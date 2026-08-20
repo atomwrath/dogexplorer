@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#ffefcd">
+<meta name="description" content="Backyard Pups and Pup City — cartoon 3D dog games that run in any browser.">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<title>Pup Games</title>
+<link rel="stylesheet" href="./styles/base.css">
+<style>
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{height:100%; margin:0;}
+  body{
+    font-family:"Comic Sans MS","Chalkboard SE","Segoe UI",system-ui,sans-serif;
+    background:var(--cream);
+    background-image:radial-gradient(circle at 12% 18%, #fff6e0 0 32%, transparent 33%),
+                     radial-gradient(circle at 88% 78%, #ffe4b8 0 26%, transparent 27%);
+    color:var(--ink);
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    padding:24px calc(20px + var(--safe-l)) calc(24px + var(--safe-b)) calc(20px + var(--safe-r));
+    gap:22px;
+  }
+  h1{font-size:clamp(28px,7vw,46px); margin:0; letter-spacing:.5px;}
+  h1 span{color:var(--orange);}
+  .tag{margin:0; opacity:.72; font-size:clamp(13px,3.4vw,16px); text-align:center; max-width:34ch;}
+  .games{display:flex; flex-wrap:wrap; gap:18px; justify-content:center; width:100%; max-width:760px;}
+  .game{
+    flex:1 1 300px; max-width:360px; text-decoration:none; color:inherit;
+    background:var(--card); border:4px solid var(--ink); border-radius:22px;
+    box-shadow:6px 6px 0 rgba(61,42,32,.22);
+    padding:22px; display:flex; flex-direction:column; gap:8px;
+    transition:transform .12s, box-shadow .12s;
+  }
+  .game:active{transform:translate(3px,3px); box-shadow:2px 2px 0 rgba(61,42,32,.22);}
+  .game .em{font-size:44px; line-height:1;}
+  .game h2{margin:0; font-size:22px;}
+  .game p{margin:0; font-size:14px; opacity:.75; line-height:1.45;}
+  .game .go{margin-top:6px; font-weight:bold; color:var(--orange);}
+  footer{font-size:12px; opacity:.55; text-align:center; line-height:1.6;}
+  @media (hover:hover){ .game:hover{transform:translate(-2px,-2px); box-shadow:8px 8px 0 rgba(61,42,32,.22);} }
+</style>
+</head>
+<body>
+  <h1>PUP <span>GAMES</span></h1>
+  <p class="tag">Two little cartoon dog games. They run in the browser, work offline, and share the same pups.</p>
+
+  <div class="games">
+    <a class="game" href="./creator/">
+      <div class="em">🐶</div>
+      <h2>Backyard Pups</h2>
+      <p>Design a pup from the paws up — size, ears, tail, spots, collar. Save your favorites and export them to take into the city.</p>
+      <div class="go">Open the creator →</div>
+    </a>
+    <a class="game" href="./city/">
+      <div class="em">🌆</div>
+      <h2>Pup City</h2>
+      <p>Downtown dash. Sneak the block, scare the strays, dodge traffic, chomp the golden bone — and don't startle the neighbors.</p>
+      <div class="go">Run the block →</div>
+    </a>
+  </div>
+
+  <footer>
+    Works on phones, tablets and desktops · Add to Home Screen for fullscreen play<br>
+    Built with three.js
+  </footer>
+</body>
+</html>

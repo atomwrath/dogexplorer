@@ -1,0 +1,15 @@
+{
+  "name": "Pup City — Downtown Dash",
+  "short_name": "Pup City",
+  "description": "A cartoon 3D dog game: sneak the block, scare the strays, mind the neighbors.",
+  "start_url": "./city/",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#ffefcd",
+  "theme_color": "#ffefcd",
+  "icons": [
+    { "src": "./icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "./icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
