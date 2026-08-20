@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Backyard Pups">
+<meta name="theme-color" content="#ffefcd">
+<meta name="description" content="Design a cartoon pup, then take it for a run in Pup City.">
+<link rel="manifest" href="../manifest.webmanifest">
+<link rel="apple-touch-icon" href="../icons/icon-192.png">
+<title>Backyard Pups — Character Creator</title>
+<link rel="stylesheet" href="../styles/creator.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="logo">
+      <div class="pawbadge">🐾</div>
+      <h1>BACKYARD <span>PUPS</span><small>make a dog · play as your dog</small></h1>
+    </div>
+    <div class="spacer"></div>
+    <button class="btn icon" id="panelBtn" title="Show / hide controls">🎨</button>
+    <button class="btn" id="randomBtn">🎲 Surprise me</button>
+    <button class="btn primary" id="playBtn">▶ Play in the yard</button>
+  </header>
+  <main>
+    <aside id="panel"></aside>
+    <div id="stage">
+      <canvas id="c"></canvas>
+      <div id="editorHint">✋ drag to spin your pup</div>
+      <div id="playHud">
+        <button class="btn small" id="backBtn">← Back to editor</button>
+        <div id="keysHint">WASD / arrows move · Shift run · Space jump · B bark · F fill bowl · Esc exit</div>
+        <div id="playName">🐶</div>
+        <div id="yardStatus"></div>
+        <div id="pad">
+          <div id="dpad">
+            <div class="blank"></div><button class="pbtn" data-k="up">▲</button><div class="blank"></div>
+            <button class="pbtn" data-k="left">◀</button><div class="blank"></div><button class="pbtn" data-k="right">▶</button>
+            <div class="blank"></div><button class="pbtn" data-k="down">▼</button><div class="blank"></div>
+          </div>
+          <div id="actions">
+            <button class="pbtn" id="runBtn">🏃 Run</button>
+            <button class="pbtn" id="jumpBtn">⬆ Jump</button>
+            <button class="pbtn" id="barkBtn">💬 Bark</button>
+            <button class="pbtn" id="fillBtn">🍖 Fill bowl</button>
+          </div>
+        </div>
+      </div>
+      <div id="toast"></div>
+    </div>
+  </main>
+</div>
+<script src="../vendor/three.min.js"></script>
+<script type="module" src="../src/creator/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Pup City">
+<meta name="theme-color" content="#ffefcd">
+<meta name="description" content="Sneak the block, scare the strays, mind the neighbors. A cartoon 3D dog game.">
+<link rel="manifest" href="../manifest.webmanifest">
+<link rel="apple-touch-icon" href="../icons/icon-192.png">
+<title>Pup City — Downtown Dash</title>
+<link rel="stylesheet" href="../styles/city.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="logo">
+      <div class="pawbadge">🌆</div>
+      <h1>PUP <span>CITY</span><small>downtown dash · chomp, sneak, don't scare the neighbors</small></h1>
+    </div>
+    <div class="spacer"></div>
+    <button class="btn icon" id="panelBtn" title="Show / hide controls">🎒</button>
+    <button class="btn primary" id="playBtn">▶ Run the block</button>
+  </header>
+  <main>
+    <aside id="panel"></aside>
+    <div id="stage">
+      <canvas id="c"></canvas>
+      <div id="lobbyBadge">🐶</div>
+      <div id="editorHint">✋ drag to spin · tune your block, then Run it</div>
+      <div id="playHud">
+        <button class="btn small" id="backBtn">← Quit trail</button>
+        <div id="hudTop">
+          <div class="hud-pill" id="hudTime">0:00.0</div>
+          <div class="hud-pill" id="hudScare">😱 0/0</div>
+          <div class="hud-pill" id="hudOops">😠 0</div>
+          <div class="hud-pill" id="hudBonus">⭐ 🦴</div>
+        </div>
+        <div id="progressWrap"><div id="progressFill"></div></div>
+        <div id="keysHint">WASD move · Shift run · C sneak · Space jump · B bark · E chomp · Esc quit</div>
+        <div id="playName">🐶</div>
+        <div id="touchCtl">
+          <div id="stickZone">
+            <div id="stickBase"><div id="stickKnob">🐾</div></div>
+          </div>
+          <div id="tbtns">
+            <button class="tbtn" id="tSneak"><span class="ic">🐾</span><span class="lb">SNEAK</span></button>
+            <button class="tbtn" id="tChomp"><span class="ic">🦴</span><span class="lb">CHOMP</span></button>
+            <button class="tbtn" id="tBark"><span class="ic">💬</span><span class="lb">BARK</span></button>
+            <button class="tbtn" id="tJump"><span class="ic">⬆</span><span class="lb">JUMP</span></button>
+          </div>
+        </div>
+        <div id="rotateHint">↻ Turn sideways for a wider view</div>
+      </div>
+      <div id="results">
+        <div id="resultsCard">
+          <div id="resMedal">🥇</div>
+          <h2>Trail complete!</h2>
+          <div class="res-row"><span>⏱ Time</span><span class="val" id="resTime"></span></div>
+          <div class="res-row"><span id="resScareLbl">😱 Scared</span><span class="val" id="resScared"></span></div>
+          <div class="res-row"><span>😠 Grumbles</span><span class="val" id="resGrumb"></span></div>
+          <div class="res-row"><span>🎁 Bonus</span><span class="val" id="resBonus"></span></div>
+          <div class="res-row"><span>🧮 Block</span><span class="val" id="resTrail"></span></div>
+          <div class="res-row"><span>🏆 Best</span><span class="val" id="resBest"></span></div>
+          <div id="resScore">0</div>
+          <div style="font-size:11.5px; opacity:.65;">trail score</div>
+          <div class="res-btns">
+            <button class="btn" id="retryBtn">🔁 Retry</button>
+            <button class="btn" id="newSeedBtn">🎲 New seed</button>
+            <button class="btn primary" id="doneBackBtn">🏕 Camp</button>
+          </div>
+        </div>
+      </div>
+      <div id="panelBackdrop"></div>
+      <div id="toast"></div>
+    </div>
+  </main>
+</div>
+<script src="../vendor/three.min.js"></script>
+<script type="module" src="../src/city/main.js"></script>
+</body>
+</html>

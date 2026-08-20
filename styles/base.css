@@ -1,0 +1,13 @@
+/* Shared design tokens for the suite. Each game also loads its own sheet. */
+:root{
+  --cream:#ffefcd;
+  --card:#fffaf0;
+  --ink:#3d2a20;
+  --orange:#ff8f2d;
+  --blue:#67c6f2;
+  --green:#7cc860;
+  --pink:#ff6fa5;
+  --safe-b:env(safe-area-inset-bottom, 0px);
+  --safe-l:env(safe-area-inset-left, 0px);
+  --safe-r:env(safe-area-inset-right, 0px);
+}
