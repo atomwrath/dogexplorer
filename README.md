@@ -65,6 +65,34 @@ Edit anything under `src/` and reload. No bundler, no node_modules, no watch pro
 - **Horizontal map scale belongs to `World`,** not the game layer. `World.setMapScale()`
   re-derives the projection *and* the DEM cell grid from the bundle constants together;
   scaling one without the other decouples vectors from terrain.
+- **`surfaceY`, not `terrainY`, for anything standing ON a trail.** Trail ribbons are
+  deliberately built on the highest terrace band across their own width
+  (`stationHeights`), so a taller neighbouring cell can never poke through the tread —
+  but that means the ribbon's visual height can sit above the exact per-cell height at
+  its centreline. The avatar, trailhead gates and junction signs/pads all read ground
+  through `terrain.js`'s `surfaceY()` (same corridor-max logic, as a point query) for
+  exactly this reason; using raw `terrainY` for any of them visually buries it under the
+  ribbon the moment terrain rises to one side of the path. `cameraGroundY()` is a THIRD,
+  separate height source — distance-weighted average, not max — used only for the
+  camera rig's own altitude, so its viewpoint doesn't hop at every terrace step the way
+  reading `surfaceY`/`terrainY` directly would.
+- **Ground texture UV is absolute world x/z, tiled at a fixed metre size**
+  (`GROUND_TILE_M` in `terrain.js`), not normalised to the map's own bounding box. The
+  bounding-box version stretches one non-repeating image over the entire terrain — every
+  terrace fold shows through it like a rug draped over furniture — and gets worse the
+  bigger the map. Anything that builds ground geometry (the DEM terrain mesh, the flat
+  fallback plane) must derive UVs from world-space x/z at that same tile size, or the two
+  ground types will look inconsistent next to each other.
+- **The shared dog rig is NOT metric.** `dog/build.js` sizes itself in world units tuned
+  for Pup City's stylised block-based world (`BLOCK=22`), not for trails' real DEM/GeoJSON
+  metres — a default pup measures ~3.9 m nose-to-tail unscaled, bigger than this world's
+  own moose. `trails/dog-driver.js`'s `TRAIL_DOG_SCALE` corrects this on the *built
+  group*, never on `params.size` — `dog/stats.js` derives walk/run speed from that same
+  field over a narrow expected range, so scaling it down there would flatten every pup's
+  stats to the same low-size floor instead of just shrinking the model. Anything else
+  that reads a raw world-unit constant against `dog.position` (not `dog`'s local/child
+  space, which scales automatically) — the sneak crouch depth is the one example so far —
+  has to apply the same constant, or it becomes proportionally wrong on the resized rig.
 
 ## Building single-file versions
 

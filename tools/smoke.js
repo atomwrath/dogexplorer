@@ -207,10 +207,16 @@ const probe = `
   startHead: getStartHead(),
   graph: !!getGraph(),
   dogPos: dogPos ? {x: dogPos.x, z: dogPos.z} : null,
-  dogWorld: (typeof dog !== 'undefined' && dog) ? {x: dog.position.x, y: dog.position.y, z: dog.position.z, visible: dog.visible} : null,
+  dogWorld: (typeof dog !== 'undefined' && dog) ? {x: dog.position.x, y: dog.position.y, z: dog.position.z, visible: dog.visible, scale: dog.scale.x} : null,
   wildPos: (typeof wildPos !== 'undefined' && wildPos) ? {x: wildPos.x, z: wildPos.z} : null,
   theme: THEME.id,
   mapScale: getMapScale(),
+  fogMul: getFogMultiplier(),
+  fogNear: scene.fog ? scene.fog.near : null,
+  fogFar: scene.fog ? scene.fog.far : null,
+  camFov: camera.fov,
+  camYaw: typeof camYaw !== 'undefined' ? camYaw : null,
+  camPitch: typeof camPitch !== 'undefined' ? camPitch : null,
   worldMeshes: getWorldGroup() ? getWorldGroup().countMeshes() : 0,
   backdrop: !!getBackdrop(),
 });`;
@@ -296,6 +302,61 @@ function assertAll(window, errors, stats) {
   s = probe();
   check('switching back to a dog re-seats and shows it',
     s.dogWorld.visible && dist(s.dogWorld, s.heads[s.startHead]) < 0.5);
+
+  // dog is sized for a real-metre trail world, not reused unscaled from Pup City
+  check('dog model scaled down for trails', s.dogWorld.scale > 0.2 && s.dogWorld.scale < 0.4,
+    `scale ${s.dogWorld.scale}`);
+
+  // wide-angle FOV, not Pup City's tight 38deg
+  check('camera FOV widened for open terrain', s.camFov >= 55 && s.camFov <= 75, `${s.camFov} deg`);
+
+  // fog: default multiplier is neutral, and the slider (input, not change -- live) works
+  // without triggering a world rebuild
+  check('fog multiplier starts neutral', s.fogMul === 1, `${s.fogMul}`);
+  const meshesBefore = s.worldMeshes;
+  const fogSlider = d.querySelector('#fogAmt');
+  fogSlider.value = '2';
+  fogSlider.dispatchEvent(new window.Event('input', { bubbles: true }));
+  const s2 = probe();
+  check('fog slider updates scene.fog live', Math.abs(s2.fogNear - s.fogNear * 2) < 0.5 && Math.abs(s2.fogFar - s.fogFar * 2) < 0.5,
+    `near ${s.fogNear.toFixed(0)}->${s2.fogNear.toFixed(0)}, far ${s.fogFar.toFixed(0)}->${s2.fogFar.toFixed(0)}`);
+  check('fog slider does not rebuild the world', s2.worldMeshes === meshesBefore,
+    `${meshesBefore} -> ${s2.worldMeshes} meshes`);
+
+  // free-look: a drag starting on the right half of the canvas orbits the camera and
+  // does NOT drive the movement stick. Free-look only activates during play (same guard
+  // the movement stick already used), so enter play first.
+  d.querySelector('#playBtn').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const s2b = probe();
+  const yawBefore = s2b.camYaw, pitchBefore = s2b.camPitch;
+  const canvas = d.querySelector('#c');
+  Object.defineProperty(canvas, 'getBoundingClientRect', { value: () => ({left:0, top:0, width:1200, height:800}), configurable:true });
+  const down = new window.MouseEvent('pointerdown', { bubbles:true, clientX:1000, clientY:400 });
+  down.pointerId = 77;
+  canvas.dispatchEvent(down);
+  const move = new window.MouseEvent('pointermove', { bubbles:true, clientX:940, clientY:440 });
+  move.pointerId = 77;
+  window.dispatchEvent(move);
+  const s3 = probe();
+  check('right-half drag orbits the camera (yaw)', Math.abs(s3.camYaw - yawBefore) > 0.01, `${yawBefore.toFixed(3)} -> ${s3.camYaw.toFixed(3)}`);
+  check('right-half drag orbits the camera (pitch)', Math.abs(s3.camPitch - pitchBefore) > 0.005, `${pitchBefore.toFixed(3)} -> ${s3.camPitch.toFixed(3)}`);
+  const up = new window.MouseEvent('pointerup', { bubbles:true });
+  up.pointerId = 77;
+  window.dispatchEvent(up);
+
+  // and a LEFT-half drag must NOT be mistaken for a look-drag -- it should drive the
+  // movement stick instead, leaving the camera's manual orbit alone
+  const yaw2 = probe().camYaw;
+  const downL = new window.MouseEvent('pointerdown', { bubbles:true, clientX:100, clientY:400 });
+  downL.pointerId = 88;
+  canvas.dispatchEvent(downL);
+  const moveL = new window.MouseEvent('pointermove', { bubbles:true, clientX:160, clientY:460 });
+  moveL.pointerId = 88;
+  window.dispatchEvent(moveL);
+  check('left-half drag does not also orbit the camera', probe().camYaw === yaw2, `${yaw2.toFixed(3)}`);
+  const upL = new window.MouseEvent('pointerup', { bubbles:true });
+  upL.pointerId = 88;
+  window.dispatchEvent(upL);
 
   const failed = results.filter(r => !r.ok);
   console.log('\n---------------- smoke test ----------------');

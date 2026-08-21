@@ -13,7 +13,7 @@
    separately re-tuned against an arbitrary shrink factor. Only vertical exaggeration
    remains adjustable, since stretching Y alone can't misalign vectors from terrain. */
 import { clamp } from '../core/math.js';
-import { buildTerrainMesh, flattenAreaCells, groundTexture, resample, setStep, setWorld, stationHeights, terrainY } from './terrain.js';
+import { buildTerrainMesh, flattenAreaCells, GROUND_TILE_M, groundTexture, resample, setStep, setWorld, stationHeights, surfaceY, terrainY } from './terrain.js';
 
 import { scene, disposeGroup, sun, hemi } from '../core/render.js';
 import { toon, toonTex } from '../core/materials.js';
@@ -80,6 +80,12 @@ let startHead=0;
 let EXAG=1.8;
 let MAP_SCALE=1;
 let VERT_SCALE=EXAG*MAP_SCALE;
+/* Multiplies the theme's own fogNear/fogFar (a 1.0 default reproduces the theme exactly,
+   independent of the exaggeration/map-scale state above). Kept separate from EXAG and
+   MAP_SCALE because it only touches scene.fog -- no geometry, no rebuild -- so it can
+   apply on every slider `input` event for a genuinely live preview instead of waiting
+   for `change` the way the two rebuild-triggering sliders have to. */
+let FOG_MUL=1;
 
 function setStartHead(i){ startHead=i; }
 function getStartHead(){ return startHead; }
@@ -88,6 +94,11 @@ function setVertScale(v){ EXAG=Math.max(0.3,v); syncScales(); rebuildWorld(); }
 function getVertScale(){ return VERT_SCALE; }
 function getExaggeration(){ return EXAG; }
 function getMapScale(){ return MAP_SCALE; }
+function getFogMultiplier(){ return FOG_MUL; }
+function setFogMultiplier(v){
+  FOG_MUL=clamp(Number(v)||1, 0.15, 3);
+  applyThemeLighting();          // fog only -- cheap enough to call straight from an input handler
+}
 function setMapScale(v){
   MAP_SCALE=clamp(Number(v)||1, 0.15, 4);
   syncScales();
@@ -108,11 +119,13 @@ function setThemeById(id){
 function getTheme(){ return THEME; }
 
 /* Sky, fog and light levels are scene-wide, not part of worldG, so they are applied
-   directly rather than added to the disposable group. */
+   directly rather than added to the disposable group. Fog distances scale with MAP_SCALE
+   (a shrunk map needs fog pulled in to match, or it would see clean across the whole
+   thing) and independently with the user's own FOG_MUL on top of that. */
 function applyThemeLighting(){
   scene.background=new THREE.Color(THEME.sky);
   scene.fog=new THREE.Fog(new THREE.Color(THEME.sky).getHex(),
-                          THEME.fogNear*MAP_SCALE, THEME.fogFar*MAP_SCALE);
+                          THEME.fogNear*MAP_SCALE*FOG_MUL, THEME.fogFar*MAP_SCALE*FOG_MUL);
   hemi.color=new THREE.Color(THEME.hemiSky);
   hemi.groundColor=new THREE.Color(THEME.hemiGround);
   hemi.intensity=THEME.hemiInt;
@@ -242,15 +255,29 @@ function rebuildWorld(){
   // pair of .geojson files is still playable, just level.
   const groundMat=new THREE.MeshToonMaterial({map:groundTexture(THEME),
     gradientMap:toonTex, polygonOffset:true, polygonOffsetFactor:2, polygonOffsetUnits:2});
+  // buildTerrainMesh now writes UVs straight from world x/z (see its own comment) at a
+  // fixed real-world tile size, so the texture is already correctly scaled by
+  // construction -- no separate repeat.set() needed, and one WOULD be wrong here: it
+  // would multiply UVs that already encode real tiling by a second, unrelated map-size
+  // factor, shrinking every tile far below its intended size.
   if(BUNDLE){
-    groundMat.map.repeat.set(BUNDLE.width*BUNDLE.cell/34, BUNDLE.height*BUNDLE.cell/34);
     worldG.add(new THREE.Mesh(buildTerrainMesh(VERT_SCALE), groundMat));
   }else{
     const pad=80, gw=(Mx-mx)+pad*2, gh=(Mz-mz)+pad*2;
-    groundMat.map.repeat.set(gw/34, gh/34);
     const flat=new THREE.Mesh(new THREE.PlaneGeometry(gw,gh), groundMat);
     flat.rotation.x=-Math.PI/2;
     flat.position.set((mx+Mx)/2, 0, (mz+Mz)/2);
+    // PlaneGeometry's default UVs are also [0,1] across the whole plane -- same problem,
+    // same fix: rewrite them from absolute world x/z at the same tile size as the DEM
+    // path, so the flat fallback ground and real terrain always look the same close up.
+    // rotation.x=-90deg maps local (x,y,0) -> world (posX+x, posY, posZ-y); local Z is
+    // always 0 on a fresh PlaneGeometry, so that's the whole transform that matters here.
+    const uv=flat.geometry.attributes.uv, pos=flat.geometry.attributes.position;
+    for(let i=0;i<uv.count;i++){
+      const wx=flat.position.x+pos.getX(i), wz=flat.position.z-pos.getY(i);
+      uv.setXY(i, wx/GROUND_TILE_M, wz/GROUND_TILE_M);
+    }
+    uv.needsUpdate=true;
     worldG.add(flat);
   }
 
@@ -303,9 +330,19 @@ function rebuildWorld(){
   AREAS.forEach(a=>{ if(a.name) worldG.add(buildAreaSign(a,groundYAt,nearestTrail)); });
 
   // junction pads + signs
+  // These discs are the ONLY thing that covers the seam where two edges meet: each
+  // edge's own ribbon ends in a flat, un-rounded cut (ribbonGeom only rounds interior
+  // bends within one edge, not its two endpoints), so without a pad sitting flush on
+  // top, every junction -- including a loop trail whose ends snap into one node -- shows
+  // a hard edge where the ribbons butt together. That only works if the pad is at the
+  // SAME height the ribbons actually are: surfaceY, not raw terrainY, matching the
+  // corridor-max height stationHeights gives every ribbon converging here (see
+  // terrain.js). Radius 3.5 covers the outline layer's half-width for every edge kind
+  // this file has (worst case, 'road', is 3.45), so the pad can't be narrower than what
+  // it's supposed to hide.
   GRAPH.nodes.forEach((n,ni)=>{
     if(n.deg<1) return;
-    const y=terrainY(n.p[0],n.p[1],VERT_SCALE);
+    const y=surfaceY(n.p[0],n.p[1],VERT_SCALE,3.5);
     const oDisc=new THREE.Mesh(new THREE.CircleGeometry(3.5,20),mOutline);
     oDisc.rotation.x=-Math.PI/2; oDisc.position.set(n.p[0],y+0.045,n.p[1]); worldG.add(oDisc);
     const disc=new THREE.Mesh(new THREE.CircleGeometry(3.0,20),trailMat(THEME.tread));
@@ -405,7 +442,9 @@ function rebuildWorld(){
   buildTrailheads();
   TRAILHEADS.forEach((th,i)=>{
     const gt=buildGate(th,i);
-    gt.position.y=terrainY(th.x,th.z,VERT_SCALE);
+    // same reasoning as the junction pads above: a trailhead sits at the end of a
+    // ribbon, so it needs the ribbon's own (corridor-max) height, not the raw cell.
+    gt.position.y=surfaceY(th.x,th.z,VERT_SCALE,3.5);
     worldG.add(gt);
   });
 }
@@ -417,5 +456,6 @@ function getBackdrop(){ return backdropG; }
 
 export { loadWorld, rebuildWorld, addLayers, clearLayers, hasBundle, setContourStep,
          setThemeById, getTheme, setMapScale, getMapScale, getExaggeration, getBackdrop,
+         setFogMultiplier, getFogMultiplier,
          getGraph, getTrailheads, getPOIs, getAreas, getBBox,
          getWorldGroup, setStartHead, getStartHead, setVertScale, getVertScale, compass, THEMES, THEME };

@@ -14,9 +14,9 @@ import { setWildVisible, setWildYaw, spawnWild, topSpeedFor, updateWild, wildPos
 
 import { dogRunMul, dogTopSpeed, setDogPos, setDogVisible, setYaw, spawnDog, updateDog } from './dog-driver.js';
 
-import { terrainY } from './terrain.js';
+import { cameraGroundY, surfaceY } from './terrain.js';
 
-import { addLayers, clearLayers, getBBox, getBackdrop, getExaggeration, getGraph, getMapScale, getStartHead, getTrailheads, getVertScale, loadWorld, setMapScale, setStartHead, setThemeById, setVertScale } from './world.js';
+import { addLayers, clearLayers, getBBox, getBackdrop, getExaggeration, getFogMultiplier, getGraph, getMapScale, getStartHead, getTrailheads, getVertScale, loadWorld, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale } from './world.js';
 
 import { THEME, THEMES } from './themes.js';
 import { renderer, scene, camera, resize } from '../core/render.js';
@@ -28,7 +28,11 @@ import { nearestTrail } from './spatial.js';
 
 /* Trail networks run to real kilometres; Pup City's camera (far=300, tuned for one city
    block) would clip most of a trail map. Extend it rather than touch the shared file. */
-camera.far = 4000; camera.updateProjectionMatrix();
+// far: trail networks run to real kilometres; Pup City's far=300 (tuned for one city
+// block) would clip most of a trail map. fov: Pup City's 38 deg is a tight telephoto,
+// chosen for its small enclosed blocks; trails is wide open country, so a wider,
+// more natural-feeling field of view suits it better.
+camera.far = 4000; camera.fov = 62; camera.updateProjectionMatrix();
 camera.position.set(0, 40, 60);
 
 const $ = s => document.querySelector(s);
@@ -46,6 +50,11 @@ let wildKey = 'fox';
 let dogChoice = {label: PRESETS[0].label, params: PRESETS[0].o};
 const player = { x:0, z:0, y:0, vy:0, yaw:0, speed:0, dist:0, sneaking:false, barkT:0 };
 let camYaw=0, camPitch=0.32, playing=false;
+/* Timestamp of the last manual look-drag (performance.now(), not the loop's own `t` --
+   pointer events fire outside the loop). While recent, the auto-follow below backs off
+   so it doesn't fight a hand that's actively orbiting the camera. */
+let lastLookT=-Infinity;
+const PITCH_MIN=0.05, PITCH_MAX=1.35;   // clamps: never flips under the ground or goes top-down
 let avatarKey='';           // identity of whatever is currently built, for ensureAvatar
 
 function currentTopSpeed(){ return mode==='dog' ? dogTopSpeed() : topSpeedFor(wildKey); }
@@ -74,7 +83,11 @@ function ensureAvatar(){
 }
 
 function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
-  const groundY = terrainY(player.x, player.z, getVertScale());
+  // surfaceY, not terrainY: the trail ribbon is deliberately built on the highest band
+  // across its own width (terrain.js), so the avatar has to read ground the same way or
+  // it visually sinks below the tread anywhere terrain rises to one side of the path --
+  // see terrain.js's surfaceY doc comment for the full story.
+  const groundY = surfaceY(player.x, player.z, getVertScale());
   if(mode==='dog'){
     setDogPos(player.x, player.z);
     setYaw(player.yaw);
@@ -112,7 +125,7 @@ function placeAtHead(i){
    even a correctly-placed avatar was off screen until you pressed Play. Snap the camera
    behind the avatar instead -- you should be able to see who you picked. */
 function frameAvatar(groundY){
-  const camD=13;
+  const camD=13*camZoom;
   camera.position.set(
     player.x-Math.sin(camYaw)*camD*Math.cos(camPitch),
     groundY+2+camD*Math.sin(camPitch),
@@ -133,20 +146,54 @@ addEventListener('keydown', e=>{
 });
 addEventListener('keyup', e=> keys[e.code]=false);
 
+/* Two independent pointer zones, split by which half of the canvas a drag STARTS in --
+   the standard twin-stick split (move on one side, look on the other), which needs no
+   touch/mouse detection and works the same for a mouse drag as for two thumbs. Each zone
+   tracks its own pointer id, so one finger on each half works simultaneously; a mouse
+   only ever occupies one at a time, which is fine since WASD covers movement for it. */
 const stick = {active:false,id:null,dx:0,dy:0};
+const look  = {active:false,id:null,lastX:0,lastY:0};
+const YAW_SENS=0.0055, PITCH_SENS=0.0042;
+
 renderer.domElement.addEventListener('pointerdown', e=>{
   if(!playing) return;
-  stick.active=true; stick.id=e.pointerId; stick.ox=e.clientX; stick.oy=e.clientY; stick.dx=stick.dy=0;
+  const rect=renderer.domElement.getBoundingClientRect();
+  const rightHalf = (e.clientX-rect.left) > rect.width*0.5;
+  if(rightHalf && !look.active){
+    look.active=true; look.id=e.pointerId; look.lastX=e.clientX; look.lastY=e.clientY;
+  }else if(!rightHalf && !stick.active){
+    stick.active=true; stick.id=e.pointerId; stick.ox=e.clientX; stick.oy=e.clientY; stick.dx=stick.dy=0;
+  }
 });
 addEventListener('pointermove', e=>{
-  if(!stick.active||e.pointerId!==stick.id) return;
-  let dx=e.clientX-stick.ox, dy=e.clientY-stick.oy;
-  const L=Math.hypot(dx,dy), max=52;
-  if(L>max){dx*=max/L;dy*=max/L;}
-  stick.dx=dx/max; stick.dy=dy/max;
+  if(stick.active && e.pointerId===stick.id){
+    let dx=e.clientX-stick.ox, dy=e.clientY-stick.oy;
+    const L=Math.hypot(dx,dy), max=52;
+    if(L>max){dx*=max/L;dy*=max/L;}
+    stick.dx=dx/max; stick.dy=dy/max;
+  }else if(look.active && e.pointerId===look.id){
+    const dx=e.clientX-look.lastX, dy=e.clientY-look.lastY;
+    look.lastX=e.clientX; look.lastY=e.clientY;
+    camYaw -= dx*YAW_SENS;
+    camPitch = clamp(camPitch - dy*PITCH_SENS, PITCH_MIN, PITCH_MAX);
+    lastLookT = performance.now();
+  }
 });
-const endStick=e=>{ if(stick.active&&e.pointerId===stick.id){ stick.active=false; stick.dx=stick.dy=0; } };
-addEventListener('pointerup', endStick); addEventListener('pointercancel', endStick);
+const endPointer=e=>{
+  if(stick.active&&e.pointerId===stick.id){ stick.active=false; stick.dx=stick.dy=0; }
+  if(look.active&&e.pointerId===look.id){ look.active=false; }
+};
+addEventListener('pointerup', endPointer); addEventListener('pointercancel', endPointer);
+
+/* Scroll to zoom -- a natural companion to free-look, and cheap: `camZoom` just scales
+   the existing orbit radius (camD) everywhere it's used, both in the lobby framing and
+   the play-loop follow, so this is the only place zoom needs to be taught about. */
+let camZoom=1;
+renderer.domElement.addEventListener('wheel', e=>{
+  if(!playing) return;
+  e.preventDefault();
+  camZoom = clamp(camZoom + Math.sign(e.deltaY)*0.08, 0.5, 2.2);
+}, {passive:false});
 
 /* ---------- game loop ---------- */
 let lastT=0;
@@ -191,9 +238,14 @@ function loop(t){
     const targetYaw=Math.atan2(-wz/L,wx/L);
     let dy=targetYaw-player.yaw; while(dy>Math.PI)dy-=Math.PI*2; while(dy<-Math.PI)dy+=Math.PI*2;
     player.yaw+=dy*Math.min(1,dt*10);
-    const headYaw=Math.atan2(wx/L,wz/L);
-    let dc=headYaw-camYaw; while(dc>Math.PI)dc-=Math.PI*2; while(dc<-Math.PI)dc+=Math.PI*2;
-    camYaw+=dc*Math.min(1,dt*2.2);
+    // convenience auto-follow: swing the camera in behind the direction you're walking,
+    // but only when nobody's hand is on it -- otherwise every step yanks the view back
+    // out from under a manual look-drag, which is worse than not auto-following at all.
+    if(performance.now()-lastLookT>900){
+      const headYaw=Math.atan2(wx/L,wz/L);
+      let dc=headYaw-camYaw; while(dc>Math.PI)dc-=Math.PI*2; while(dc<-Math.PI)dc+=Math.PI*2;
+      camYaw+=dc*Math.min(1,dt*2.2);
+    }
   }
   const bb=getBBox(), F=55;
   player.x=clamp(player.x,bb.minx-F,bb.maxx+F); player.z=clamp(player.z,bb.minz-F,bb.maxz+F);
@@ -203,10 +255,16 @@ function loop(t){
 
   const groundY = syncAvatar(dt,t,player.y,player.speed,player.sneaking,player.barkT>0,run);
 
-  const camD=11;
+  // camGroundY: smoothed terrain height for the camera RIG's own altitude only -- using
+  // the true (stepped) groundY here is what made the camera hop every time the avatar
+  // crossed a terrace cell boundary. lookAt below still targets the exact avatar
+  // position, so the avatar itself stays precisely framed; only the viewpoint's own
+  // bob is damped.
+  const camD=11*camZoom;
+  const camY = cameraGroundY(player.x, player.z, getVertScale());
   camera.position.lerp(new THREE.Vector3(
     player.x-Math.sin(camYaw)*camD*Math.cos(camPitch),
-    groundY+2+camD*Math.sin(camPitch),
+    camY+2+camD*Math.sin(camPitch),
     player.z-Math.cos(camYaw)*camD*Math.cos(camPitch)
   ), 1-Math.pow(0.001,dt));
   camera.lookAt(player.x, groundY+player.y+1.4, player.z);
@@ -332,6 +390,18 @@ function wireScale(){
       setVertScale(+e.target.value);
       show(getExaggeration());
       placeAtHead(getStartHead());
+    });
+  }
+  // fog touches scene.fog only -- no rebuild, so it applies live on every `input` tick
+  // instead of waiting for `change` the way the two rebuild-triggering sliders above do.
+  const fog=$('#fogAmt'), fogV=$('#fogAmtVal');
+  if(fog && fogV){
+    fog.value=getFogMultiplier();
+    const show=v=>{ fogV.textContent = (+v).toFixed(2)+'\u00d7'; };
+    show(fog.value);
+    fog.addEventListener('input', e=>{
+      setFogMultiplier(+e.target.value);
+      show(getFogMultiplier());
     });
   }
 }

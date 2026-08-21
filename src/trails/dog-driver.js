@@ -13,8 +13,27 @@ import { P, dog, R, dogPos, dogYaw, STATS, setDog, setDogYaw } from '../dog/runt
 let legPhase = 0;
 let crouchAmt = 0;
 
+/* The shared rig sizes itself directly in world units via g.scale.setScalar(p.size)
+   inside dog/build.js -- tuned to look right in Pup City's own stylised world (city
+   blocks 22 units square) and reused as-is in Backyard Pups. Trails' world is real
+   metric distance (DEM + GeoJSON, "1 unit = 1 metre" per the scale slider's own copy),
+   and the rig was never re-tuned for that: worked out from build.js's own geometry, a
+   DEFAULTS pup (size:1) measures roughly 3.9 m nose to tail-tip before any correction --
+   bigger than this world's own moose, the largest thing in the wildlife roster (~1.0m
+   half-body-length, comparably sized overall), and enormous next to a real 2.6 m trail.
+   TRAIL_DOG_SCALE brings a default pup down to roughly 1.15 m nose to tail-tip, in line
+   with the fox/coyote/bobcat that already share this world.
+
+   Applied to the BUILT GROUP, not to params.size, deliberately: dog/stats.js derives
+   walk/run/turn speed from that same size field over a narrow expected range (0.55-1.6),
+   so scaling it down here would flatten every pup's stats to the same low-size floor
+   instead of shrinking the model. This way a saved pup's chosen size still varies its
+   speed exactly as it does in Backyard Pups; only what you SEE changes. */
+const TRAIL_DOG_SCALE = 0.3;
+
 function spawnDog(params){
   setDog(params);
+  dog.scale.multiplyScalar(TRAIL_DOG_SCALE);
   legPhase = 0; crouchAmt = 0;
 }
 
@@ -32,7 +51,12 @@ function getDogPos(){ return dogPos; }
    dispose: the rig is rebuilt from params on demand and re-showing is free. */
 function setDogVisible(v){ if(dog) dog.visible = !!v; }
 
-function dogTopSpeed(){ return STATS.walk; }          // walk/run figures already tuned in dog/stats.js
+// dog/stats.js's walk/run figures were tuned for Pup City's block-sized play area;
+// wild-driver.js already applies a similar bump to SPECIES.speed for the same reason
+// (trails covers real distance, not a city block) -- this is the dog-side equivalent,
+// just more modest, since "a little faster" was the ask, not wildlife's full 1.7x.
+const TRAIL_DOG_SPEED_MUL = 1.2;
+function dogTopSpeed(){ return STATS.walk * TRAIL_DOG_SPEED_MUL; }
 function dogRunMul(){ return STATS.run / STATS.walk; }
 
 /* Called once per frame with the resolved ground height under the dog's feet (from
@@ -41,7 +65,11 @@ function dogRunMul(){ return STATS.run / STATS.walk; }
 function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run){
   if(!dog || !R) return;
   const size = P ? P.size : 1;
-  crouchAmt = lerp(crouchAmt, sneaking ? 0.22*size : 0, 1-Math.pow(0.0005,dt));
+  // dog.position is in SCENE space, unlike dog.scale -- shrinking the group above
+  // doesn't shrink this offset automatically. 0.22 world units of crouch was tuned for
+  // the pre-shrink ~2.5 m-tall rig (a subtle dip); left unscaled here it would now read
+  // as the dog ducking by nearly a third of its own (post-shrink) height.
+  crouchAmt = lerp(crouchAmt, sneaking ? 0.22*size*TRAIL_DOG_SCALE : 0, 1-Math.pow(0.0005,dt));
   dog.position.set(dogPos.x, groundY + jumpY - crouchAmt, dogPos.z);
   dog.rotation.y = dogYaw;
 

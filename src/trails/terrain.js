@@ -83,6 +83,24 @@ function flattenAreaCells(areas, pointInArea, areaBBox){
   }
 }
 
+/* Highest terrace band within radius `r` of a point -- the shared core of the
+   anti-burial technique. Circular rather than the segment-corridor shape stationHeights
+   uses below; close enough for a point query, and simple enough to also serve callers
+   that have no direction to sweep (surfaceY, below). */
+function maxBandNear(x,z,r){
+  if(!WORLD||!BAND)return NaN;
+  const i0=clamp(WORLD.cellI(x-r),0,WORLD.width-1), i1=clamp(WORLD.cellI(x+r),0,WORLD.width-1),
+        j0=clamp(WORLD.cellJ(z-r),0,WORLD.height-1), j1=clamp(WORLD.cellJ(z+r),0,WORLD.height-1);
+  let m=-Infinity;
+  for(let j=j0;j<=j1;j++)for(let k=i0;k<=i1;k++){
+    const c=WORLD.cellCentre(k,j);
+    if(Math.hypot(c.x-x,c.z-z)>r)continue;
+    const band=BAND[j*WORLD.width+k];
+    if(band>m)m=band;
+  }
+  return m;
+}
+
 /* Station heights for a trail ribbon: the highest terrace under the ribbon's own
    footprint at each vertex, guaranteeing the tread can't be buried by construction —
    same technique as the draped-Z version, reading from the DEM-derived bands instead. */
@@ -117,6 +135,53 @@ function stationHeights(rpts,w,vertScale){
   return out;
 }
 
+/* Ground height for something with real footprint, not a single point.
+   `terrainY` is nearest-cell: correct for a flat-bottomed object exactly the size of
+   one cell, but the trail ribbon above deliberately does NOT use that -- it takes the
+   highest band across its own width so a taller neighbouring cell can never poke through
+   the tread. Anything placed directly on the trail (the avatar, trailhead gates, node
+   signs) needs to sit on that SAME inflated surface, or it visually sinks below the
+   ribbon at exactly the spots where terrain rises to one side of the path -- a hairpin
+   or a junction where two legs of a loop sit on different terraces is the worst case,
+   because the corridor there is pulled up by the far leg while the near leg (and
+   anything standing on it) stays at its own true, lower height.
+
+   `radius` should roughly match the trail corridor's half-width (world.js's
+   PATH_STYLE), not the whole DEM -- this only exists to match the ribbon's own anti-
+   burial margin, not to flatten real elevation change generally. Off-trail callers keep
+   using plain terrainY, so slopes and cliffs away from a path are unaffected. */
+function surfaceY(x,z,vertScale,radius=2.6){
+  if(!WORLD||!BAND)return 0;
+  let band=maxBandNear(x,z,radius);
+  if(!isFinite(band))band=BAND[WORLD.cellJ(z)*WORLD.width+WORLD.cellI(x)];
+  return (band*STEP-GROUND_M)*vertScale;
+}
+
+/* Smoothed height for camera framing ONLY -- never for placing anything on the ground.
+   The terrace mesh is deliberately low-poly (a stylistic choice), which means the true
+   ground height jumps a whole step the instant you cross a cell boundary. Feeding that
+   straight into the camera's target height reads as jittery/jumpy vertical motion, even
+   though the same steps look intentional and fine as geometry. Averaging several nearby
+   bands, weighted by distance, gives a height that drifts as you walk instead of
+   snapping -- each cell entering or leaving the sample radius nudges the average rather
+   than replacing it outright. Radius is expressed in cells, not metres, so it keeps the
+   same amount of smoothing at any --map-scale. */
+function cameraGroundY(x,z,vertScale){
+  if(!WORLD||!BAND)return 0;
+  const radius=WORLD.cell*1.8;
+  const i0=clamp(WORLD.cellI(x-radius),0,WORLD.width-1), i1=clamp(WORLD.cellI(x+radius),0,WORLD.width-1),
+        j0=clamp(WORLD.cellJ(z-radius),0,WORLD.height-1), j1=clamp(WORLD.cellJ(z+radius),0,WORLD.height-1);
+  let sum=0,wsum=0;
+  for(let j=j0;j<=j1;j++)for(let k=i0;k<=i1;k++){
+    const c=WORLD.cellCentre(k,j);
+    const d=Math.hypot(c.x-x,c.z-z); if(d>radius)continue;
+    const wgt=1-d/radius;
+    sum+=BAND[j*WORLD.width+k]*wgt; wsum+=wgt;
+  }
+  const band = wsum>0 ? sum/wsum : BAND[WORLD.cellJ(z)*WORLD.width+WORLD.cellI(x)];
+  return (band*STEP-GROUND_M)*vertScale;
+}
+
 /* Resample a polyline so no gap exceeds `step`, keeping every original vertex. */
 function resample(pts,step){
   if(pts.length<2)return pts.map(p=>p.slice());
@@ -137,12 +202,27 @@ function resample(pts,step){
    direction it needs to face, rather than hand-picking vertex order per branch. That
    hand-picking is exactly what left two of four riser cases backface-culled — verified
    by cross product, not assumed — leaking sky through the ground in a checkerboard. */
+/* Metres per texture repeat. Chosen deliberately NOT equal to the DEM cell size (8 m by
+   default) -- matching it would line the grass pattern up with the terrace grid and look
+   artificially regular. Fixed in world units (not derived from the map's own extent, see
+   below), so it stays the same apparent size next to the avatar at any --map-scale. */
+const GROUND_TILE_M = 9;
+
 function buildTerrainMesh(vertScale){
   const W=WORLD;
   const P=[],N=[],UV=[],idx=[];
+  /* UV from absolute world x/z, not normalised to the map's bounding box. The previous
+     formula -- (x-originX)/(full map width) -- gave every vertex a UV in [0,1] across
+     the WHOLE terrain in one pass, so one 256x256 canvas got stretched over the entire
+     map: every fold of the low-poly terrace mesh showed through the pattern like a rug
+     draped over furniture, and a bigger map just stretched it further. Dividing by a
+     fixed tile size instead repeats the real texture at a constant real-world scale --
+     it sits on the ground rather than wrapping around whatever shape is underneath, and
+     is already seamless across risers and terrace steps since RepeatWrapping is set on
+     the texture (groundTexture, below) and x/z vary continuously across them. */
   const put=(x,y,z,nx,ny,nz)=>{
     P.push(x,y,z);N.push(nx,ny,nz);
-    UV.push((x-W.originX)/(W.width*W.cell),(z-W.originZ)/(W.height*W.cell));
+    UV.push(x/GROUND_TILE_M,z/GROUND_TILE_M);
     return P.length/3-1;
   };
   const pushQuad=(p0,p1,p2,p3,dir)=>{
@@ -198,5 +278,5 @@ function groundTexture(theme){
   const t=new THREE.CanvasTexture(c);t.wrapS=t.wrapT=THREE.RepeatWrapping;return t;
 }
 
-export { setWorld, setStep, getWorld, getStep, terrainY, rawGroundY, flattenAreaCells,
-         stationHeights, resample, buildTerrainMesh, groundTexture };
+export { setWorld, setStep, getWorld, getStep, terrainY, surfaceY, cameraGroundY, rawGroundY, flattenAreaCells,
+         stationHeights, resample, buildTerrainMesh, groundTexture, GROUND_TILE_M };
