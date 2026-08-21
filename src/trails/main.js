@@ -1,19 +1,29 @@
 /* Pup Trails entry point. Player movement is shared regardless of whether you're playing
    as the dog or a wild animal; only the two driver modules differ in what gets animated
    and where the geometry comes from (dog/runtime.js's shared rig vs. animal-models.js's
-   shared quadruped()). */
-import { clamp, lerp } from '../core/math.js';
-import { setWildYaw, spawnWild, topSpeedFor, updateWild, wildPos } from './wild-driver.js';
+   shared quadruped()).
 
-import { dogRunMul, dogTopSpeed, setYaw, spawnDog, updateDog } from './dog-driver.js';
+   THE AVATAR RULE, learned the hard way: this file owns `player`, and every driver has
+   its own position store -- dog/runtime.js's `dogPos`, wild-driver.js's `pos`. Neither
+   reads `player`. Any code path that moves the player MUST push x/z across to whichever
+   driver is live (syncAvatar below), or the rig renders at the world origin while the
+   camera follows the player, which on a 2.6 km map means it is simply never on screen.
+   That was the "map loads, no dog" bug. */
+import { clamp, lerp } from '../core/math.js';
+import { setWildVisible, setWildYaw, spawnWild, topSpeedFor, updateWild, wildPos } from './wild-driver.js';
+
+import { dogRunMul, dogTopSpeed, setDogPos, setDogVisible, setYaw, spawnDog, updateDog } from './dog-driver.js';
 
 import { terrainY } from './terrain.js';
 
-import { addLayers, clearLayers, getBBox, getGraph, getStartHead, getTrailheads, getVertScale, loadWorld, setStartHead } from './world.js';
+import { addLayers, clearLayers, getBBox, getBackdrop, getExaggeration, getGraph, getMapScale, getStartHead, getTrailheads, getVertScale, loadWorld, setMapScale, setStartHead, setThemeById, setVertScale } from './world.js';
 
+import { THEME, THEMES } from './themes.js';
 import { renderer, scene, camera, resize } from '../core/render.js';
 import { SPECIES } from '../data/species.js';
 import { PRESETS } from '../creator/presets.js';
+import { DEFAULTS } from '../dog/params.js';
+import { addPups, kennelPups, loadKennel, parsePupFile } from '../data/kennel.js';
 import { nearestTrail } from './spatial.js';
 
 /* Trail networks run to real kilometres; Pup City's camera (far=300, tuned for one city
@@ -23,32 +33,91 @@ camera.position.set(0, 40, 60);
 
 const $ = s => document.querySelector(s);
 
+/* The map you get if you don't ask for one. Relative to trails/index.html, which also
+   resolves correctly for dist/pup-trails.html served from the repo root and for the
+   GitHub Pages deploy. `?world=` still overrides it, and the file picker still replaces
+   it at runtime. Loaded through the normal path -- no special-casing -- so a failure
+   here fails exactly the way a hand-picked bundle would. */
+const DEFAULT_WORLD = '../data/world.json';
+
 /* ---------- player state ---------- */
 let mode = 'dog';           // 'dog' | 'wild'
 let wildKey = 'fox';
-let dogPresetIdx = 0;
+let dogChoice = {label: PRESETS[0].label, params: PRESETS[0].o};
 const player = { x:0, z:0, y:0, vy:0, yaw:0, speed:0, dist:0, sneaking:false, barkT:0 };
 let camYaw=0, camPitch=0.32, playing=false;
+let avatarKey='';           // identity of whatever is currently built, for ensureAvatar
 
 function currentTopSpeed(){ return mode==='dog' ? dogTopSpeed() : topSpeedFor(wildKey); }
 function currentRunMul(){ return mode==='dog' ? dogRunMul() : 1.8; }
 
+/* ---------- avatar ----------
+   ensureAvatar rebuilds geometry only when the *identity* changes; syncAvatar pushes
+   position every time the player moves or is teleported. Keeping them apart means
+   re-placing at a trailhead, changing theme or dragging the scale slider no longer
+   rebuilds and re-uploads the whole rig. */
+function dogParams(){ return Object.assign({}, DEFAULTS, dogChoice.params); }
+
+function ensureAvatar(){
+  const key = mode==='dog' ? 'dog:'+dogChoice.label : 'wild:'+wildKey;
+  if(key === avatarKey) return;
+  avatarKey = key;
+  if(mode==='dog'){
+    spawnDog(dogParams());
+  }else{
+    // stable seed per species: the same fox should look the same every time you pick it
+    let h=0; for(let i=0;i<wildKey.length;i++) h=(h*31+wildKey.charCodeAt(i))|0;
+    spawnWild(wildKey, Math.abs(h)||1);
+  }
+  setDogVisible(mode==='dog');
+  setWildVisible(mode==='wild');
+}
+
+function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
+  const groundY = terrainY(player.x, player.z, getVertScale());
+  if(mode==='dog'){
+    setDogPos(player.x, player.z);
+    setYaw(player.yaw);
+    updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run);
+  }else{
+    wildPos.set(player.x, 0, player.z);
+    setWildYaw(player.yaw);
+    updateWild(dt, t, groundY, jumpY, speed, sneaking, barking);
+  }
+  return groundY;
+}
+
+/* Drop the player at trailhead `i`. Falls back to the middle of the map when a set of
+   layers has no degree-1 node to make a trailhead out of -- an avatar standing in the
+   centre of the map is far more debuggable than no avatar at all. */
 function placeAtHead(i){
   const heads = getTrailheads();
-  if(!heads.length) return;
-  setStartHead(clamp(i,0,heads.length-1));
-  const h = heads[getStartHead()];
-  player.x=h.x; player.z=h.z; player.y=0; player.vy=0; player.dist=0; player.yaw=h.yaw;
-  camYaw = Math.atan2(Math.cos(player.yaw), -Math.sin(player.yaw));
-  if(mode==='dog'){
-    spawnDog(PRESETS[clamp(dogPresetIdx,0,PRESETS.length-1)].o);
-    setYaw(player.yaw);
-    updateDog(0,0, terrainY(player.x,player.z,getVertScale()), 0, 0, false, false, false);
+  if(heads.length){
+    setStartHead(clamp(i,0,heads.length-1));
+    const h = heads[getStartHead()];
+    player.x=h.x; player.z=h.z; player.yaw=h.yaw;
   }else{
-    wildPos.set(player.x,0,player.z);
-    setWildYaw(player.yaw);
-    spawnWild(wildKey, Math.floor(Math.random()*1e6));
+    const bb=getBBox();
+    player.x=(bb.minx+bb.maxx)/2; player.z=(bb.minz+bb.maxz)/2; player.yaw=0;
   }
+  player.y=0; player.vy=0; player.dist=0; player.speed=0;
+  camYaw = Math.atan2(Math.cos(player.yaw), -Math.sin(player.yaw));
+  ensureAvatar();
+  const groundY = syncAvatar(0,0,0,0,false,false,false);
+  if(!playing) frameAvatar(groundY);
+  renderStartPicker();
+}
+
+/* In the lobby the camera used to sit at its boot position looking at the origin, so
+   even a correctly-placed avatar was off screen until you pressed Play. Snap the camera
+   behind the avatar instead -- you should be able to see who you picked. */
+function frameAvatar(groundY){
+  const camD=13;
+  camera.position.set(
+    player.x-Math.sin(camYaw)*camD*Math.cos(camPitch),
+    groundY+2+camD*Math.sin(camPitch),
+    player.z-Math.cos(camYaw)*camD*Math.cos(camPitch));
+  camera.lookAt(player.x, groundY+1.4, player.z);
 }
 
 /* ---------- input: trail-owned, not core/input.js (that module is wired directly to
@@ -57,7 +126,7 @@ const keys = {};
 addEventListener('keydown', e=>{
   keys[e.code]=true;
   if(!playing) return;
-  if(e.code==='Space') e.preventDefault();
+  if(e.code==='Space'){ e.preventDefault(); if(player.y===0) player.vy=9.5; }
   if(e.code==='KeyC') player.sneaking=!player.sneaking;
   if(e.code==='KeyB') player.barkT=1;
   if(e.code==='Escape') exitPlay();
@@ -84,7 +153,17 @@ let lastT=0;
 function loop(t){
   requestAnimationFrame(loop);
   const dt=Math.min(0.05,(t-lastT)/1000||0.016); lastT=t;
-  if(!playing || !getGraph()){ renderer.render(scene,camera); return; }
+
+  // the horizon ring is a sky dome: keep it centred on the camera so it can't be reached
+  const bd=getBackdrop();
+  if(bd) bd.position.set(camera.position.x, 0, camera.position.z);
+
+  if(!playing || !getGraph()){
+    // idle: no movement, but keep the avatar breathing so the lobby isn't a still frame
+    if(avatarKey) syncAvatar(dt, t, 0, 0, player.sneaking, false, false);
+    renderer.render(scene,camera);
+    return;
+  }
 
   let ix=0,iz=0,run=false;
   if(keys.KeyW||keys.ArrowUp) iz-=1;
@@ -122,15 +201,7 @@ function loop(t){
   if(player.y===0) player.vy=Math.max(0,player.vy);
   player.barkT=Math.max(0,player.barkT-dt*2);
 
-  const groundY=terrainY(player.x,player.z,getVertScale());
-  if(mode==='dog'){
-    setYaw(player.yaw);
-    updateDog(dt,t,groundY,player.y,player.speed,player.sneaking,player.barkT>0,run);
-  }else{
-    wildPos.set(player.x,0,player.z);
-    setWildYaw(player.yaw);
-    updateWild(dt,t,groundY,player.y,player.speed,player.sneaking,player.barkT>0);
-  }
+  const groundY = syncAvatar(dt,t,player.y,player.speed,player.sneaking,player.barkT>0,run);
 
   const camD=11;
   camera.position.lerp(new THREE.Vector3(
@@ -160,54 +231,195 @@ function exitPlay(){
   placeAtHead(getStartHead());
 }
 
-/* ---------- UI wiring (minimal: species picker, play/exit, theme) ----------
+/* ---------- UI wiring ----------
    Sighting log, exit-gate stats screen and full minimap drawing from the standalone
-   build are not ported in this pass -- flagged in the integration notes rather than
-   silently dropped. Core loop (movement, dog/wildlife switch, sneak/run/bark/jump,
-   trailhead placement and exit) is complete and verified. */
-function renderSpeciesPicker(){
-  const grid=$('#speciesGrid'); if(!grid) return;
-  grid.innerHTML='';
-  PRESETS.forEach((p,i)=>{
+   build are still not ported -- flagged rather than silently dropped. */
+
+/* --- who's exploring ---
+   Two rosters, not one mixed grid: the premade pups and any pups saved in the creator
+   are one kind of choice, the wildlife is another. Both are populated on boot with no
+   file to import and no map required -- picking a dog before a map has loaded stands it
+   at the origin rather than doing nothing, which is also how you can tell the picker
+   works when a map fails. The live choice carries `.sel`, because a button that silently
+   does its job is indistinguishable from a button that is broken. */
+function rosterKey(){ return mode==='dog' ? 'dog:'+dogChoice.label : 'wild:'+wildKey; }
+
+function renderRoster(){
+  const dogs=$('#dogGrid'), wild=$('#animalGrid');
+  const live=rosterKey();
+  const pick=(grid,label,key,cls,onClick)=>{
+    if(!grid) return null;
     const b=document.createElement('button');
-    b.textContent='🐶 '+p.label;
-    b.addEventListener('click',()=>{mode='dog';dogPresetIdx=i;placeAtHead(getStartHead());});
+    b.className=cls+(key===live?' sel':'');
+    b.textContent=label;
+    b.addEventListener('click',()=>{ onClick(); renderRoster(); placeAtHead(getStartHead()); });
+    grid.appendChild(b);
+    return b;
+  };
+  if(dogs){
+    dogs.innerHTML='';
+    kennelPups.forEach(k=>{
+      const b=pick(dogs,'⭐ '+k.name,'dog:saved:'+k.name,'saved',()=>{
+        mode='dog'; dogChoice={label:'saved:'+k.name, params:k.params};
+      });
+      if(b && k.params.furColor) b.style.borderColor=k.params.furColor;
+    });
+    PRESETS.forEach(p=>{
+      pick(dogs,'🐶 '+p.label,'dog:'+p.label,'',()=>{
+        mode='dog'; dogChoice={label:p.label, params:p.o};
+      });
+    });
+  }
+  if(wild){
+    wild.innerHTML='';
+    // every species in the shared roster, theme-appropriate ones first so the list reads
+    // as "what you'd meet out here" before "everything that exists"
+    const local=(THEME.wildlife||[]);
+    const keys=[...local, ...Object.keys(SPECIES).filter(k=>!local.includes(k))];
+    for(const key of keys){
+      if(!SPECIES[key]) continue;
+      pick(wild,SPECIES[key].nm,'wild:'+key,'wild',()=>{ mode='wild'; wildKey=key; });
+    }
+  }
+  const note=$('#pupNote');
+  if(note) note.textContent = kennelPups.length
+    ? `${kennelPups.length} saved pup${kennelPups.length>1?'s':''} from the creator, plus the ${PRESETS.length} starters.`
+    : `${PRESETS.length} starter pups. Make your own in Backyard Pups — they show up here automatically — or import a backyard-pups.json below.`;
+}
+
+/* --- environment --- */
+function renderThemePicker(){
+  const grid=$('#envGrid'); if(!grid) return;
+  grid.innerHTML='';
+  Object.values(THEMES).forEach(t=>{
+    const b=document.createElement('button');
+    b.className='envcard'+(t.id===THEME.id?' sel':'');
+    b.style.background=t.sky;
+    b.innerHTML=`<span class="em">${t.em}</span><span class="nm">${t.label}</span>`;
+    b.addEventListener('click',()=>{
+      if(!setThemeById(t.id)) return;
+      renderThemePicker();
+      renderRoster();
+      placeAtHead(getStartHead());     // rebuild dropped the old scene; re-seat the player
+    });
     grid.appendChild(b);
   });
-  for(const key of ['fox','coyote','bobcat','deer','goat','bighorn','bear','moose','rabbit','squirrel']){
-    if(!SPECIES[key]) continue;
-    const b=document.createElement('button');
-    b.textContent=SPECIES[key].nm;
-    b.addEventListener('click',()=>{mode='wild';wildKey=key;placeAtHead(getStartHead());});
-    grid.appendChild(b);
+}
+
+/* --- scale ---
+   Both sliders rebuild the world, which is expensive, so the label updates on `input`
+   and the rebuild only fires on `change` (pointer release / arrow-key commit). */
+function wireScale(){
+  const map=$('#mapScale'), mapV=$('#mapScaleVal');
+  const ex=$('#vertScale'), exV=$('#vertScaleVal');
+  if(map && mapV){
+    map.value=getMapScale();
+    const show=v=>{ mapV.textContent = (+v).toFixed(2)+'\u00d7'; };
+    show(map.value);
+    map.addEventListener('input', e=> show(e.target.value));
+    map.addEventListener('change', e=>{
+      setMapScale(+e.target.value);
+      show(getMapScale());
+      placeAtHead(getStartHead());
+    });
+  }
+  if(ex && exV){
+    ex.value=getExaggeration();
+    const show=v=>{ exV.textContent = (+v).toFixed(1)+'\u00d7'; };
+    show(ex.value);
+    ex.addEventListener('input', e=> show(e.target.value));
+    ex.addEventListener('change', e=>{
+      setVertScale(+e.target.value);
+      show(getExaggeration());
+      placeAtHead(getStartHead());
+    });
   }
 }
 
-async function boot(bundleUrl){
-  if(bundleUrl){
-    await loadWorld(bundleUrl, [], 3);
+/* --- starting point --- */
+function renderStartPicker(){
+  const sel=$('#startSel'); if(!sel) return;
+  const heads=getTrailheads();
+  sel.innerHTML='';
+  if(!heads.length){
+    sel.innerHTML='<option>— load a map first —</option>';
+    sel.disabled=true;
+    return;
   }
-  renderSpeciesPicker();
+  sel.disabled=false;
+  heads.forEach((h,i)=>{
+    const o=document.createElement('option');
+    o.value=String(i);
+    o.textContent=`${h.name} · ${h.where}${h.lenM?` · ${Math.round(h.lenM)} m`:''}`;
+    sel.appendChild(o);
+  });
+  sel.value=String(getStartHead());
+}
+
+async function boot(bundleUrl){
+  loadKennel();
+  renderThemePicker();
+  wireScale();
+  await loadMap(bundleUrl || DEFAULT_WORLD, !bundleUrl);
+  renderRoster();
+  renderStartPicker();
+  // seat an avatar unconditionally. With a map that means the chosen trailhead; without
+  // one, the middle of an empty world -- either way you can see who you picked, which is
+  // what tells you the roster works when the map does not.
+  placeAtHead(getStartHead());
   resize();
   requestAnimationFrame(loop);
 }
 
+/* One place that loads a map by URL, so the boot path, the reload button and any future
+   map list all report success and failure identically. */
+async function loadMap(url, isDefault){
+  const note=$('#mapNote');
+  if(note) note.textContent='Loading map…';
+  try{
+    await loadWorld(url, [], 3);
+    if(note) note.textContent = (isDefault?'Default map: ':'Loaded: ')+url.split('/').pop()
+      + ` · ${getTrailheads().length} trailhead${getTrailheads().length===1?'':'s'}`;
+    return true;
+  }catch(err){
+    console.error('could not load world:', url, err);
+    if(note) note.textContent = isDefault
+      ? 'Default map could not load — serve the repo over http (python3 build.py --serve), or pick a bundle below.'
+      : 'That map could not be loaded — see the console.';
+    return false;
+  }
+}
+
+$('#defaultMapBtn')?.addEventListener('click', async ()=>{
+  if(await loadMap(DEFAULT_WORLD, true)){ renderStartPicker(); placeAtHead(0); }
+});
 $('#playBtn')?.addEventListener('click', enterPlay);
 $('#exitBtn')?.addEventListener('click', exitPlay);
-$('#clearLayersBtn')?.addEventListener('click', ()=>{ clearLayers(); });
+$('#clearLayersBtn')?.addEventListener('click', ()=>{ clearLayers(); renderStartPicker(); });
+$('#startSel')?.addEventListener('change', e=> placeAtHead(+e.target.value));
 
 $('#worldFile')?.addEventListener('change', async e=>{
-  await loadFiles([...e.target.files]);
+  const files=[...e.target.files];
   e.target.value='';
+  await loadFiles(files);
+});
+$('#pupFile')?.addEventListener('change', async e=>{
+  const files=[...e.target.files];
+  e.target.value='';
+  let n=0;
+  for(const f of files) n += addPups(parsePupFile(await f.text()));
+  renderRoster();
+  if(!n) console.warn('no pups found in that file');
 });
 
-/* One picker for everything. A pup-world/1 bundle and a plain .geojson are both just
-   JSON, so detect by content (bundle.format) rather than by extension -- QGIS writes
-   .geojson, fetch_dem.py writes .json, and users rename both. Layers are batched so
-   dropping trails + areas together rebuilds once, not twice. */
+/* One picker for everything. A pup-world/1 bundle, a plain .geojson and a
+   backyard-pups.json are all just JSON, so detect by content rather than by extension --
+   QGIS writes .geojson, fetch_dem.py writes .json, and users rename both. Layers are
+   batched so dropping trails + areas together rebuilds once, not twice. */
 async function loadFiles(files){
   if(!files.length) return;
   const layers=[];
+  let gotPups=0;
   for(const f of files){
     let obj;
     try{ obj=JSON.parse(await f.text()); }
@@ -217,13 +429,16 @@ async function loadFiles(files){
       catch(err){ console.error('bad world bundle:',f.name,err); }
     }else if(obj && (obj.type==='FeatureCollection' || obj.type==='Feature')){
       layers.push(obj.type==='Feature' ? {type:'FeatureCollection',features:[obj]} : obj);
+    }else if(obj && (obj.backyardPups || obj.pups || obj.furColor)){
+      gotPups += addPups(parsePupFile(obj));
     }else{
-      console.error('unrecognised file (expected a pup-world/1 bundle or GeoJSON):', f.name);
+      console.error('unrecognised file (expected a pup-world/1 bundle, GeoJSON or a pup file):', f.name);
     }
   }
   if(layers.length) addLayers(layers);
+  if(gotPups) renderRoster();
   if(!getGraph()) return;
-  renderSpeciesPicker();
+  renderStartPicker();
   placeAtHead(0);
 }
 

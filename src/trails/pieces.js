@@ -528,7 +528,77 @@ function makeShadow(radius){
   return m;
 }
 
+/* ---------- horizon backdrop ----------
+   The themes have carried `mountain` / `mountainStyle` since they were written, but
+   nothing ever drew them, so "Deep forest" and "Red rock" only differed at your feet.
+   This is the skyline that makes the choice read from the first frame.
+
+   Three deliberate choices, each avoiding a bug this file has hit before:
+   - side:DoubleSide. This is a decorative shell with no interior to see, so winding
+     order is made irrelevant by construction rather than reasoned about. (Both the
+     trail ribbons and the terraced terrain shipped with invisible backface-culled
+     faces at some point; there is no reason to re-earn that lesson here.)
+   - depthTest:false + renderOrder -1. Painted before anything else and never writing
+     depth, so real terrain always draws on top of it however far away that terrain is.
+     No z-fighting with the ground, no chance of a distant ridge poking through.
+   - fog:false, with each band pre-blended toward the sky colour. Fog is tuned for a
+     few hundred metres of trail; a backdrop that far out would be solid fog. Blending
+     by hand gives the same aerial-perspective read at any fog setting.
+   The group is re-centred on the camera every frame (main.js), so it behaves as a sky
+   dome: you can never walk up to it. */
+function mixHex(a, b, t){
+  const ca=new THREE.Color(a), cb=new THREE.Color(b);
+  return new THREE.Color(ca.r+(cb.r-ca.r)*t, ca.g+(cb.g-ca.g)*t, ca.b+(cb.b-ca.b)*t);
+}
+function buildBackdrop(theme, rng, mapScale=1){
+  const g = new THREE.Group();
+  g.name = 'backdrop';
+  const mesas = theme.mountainStyle === 'mesas';
+  const BASE_Y = -600;                    // far below any terrain the player can stand on
+  const bands = theme.mountain.length;
+  for(let b=0; b<bands; b++){
+    const R = 900 * mapScale * (1 + b*0.07);
+    const segs = 64;
+    const peakH = (150 + b*55) * mapScale;
+    const mat = new THREE.MeshBasicMaterial({
+      color: mixHex(theme.mountain[b], theme.sky, 0.28 + b*0.17),
+      side: THREE.DoubleSide, fog:false, depthTest:false, depthWrite:false,
+    });
+    // ridge profile: one height per segment, flat-topped runs for mesas, spikes for peaks
+    const h = new Array(segs+1);
+    let runH = 0, runLeft = 0;
+    for(let i=0; i<=segs; i++){
+      if(mesas){
+        if(runLeft<=0){ runLeft = 3 + Math.floor(rng()*4); runH = peakH*(0.45+rng()*0.55); }
+        runLeft--; h[i] = runH;
+      }else{
+        h[i] = peakH*(0.35 + rng()*0.65) * (i%2 ? 1 : 0.72);
+      }
+    }
+    h[segs] = h[0];                        // close the ring seamlessly
+    const P=[], idx=[];
+    for(let i=0; i<=segs; i++){
+      const a = i/segs*Math.PI*2;
+      const x = Math.cos(a)*R, z = Math.sin(a)*R;
+      P.push(x, BASE_Y, z, x, h[i], z);
+    }
+    for(let i=0; i<segs; i++){
+      const v = i*2;
+      idx.push(v, v+1, v+3, v, v+3, v+2);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(P), 3));
+    geo.setIndex(idx);
+    const m = new THREE.Mesh(geo, mat);
+    m.renderOrder = -10 + b;               // furthest band first
+    m.frustumCulled = false;               // it surrounds the camera; culling it is wrong
+    g.add(m);
+  }
+  return g;
+}
+
 
 export { ribbonGeom, trailMat, INK, buildSign, buildBlaze, buildGate, makeTree, makeRock,
          POI_STYLE, AREA_STYLE, nameplate, buildPOI, pavementTexture, buildLandform,
-         buildFloatingLabel, buildArea, buildAreaSign, makeShadow, pickTree, shade };
+         buildFloatingLabel, buildArea, buildAreaSign, makeShadow, pickTree, shade,
+         buildBackdrop };

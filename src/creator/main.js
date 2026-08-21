@@ -8,6 +8,7 @@ import { buildDog } from '../dog/build.js';
 import { PRESETS } from './presets.js';
 import { YARD, STREAM, GARDEN, BOWL_POS, BOWL_MAX, ball } from './scene.js';
 import { registerServiceWorker } from '../city/pwa.js';
+import { kennelPups, loadKennel, setKennelPups } from '../data/kennel.js';
 
 let P = Object.assign({}, DEFAULTS);
 
@@ -231,7 +232,12 @@ function syncAllUI(){ Object.values(uiRefs).forEach(f=>f()); }
 /* =========================================================
    SAVE / LOAD (in-memory + JSON file export/import)
    ========================================================= */
+/* Saved pups now outlive the tab, and are visible to Pup City and Pup Trails, via
+   data/kennel.js. savedPups stays the local working copy so none of the UI below
+   changes; syncKennel() pushes it to storage after every edit. The .json export is
+   untouched -- it is still how you move pups between devices or trade with a friend. */
 let savedPups = [];
+function syncKennel(){ setKennelPups(savedPups.map(s=> s.params)); }
 function renderSaved(){
   const list = document.getElementById('savedList');
   list.innerHTML = '';
@@ -254,7 +260,7 @@ function renderSaved(){
       toast(`${P.name} is back!`);
     });
     delB.addEventListener('click', ()=>{
-      savedPups.splice(i,1); renderSaved();
+      savedPups.splice(i,1); syncKennel(); renderSaved();
     });
     list.appendChild(chip);
   });
@@ -264,6 +270,7 @@ function saveCurrent(){
   const existing = savedPups.findIndex(s=> s.params.name === snap.name);
   if(existing >= 0) savedPups[existing] = {params:snap};
   else savedPups.push({params:snap});
+  syncKennel();
   renderSaved();
   toast(`${snap.name} saved!`);
 }
@@ -293,6 +300,7 @@ function importSaves(e){
           n++;
         }
       });
+      syncKennel();
       renderSaved();
       toast(n? `Imported ${n} pup${n>1?'s':''}!` : 'No pups found in that file.');
     }catch(err){
@@ -302,6 +310,8 @@ function importSaves(e){
   rd.readAsText(file);
   e.target.value = '';
 }
+loadKennel();
+savedPups = kennelPups.map(k=> ({params:k.params}));
 renderSaved();
 
 /* ---------- randomize ---------- */

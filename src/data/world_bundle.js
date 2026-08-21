@@ -9,6 +9,27 @@
 
 const FORMAT = 'pup-world/1';
 
+/**
+ * fetch_dem.py writes `layers` as an OBJECT keyed by source filename
+ * ({"pup-trails-map": {...FeatureCollection}}), because that is the natural
+ * shape coming out of `load_layers()`. Consumers iterate layers as an ARRAY.
+ * Spreading an object into an array literal throws "is not iterable", which
+ * meant every real bundle blew up inside rebuildWorld() the moment it loaded --
+ * no map, and therefore no trailheads, no start point and no avatar.
+ *
+ * Normalising here rather than at the call site means there is exactly one
+ * place that knows about the two shapes, and `World.layers` is an array for
+ * everyone: the game, the map editor and anything written later. Both shapes
+ * stay valid on disk, so old bundles keep working.
+ */
+function normaliseLayers(layers) {
+  if (!layers) return [];
+  if (Array.isArray(layers)) return layers.filter(Boolean);
+  return Object.entries(layers)
+    .map(([name, doc]) => (doc && !doc.name ? { ...doc, name } : doc))
+    .filter(Boolean);
+}
+
 function decodeInt16LE(b64) {
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
@@ -30,7 +51,7 @@ export class World {
     const pr = bundle.projection;
 
     this.bundle = bundle;
-    this.layers = bundle.layers;
+    this.layers = normaliseLayers(bundle.layers);
     this.bounds = bundle.bounds;
     this.attribution = bundle.attribution;
 
@@ -47,6 +68,7 @@ export class World {
     this.originZ = hf.originZ;
     this.minM = hf.minM;
     this.maxM = hf.maxM;
+    this.mapScale = 1;
 
     const raw = decodeInt16LE(hf.data);
     if (raw.length !== hf.width * hf.height) {
@@ -58,6 +80,35 @@ export class World {
     for (let i = 0; i < raw.length; i++) {
       this.heights[i] = hf.baseM + raw[i] / hf.scale;
     }
+  }
+
+  // --- horizontal scale -------------------------------------------------
+
+  /**
+   * Shrink or stretch the whole map horizontally.
+   *
+   * Scale MUST be applied here rather than in the game layer, because the
+   * projection and the heightfield grid have to move together: `project()`
+   * turns lon/lat into metres, and `cellI/cellJ` turn those same metres back
+   * into DEM cells. Scaling one without the other silently decouples the
+   * vectors from the terrain -- trails would drape over the wrong ground.
+   * Deriving both from the untouched bundle constants keeps them consistent
+   * for any scale, and makes repeat calls idempotent rather than cumulative.
+   *
+   * Elevations stay in true metres; vertical scale is the game's business
+   * (see trails/world.js), so a scaled map is not automatically flattened.
+   */
+  setMapScale(scale) {
+    const s = Math.max(0.05, Math.min(8, Number(scale) || 1));
+    const hf = this.bundle.heightfield;
+    const pr = this.bundle.projection;
+    this.mapScale = s;
+    this.mPerDegLon = pr.metresPerDegreeLon * s;
+    this.mPerDegLat = pr.metresPerDegreeLat * s;
+    this.cell = hf.cell * s;
+    this.originX = hf.originX * s;
+    this.originZ = hf.originZ * s;
+    return this;
   }
 
   // --- projection -------------------------------------------------------

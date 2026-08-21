@@ -30,17 +30,52 @@
     <aside id="panel">
       <div class="sect">
         <h2>🐾 Who's exploring</h2>
-        <div id="speciesGrid" class="species-grid"></div>
+        <h3 class="subhead">Dogs</h3>
+        <div id="dogGrid" class="species-grid"></div>
+        <h3 class="subhead">Wild animals</h3>
+        <div id="animalGrid" class="species-grid"></div>
+        <p class="hint" id="pupNote"></p>
+        <input type="file" id="pupFile" accept=".json,application/json" multiple>
+      </div>
+      <div class="sect">
+        <h2>🏞️ Environment</h2>
+        <div id="envGrid" class="env-grid"></div>
+        <p class="hint">Sets the sky, light, ground, plants, rock colour and horizon.
+          The trails themselves don't move.</p>
+      </div>
+      <div class="sect">
+        <h2>📐 Scale</h2>
+        <div class="ctl">
+          <label>Map size <span class="val" id="mapScaleVal">1.00×</span></label>
+          <input type="range" id="mapScale" min="0.25" max="2" step="0.05" value="1">
+        </div>
+        <div class="ctl">
+          <label>Hill exaggeration <span class="val" id="vertScaleVal">1.8×</span></label>
+          <input type="range" id="vertScale" min="0.3" max="4" step="0.1" value="1.8">
+        </div>
+        <p class="hint"><b>Map size</b> 1.00× is true scale — a 953 m trail sign means 953 real
+          metres. Shrink it for a quicker walk; your pup stays the same size, so the world
+          gets smaller around it. <b>Hill exaggeration</b> only stretches height.</p>
+      </div>
+      <div class="sect">
+        <h2>🚩 Starting point</h2>
+        <select id="startSel"><option>— load a map first —</option></select>
+        <p class="hint">Every dead-end on the trail network is a trailhead. Reaching any
+          of them after 20 m of walking ends the hike.</p>
       </div>
       <div class="sect">
         <h2>🗺️ Trail world</h2>
-        <p class="hint">Drop in a <code>.geojson</code> of paths and another of areas of
-          interest &mdash; select both at once. Add a <code>pup-world/1</code> bundle from
+        <p class="hint">Garden of the Gods loads by default. To explore somewhere else, drop in a
+          <code>.geojson</code> of paths and another of areas of interest &mdash; select both at once. Add a <code>pup-world/1</code> bundle from
           <code>tools/fetch_dem.py</code> for real terrain, or pass
           <code>?world=path/to/world.json</code> in the URL. Without a bundle the map is
           playable but flat.</p>
         <input type="file" id="worldFile" accept=".geojson,.json,application/geo+json,application/json" multiple>
-        <button class="btn small" id="clearLayersBtn">Clear loaded layers</button>
+        <div class="io-row">
+          <button class="btn small" id="defaultMapBtn">🏜️ Default map</button>
+          <button class="btn small" id="clearLayersBtn">Clear loaded layers</button>
+        </div>
+        <p class="hint" id="mapNote">Loading map…</p>
       </div>
     </aside>
     <div id="stage">

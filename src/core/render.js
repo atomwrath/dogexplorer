@@ -52,4 +52,4 @@ function disposeGroup(g){
   });
 }
 
-export { canvas, renderer, scene, camera, resize, sun, sunTarget, setHemi, disposeGroup };
+export { canvas, renderer, scene, camera, resize, sun, sunTarget, hemi, setHemi, disposeGroup };

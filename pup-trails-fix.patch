@@ -1,0 +1,2603 @@
+diff --git a/README.md b/README.md
+index e0aa97e..28cc0f6 100644
+--- a/README.md
++++ b/README.md
+@@ -47,6 +47,25 @@ python3 build.py --serve     # builds, then serves at http://localhost:8000
+ 
+ Edit anything under `src/` and reload. No bundler, no node_modules, no watch process.
+ 
++### Load-bearing rules
++
++- **Shared mutable arrays are cleared in place**, never reassigned — other modules hold
++  the same reference, and reassigning silently orphans them (`resetWorld()`,
++  `kennel.pups`).
++- **A driver never reads the player.** `dog/runtime.js` owns `dogPos`; `wild-driver.js`
++  owns its own `pos`. Whoever owns the player state has to push x/z across to the live
++  driver every frame (`trails/main.js`'s `syncAvatar`). Miss it and the rig renders at
++  the world origin while the camera follows the player — on a kilometres-wide map, the
++  avatar is simply never on screen, with no error anywhere.
++- **Never alias an import or export** (`import { a as b }`). `build.py` flattens every
++  module into one scope and deletes the import/export lines, so the alias is undefined
++  in the built bundle — works in dev, throws in `dist/`. `tools/check.py` enforces this.
++- **`fetch_dem.py` writes `layers` as an object** keyed by filename; `World` normalises
++  it to an array. Consumers can rely on `World.layers` being an array.
++- **Horizontal map scale belongs to `World`,** not the game layer. `World.setMapScale()`
++  re-derives the projection *and* the DEM cell grid from the bundle constants together;
++  scaling one without the other decouples vectors from terrain.
++
+ ## Building single-file versions
+ 
+ ```bash
+@@ -65,6 +84,17 @@ Checks that every module parses as ESM, that each built bundle parses as a **cla
+ 
+ > The classic-script check matters: `node --check` on a plain `.js` auto-detects ESM and will happily accept leftover `import`/`export` that a browser would reject, so bundles are checked as `.cjs`.
+ 
++### Smoke test (optional)
++
++`tools/check.py` proves the code parses. `tools/smoke.js` proves it runs: it boots the
++built bundle under jsdom with a stubbed THREE, then clicks through the pickers and
++asserts the avatar ends up where the player is.
++
++```bash
++npm install jsdom            # dev only, nothing ships
++python3 build.py && node tools/smoke.js
++```
++
+ ## Tuning the game
+ 
+ Most balance changes need no logic edits:
+diff --git a/dist/backyard-pups.html b/dist/backyard-pups.html
+index 14140e8..10f5f3f 100644
+--- a/dist/backyard-pups.html
++++ b/dist/backyard-pups.html
+@@ -1213,6 +1213,110 @@ function registerServiceWorker(){
+   });
+ }
+ 
++/* ==== src/data/kennel.js ==== */
++/* The kennel: kennelPups the player has made, shared across every app in the suite.
++   Until now a pup could only travel between apps as a downloaded backyard-kennelPups.json
++   the player re-imported by hand; the creator's own saves were in-memory and died with
++   the tab. This is the one place that persists them.
++
++   Sits in data/ because it is the bottom of the dependency chain -- it imports nothing,
++   not even DEFAULTS. It stores whatever param objects it is handed and leaves merging
++   with DEFAULTS to the caller (dog/params.js is *above* data/, and reaching up would
++   invert the arrow). That also keeps the stored shape a plain, versioned data record
++   rather than a snapshot of whatever DEFAULTS happened to be that week.
++
++   `kennelPups` is exported as a live array and is ALWAYS cleared in place, never reassigned:
++   other modules hold this same reference, and reassigning would silently orphan them. */
++
++const KEY = 'dogexplorer.kennel';
++const VERSION = 1;
++
++const kennelPups = [];              // [{ name, params }] -- live binding, mutate in place
++const listeners = [];
++
++function onKennelChange(fn){ listeners.push(fn); }
++function notify(){ for(const fn of listeners) fn(kennelPups); }
++
++/* localStorage throws rather than returning null in Safari private mode and in some
++   embedded webviews, and the whole feature is a nicety -- never let it break the game. */
++function readStore(){
++  try{ return JSON.parse(localStorage.getItem(KEY) || 'null'); }
++  catch(err){ console.warn('kennel: could not read saved kennelPups', err); return null; }
++}
++function writeStore(payload){
++  try{ localStorage.setItem(KEY, JSON.stringify(payload)); return true; }
++  catch(err){ console.warn('kennel: could not save kennelPups', err); return false; }
++}
++
++/* Migration chain, one step per version bump. Unknown-but-newer records are dropped
++   rather than guessed at, so a downgrade can't corrupt a save. */
++function migrate(rec){
++  if(!rec || typeof rec !== 'object') return null;
++  if(!rec.version || rec.version > VERSION) return null;
++  return rec;
++}
++
++function loadKennel(){
++  const rec = migrate(readStore());
++  kennelPups.length = 0;
++  if(rec && Array.isArray(rec.pups)) kennelPups.push(...rec.pups.filter(isPup));
++  notify();
++  return kennelPups;
++}
++
++function saveKennel(){
++  const ok = writeStore({version:VERSION, pups:kennelPups});
++  notify();
++  return ok;
++}
++
++function isPup(p){
++  return !!(p && p.params && typeof p.params === 'object' && p.params.furColor);
++}
++
++/* Name is the identity, matching how the creator's own save list already behaves:
++   saving a pup twice under one name updates it instead of piling up duplicates. */
++function addPups(list){
++  let n = 0;
++  for(const raw of (list || [])){
++    const params = raw && (raw.params || raw);
++    if(!params || !params.furColor) continue;
++    const entry = {name: String(params.name || 'Pup').slice(0,24), params};
++    const at = kennelPups.findIndex(p => p.name === entry.name);
++    if(at >= 0) kennelPups[at] = entry; else kennelPups.push(entry);
++    n++;
++  }
++  if(n) saveKennel();
++  return n;
++}
++
++function removePup(i){
++  if(i < 0 || i >= kennelPups.length) return false;
++  kennelPups.splice(i, 1);
++  saveKennel();
++  return true;
++}
++
++function setKennelPups(list){
++  kennelPups.length = 0;
++  addPups(list);
++  saveKennel();
++  return kennelPups.length;
++}
++
++/* Accepts every shape the suite has ever written or read: the creator's
++   {backyardPups:1, pups:[{params}]} export, a bare array, or a single pup object.
++   Returns plain param objects; callers merge DEFAULTS themselves. */
++function parsePupFile(data){
++  let obj = data;
++  if(typeof obj === 'string'){
++    try{ obj = JSON.parse(obj); }catch(err){ return []; }
++  }
++  if(!obj) return [];
++  const list = obj.pups || (Array.isArray(obj) ? obj : [obj]);
++  return list.map(p => (p && p.params) || p).filter(p => p && p.furColor);
++}
++
+ /* ==== src/creator/main.js ==== */
+ /* Backyard Pups — the character creator.
+    buildDog and DEFAULTS come from ../dog/, shared byte-for-byte with Pup City. */
+@@ -1225,6 +1329,7 @@ function registerServiceWorker(){
+ 
+ 
+ 
++
+ let P = Object.assign({}, DEFAULTS);
+ 
+ /* ---------- current dog instance ---------- */
+@@ -1447,7 +1552,12 @@ function syncAllUI(){ Object.values(uiRefs).forEach(f=>f()); }
+ /* =========================================================
+    SAVE / LOAD (in-memory + JSON file export/import)
+    ========================================================= */
++/* Saved pups now outlive the tab, and are visible to Pup City and Pup Trails, via
++   data/kennel.js. savedPups stays the local working copy so none of the UI below
++   changes; syncKennel() pushes it to storage after every edit. The .json export is
++   untouched -- it is still how you move pups between devices or trade with a friend. */
+ let savedPups = [];
++function syncKennel(){ setKennelPups(savedPups.map(s=> s.params)); }
+ function renderSaved(){
+   const list = document.getElementById('savedList');
+   list.innerHTML = '';
+@@ -1470,7 +1580,7 @@ function renderSaved(){
+       toast(`${P.name} is back!`);
+     });
+     delB.addEventListener('click', ()=>{
+-      savedPups.splice(i,1); renderSaved();
++      savedPups.splice(i,1); syncKennel(); renderSaved();
+     });
+     list.appendChild(chip);
+   });
+@@ -1480,6 +1590,7 @@ function saveCurrent(){
+   const existing = savedPups.findIndex(s=> s.params.name === snap.name);
+   if(existing >= 0) savedPups[existing] = {params:snap};
+   else savedPups.push({params:snap});
++  syncKennel();
+   renderSaved();
+   toast(`${snap.name} saved!`);
+ }
+@@ -1509,6 +1620,7 @@ function importSaves(e){
+           n++;
+         }
+       });
++      syncKennel();
+       renderSaved();
+       toast(n? `Imported ${n} pup${n>1?'s':''}!` : 'No pups found in that file.');
+     }catch(err){
+@@ -1518,6 +1630,8 @@ function importSaves(e){
+   rd.readAsText(file);
+   e.target.value = '';
+ }
++loadKennel();
++savedPups = kennelPups.map(k=> ({params:k.params}));
+ renderSaved();
+ 
+ /* ---------- randomize ---------- */
+diff --git a/dist/pup-trails.html b/dist/pup-trails.html
+index a2f2ac8..b5d7b5c 100644
+--- a/dist/pup-trails.html
++++ b/dist/pup-trails.html
+@@ -60,6 +60,29 @@ canvas#c{position:absolute;inset:0;width:100%;height:100%;display:block;}
+ body.play #playHud{display:block;}
+ @media (max-width:760px){ .btn.icon{display:inline-block;} #panel{position:absolute;height:100%;z-index:5;} }
+ 
++/* --- panel controls added with the environment / scale / start pickers --- */
++.species-grid button.saved{background:#fff;border-width:3px;}
++.species-grid button.wild{background:#f2e7d5;}
++.env-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;}
++.envcard{font-family:inherit;font-weight:bold;border:3px solid var(--ink);border-radius:12px;
++  padding:8px 2px 6px;cursor:pointer;color:var(--ink);text-shadow:0 1px 0 rgba(255,255,255,.55);}
++.envcard.sel{outline:3px solid var(--orange);outline-offset:2px;}
++.envcard .em{display:block;font-size:20px;}
++.envcard .nm{display:block;font-size:10.5px;margin-top:2px;}
++.ctl{margin-top:10px;}
++.ctl label{display:flex;justify-content:space-between;font-size:12.5px;font-weight:bold;margin-bottom:4px;}
++.ctl label .val{opacity:.6;font-weight:normal;}
++.ctl input[type=range]{width:100%;accent-color:var(--orange);}
++#startSel{width:100%;font-family:inherit;font-size:12.5px;font-weight:bold;padding:7px 8px;
++  border:3px solid var(--ink);border-radius:10px;background:var(--cream);cursor:pointer;}
++#startSel:disabled{opacity:.55;cursor:default;}
++#pupFile{width:100%;font-size:11px;margin-top:6px;}
++.subhead{margin:10px 0 5px;font-size:11px;letter-spacing:1px;text-transform:uppercase;opacity:.55;}
++.subhead:first-of-type{margin-top:2px;}
++.species-grid button.sel{outline:3px solid var(--orange);outline-offset:2px;}
++.io-row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;}
++#mapNote{margin:8px 0 0;}
++
+ </style>
+ </head>
+ <body>
+@@ -77,17 +100,52 @@ body.play #playHud{display:block;}
+     <aside id="panel">
+       <div class="sect">
+         <h2>🐾 Who's exploring</h2>
+-        <div id="speciesGrid" class="species-grid"></div>
++        <h3 class="subhead">Dogs</h3>
++        <div id="dogGrid" class="species-grid"></div>
++        <h3 class="subhead">Wild animals</h3>
++        <div id="animalGrid" class="species-grid"></div>
++        <p class="hint" id="pupNote"></p>
++        <input type="file" id="pupFile" accept=".json,application/json" multiple>
++      </div>
++      <div class="sect">
++        <h2>🏞️ Environment</h2>
++        <div id="envGrid" class="env-grid"></div>
++        <p class="hint">Sets the sky, light, ground, plants, rock colour and horizon.
++          The trails themselves don't move.</p>
++      </div>
++      <div class="sect">
++        <h2>📐 Scale</h2>
++        <div class="ctl">
++          <label>Map size <span class="val" id="mapScaleVal">1.00×</span></label>
++          <input type="range" id="mapScale" min="0.25" max="2" step="0.05" value="1">
++        </div>
++        <div class="ctl">
++          <label>Hill exaggeration <span class="val" id="vertScaleVal">1.8×</span></label>
++          <input type="range" id="vertScale" min="0.3" max="4" step="0.1" value="1.8">
++        </div>
++        <p class="hint"><b>Map size</b> 1.00× is true scale — a 953 m trail sign means 953 real
++          metres. Shrink it for a quicker walk; your pup stays the same size, so the world
++          gets smaller around it. <b>Hill exaggeration</b> only stretches height.</p>
++      </div>
++      <div class="sect">
++        <h2>🚩 Starting point</h2>
++        <select id="startSel"><option>— load a map first —</option></select>
++        <p class="hint">Every dead-end on the trail network is a trailhead. Reaching any
++          of them after 20 m of walking ends the hike.</p>
+       </div>
+       <div class="sect">
+         <h2>🗺️ Trail world</h2>
+-        <p class="hint">Drop in a <code>.geojson</code> of paths and another of areas of
+-          interest &mdash; select both at once. Add a <code>pup-world/1</code> bundle from
++        <p class="hint">Garden of the Gods loads by default. To explore somewhere else, drop in a
++          <code>.geojson</code> of paths and another of areas of interest &mdash; select both at once. Add a <code>pup-world/1</code> bundle from
+           <code>tools/fetch_dem.py</code> for real terrain, or pass
+           <code>?world=path/to/world.json</code> in the URL. Without a bundle the map is
+           playable but flat.</p>
+         <input type="file" id="worldFile" accept=".geojson,.json,application/geo+json,application/json" multiple>
+-        <button class="btn small" id="clearLayersBtn">Clear loaded layers</button>
++        <div class="io-row">
++          <button class="btn small" id="defaultMapBtn">🏜️ Default map</button>
++          <button class="btn small" id="clearLayersBtn">Clear loaded layers</button>
++        </div>
++        <p class="hint" id="mapNote">Loading map…</p>
+       </div>
+     </aside>
+     <div id="stage">
+@@ -661,7 +719,7 @@ function attachWantedStar(a){
+ 
+ let group = null, refs = null, speciesKey = null, S = null;
+ let wildLegPhase = 0, wildBodyBaseY = 0;
+-const pos = new THREE.Vector3(0,0,0);
++const wildPos = new THREE.Vector3(0,0,0);
+ let yaw = 0;
+ 
+ function spawnWild(key, seed){
+@@ -670,7 +728,7 @@ function spawnWild(key, seed){
+   const rnd = mulberry32((seed|0) || 1);
+   const built = makeAnimalModel(key, rnd);
+   group = built.g; refs = built.refs;
+-  group.position.copy(pos);
++  group.position.copy(wildPos);
+   group.rotation.y = yaw;
+   scene.add(group);
+   wildLegPhase = 0;
+@@ -678,6 +736,7 @@ function spawnWild(key, seed){
+ }
+ 
+ function setWildYaw(v){ yaw = v; if(group) group.rotation.y = yaw; }
++function setWildVisible(v){ if(group) group.visible = !!v; }
+ 
+ function topSpeedFor(key){
+   // SPECIES.speed is Pup City's fleeing/wander speed, tuned for a much smaller play
+@@ -694,7 +753,7 @@ function spookRadiusFor(key){
+ 
+ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking){
+   if(!group || !refs) return;
+-  group.position.set(pos.x, groundY + jumpY, pos.z);
++  group.position.set(wildPos.x, groundY + jumpY, wildPos.z);
+   group.rotation.y = yaw;
+   const hop = !!S?.hopper;
+   const strideRate = 2.2 / clamp((S?.scale||1),0.4,2.2);
+@@ -1223,6 +1282,20 @@ function spawnDog(params){
+   legPhase = 0; crouchAmt = 0;
+ }
+ 
++/* The dog's x/z live in runtime.js's `dogPos`, which updateDog() reads every frame.
++   Trails drives the player through its own `player` object, so that position has to be
++   pushed across explicitly -- exactly the way wild-driver's `wildPos` is written by
++   main.js. Without this the rig renders at the world origin no matter where the camera
++   is, which on a real 2.6 km map means it is simply never on screen. Mutate in place:
++   dogPos is a live binding several modules already hold a reference to. */
++function setDogPos(x, z){ dogPos.set(x, 0, z); }
++function getDogPos(){ return dogPos; }
++
++/* Switching to a wild animal used to leave the dog standing wherever it was last
++   drawn, because each driver only ever replaces its OWN instance. Hide rather than
++   dispose: the rig is rebuilt from params on demand and re-showing is free. */
++function setDogVisible(v){ if(dog) dog.visible = !!v; }
++
+ function dogTopSpeed(){ return STATS.walk; }          // walk/run figures already tuned in dog/stats.js
+ function dogRunMul(){ return STATS.run / STATS.walk; }
+ 
+@@ -1474,6 +1547,27 @@ function groundTexture(theme){
+ 
+ const FORMAT = 'pup-world/1';
+ 
++/**
++ * fetch_dem.py writes `layers` as an OBJECT keyed by source filename
++ * ({"pup-trails-map": {...FeatureCollection}}), because that is the natural
++ * shape coming out of `load_layers()`. Consumers iterate layers as an ARRAY.
++ * Spreading an object into an array literal throws "is not iterable", which
++ * meant every real bundle blew up inside rebuildWorld() the moment it loaded --
++ * no map, and therefore no trailheads, no start point and no avatar.
++ *
++ * Normalising here rather than at the call site means there is exactly one
++ * place that knows about the two shapes, and `World.layers` is an array for
++ * everyone: the game, the map editor and anything written later. Both shapes
++ * stay valid on disk, so old bundles keep working.
++ */
++function normaliseLayers(layers) {
++  if (!layers) return [];
++  if (Array.isArray(layers)) return layers.filter(Boolean);
++  return Object.entries(layers)
++    .map(([name, doc]) => (doc && !doc.name ? { ...doc, name } : doc))
++    .filter(Boolean);
++}
++
+ function decodeInt16LE(b64) {
+   const bin = atob(b64);
+   const bytes = new Uint8Array(bin.length);
+@@ -1495,7 +1589,7 @@ class World {
+     const pr = bundle.projection;
+ 
+     this.bundle = bundle;
+-    this.layers = bundle.layers;
++    this.layers = normaliseLayers(bundle.layers);
+     this.bounds = bundle.bounds;
+     this.attribution = bundle.attribution;
+ 
+@@ -1512,6 +1606,7 @@ class World {
+     this.originZ = hf.originZ;
+     this.minM = hf.minM;
+     this.maxM = hf.maxM;
++    this.mapScale = 1;
+ 
+     const raw = decodeInt16LE(hf.data);
+     if (raw.length !== hf.width * hf.height) {
+@@ -1525,6 +1620,35 @@ class World {
+     }
+   }
+ 
++  // --- horizontal scale -------------------------------------------------
++
++  /**
++   * Shrink or stretch the whole map horizontally.
++   *
++   * Scale MUST be applied here rather than in the game layer, because the
++   * projection and the heightfield grid have to move together: `project()`
++   * turns lon/lat into metres, and `cellI/cellJ` turn those same metres back
++   * into DEM cells. Scaling one without the other silently decouples the
++   * vectors from the terrain -- trails would drape over the wrong ground.
++   * Deriving both from the untouched bundle constants keeps them consistent
++   * for any scale, and makes repeat calls idempotent rather than cumulative.
++   *
++   * Elevations stay in true metres; vertical scale is the game's business
++   * (see trails/world.js), so a scaled map is not automatically flattened.
++   */
++  setMapScale(scale) {
++    const s = Math.max(0.05, Math.min(8, Number(scale) || 1));
++    const hf = this.bundle.heightfield;
++    const pr = this.bundle.projection;
++    this.mapScale = s;
++    this.mPerDegLon = pr.metresPerDegreeLon * s;
++    this.mPerDegLat = pr.metresPerDegreeLat * s;
++    this.cell = hf.cell * s;
++    this.originX = hf.originX * s;
++    this.originZ = hf.originZ * s;
++    return this;
++  }
++
+   // --- projection -------------------------------------------------------
+ 
+   project(lon, lat, out = { x: 0, z: 0 }) {
+@@ -2459,6 +2583,75 @@ function makeShadow(radius){
+   return m;
+ }
+ 
++/* ---------- horizon backdrop ----------
++   The themes have carried `mountain` / `mountainStyle` since they were written, but
++   nothing ever drew them, so "Deep forest" and "Red rock" only differed at your feet.
++   This is the skyline that makes the choice read from the first frame.
++
++   Three deliberate choices, each avoiding a bug this file has hit before:
++   - side:DoubleSide. This is a decorative shell with no interior to see, so winding
++     order is made irrelevant by construction rather than reasoned about. (Both the
++     trail ribbons and the terraced terrain shipped with invisible backface-culled
++     faces at some point; there is no reason to re-earn that lesson here.)
++   - depthTest:false + renderOrder -1. Painted before anything else and never writing
++     depth, so real terrain always draws on top of it however far away that terrain is.
++     No z-fighting with the ground, no chance of a distant ridge poking through.
++   - fog:false, with each band pre-blended toward the sky colour. Fog is tuned for a
++     few hundred metres of trail; a backdrop that far out would be solid fog. Blending
++     by hand gives the same aerial-perspective read at any fog setting.
++   The group is re-centred on the camera every frame (main.js), so it behaves as a sky
++   dome: you can never walk up to it. */
++function mixHex(a, b, t){
++  const ca=new THREE.Color(a), cb=new THREE.Color(b);
++  return new THREE.Color(ca.r+(cb.r-ca.r)*t, ca.g+(cb.g-ca.g)*t, ca.b+(cb.b-ca.b)*t);
++}
++function buildBackdrop(theme, rng, mapScale=1){
++  const g = new THREE.Group();
++  g.name = 'backdrop';
++  const mesas = theme.mountainStyle === 'mesas';
++  const BASE_Y = -600;                    // far below any terrain the player can stand on
++  const bands = theme.mountain.length;
++  for(let b=0; b<bands; b++){
++    const R = 900 * mapScale * (1 + b*0.07);
++    const segs = 64;
++    const peakH = (150 + b*55) * mapScale;
++    const mat = new THREE.MeshBasicMaterial({
++      color: mixHex(theme.mountain[b], theme.sky, 0.28 + b*0.17),
++      side: THREE.DoubleSide, fog:false, depthTest:false, depthWrite:false,
++    });
++    // ridge profile: one height per segment, flat-topped runs for mesas, spikes for peaks
++    const h = new Array(segs+1);
++    let runH = 0, runLeft = 0;
++    for(let i=0; i<=segs; i++){
++      if(mesas){
++        if(runLeft<=0){ runLeft = 3 + Math.floor(rng()*4); runH = peakH*(0.45+rng()*0.55); }
++        runLeft--; h[i] = runH;
++      }else{
++        h[i] = peakH*(0.35 + rng()*0.65) * (i%2 ? 1 : 0.72);
++      }
++    }
++    h[segs] = h[0];                        // close the ring seamlessly
++    const P=[], idx=[];
++    for(let i=0; i<=segs; i++){
++      const a = i/segs*Math.PI*2;
++      const x = Math.cos(a)*R, z = Math.sin(a)*R;
++      P.push(x, BASE_Y, z, x, h[i], z);
++    }
++    for(let i=0; i<segs; i++){
++      const v = i*2;
++      idx.push(v, v+1, v+3, v, v+3, v+2);
++    }
++    const geo = new THREE.BufferGeometry();
++    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(P), 3));
++    geo.setIndex(idx);
++    const m = new THREE.Mesh(geo, mat);
++    m.renderOrder = -10 + b;               // furthest band first
++    m.frustumCulled = false;               // it surrounds the camera; culling it is wrong
++    g.add(m);
++  }
++  return g;
++}
++
+ /* ==== src/trails/world.js ==== */
+ /* Scene state + rebuildWorld(). Owns GRAPH, POIS, AREAS, TRAILHEADS, bboxW -- read
+    elsewhere as live bindings, mutated only through the functions here, same rule as
+@@ -2487,6 +2680,7 @@ function makeShadow(radius){
+ 
+ 
+ let GRAPH=null, TRAILHEADS=[], POIS=[], AREAS=[], WATER=[];
++let backdropG=null;             // horizon ring, re-centred on the camera by main.js
+ let bboxW={minx:0,maxx:0,minz:0,maxz:0};
+ let EXTRA=[];                   // raw GeoJSON FeatureCollections dropped in-session
+ let STEP_M=3;                   // contour step in metres, remembered across rebuilds
+@@ -2504,7 +2698,8 @@ function fallbackProjector(layers){
+   for(const L of layers) for(const f of (L.features||[])) if(f&&f.geometry&&f.geometry.coordinates) walk(f.geometry.coordinates);
+   if(lo>hi) return null;
+   const lat0=(la+ha)/2;
+-  const mLon=111320*Math.cos(lat0*Math.PI/180), mLat=110540;
++  // same horizontal scale the DEM path applies via World.setMapScale()
++  const mLon=111320*Math.cos(lat0*Math.PI/180)*MAP_SCALE, mLat=110540*MAP_SCALE;
+   const originLon=lo, originLat=ha;   // x >= 0 eastward, z >= 0 southward
+   const proj={
+     isFallback:true,
+@@ -2518,13 +2713,64 @@ function fallbackProjector(layers){
+ }
+ let worldG=null;               // THREE.Group holding everything rebuildWorld() creates
+ let BUNDLE=null;                // the loaded World instance
+-let VERT_SCALE=1.8;             // hill exaggeration only -- see file header
+ let startHead=0;
+ 
++/* Two independent knobs, one derived value.
++
++   EXAG is the hill-exaggeration slider the file header describes: pure taste, safe to
++   change because stretching Y alone cannot misalign vectors from terrain.
++
++   MAP_SCALE shrinks or stretches the map horizontally. The header's warning still
++   stands -- you cannot rescale vectors without resampling the heightfield to match --
++   so this is NOT applied here: it is handed to World.setMapScale(), which re-derives
++   the projection AND the DEM cell grid from the same constants, keeping them aligned
++   by construction. A bundle at scale 0.5 is a genuinely half-size map, not a stretched
++   one, and vectors still land on the right cells.
++
++   VERT_SCALE is what every draw call in this file uses, and folds both together: a map
++   shrunk to half width keeps its real-world slopes only if its hills halve too.
++   Exposed unchanged as getVertScale() so terrain.js and main.js need no edits. */
++let EXAG=1.8;
++let MAP_SCALE=1;
++let VERT_SCALE=EXAG*MAP_SCALE;
++
+ function setStartHead(i){ startHead=i; }
+ function getStartHead(){ return startHead; }
+-function setVertScale(v){ VERT_SCALE=Math.max(0.3,v); }
++function syncScales(){ VERT_SCALE=EXAG*MAP_SCALE; }
++function setVertScale(v){ EXAG=Math.max(0.3,v); syncScales(); rebuildWorld(); }
+ function getVertScale(){ return VERT_SCALE; }
++function getExaggeration(){ return EXAG; }
++function getMapScale(){ return MAP_SCALE; }
++function setMapScale(v){
++  MAP_SCALE=clamp(Number(v)||1, 0.15, 4);
++  syncScales();
++  if(BUNDLE) BUNDLE.setMapScale(MAP_SCALE);
++  rebuildWorld();
++}
++
++/* Switch landscape. Everything themed -- sky, fog, light, ground texture, tree and rock
++   palettes, densities, the horizon -- is read during rebuildWorld(), so a theme change
++   is just "set it, build it". THEME is a live binding in themes.js; reassigning it there
++   is picked up here and in pieces.js without either module re-importing anything. */
++function setThemeById(id){
++  const t=THEMES[id]; if(!t) return false;
++  setTheme(t);
++  rebuildWorld();
++  return true;
++}
++function getTheme(){ return THEME; }
++
++/* Sky, fog and light levels are scene-wide, not part of worldG, so they are applied
++   directly rather than added to the disposable group. */
++function applyThemeLighting(){
++  scene.background=new THREE.Color(THEME.sky);
++  scene.fog=new THREE.Fog(new THREE.Color(THEME.sky).getHex(),
++                          THEME.fogNear*MAP_SCALE, THEME.fogFar*MAP_SCALE);
++  hemi.color=new THREE.Color(THEME.hemiSky);
++  hemi.groundColor=new THREE.Color(THEME.hemiGround);
++  hemi.intensity=THEME.hemiInt;
++  sun.intensity=THEME.sunInt;
++}
+ function getGraph(){ return GRAPH; }
+ function getTrailheads(){ return TRAILHEADS; }
+ function getPOIs(){ return POIS; }
+@@ -2576,6 +2822,7 @@ async function loadWorld(urlOrBundleObj, extraLayers, stepMetres){
+   BUNDLE = (typeof urlOrBundleObj==='string')
+     ? await fetchWorldBundle(urlOrBundleObj)
+     : loadWorldBundle(urlOrBundleObj);
++  BUNDLE.setMapScale(MAP_SCALE);
+   if(extraLayers) EXTRA = extraLayers.slice();
+   if(stepMetres) STEP_M = stepMetres;
+   rebuildWorld();
+@@ -2595,10 +2842,11 @@ function setContourStep(m){ STEP_M=Math.max(0.5,m); rebuildWorld(); }
+ function rebuildWorld(){
+   if(worldG){ scene.remove(worldG); disposeGroup(worldG); }
+   worldG=new THREE.Group(); scene.add(worldG);
++  backdropG=null;
+   resetSpatialHash();
+ 
+   const layers=[...(BUNDLE ? (BUNDLE.layers||[]) : []), ...EXTRA];
+-  if(!layers.length) return;
++  if(!layers.length){ applyThemeLighting(); return; }
+   // A bundle's own projection is authoritative whenever one is loaded; the fallback only
+   // covers the no-DEM case, where there's no heightfield to stay aligned with anyway.
+   const PROJ = BUNDLE || fallbackProjector(layers);
+@@ -2635,6 +2883,10 @@ function rebuildWorld(){
+   bboxW={minx:mx,maxx:Mx,minz:mz,maxz:Mz};
+   const rng=mulberry(1337);
+ 
++  applyThemeLighting();
++  backdropG=buildBackdrop(THEME,rng,MAP_SCALE);
++  worldG.add(backdropG);
++
+   setWorld(BUNDLE || null);
+   setStep(STEP_M);
+ 
+@@ -2814,6 +3066,8 @@ function rebuildWorld(){
+ function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);
+   t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+ 
++function getBackdrop(){ return backdropG; }
++
+ /* ==== src/creator/presets.js ==== */
+ /* The six starter pups on the creator's preset row. */
+ 
+@@ -2833,11 +3087,125 @@ Object.assign(PRESETS[3].o,{eyeColor:'#4d6a8f', build:1.0, tailThick:0.9});
+ Object.assign(PRESETS[4].o,{brows:true, browColor:'#171310', eyeColor:'#3c2e24', build:0.8});
+ Object.assign(PRESETS[5].o,{eyeColor:'#54401f', build:1.15, tailThick:1.7, faceMask:'blaze'});
+ 
++/* ==== src/data/kennel.js ==== */
++/* The kennel: kennelPups the player has made, shared across every app in the suite.
++   Until now a pup could only travel between apps as a downloaded backyard-kennelPups.json
++   the player re-imported by hand; the creator's own saves were in-memory and died with
++   the tab. This is the one place that persists them.
++
++   Sits in data/ because it is the bottom of the dependency chain -- it imports nothing,
++   not even DEFAULTS. It stores whatever param objects it is handed and leaves merging
++   with DEFAULTS to the caller (dog/params.js is *above* data/, and reaching up would
++   invert the arrow). That also keeps the stored shape a plain, versioned data record
++   rather than a snapshot of whatever DEFAULTS happened to be that week.
++
++   `kennelPups` is exported as a live array and is ALWAYS cleared in place, never reassigned:
++   other modules hold this same reference, and reassigning would silently orphan them. */
++
++const KEY = 'dogexplorer.kennel';
++const VERSION = 1;
++
++const kennelPups = [];              // [{ name, params }] -- live binding, mutate in place
++const listeners = [];
++
++function onKennelChange(fn){ listeners.push(fn); }
++function notify(){ for(const fn of listeners) fn(kennelPups); }
++
++/* localStorage throws rather than returning null in Safari private mode and in some
++   embedded webviews, and the whole feature is a nicety -- never let it break the game. */
++function readStore(){
++  try{ return JSON.parse(localStorage.getItem(KEY) || 'null'); }
++  catch(err){ console.warn('kennel: could not read saved kennelPups', err); return null; }
++}
++function writeStore(payload){
++  try{ localStorage.setItem(KEY, JSON.stringify(payload)); return true; }
++  catch(err){ console.warn('kennel: could not save kennelPups', err); return false; }
++}
++
++/* Migration chain, one step per version bump. Unknown-but-newer records are dropped
++   rather than guessed at, so a downgrade can't corrupt a save. */
++function migrate(rec){
++  if(!rec || typeof rec !== 'object') return null;
++  if(!rec.version || rec.version > VERSION) return null;
++  return rec;
++}
++
++function loadKennel(){
++  const rec = migrate(readStore());
++  kennelPups.length = 0;
++  if(rec && Array.isArray(rec.pups)) kennelPups.push(...rec.pups.filter(isPup));
++  notify();
++  return kennelPups;
++}
++
++function saveKennel(){
++  const ok = writeStore({version:VERSION, pups:kennelPups});
++  notify();
++  return ok;
++}
++
++function isPup(p){
++  return !!(p && p.params && typeof p.params === 'object' && p.params.furColor);
++}
++
++/* Name is the identity, matching how the creator's own save list already behaves:
++   saving a pup twice under one name updates it instead of piling up duplicates. */
++function addPups(list){
++  let n = 0;
++  for(const raw of (list || [])){
++    const params = raw && (raw.params || raw);
++    if(!params || !params.furColor) continue;
++    const entry = {name: String(params.name || 'Pup').slice(0,24), params};
++    const at = kennelPups.findIndex(p => p.name === entry.name);
++    if(at >= 0) kennelPups[at] = entry; else kennelPups.push(entry);
++    n++;
++  }
++  if(n) saveKennel();
++  return n;
++}
++
++function removePup(i){
++  if(i < 0 || i >= kennelPups.length) return false;
++  kennelPups.splice(i, 1);
++  saveKennel();
++  return true;
++}
++
++function setKennelPups(list){
++  kennelPups.length = 0;
++  addPups(list);
++  saveKennel();
++  return kennelPups.length;
++}
++
++/* Accepts every shape the suite has ever written or read: the creator's
++   {backyardPups:1, pups:[{params}]} export, a bare array, or a single pup object.
++   Returns plain param objects; callers merge DEFAULTS themselves. */
++function parsePupFile(data){
++  let obj = data;
++  if(typeof obj === 'string'){
++    try{ obj = JSON.parse(obj); }catch(err){ return []; }
++  }
++  if(!obj) return [];
++  const list = obj.pups || (Array.isArray(obj) ? obj : [obj]);
++  return list.map(p => (p && p.params) || p).filter(p => p && p.furColor);
++}
++
+ /* ==== src/trails/main.js ==== */
+ /* Pup Trails entry point. Player movement is shared regardless of whether you're playing
+    as the dog or a wild animal; only the two driver modules differ in what gets animated
+    and where the geometry comes from (dog/runtime.js's shared rig vs. animal-models.js's
+-   shared quadruped()). */
++   shared quadruped()).
++
++   THE AVATAR RULE, learned the hard way: this file owns `player`, and every driver has
++   its own position store -- dog/runtime.js's `dogPos`, wild-driver.js's `pos`. Neither
++   reads `player`. Any code path that moves the player MUST push x/z across to whichever
++   driver is live (syncAvatar below), or the rig renders at the world origin while the
++   camera follows the player, which on a 2.6 km map means it is simply never on screen.
++   That was the "map loads, no dog" bug. */
++
++
++
+ 
+ 
+ 
+@@ -2859,32 +3227,91 @@ camera.position.set(0, 40, 60);
+ 
+ const $ = s => document.querySelector(s);
+ 
++/* The map you get if you don't ask for one. Relative to trails/index.html, which also
++   resolves correctly for dist/pup-trails.html served from the repo root and for the
++   GitHub Pages deploy. `?world=` still overrides it, and the file picker still replaces
++   it at runtime. Loaded through the normal path -- no special-casing -- so a failure
++   here fails exactly the way a hand-picked bundle would. */
++const DEFAULT_WORLD = '../data/world.json';
++
+ /* ---------- player state ---------- */
+ let mode = 'dog';           // 'dog' | 'wild'
+ let wildKey = 'fox';
+-let dogPresetIdx = 0;
++let dogChoice = {label: PRESETS[0].label, params: PRESETS[0].o};
+ const player = { x:0, z:0, y:0, vy:0, yaw:0, speed:0, dist:0, sneaking:false, barkT:0 };
+ let camYaw=0, camPitch=0.32, playing=false;
++let avatarKey='';           // identity of whatever is currently built, for ensureAvatar
+ 
+ function currentTopSpeed(){ return mode==='dog' ? dogTopSpeed() : topSpeedFor(wildKey); }
+ function currentRunMul(){ return mode==='dog' ? dogRunMul() : 1.8; }
+ 
+-function placeAtHead(i){
+-  const heads = getTrailheads();
+-  if(!heads.length) return;
+-  setStartHead(clamp(i,0,heads.length-1));
+-  const h = heads[getStartHead()];
+-  player.x=h.x; player.z=h.z; player.y=0; player.vy=0; player.dist=0; player.yaw=h.yaw;
+-  camYaw = Math.atan2(Math.cos(player.yaw), -Math.sin(player.yaw));
++/* ---------- avatar ----------
++   ensureAvatar rebuilds geometry only when the *identity* changes; syncAvatar pushes
++   position every time the player moves or is teleported. Keeping them apart means
++   re-placing at a trailhead, changing theme or dragging the scale slider no longer
++   rebuilds and re-uploads the whole rig. */
++function dogParams(){ return Object.assign({}, DEFAULTS, dogChoice.params); }
++
++function ensureAvatar(){
++  const key = mode==='dog' ? 'dog:'+dogChoice.label : 'wild:'+wildKey;
++  if(key === avatarKey) return;
++  avatarKey = key;
++  if(mode==='dog'){
++    spawnDog(dogParams());
++  }else{
++    // stable seed per species: the same fox should look the same every time you pick it
++    let h=0; for(let i=0;i<wildKey.length;i++) h=(h*31+wildKey.charCodeAt(i))|0;
++    spawnWild(wildKey, Math.abs(h)||1);
++  }
++  setDogVisible(mode==='dog');
++  setWildVisible(mode==='wild');
++}
++
++function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
++  const groundY = terrainY(player.x, player.z, getVertScale());
+   if(mode==='dog'){
+-    spawnDog(PRESETS[clamp(dogPresetIdx,0,PRESETS.length-1)].o);
++    setDogPos(player.x, player.z);
+     setYaw(player.yaw);
+-    updateDog(0,0, terrainY(player.x,player.z,getVertScale()), 0, 0, false, false, false);
++    updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run);
+   }else{
+-    wildPos.set(player.x,0,player.z);
++    wildPos.set(player.x, 0, player.z);
+     setWildYaw(player.yaw);
+-    spawnWild(wildKey, Math.floor(Math.random()*1e6));
++    updateWild(dt, t, groundY, jumpY, speed, sneaking, barking);
+   }
++  return groundY;
++}
++
++/* Drop the player at trailhead `i`. Falls back to the middle of the map when a set of
++   layers has no degree-1 node to make a trailhead out of -- an avatar standing in the
++   centre of the map is far more debuggable than no avatar at all. */
++function placeAtHead(i){
++  const heads = getTrailheads();
++  if(heads.length){
++    setStartHead(clamp(i,0,heads.length-1));
++    const h = heads[getStartHead()];
++    player.x=h.x; player.z=h.z; player.yaw=h.yaw;
++  }else{
++    const bb=getBBox();
++    player.x=(bb.minx+bb.maxx)/2; player.z=(bb.minz+bb.maxz)/2; player.yaw=0;
++  }
++  player.y=0; player.vy=0; player.dist=0; player.speed=0;
++  camYaw = Math.atan2(Math.cos(player.yaw), -Math.sin(player.yaw));
++  ensureAvatar();
++  const groundY = syncAvatar(0,0,0,0,false,false,false);
++  if(!playing) frameAvatar(groundY);
++  renderStartPicker();
++}
++
++/* In the lobby the camera used to sit at its boot position looking at the origin, so
++   even a correctly-placed avatar was off screen until you pressed Play. Snap the camera
++   behind the avatar instead -- you should be able to see who you picked. */
++function frameAvatar(groundY){
++  const camD=13;
++  camera.position.set(
++    player.x-Math.sin(camYaw)*camD*Math.cos(camPitch),
++    groundY+2+camD*Math.sin(camPitch),
++    player.z-Math.cos(camYaw)*camD*Math.cos(camPitch));
++  camera.lookAt(player.x, groundY+1.4, player.z);
+ }
+ 
+ /* ---------- input: trail-owned, not core/input.js (that module is wired directly to
+@@ -2893,7 +3320,7 @@ const keys = {};
+ addEventListener('keydown', e=>{
+   keys[e.code]=true;
+   if(!playing) return;
+-  if(e.code==='Space') e.preventDefault();
++  if(e.code==='Space'){ e.preventDefault(); if(player.y===0) player.vy=9.5; }
+   if(e.code==='KeyC') player.sneaking=!player.sneaking;
+   if(e.code==='KeyB') player.barkT=1;
+   if(e.code==='Escape') exitPlay();
+@@ -2920,7 +3347,17 @@ let lastT=0;
+ function loop(t){
+   requestAnimationFrame(loop);
+   const dt=Math.min(0.05,(t-lastT)/1000||0.016); lastT=t;
+-  if(!playing || !getGraph()){ renderer.render(scene,camera); return; }
++
++  // the horizon ring is a sky dome: keep it centred on the camera so it can't be reached
++  const bd=getBackdrop();
++  if(bd) bd.position.set(camera.position.x, 0, camera.position.z);
++
++  if(!playing || !getGraph()){
++    // idle: no movement, but keep the avatar breathing so the lobby isn't a still frame
++    if(avatarKey) syncAvatar(dt, t, 0, 0, player.sneaking, false, false);
++    renderer.render(scene,camera);
++    return;
++  }
+ 
+   let ix=0,iz=0,run=false;
+   if(keys.KeyW||keys.ArrowUp) iz-=1;
+@@ -2958,15 +3395,7 @@ function loop(t){
+   if(player.y===0) player.vy=Math.max(0,player.vy);
+   player.barkT=Math.max(0,player.barkT-dt*2);
+ 
+-  const groundY=terrainY(player.x,player.z,getVertScale());
+-  if(mode==='dog'){
+-    setYaw(player.yaw);
+-    updateDog(dt,t,groundY,player.y,player.speed,player.sneaking,player.barkT>0,run);
+-  }else{
+-    wildPos.set(player.x,0,player.z);
+-    setWildYaw(player.yaw);
+-    updateWild(dt,t,groundY,player.y,player.speed,player.sneaking,player.barkT>0);
+-  }
++  const groundY = syncAvatar(dt,t,player.y,player.speed,player.sneaking,player.barkT>0,run);
+ 
+   const camD=11;
+   camera.position.lerp(new THREE.Vector3(
+@@ -2996,54 +3425,195 @@ function exitPlay(){
+   placeAtHead(getStartHead());
+ }
+ 
+-/* ---------- UI wiring (minimal: species picker, play/exit, theme) ----------
++/* ---------- UI wiring ----------
+    Sighting log, exit-gate stats screen and full minimap drawing from the standalone
+-   build are not ported in this pass -- flagged in the integration notes rather than
+-   silently dropped. Core loop (movement, dog/wildlife switch, sneak/run/bark/jump,
+-   trailhead placement and exit) is complete and verified. */
+-function renderSpeciesPicker(){
+-  const grid=$('#speciesGrid'); if(!grid) return;
+-  grid.innerHTML='';
+-  PRESETS.forEach((p,i)=>{
++   build are still not ported -- flagged rather than silently dropped. */
++
++/* --- who's exploring ---
++   Two rosters, not one mixed grid: the premade pups and any pups saved in the creator
++   are one kind of choice, the wildlife is another. Both are populated on boot with no
++   file to import and no map required -- picking a dog before a map has loaded stands it
++   at the origin rather than doing nothing, which is also how you can tell the picker
++   works when a map fails. The live choice carries `.sel`, because a button that silently
++   does its job is indistinguishable from a button that is broken. */
++function rosterKey(){ return mode==='dog' ? 'dog:'+dogChoice.label : 'wild:'+wildKey; }
++
++function renderRoster(){
++  const dogs=$('#dogGrid'), wild=$('#animalGrid');
++  const live=rosterKey();
++  const pick=(grid,label,key,cls,onClick)=>{
++    if(!grid) return null;
+     const b=document.createElement('button');
+-    b.textContent='🐶 '+p.label;
+-    b.addEventListener('click',()=>{mode='dog';dogPresetIdx=i;placeAtHead(getStartHead());});
++    b.className=cls+(key===live?' sel':'');
++    b.textContent=label;
++    b.addEventListener('click',()=>{ onClick(); renderRoster(); placeAtHead(getStartHead()); });
+     grid.appendChild(b);
+-  });
+-  for(const key of ['fox','coyote','bobcat','deer','goat','bighorn','bear','moose','rabbit','squirrel']){
+-    if(!SPECIES[key]) continue;
++    return b;
++  };
++  if(dogs){
++    dogs.innerHTML='';
++    kennelPups.forEach(k=>{
++      const b=pick(dogs,'⭐ '+k.name,'dog:saved:'+k.name,'saved',()=>{
++        mode='dog'; dogChoice={label:'saved:'+k.name, params:k.params};
++      });
++      if(b && k.params.furColor) b.style.borderColor=k.params.furColor;
++    });
++    PRESETS.forEach(p=>{
++      pick(dogs,'🐶 '+p.label,'dog:'+p.label,'',()=>{
++        mode='dog'; dogChoice={label:p.label, params:p.o};
++      });
++    });
++  }
++  if(wild){
++    wild.innerHTML='';
++    // every species in the shared roster, theme-appropriate ones first so the list reads
++    // as "what you'd meet out here" before "everything that exists"
++    const local=(THEME.wildlife||[]);
++    const keys=[...local, ...Object.keys(SPECIES).filter(k=>!local.includes(k))];
++    for(const key of keys){
++      if(!SPECIES[key]) continue;
++      pick(wild,SPECIES[key].nm,'wild:'+key,'wild',()=>{ mode='wild'; wildKey=key; });
++    }
++  }
++  const note=$('#pupNote');
++  if(note) note.textContent = kennelPups.length
++    ? `${kennelPups.length} saved pup${kennelPups.length>1?'s':''} from the creator, plus the ${PRESETS.length} starters.`
++    : `${PRESETS.length} starter pups. Make your own in Backyard Pups — they show up here automatically — or import a backyard-pups.json below.`;
++}
++
++/* --- environment --- */
++function renderThemePicker(){
++  const grid=$('#envGrid'); if(!grid) return;
++  grid.innerHTML='';
++  Object.values(THEMES).forEach(t=>{
+     const b=document.createElement('button');
+-    b.textContent=SPECIES[key].nm;
+-    b.addEventListener('click',()=>{mode='wild';wildKey=key;placeAtHead(getStartHead());});
++    b.className='envcard'+(t.id===THEME.id?' sel':'');
++    b.style.background=t.sky;
++    b.innerHTML=`<span class="em">${t.em}</span><span class="nm">${t.label}</span>`;
++    b.addEventListener('click',()=>{
++      if(!setThemeById(t.id)) return;
++      renderThemePicker();
++      renderRoster();
++      placeAtHead(getStartHead());     // rebuild dropped the old scene; re-seat the player
++    });
+     grid.appendChild(b);
++  });
++}
++
++/* --- scale ---
++   Both sliders rebuild the world, which is expensive, so the label updates on `input`
++   and the rebuild only fires on `change` (pointer release / arrow-key commit). */
++function wireScale(){
++  const map=$('#mapScale'), mapV=$('#mapScaleVal');
++  const ex=$('#vertScale'), exV=$('#vertScaleVal');
++  if(map && mapV){
++    map.value=getMapScale();
++    const show=v=>{ mapV.textContent = (+v).toFixed(2)+'\u00d7'; };
++    show(map.value);
++    map.addEventListener('input', e=> show(e.target.value));
++    map.addEventListener('change', e=>{
++      setMapScale(+e.target.value);
++      show(getMapScale());
++      placeAtHead(getStartHead());
++    });
++  }
++  if(ex && exV){
++    ex.value=getExaggeration();
++    const show=v=>{ exV.textContent = (+v).toFixed(1)+'\u00d7'; };
++    show(ex.value);
++    ex.addEventListener('input', e=> show(e.target.value));
++    ex.addEventListener('change', e=>{
++      setVertScale(+e.target.value);
++      show(getExaggeration());
++      placeAtHead(getStartHead());
++    });
+   }
+ }
+ 
+-async function boot(bundleUrl){
+-  if(bundleUrl){
+-    await loadWorld(bundleUrl, [], 3);
++/* --- starting point --- */
++function renderStartPicker(){
++  const sel=$('#startSel'); if(!sel) return;
++  const heads=getTrailheads();
++  sel.innerHTML='';
++  if(!heads.length){
++    sel.innerHTML='<option>— load a map first —</option>';
++    sel.disabled=true;
++    return;
+   }
+-  renderSpeciesPicker();
++  sel.disabled=false;
++  heads.forEach((h,i)=>{
++    const o=document.createElement('option');
++    o.value=String(i);
++    o.textContent=`${h.name} · ${h.where}${h.lenM?` · ${Math.round(h.lenM)} m`:''}`;
++    sel.appendChild(o);
++  });
++  sel.value=String(getStartHead());
++}
++
++async function boot(bundleUrl){
++  loadKennel();
++  renderThemePicker();
++  wireScale();
++  await loadMap(bundleUrl || DEFAULT_WORLD, !bundleUrl);
++  renderRoster();
++  renderStartPicker();
++  // seat an avatar unconditionally. With a map that means the chosen trailhead; without
++  // one, the middle of an empty world -- either way you can see who you picked, which is
++  // what tells you the roster works when the map does not.
++  placeAtHead(getStartHead());
+   resize();
+   requestAnimationFrame(loop);
+ }
+ 
++/* One place that loads a map by URL, so the boot path, the reload button and any future
++   map list all report success and failure identically. */
++async function loadMap(url, isDefault){
++  const note=$('#mapNote');
++  if(note) note.textContent='Loading map…';
++  try{
++    await loadWorld(url, [], 3);
++    if(note) note.textContent = (isDefault?'Default map: ':'Loaded: ')+url.split('/').pop()
++      + ` · ${getTrailheads().length} trailhead${getTrailheads().length===1?'':'s'}`;
++    return true;
++  }catch(err){
++    console.error('could not load world:', url, err);
++    if(note) note.textContent = isDefault
++      ? 'Default map could not load — serve the repo over http (python3 build.py --serve), or pick a bundle below.'
++      : 'That map could not be loaded — see the console.';
++    return false;
++  }
++}
++
++$('#defaultMapBtn')?.addEventListener('click', async ()=>{
++  if(await loadMap(DEFAULT_WORLD, true)){ renderStartPicker(); placeAtHead(0); }
++});
+ $('#playBtn')?.addEventListener('click', enterPlay);
+ $('#exitBtn')?.addEventListener('click', exitPlay);
+-$('#clearLayersBtn')?.addEventListener('click', ()=>{ clearLayers(); });
++$('#clearLayersBtn')?.addEventListener('click', ()=>{ clearLayers(); renderStartPicker(); });
++$('#startSel')?.addEventListener('change', e=> placeAtHead(+e.target.value));
+ 
+ $('#worldFile')?.addEventListener('change', async e=>{
+-  await loadFiles([...e.target.files]);
++  const files=[...e.target.files];
++  e.target.value='';
++  await loadFiles(files);
++});
++$('#pupFile')?.addEventListener('change', async e=>{
++  const files=[...e.target.files];
+   e.target.value='';
++  let n=0;
++  for(const f of files) n += addPups(parsePupFile(await f.text()));
++  renderRoster();
++  if(!n) console.warn('no pups found in that file');
+ });
+ 
+-/* One picker for everything. A pup-world/1 bundle and a plain .geojson are both just
+-   JSON, so detect by content (bundle.format) rather than by extension -- QGIS writes
+-   .geojson, fetch_dem.py writes .json, and users rename both. Layers are batched so
+-   dropping trails + areas together rebuilds once, not twice. */
++/* One picker for everything. A pup-world/1 bundle, a plain .geojson and a
++   backyard-pups.json are all just JSON, so detect by content rather than by extension --
++   QGIS writes .geojson, fetch_dem.py writes .json, and users rename both. Layers are
++   batched so dropping trails + areas together rebuilds once, not twice. */
+ async function loadFiles(files){
+   if(!files.length) return;
+   const layers=[];
++  let gotPups=0;
+   for(const f of files){
+     let obj;
+     try{ obj=JSON.parse(await f.text()); }
+@@ -3053,13 +3623,16 @@ async function loadFiles(files){
+       catch(err){ console.error('bad world bundle:',f.name,err); }
+     }else if(obj && (obj.type==='FeatureCollection' || obj.type==='Feature')){
+       layers.push(obj.type==='Feature' ? {type:'FeatureCollection',features:[obj]} : obj);
++    }else if(obj && (obj.backyardPups || obj.pups || obj.furColor)){
++      gotPups += addPups(parsePupFile(obj));
+     }else{
+-      console.error('unrecognised file (expected a pup-world/1 bundle or GeoJSON):', f.name);
++      console.error('unrecognised file (expected a pup-world/1 bundle, GeoJSON or a pup file):', f.name);
+     }
+   }
+   if(layers.length) addLayers(layers);
++  if(gotPups) renderRoster();
+   if(!getGraph()) return;
+-  renderSpeciesPicker();
++  renderStartPicker();
+   placeAtHead(0);
+ }
+ 
+diff --git a/src/core/render.js b/src/core/render.js
+index e7660b6..e260f41 100644
+--- a/src/core/render.js
++++ b/src/core/render.js
+@@ -52,4 +52,4 @@ function disposeGroup(g){
+   });
+ }
+ 
+-export { canvas, renderer, scene, camera, resize, sun, sunTarget, setHemi, disposeGroup };
++export { canvas, renderer, scene, camera, resize, sun, sunTarget, hemi, setHemi, disposeGroup };
+diff --git a/src/creator/main.js b/src/creator/main.js
+index d02b110..5eec6ae 100644
+--- a/src/creator/main.js
++++ b/src/creator/main.js
+@@ -8,6 +8,7 @@ import { buildDog } from '../dog/build.js';
+ import { PRESETS } from './presets.js';
+ import { YARD, STREAM, GARDEN, BOWL_POS, BOWL_MAX, ball } from './scene.js';
+ import { registerServiceWorker } from '../city/pwa.js';
++import { kennelPups, loadKennel, setKennelPups } from '../data/kennel.js';
+ 
+ let P = Object.assign({}, DEFAULTS);
+ 
+@@ -231,7 +232,12 @@ function syncAllUI(){ Object.values(uiRefs).forEach(f=>f()); }
+ /* =========================================================
+    SAVE / LOAD (in-memory + JSON file export/import)
+    ========================================================= */
++/* Saved pups now outlive the tab, and are visible to Pup City and Pup Trails, via
++   data/kennel.js. savedPups stays the local working copy so none of the UI below
++   changes; syncKennel() pushes it to storage after every edit. The .json export is
++   untouched -- it is still how you move pups between devices or trade with a friend. */
+ let savedPups = [];
++function syncKennel(){ setKennelPups(savedPups.map(s=> s.params)); }
+ function renderSaved(){
+   const list = document.getElementById('savedList');
+   list.innerHTML = '';
+@@ -254,7 +260,7 @@ function renderSaved(){
+       toast(`${P.name} is back!`);
+     });
+     delB.addEventListener('click', ()=>{
+-      savedPups.splice(i,1); renderSaved();
++      savedPups.splice(i,1); syncKennel(); renderSaved();
+     });
+     list.appendChild(chip);
+   });
+@@ -264,6 +270,7 @@ function saveCurrent(){
+   const existing = savedPups.findIndex(s=> s.params.name === snap.name);
+   if(existing >= 0) savedPups[existing] = {params:snap};
+   else savedPups.push({params:snap});
++  syncKennel();
+   renderSaved();
+   toast(`${snap.name} saved!`);
+ }
+@@ -293,6 +300,7 @@ function importSaves(e){
+           n++;
+         }
+       });
++      syncKennel();
+       renderSaved();
+       toast(n? `Imported ${n} pup${n>1?'s':''}!` : 'No pups found in that file.');
+     }catch(err){
+@@ -302,6 +310,8 @@ function importSaves(e){
+   rd.readAsText(file);
+   e.target.value = '';
+ }
++loadKennel();
++savedPups = kennelPups.map(k=> ({params:k.params}));
+ renderSaved();
+ 
+ /* ---------- randomize ---------- */
+diff --git a/src/data/kennel.js b/src/data/kennel.js
+new file mode 100644
+index 0000000..80e4782
+--- /dev/null
++++ b/src/data/kennel.js
+@@ -0,0 +1,104 @@
++/* The kennel: kennelPups the player has made, shared across every app in the suite.
++   Until now a pup could only travel between apps as a downloaded backyard-kennelPups.json
++   the player re-imported by hand; the creator's own saves were in-memory and died with
++   the tab. This is the one place that persists them.
++
++   Sits in data/ because it is the bottom of the dependency chain -- it imports nothing,
++   not even DEFAULTS. It stores whatever param objects it is handed and leaves merging
++   with DEFAULTS to the caller (dog/params.js is *above* data/, and reaching up would
++   invert the arrow). That also keeps the stored shape a plain, versioned data record
++   rather than a snapshot of whatever DEFAULTS happened to be that week.
++
++   `kennelPups` is exported as a live array and is ALWAYS cleared in place, never reassigned:
++   other modules hold this same reference, and reassigning would silently orphan them. */
++
++const KEY = 'dogexplorer.kennel';
++const VERSION = 1;
++
++const kennelPups = [];              // [{ name, params }] -- live binding, mutate in place
++const listeners = [];
++
++function onKennelChange(fn){ listeners.push(fn); }
++function notify(){ for(const fn of listeners) fn(kennelPups); }
++
++/* localStorage throws rather than returning null in Safari private mode and in some
++   embedded webviews, and the whole feature is a nicety -- never let it break the game. */
++function readStore(){
++  try{ return JSON.parse(localStorage.getItem(KEY) || 'null'); }
++  catch(err){ console.warn('kennel: could not read saved kennelPups', err); return null; }
++}
++function writeStore(payload){
++  try{ localStorage.setItem(KEY, JSON.stringify(payload)); return true; }
++  catch(err){ console.warn('kennel: could not save kennelPups', err); return false; }
++}
++
++/* Migration chain, one step per version bump. Unknown-but-newer records are dropped
++   rather than guessed at, so a downgrade can't corrupt a save. */
++function migrate(rec){
++  if(!rec || typeof rec !== 'object') return null;
++  if(!rec.version || rec.version > VERSION) return null;
++  return rec;
++}
++
++function loadKennel(){
++  const rec = migrate(readStore());
++  kennelPups.length = 0;
++  if(rec && Array.isArray(rec.pups)) kennelPups.push(...rec.pups.filter(isPup));
++  notify();
++  return kennelPups;
++}
++
++function saveKennel(){
++  const ok = writeStore({version:VERSION, pups:kennelPups});
++  notify();
++  return ok;
++}
++
++function isPup(p){
++  return !!(p && p.params && typeof p.params === 'object' && p.params.furColor);
++}
++
++/* Name is the identity, matching how the creator's own save list already behaves:
++   saving a pup twice under one name updates it instead of piling up duplicates. */
++function addPups(list){
++  let n = 0;
++  for(const raw of (list || [])){
++    const params = raw && (raw.params || raw);
++    if(!params || !params.furColor) continue;
++    const entry = {name: String(params.name || 'Pup').slice(0,24), params};
++    const at = kennelPups.findIndex(p => p.name === entry.name);
++    if(at >= 0) kennelPups[at] = entry; else kennelPups.push(entry);
++    n++;
++  }
++  if(n) saveKennel();
++  return n;
++}
++
++function removePup(i){
++  if(i < 0 || i >= kennelPups.length) return false;
++  kennelPups.splice(i, 1);
++  saveKennel();
++  return true;
++}
++
++function setKennelPups(list){
++  kennelPups.length = 0;
++  addPups(list);
++  saveKennel();
++  return kennelPups.length;
++}
++
++/* Accepts every shape the suite has ever written or read: the creator's
++   {backyardPups:1, pups:[{params}]} export, a bare array, or a single pup object.
++   Returns plain param objects; callers merge DEFAULTS themselves. */
++function parsePupFile(data){
++  let obj = data;
++  if(typeof obj === 'string'){
++    try{ obj = JSON.parse(obj); }catch(err){ return []; }
++  }
++  if(!obj) return [];
++  const list = obj.pups || (Array.isArray(obj) ? obj : [obj]);
++  return list.map(p => (p && p.params) || p).filter(p => p && p.furColor);
++}
++
++export { kennelPups, loadKennel, saveKennel, addPups, setKennelPups, removePup, parsePupFile, onKennelChange };
+diff --git a/src/data/world_bundle.js b/src/data/world_bundle.js
+index 765d8c1..61b8f4b 100644
+--- a/src/data/world_bundle.js
++++ b/src/data/world_bundle.js
+@@ -9,6 +9,27 @@
+ 
+ const FORMAT = 'pup-world/1';
+ 
++/**
++ * fetch_dem.py writes `layers` as an OBJECT keyed by source filename
++ * ({"pup-trails-map": {...FeatureCollection}}), because that is the natural
++ * shape coming out of `load_layers()`. Consumers iterate layers as an ARRAY.
++ * Spreading an object into an array literal throws "is not iterable", which
++ * meant every real bundle blew up inside rebuildWorld() the moment it loaded --
++ * no map, and therefore no trailheads, no start point and no avatar.
++ *
++ * Normalising here rather than at the call site means there is exactly one
++ * place that knows about the two shapes, and `World.layers` is an array for
++ * everyone: the game, the map editor and anything written later. Both shapes
++ * stay valid on disk, so old bundles keep working.
++ */
++function normaliseLayers(layers) {
++  if (!layers) return [];
++  if (Array.isArray(layers)) return layers.filter(Boolean);
++  return Object.entries(layers)
++    .map(([name, doc]) => (doc && !doc.name ? { ...doc, name } : doc))
++    .filter(Boolean);
++}
++
+ function decodeInt16LE(b64) {
+   const bin = atob(b64);
+   const bytes = new Uint8Array(bin.length);
+@@ -30,7 +51,7 @@ export class World {
+     const pr = bundle.projection;
+ 
+     this.bundle = bundle;
+-    this.layers = bundle.layers;
++    this.layers = normaliseLayers(bundle.layers);
+     this.bounds = bundle.bounds;
+     this.attribution = bundle.attribution;
+ 
+@@ -47,6 +68,7 @@ export class World {
+     this.originZ = hf.originZ;
+     this.minM = hf.minM;
+     this.maxM = hf.maxM;
++    this.mapScale = 1;
+ 
+     const raw = decodeInt16LE(hf.data);
+     if (raw.length !== hf.width * hf.height) {
+@@ -60,6 +82,35 @@ export class World {
+     }
+   }
+ 
++  // --- horizontal scale -------------------------------------------------
++
++  /**
++   * Shrink or stretch the whole map horizontally.
++   *
++   * Scale MUST be applied here rather than in the game layer, because the
++   * projection and the heightfield grid have to move together: `project()`
++   * turns lon/lat into metres, and `cellI/cellJ` turn those same metres back
++   * into DEM cells. Scaling one without the other silently decouples the
++   * vectors from the terrain -- trails would drape over the wrong ground.
++   * Deriving both from the untouched bundle constants keeps them consistent
++   * for any scale, and makes repeat calls idempotent rather than cumulative.
++   *
++   * Elevations stay in true metres; vertical scale is the game's business
++   * (see trails/world.js), so a scaled map is not automatically flattened.
++   */
++  setMapScale(scale) {
++    const s = Math.max(0.05, Math.min(8, Number(scale) || 1));
++    const hf = this.bundle.heightfield;
++    const pr = this.bundle.projection;
++    this.mapScale = s;
++    this.mPerDegLon = pr.metresPerDegreeLon * s;
++    this.mPerDegLat = pr.metresPerDegreeLat * s;
++    this.cell = hf.cell * s;
++    this.originX = hf.originX * s;
++    this.originZ = hf.originZ * s;
++    return this;
++  }
++
+   // --- projection -------------------------------------------------------
+ 
+   project(lon, lat, out = { x: 0, z: 0 }) {
+diff --git a/src/trails/dog-driver.js b/src/trails/dog-driver.js
+index 06e8729..25c3dd7 100644
+--- a/src/trails/dog-driver.js
++++ b/src/trails/dog-driver.js
+@@ -18,6 +18,20 @@ function spawnDog(params){
+   legPhase = 0; crouchAmt = 0;
+ }
+ 
++/* The dog's x/z live in runtime.js's `dogPos`, which updateDog() reads every frame.
++   Trails drives the player through its own `player` object, so that position has to be
++   pushed across explicitly -- exactly the way wild-driver's `wildPos` is written by
++   main.js. Without this the rig renders at the world origin no matter where the camera
++   is, which on a real 2.6 km map means it is simply never on screen. Mutate in place:
++   dogPos is a live binding several modules already hold a reference to. */
++function setDogPos(x, z){ dogPos.set(x, 0, z); }
++function getDogPos(){ return dogPos; }
++
++/* Switching to a wild animal used to leave the dog standing wherever it was last
++   drawn, because each driver only ever replaces its OWN instance. Hide rather than
++   dispose: the rig is rebuilt from params on demand and re-showing is free. */
++function setDogVisible(v){ if(dog) dog.visible = !!v; }
++
+ function dogTopSpeed(){ return STATS.walk; }          // walk/run figures already tuned in dog/stats.js
+ function dogRunMul(){ return STATS.run / STATS.walk; }
+ 
+@@ -56,4 +70,5 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run){
+ 
+ function setYaw(v){ setDogYaw(v); }
+ 
+-export { spawnDog, updateDog, setYaw, dogTopSpeed, dogRunMul };
++export { spawnDog, updateDog, setYaw, setDogPos, getDogPos, setDogVisible,
++         dogTopSpeed, dogRunMul };
+diff --git a/src/trails/main.js b/src/trails/main.js
+index 5110e8f..164794a 100644
+--- a/src/trails/main.js
++++ b/src/trails/main.js
+@@ -1,19 +1,29 @@
+ /* Pup Trails entry point. Player movement is shared regardless of whether you're playing
+    as the dog or a wild animal; only the two driver modules differ in what gets animated
+    and where the geometry comes from (dog/runtime.js's shared rig vs. animal-models.js's
+-   shared quadruped()). */
++   shared quadruped()).
++
++   THE AVATAR RULE, learned the hard way: this file owns `player`, and every driver has
++   its own position store -- dog/runtime.js's `dogPos`, wild-driver.js's `pos`. Neither
++   reads `player`. Any code path that moves the player MUST push x/z across to whichever
++   driver is live (syncAvatar below), or the rig renders at the world origin while the
++   camera follows the player, which on a 2.6 km map means it is simply never on screen.
++   That was the "map loads, no dog" bug. */
+ import { clamp, lerp } from '../core/math.js';
+-import { setWildYaw, spawnWild, topSpeedFor, updateWild, wildPos } from './wild-driver.js';
++import { setWildVisible, setWildYaw, spawnWild, topSpeedFor, updateWild, wildPos } from './wild-driver.js';
+ 
+-import { dogRunMul, dogTopSpeed, setYaw, spawnDog, updateDog } from './dog-driver.js';
++import { dogRunMul, dogTopSpeed, setDogPos, setDogVisible, setYaw, spawnDog, updateDog } from './dog-driver.js';
+ 
+ import { terrainY } from './terrain.js';
+ 
+-import { addLayers, clearLayers, getBBox, getGraph, getStartHead, getTrailheads, getVertScale, loadWorld, setStartHead } from './world.js';
++import { addLayers, clearLayers, getBBox, getBackdrop, getExaggeration, getGraph, getMapScale, getStartHead, getTrailheads, getVertScale, loadWorld, setMapScale, setStartHead, setThemeById, setVertScale } from './world.js';
+ 
++import { THEME, THEMES } from './themes.js';
+ import { renderer, scene, camera, resize } from '../core/render.js';
+ import { SPECIES } from '../data/species.js';
+ import { PRESETS } from '../creator/presets.js';
++import { DEFAULTS } from '../dog/params.js';
++import { addPups, kennelPups, loadKennel, parsePupFile } from '../data/kennel.js';
+ import { nearestTrail } from './spatial.js';
+ 
+ /* Trail networks run to real kilometres; Pup City's camera (far=300, tuned for one city
+@@ -23,32 +33,91 @@ camera.position.set(0, 40, 60);
+ 
+ const $ = s => document.querySelector(s);
+ 
++/* The map you get if you don't ask for one. Relative to trails/index.html, which also
++   resolves correctly for dist/pup-trails.html served from the repo root and for the
++   GitHub Pages deploy. `?world=` still overrides it, and the file picker still replaces
++   it at runtime. Loaded through the normal path -- no special-casing -- so a failure
++   here fails exactly the way a hand-picked bundle would. */
++const DEFAULT_WORLD = '../data/world.json';
++
+ /* ---------- player state ---------- */
+ let mode = 'dog';           // 'dog' | 'wild'
+ let wildKey = 'fox';
+-let dogPresetIdx = 0;
++let dogChoice = {label: PRESETS[0].label, params: PRESETS[0].o};
+ const player = { x:0, z:0, y:0, vy:0, yaw:0, speed:0, dist:0, sneaking:false, barkT:0 };
+ let camYaw=0, camPitch=0.32, playing=false;
++let avatarKey='';           // identity of whatever is currently built, for ensureAvatar
+ 
+ function currentTopSpeed(){ return mode==='dog' ? dogTopSpeed() : topSpeedFor(wildKey); }
+ function currentRunMul(){ return mode==='dog' ? dogRunMul() : 1.8; }
+ 
+-function placeAtHead(i){
+-  const heads = getTrailheads();
+-  if(!heads.length) return;
+-  setStartHead(clamp(i,0,heads.length-1));
+-  const h = heads[getStartHead()];
+-  player.x=h.x; player.z=h.z; player.y=0; player.vy=0; player.dist=0; player.yaw=h.yaw;
+-  camYaw = Math.atan2(Math.cos(player.yaw), -Math.sin(player.yaw));
++/* ---------- avatar ----------
++   ensureAvatar rebuilds geometry only when the *identity* changes; syncAvatar pushes
++   position every time the player moves or is teleported. Keeping them apart means
++   re-placing at a trailhead, changing theme or dragging the scale slider no longer
++   rebuilds and re-uploads the whole rig. */
++function dogParams(){ return Object.assign({}, DEFAULTS, dogChoice.params); }
++
++function ensureAvatar(){
++  const key = mode==='dog' ? 'dog:'+dogChoice.label : 'wild:'+wildKey;
++  if(key === avatarKey) return;
++  avatarKey = key;
++  if(mode==='dog'){
++    spawnDog(dogParams());
++  }else{
++    // stable seed per species: the same fox should look the same every time you pick it
++    let h=0; for(let i=0;i<wildKey.length;i++) h=(h*31+wildKey.charCodeAt(i))|0;
++    spawnWild(wildKey, Math.abs(h)||1);
++  }
++  setDogVisible(mode==='dog');
++  setWildVisible(mode==='wild');
++}
++
++function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
++  const groundY = terrainY(player.x, player.z, getVertScale());
+   if(mode==='dog'){
+-    spawnDog(PRESETS[clamp(dogPresetIdx,0,PRESETS.length-1)].o);
++    setDogPos(player.x, player.z);
+     setYaw(player.yaw);
+-    updateDog(0,0, terrainY(player.x,player.z,getVertScale()), 0, 0, false, false, false);
++    updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run);
+   }else{
+-    wildPos.set(player.x,0,player.z);
++    wildPos.set(player.x, 0, player.z);
+     setWildYaw(player.yaw);
+-    spawnWild(wildKey, Math.floor(Math.random()*1e6));
++    updateWild(dt, t, groundY, jumpY, speed, sneaking, barking);
++  }
++  return groundY;
++}
++
++/* Drop the player at trailhead `i`. Falls back to the middle of the map when a set of
++   layers has no degree-1 node to make a trailhead out of -- an avatar standing in the
++   centre of the map is far more debuggable than no avatar at all. */
++function placeAtHead(i){
++  const heads = getTrailheads();
++  if(heads.length){
++    setStartHead(clamp(i,0,heads.length-1));
++    const h = heads[getStartHead()];
++    player.x=h.x; player.z=h.z; player.yaw=h.yaw;
++  }else{
++    const bb=getBBox();
++    player.x=(bb.minx+bb.maxx)/2; player.z=(bb.minz+bb.maxz)/2; player.yaw=0;
+   }
++  player.y=0; player.vy=0; player.dist=0; player.speed=0;
++  camYaw = Math.atan2(Math.cos(player.yaw), -Math.sin(player.yaw));
++  ensureAvatar();
++  const groundY = syncAvatar(0,0,0,0,false,false,false);
++  if(!playing) frameAvatar(groundY);
++  renderStartPicker();
++}
++
++/* In the lobby the camera used to sit at its boot position looking at the origin, so
++   even a correctly-placed avatar was off screen until you pressed Play. Snap the camera
++   behind the avatar instead -- you should be able to see who you picked. */
++function frameAvatar(groundY){
++  const camD=13;
++  camera.position.set(
++    player.x-Math.sin(camYaw)*camD*Math.cos(camPitch),
++    groundY+2+camD*Math.sin(camPitch),
++    player.z-Math.cos(camYaw)*camD*Math.cos(camPitch));
++  camera.lookAt(player.x, groundY+1.4, player.z);
+ }
+ 
+ /* ---------- input: trail-owned, not core/input.js (that module is wired directly to
+@@ -57,7 +126,7 @@ const keys = {};
+ addEventListener('keydown', e=>{
+   keys[e.code]=true;
+   if(!playing) return;
+-  if(e.code==='Space') e.preventDefault();
++  if(e.code==='Space'){ e.preventDefault(); if(player.y===0) player.vy=9.5; }
+   if(e.code==='KeyC') player.sneaking=!player.sneaking;
+   if(e.code==='KeyB') player.barkT=1;
+   if(e.code==='Escape') exitPlay();
+@@ -84,7 +153,17 @@ let lastT=0;
+ function loop(t){
+   requestAnimationFrame(loop);
+   const dt=Math.min(0.05,(t-lastT)/1000||0.016); lastT=t;
+-  if(!playing || !getGraph()){ renderer.render(scene,camera); return; }
++
++  // the horizon ring is a sky dome: keep it centred on the camera so it can't be reached
++  const bd=getBackdrop();
++  if(bd) bd.position.set(camera.position.x, 0, camera.position.z);
++
++  if(!playing || !getGraph()){
++    // idle: no movement, but keep the avatar breathing so the lobby isn't a still frame
++    if(avatarKey) syncAvatar(dt, t, 0, 0, player.sneaking, false, false);
++    renderer.render(scene,camera);
++    return;
++  }
+ 
+   let ix=0,iz=0,run=false;
+   if(keys.KeyW||keys.ArrowUp) iz-=1;
+@@ -122,15 +201,7 @@ function loop(t){
+   if(player.y===0) player.vy=Math.max(0,player.vy);
+   player.barkT=Math.max(0,player.barkT-dt*2);
+ 
+-  const groundY=terrainY(player.x,player.z,getVertScale());
+-  if(mode==='dog'){
+-    setYaw(player.yaw);
+-    updateDog(dt,t,groundY,player.y,player.speed,player.sneaking,player.barkT>0,run);
+-  }else{
+-    wildPos.set(player.x,0,player.z);
+-    setWildYaw(player.yaw);
+-    updateWild(dt,t,groundY,player.y,player.speed,player.sneaking,player.barkT>0);
+-  }
++  const groundY = syncAvatar(dt,t,player.y,player.speed,player.sneaking,player.barkT>0,run);
+ 
+   const camD=11;
+   camera.position.lerp(new THREE.Vector3(
+@@ -160,54 +231,195 @@ function exitPlay(){
+   placeAtHead(getStartHead());
+ }
+ 
+-/* ---------- UI wiring (minimal: species picker, play/exit, theme) ----------
++/* ---------- UI wiring ----------
+    Sighting log, exit-gate stats screen and full minimap drawing from the standalone
+-   build are not ported in this pass -- flagged in the integration notes rather than
+-   silently dropped. Core loop (movement, dog/wildlife switch, sneak/run/bark/jump,
+-   trailhead placement and exit) is complete and verified. */
+-function renderSpeciesPicker(){
+-  const grid=$('#speciesGrid'); if(!grid) return;
+-  grid.innerHTML='';
+-  PRESETS.forEach((p,i)=>{
++   build are still not ported -- flagged rather than silently dropped. */
++
++/* --- who's exploring ---
++   Two rosters, not one mixed grid: the premade pups and any pups saved in the creator
++   are one kind of choice, the wildlife is another. Both are populated on boot with no
++   file to import and no map required -- picking a dog before a map has loaded stands it
++   at the origin rather than doing nothing, which is also how you can tell the picker
++   works when a map fails. The live choice carries `.sel`, because a button that silently
++   does its job is indistinguishable from a button that is broken. */
++function rosterKey(){ return mode==='dog' ? 'dog:'+dogChoice.label : 'wild:'+wildKey; }
++
++function renderRoster(){
++  const dogs=$('#dogGrid'), wild=$('#animalGrid');
++  const live=rosterKey();
++  const pick=(grid,label,key,cls,onClick)=>{
++    if(!grid) return null;
+     const b=document.createElement('button');
+-    b.textContent='🐶 '+p.label;
+-    b.addEventListener('click',()=>{mode='dog';dogPresetIdx=i;placeAtHead(getStartHead());});
++    b.className=cls+(key===live?' sel':'');
++    b.textContent=label;
++    b.addEventListener('click',()=>{ onClick(); renderRoster(); placeAtHead(getStartHead()); });
+     grid.appendChild(b);
+-  });
+-  for(const key of ['fox','coyote','bobcat','deer','goat','bighorn','bear','moose','rabbit','squirrel']){
+-    if(!SPECIES[key]) continue;
++    return b;
++  };
++  if(dogs){
++    dogs.innerHTML='';
++    kennelPups.forEach(k=>{
++      const b=pick(dogs,'⭐ '+k.name,'dog:saved:'+k.name,'saved',()=>{
++        mode='dog'; dogChoice={label:'saved:'+k.name, params:k.params};
++      });
++      if(b && k.params.furColor) b.style.borderColor=k.params.furColor;
++    });
++    PRESETS.forEach(p=>{
++      pick(dogs,'🐶 '+p.label,'dog:'+p.label,'',()=>{
++        mode='dog'; dogChoice={label:p.label, params:p.o};
++      });
++    });
++  }
++  if(wild){
++    wild.innerHTML='';
++    // every species in the shared roster, theme-appropriate ones first so the list reads
++    // as "what you'd meet out here" before "everything that exists"
++    const local=(THEME.wildlife||[]);
++    const keys=[...local, ...Object.keys(SPECIES).filter(k=>!local.includes(k))];
++    for(const key of keys){
++      if(!SPECIES[key]) continue;
++      pick(wild,SPECIES[key].nm,'wild:'+key,'wild',()=>{ mode='wild'; wildKey=key; });
++    }
++  }
++  const note=$('#pupNote');
++  if(note) note.textContent = kennelPups.length
++    ? `${kennelPups.length} saved pup${kennelPups.length>1?'s':''} from the creator, plus the ${PRESETS.length} starters.`
++    : `${PRESETS.length} starter pups. Make your own in Backyard Pups — they show up here automatically — or import a backyard-pups.json below.`;
++}
++
++/* --- environment --- */
++function renderThemePicker(){
++  const grid=$('#envGrid'); if(!grid) return;
++  grid.innerHTML='';
++  Object.values(THEMES).forEach(t=>{
+     const b=document.createElement('button');
+-    b.textContent=SPECIES[key].nm;
+-    b.addEventListener('click',()=>{mode='wild';wildKey=key;placeAtHead(getStartHead());});
++    b.className='envcard'+(t.id===THEME.id?' sel':'');
++    b.style.background=t.sky;
++    b.innerHTML=`<span class="em">${t.em}</span><span class="nm">${t.label}</span>`;
++    b.addEventListener('click',()=>{
++      if(!setThemeById(t.id)) return;
++      renderThemePicker();
++      renderRoster();
++      placeAtHead(getStartHead());     // rebuild dropped the old scene; re-seat the player
++    });
+     grid.appendChild(b);
++  });
++}
++
++/* --- scale ---
++   Both sliders rebuild the world, which is expensive, so the label updates on `input`
++   and the rebuild only fires on `change` (pointer release / arrow-key commit). */
++function wireScale(){
++  const map=$('#mapScale'), mapV=$('#mapScaleVal');
++  const ex=$('#vertScale'), exV=$('#vertScaleVal');
++  if(map && mapV){
++    map.value=getMapScale();
++    const show=v=>{ mapV.textContent = (+v).toFixed(2)+'\u00d7'; };
++    show(map.value);
++    map.addEventListener('input', e=> show(e.target.value));
++    map.addEventListener('change', e=>{
++      setMapScale(+e.target.value);
++      show(getMapScale());
++      placeAtHead(getStartHead());
++    });
++  }
++  if(ex && exV){
++    ex.value=getExaggeration();
++    const show=v=>{ exV.textContent = (+v).toFixed(1)+'\u00d7'; };
++    show(ex.value);
++    ex.addEventListener('input', e=> show(e.target.value));
++    ex.addEventListener('change', e=>{
++      setVertScale(+e.target.value);
++      show(getExaggeration());
++      placeAtHead(getStartHead());
++    });
+   }
+ }
+ 
+-async function boot(bundleUrl){
+-  if(bundleUrl){
+-    await loadWorld(bundleUrl, [], 3);
++/* --- starting point --- */
++function renderStartPicker(){
++  const sel=$('#startSel'); if(!sel) return;
++  const heads=getTrailheads();
++  sel.innerHTML='';
++  if(!heads.length){
++    sel.innerHTML='<option>— load a map first —</option>';
++    sel.disabled=true;
++    return;
+   }
+-  renderSpeciesPicker();
++  sel.disabled=false;
++  heads.forEach((h,i)=>{
++    const o=document.createElement('option');
++    o.value=String(i);
++    o.textContent=`${h.name} · ${h.where}${h.lenM?` · ${Math.round(h.lenM)} m`:''}`;
++    sel.appendChild(o);
++  });
++  sel.value=String(getStartHead());
++}
++
++async function boot(bundleUrl){
++  loadKennel();
++  renderThemePicker();
++  wireScale();
++  await loadMap(bundleUrl || DEFAULT_WORLD, !bundleUrl);
++  renderRoster();
++  renderStartPicker();
++  // seat an avatar unconditionally. With a map that means the chosen trailhead; without
++  // one, the middle of an empty world -- either way you can see who you picked, which is
++  // what tells you the roster works when the map does not.
++  placeAtHead(getStartHead());
+   resize();
+   requestAnimationFrame(loop);
+ }
+ 
++/* One place that loads a map by URL, so the boot path, the reload button and any future
++   map list all report success and failure identically. */
++async function loadMap(url, isDefault){
++  const note=$('#mapNote');
++  if(note) note.textContent='Loading map…';
++  try{
++    await loadWorld(url, [], 3);
++    if(note) note.textContent = (isDefault?'Default map: ':'Loaded: ')+url.split('/').pop()
++      + ` · ${getTrailheads().length} trailhead${getTrailheads().length===1?'':'s'}`;
++    return true;
++  }catch(err){
++    console.error('could not load world:', url, err);
++    if(note) note.textContent = isDefault
++      ? 'Default map could not load — serve the repo over http (python3 build.py --serve), or pick a bundle below.'
++      : 'That map could not be loaded — see the console.';
++    return false;
++  }
++}
++
++$('#defaultMapBtn')?.addEventListener('click', async ()=>{
++  if(await loadMap(DEFAULT_WORLD, true)){ renderStartPicker(); placeAtHead(0); }
++});
+ $('#playBtn')?.addEventListener('click', enterPlay);
+ $('#exitBtn')?.addEventListener('click', exitPlay);
+-$('#clearLayersBtn')?.addEventListener('click', ()=>{ clearLayers(); });
++$('#clearLayersBtn')?.addEventListener('click', ()=>{ clearLayers(); renderStartPicker(); });
++$('#startSel')?.addEventListener('change', e=> placeAtHead(+e.target.value));
+ 
+ $('#worldFile')?.addEventListener('change', async e=>{
+-  await loadFiles([...e.target.files]);
++  const files=[...e.target.files];
++  e.target.value='';
++  await loadFiles(files);
++});
++$('#pupFile')?.addEventListener('change', async e=>{
++  const files=[...e.target.files];
+   e.target.value='';
++  let n=0;
++  for(const f of files) n += addPups(parsePupFile(await f.text()));
++  renderRoster();
++  if(!n) console.warn('no pups found in that file');
+ });
+ 
+-/* One picker for everything. A pup-world/1 bundle and a plain .geojson are both just
+-   JSON, so detect by content (bundle.format) rather than by extension -- QGIS writes
+-   .geojson, fetch_dem.py writes .json, and users rename both. Layers are batched so
+-   dropping trails + areas together rebuilds once, not twice. */
++/* One picker for everything. A pup-world/1 bundle, a plain .geojson and a
++   backyard-pups.json are all just JSON, so detect by content rather than by extension --
++   QGIS writes .geojson, fetch_dem.py writes .json, and users rename both. Layers are
++   batched so dropping trails + areas together rebuilds once, not twice. */
+ async function loadFiles(files){
+   if(!files.length) return;
+   const layers=[];
++  let gotPups=0;
+   for(const f of files){
+     let obj;
+     try{ obj=JSON.parse(await f.text()); }
+@@ -217,13 +429,16 @@ async function loadFiles(files){
+       catch(err){ console.error('bad world bundle:',f.name,err); }
+     }else if(obj && (obj.type==='FeatureCollection' || obj.type==='Feature')){
+       layers.push(obj.type==='Feature' ? {type:'FeatureCollection',features:[obj]} : obj);
++    }else if(obj && (obj.backyardPups || obj.pups || obj.furColor)){
++      gotPups += addPups(parsePupFile(obj));
+     }else{
+-      console.error('unrecognised file (expected a pup-world/1 bundle or GeoJSON):', f.name);
++      console.error('unrecognised file (expected a pup-world/1 bundle, GeoJSON or a pup file):', f.name);
+     }
+   }
+   if(layers.length) addLayers(layers);
++  if(gotPups) renderRoster();
+   if(!getGraph()) return;
+-  renderSpeciesPicker();
++  renderStartPicker();
+   placeAtHead(0);
+ }
+ 
+diff --git a/src/trails/pieces.js b/src/trails/pieces.js
+index f0c84f6..9796d1e 100644
+--- a/src/trails/pieces.js
++++ b/src/trails/pieces.js
+@@ -528,7 +528,77 @@ function makeShadow(radius){
+   return m;
+ }
+ 
++/* ---------- horizon backdrop ----------
++   The themes have carried `mountain` / `mountainStyle` since they were written, but
++   nothing ever drew them, so "Deep forest" and "Red rock" only differed at your feet.
++   This is the skyline that makes the choice read from the first frame.
++
++   Three deliberate choices, each avoiding a bug this file has hit before:
++   - side:DoubleSide. This is a decorative shell with no interior to see, so winding
++     order is made irrelevant by construction rather than reasoned about. (Both the
++     trail ribbons and the terraced terrain shipped with invisible backface-culled
++     faces at some point; there is no reason to re-earn that lesson here.)
++   - depthTest:false + renderOrder -1. Painted before anything else and never writing
++     depth, so real terrain always draws on top of it however far away that terrain is.
++     No z-fighting with the ground, no chance of a distant ridge poking through.
++   - fog:false, with each band pre-blended toward the sky colour. Fog is tuned for a
++     few hundred metres of trail; a backdrop that far out would be solid fog. Blending
++     by hand gives the same aerial-perspective read at any fog setting.
++   The group is re-centred on the camera every frame (main.js), so it behaves as a sky
++   dome: you can never walk up to it. */
++function mixHex(a, b, t){
++  const ca=new THREE.Color(a), cb=new THREE.Color(b);
++  return new THREE.Color(ca.r+(cb.r-ca.r)*t, ca.g+(cb.g-ca.g)*t, ca.b+(cb.b-ca.b)*t);
++}
++function buildBackdrop(theme, rng, mapScale=1){
++  const g = new THREE.Group();
++  g.name = 'backdrop';
++  const mesas = theme.mountainStyle === 'mesas';
++  const BASE_Y = -600;                    // far below any terrain the player can stand on
++  const bands = theme.mountain.length;
++  for(let b=0; b<bands; b++){
++    const R = 900 * mapScale * (1 + b*0.07);
++    const segs = 64;
++    const peakH = (150 + b*55) * mapScale;
++    const mat = new THREE.MeshBasicMaterial({
++      color: mixHex(theme.mountain[b], theme.sky, 0.28 + b*0.17),
++      side: THREE.DoubleSide, fog:false, depthTest:false, depthWrite:false,
++    });
++    // ridge profile: one height per segment, flat-topped runs for mesas, spikes for peaks
++    const h = new Array(segs+1);
++    let runH = 0, runLeft = 0;
++    for(let i=0; i<=segs; i++){
++      if(mesas){
++        if(runLeft<=0){ runLeft = 3 + Math.floor(rng()*4); runH = peakH*(0.45+rng()*0.55); }
++        runLeft--; h[i] = runH;
++      }else{
++        h[i] = peakH*(0.35 + rng()*0.65) * (i%2 ? 1 : 0.72);
++      }
++    }
++    h[segs] = h[0];                        // close the ring seamlessly
++    const P=[], idx=[];
++    for(let i=0; i<=segs; i++){
++      const a = i/segs*Math.PI*2;
++      const x = Math.cos(a)*R, z = Math.sin(a)*R;
++      P.push(x, BASE_Y, z, x, h[i], z);
++    }
++    for(let i=0; i<segs; i++){
++      const v = i*2;
++      idx.push(v, v+1, v+3, v, v+3, v+2);
++    }
++    const geo = new THREE.BufferGeometry();
++    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(P), 3));
++    geo.setIndex(idx);
++    const m = new THREE.Mesh(geo, mat);
++    m.renderOrder = -10 + b;               // furthest band first
++    m.frustumCulled = false;               // it surrounds the camera; culling it is wrong
++    g.add(m);
++  }
++  return g;
++}
++
+ 
+ export { ribbonGeom, trailMat, INK, buildSign, buildBlaze, buildGate, makeTree, makeRock,
+          POI_STYLE, AREA_STYLE, nameplate, buildPOI, pavementTexture, buildLandform,
+-         buildFloatingLabel, buildArea, buildAreaSign, makeShadow, pickTree, shade };
++         buildFloatingLabel, buildArea, buildAreaSign, makeShadow, pickTree, shade,
++         buildBackdrop };
+diff --git a/src/trails/wild-driver.js b/src/trails/wild-driver.js
+index 4f237aa..100afa8 100644
+--- a/src/trails/wild-driver.js
++++ b/src/trails/wild-driver.js
+@@ -12,7 +12,7 @@ import { SPECIES } from '../data/species.js';
+ 
+ let group = null, refs = null, speciesKey = null, S = null;
+ let wildLegPhase = 0, wildBodyBaseY = 0;
+-const pos = new THREE.Vector3(0,0,0);
++const wildPos = new THREE.Vector3(0,0,0);
+ let yaw = 0;
+ 
+ function spawnWild(key, seed){
+@@ -21,7 +21,7 @@ function spawnWild(key, seed){
+   const rnd = mulberry32((seed|0) || 1);
+   const built = makeAnimalModel(key, rnd);
+   group = built.g; refs = built.refs;
+-  group.position.copy(pos);
++  group.position.copy(wildPos);
+   group.rotation.y = yaw;
+   scene.add(group);
+   wildLegPhase = 0;
+@@ -29,6 +29,7 @@ function spawnWild(key, seed){
+ }
+ 
+ function setWildYaw(v){ yaw = v; if(group) group.rotation.y = yaw; }
++function setWildVisible(v){ if(group) group.visible = !!v; }
+ 
+ function topSpeedFor(key){
+   // SPECIES.speed is Pup City's fleeing/wander speed, tuned for a much smaller play
+@@ -45,7 +46,7 @@ function spookRadiusFor(key){
+ 
+ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking){
+   if(!group || !refs) return;
+-  group.position.set(pos.x, groundY + jumpY, pos.z);
++  group.position.set(wildPos.x, groundY + jumpY, wildPos.z);
+   group.rotation.y = yaw;
+   const hop = !!S?.hopper;
+   const strideRate = 2.2 / clamp((S?.scale||1),0.4,2.2);
+@@ -64,4 +65,5 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking){
+   }
+ }
+ 
+-export { spawnWild, updateWild, setWildYaw, topSpeedFor, spookRadiusFor, pos as wildPos, lerp };
++export { spawnWild, updateWild, setWildYaw, setWildVisible, topSpeedFor, spookRadiusFor,
++         wildPos };
+diff --git a/src/trails/world.js b/src/trails/world.js
+index 1bde56e..229618e 100644
+--- a/src/trails/world.js
++++ b/src/trails/world.js
+@@ -15,17 +15,19 @@
+ import { clamp } from '../core/math.js';
+ import { buildTerrainMesh, flattenAreaCells, groundTexture, resample, setStep, setWorld, stationHeights, terrainY } from './terrain.js';
+ 
+-import { scene, disposeGroup } from '../core/render.js';
++import { scene, disposeGroup, sun, hemi } from '../core/render.js';
+ import { toon, toonTex } from '../core/materials.js';
+ import { loadWorldBundle, fetchWorldBundle } from '../data/world_bundle.js';
+ import { parseFeatures, buildGraph } from './geo.js';
+ import { pointInArea, areaBBox } from './geom2d.js';
+ import { resetSpatialHash, hashSeg, nearestTrail } from './spatial.js';
+-import { THEME, THEMES } from './themes.js';
++import { THEME, THEMES, setTheme } from './themes.js';
+ import { ribbonGeom, trailMat, INK, buildSign, buildBlaze, buildGate, makeTree, makeRock,
+-         pickTree, buildPOI, buildArea, buildAreaSign, POI_STYLE, shade } from './pieces.js';
++         pickTree, buildPOI, buildArea, buildAreaSign, POI_STYLE, shade,
++         buildBackdrop } from './pieces.js';
+ 
+ let GRAPH=null, TRAILHEADS=[], POIS=[], AREAS=[], WATER=[];
++let backdropG=null;             // horizon ring, re-centred on the camera by main.js
+ let bboxW={minx:0,maxx:0,minz:0,maxz:0};
+ let EXTRA=[];                   // raw GeoJSON FeatureCollections dropped in-session
+ let STEP_M=3;                   // contour step in metres, remembered across rebuilds
+@@ -43,7 +45,8 @@ function fallbackProjector(layers){
+   for(const L of layers) for(const f of (L.features||[])) if(f&&f.geometry&&f.geometry.coordinates) walk(f.geometry.coordinates);
+   if(lo>hi) return null;
+   const lat0=(la+ha)/2;
+-  const mLon=111320*Math.cos(lat0*Math.PI/180), mLat=110540;
++  // same horizontal scale the DEM path applies via World.setMapScale()
++  const mLon=111320*Math.cos(lat0*Math.PI/180)*MAP_SCALE, mLat=110540*MAP_SCALE;
+   const originLon=lo, originLat=ha;   // x >= 0 eastward, z >= 0 southward
+   const proj={
+     isFallback:true,
+@@ -57,13 +60,64 @@ function fallbackProjector(layers){
+ }
+ let worldG=null;               // THREE.Group holding everything rebuildWorld() creates
+ let BUNDLE=null;                // the loaded World instance
+-let VERT_SCALE=1.8;             // hill exaggeration only -- see file header
+ let startHead=0;
+ 
++/* Two independent knobs, one derived value.
++
++   EXAG is the hill-exaggeration slider the file header describes: pure taste, safe to
++   change because stretching Y alone cannot misalign vectors from terrain.
++
++   MAP_SCALE shrinks or stretches the map horizontally. The header's warning still
++   stands -- you cannot rescale vectors without resampling the heightfield to match --
++   so this is NOT applied here: it is handed to World.setMapScale(), which re-derives
++   the projection AND the DEM cell grid from the same constants, keeping them aligned
++   by construction. A bundle at scale 0.5 is a genuinely half-size map, not a stretched
++   one, and vectors still land on the right cells.
++
++   VERT_SCALE is what every draw call in this file uses, and folds both together: a map
++   shrunk to half width keeps its real-world slopes only if its hills halve too.
++   Exposed unchanged as getVertScale() so terrain.js and main.js need no edits. */
++let EXAG=1.8;
++let MAP_SCALE=1;
++let VERT_SCALE=EXAG*MAP_SCALE;
++
+ function setStartHead(i){ startHead=i; }
+ function getStartHead(){ return startHead; }
+-function setVertScale(v){ VERT_SCALE=Math.max(0.3,v); }
++function syncScales(){ VERT_SCALE=EXAG*MAP_SCALE; }
++function setVertScale(v){ EXAG=Math.max(0.3,v); syncScales(); rebuildWorld(); }
+ function getVertScale(){ return VERT_SCALE; }
++function getExaggeration(){ return EXAG; }
++function getMapScale(){ return MAP_SCALE; }
++function setMapScale(v){
++  MAP_SCALE=clamp(Number(v)||1, 0.15, 4);
++  syncScales();
++  if(BUNDLE) BUNDLE.setMapScale(MAP_SCALE);
++  rebuildWorld();
++}
++
++/* Switch landscape. Everything themed -- sky, fog, light, ground texture, tree and rock
++   palettes, densities, the horizon -- is read during rebuildWorld(), so a theme change
++   is just "set it, build it". THEME is a live binding in themes.js; reassigning it there
++   is picked up here and in pieces.js without either module re-importing anything. */
++function setThemeById(id){
++  const t=THEMES[id]; if(!t) return false;
++  setTheme(t);
++  rebuildWorld();
++  return true;
++}
++function getTheme(){ return THEME; }
++
++/* Sky, fog and light levels are scene-wide, not part of worldG, so they are applied
++   directly rather than added to the disposable group. */
++function applyThemeLighting(){
++  scene.background=new THREE.Color(THEME.sky);
++  scene.fog=new THREE.Fog(new THREE.Color(THEME.sky).getHex(),
++                          THEME.fogNear*MAP_SCALE, THEME.fogFar*MAP_SCALE);
++  hemi.color=new THREE.Color(THEME.hemiSky);
++  hemi.groundColor=new THREE.Color(THEME.hemiGround);
++  hemi.intensity=THEME.hemiInt;
++  sun.intensity=THEME.sunInt;
++}
+ function getGraph(){ return GRAPH; }
+ function getTrailheads(){ return TRAILHEADS; }
+ function getPOIs(){ return POIS; }
+@@ -115,6 +169,7 @@ async function loadWorld(urlOrBundleObj, extraLayers, stepMetres){
+   BUNDLE = (typeof urlOrBundleObj==='string')
+     ? await fetchWorldBundle(urlOrBundleObj)
+     : loadWorldBundle(urlOrBundleObj);
++  BUNDLE.setMapScale(MAP_SCALE);
+   if(extraLayers) EXTRA = extraLayers.slice();
+   if(stepMetres) STEP_M = stepMetres;
+   rebuildWorld();
+@@ -134,10 +189,11 @@ function setContourStep(m){ STEP_M=Math.max(0.5,m); rebuildWorld(); }
+ function rebuildWorld(){
+   if(worldG){ scene.remove(worldG); disposeGroup(worldG); }
+   worldG=new THREE.Group(); scene.add(worldG);
++  backdropG=null;
+   resetSpatialHash();
+ 
+   const layers=[...(BUNDLE ? (BUNDLE.layers||[]) : []), ...EXTRA];
+-  if(!layers.length) return;
++  if(!layers.length){ applyThemeLighting(); return; }
+   // A bundle's own projection is authoritative whenever one is loaded; the fallback only
+   // covers the no-DEM case, where there's no heightfield to stay aligned with anyway.
+   const PROJ = BUNDLE || fallbackProjector(layers);
+@@ -174,6 +230,10 @@ function rebuildWorld(){
+   bboxW={minx:mx,maxx:Mx,minz:mz,maxz:Mz};
+   const rng=mulberry(1337);
+ 
++  applyThemeLighting();
++  backdropG=buildBackdrop(THEME,rng,MAP_SCALE);
++  worldG.add(backdropG);
++
+   setWorld(BUNDLE || null);
+   setStep(STEP_M);
+ 
+@@ -353,6 +413,9 @@ function rebuildWorld(){
+ function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);
+   t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+ 
++function getBackdrop(){ return backdropG; }
++
+ export { loadWorld, rebuildWorld, addLayers, clearLayers, hasBundle, setContourStep,
++         setThemeById, getTheme, setMapScale, getMapScale, getExaggeration, getBackdrop,
+          getGraph, getTrailheads, getPOIs, getAreas, getBBox,
+          getWorldGroup, setStartHead, getStartHead, setVertScale, getVertScale, compass, THEMES, THEME };
+diff --git a/styles/trails.css b/styles/trails.css
+index b3a64e8..dfc494c 100644
+--- a/styles/trails.css
++++ b/styles/trails.css
+@@ -29,3 +29,26 @@ canvas#c{position:absolute;inset:0;width:100%;height:100%;display:block;}
+ #playHud{position:absolute;top:10px;left:10px;display:none;}
+ body.play #playHud{display:block;}
+ @media (max-width:760px){ .btn.icon{display:inline-block;} #panel{position:absolute;height:100%;z-index:5;} }
++
++/* --- panel controls added with the environment / scale / start pickers --- */
++.species-grid button.saved{background:#fff;border-width:3px;}
++.species-grid button.wild{background:#f2e7d5;}
++.env-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;}
++.envcard{font-family:inherit;font-weight:bold;border:3px solid var(--ink);border-radius:12px;
++  padding:8px 2px 6px;cursor:pointer;color:var(--ink);text-shadow:0 1px 0 rgba(255,255,255,.55);}
++.envcard.sel{outline:3px solid var(--orange);outline-offset:2px;}
++.envcard .em{display:block;font-size:20px;}
++.envcard .nm{display:block;font-size:10.5px;margin-top:2px;}
++.ctl{margin-top:10px;}
++.ctl label{display:flex;justify-content:space-between;font-size:12.5px;font-weight:bold;margin-bottom:4px;}
++.ctl label .val{opacity:.6;font-weight:normal;}
++.ctl input[type=range]{width:100%;accent-color:var(--orange);}
++#startSel{width:100%;font-family:inherit;font-size:12.5px;font-weight:bold;padding:7px 8px;
++  border:3px solid var(--ink);border-radius:10px;background:var(--cream);cursor:pointer;}
++#startSel:disabled{opacity:.55;cursor:default;}
++#pupFile{width:100%;font-size:11px;margin-top:6px;}
++.subhead{margin:10px 0 5px;font-size:11px;letter-spacing:1px;text-transform:uppercase;opacity:.55;}
++.subhead:first-of-type{margin-top:2px;}
++.species-grid button.sel{outline:3px solid var(--orange);outline-offset:2px;}
++.io-row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;}
++#mapNote{margin:8px 0 0;}
+diff --git a/tools/check.py b/tools/check.py
+index adee09c..0bd43ca 100755
+--- a/tools/check.py
++++ b/tools/check.py
+@@ -61,6 +61,29 @@ for entry_rel in ['src/city/main.js', 'src/creator/main.js', 'src/trails/main.js
+     else:
+         print(f'  ok    {entry_rel} ({len(order)} modules, no collisions)')
+ 
++print('checking for aliased imports/exports...')
++# build.py flattens every module into one scope and DELETES the import/export lines,
++# so `import { pups as kennelPups }` leaves no `kennelPups` binding anywhere: the name
++# is simply undefined in the bundle. It works perfectly in dev (real ES modules) and
++# throws only in the built single-file version, which is the worst possible place to
++# find out. `import * as ns` is fine -- the regex below deliberately ignores it.
++ALIAS_RE = re.compile(r'(?:^|\n)[ \t]*(?:import|export)[ \t]*\{([^}]*)\}', re.S)
++alias_fails = []
++for p in sorted(ROOT.glob('src/**/*.js')):
++    src = p.read_text(encoding='utf-8')
++    for m in ALIAS_RE.finditer(src):
++        for part in m.group(1).split(','):
++            bits = part.split()
++            if len(bits) == 3 and bits[1] == 'as':
++                line = src[:m.start()].count('\n') + 1
++                alias_fails.append(f'{p.relative_to(ROOT)}:{line}  {bits[0]} as {bits[2]}')
++if alias_fails:
++    fails.append('aliased import/export (build.py strips these, leaving the alias '
++                 'undefined in the bundle):\n  ' + '\n  '.join(alias_fails))
++    print(f'  FAIL  {len(alias_fails)} alias(es)')
++else:
++    print('  ok    no aliases')
++
+ if fails:
+     print('\n' + '\n\n'.join(fails))
+     sys.exit(1)
+diff --git a/tools/smoke.js b/tools/smoke.js
+new file mode 100644
+index 0000000..98ca4a3
+--- /dev/null
++++ b/tools/smoke.js
+@@ -0,0 +1,309 @@
++/* Headless smoke test: boots the REAL built bundle and drives the UI.
++ *
++ *     npm install jsdom      (one-off, dev only -- nothing here ships)
++ *     python3 build.py && node tools/smoke.js
++ *
++ * tools/check.py proves the code parses. This proves it RUNS: that the default map
++ * loads, that the rosters populate, that clicking a dog or an animal actually seats an
++ * avatar at the trailhead, and that switching environment or scale keeps it there.
++ * Two classes of bug got past check.py and reached a human before this existed --
++ * an unwritten dogPos (avatar built but never positioned) and an aliased import
++ * (undefined name in the bundle only). Both are asserted below.
++ *
++ * three.js needs a GPU, so THREE is replaced with a duck-typed stub that records what
++ * the game builds. Everything else is the actual shipped code on its actual boot path;
++ * this checks wiring, not pixels.
++   three.js needs a GPU, so THREE is replaced with a duck-typed stub that records what
++   the game builds. Everything else -- world.js, geo.js, terrain.js, the drivers, main.js
++   -- is the actual shipped code, run through its actual boot path. */
++const fs = require('fs');
++const path = require('path');
++const { JSDOM } = require('jsdom');
++
++const ROOT = process.argv[2] || path.join(__dirname, '..');
++
++// ---------- THREE stub ----------
++class V3 {
++  constructor(x = 0, y = 0, z = 0) { this.x = x; this.y = y; this.z = z; }
++  set(x, y, z) { this.x = x; this.y = y; this.z = z; return this; }
++  copy(v) { return this.set(v.x, v.y, v.z); }
++  clone() { return new V3(this.x, this.y, this.z); }
++  lerp(v) { return this.copy(v); }
++  setScalar(s) { return this.set(s, s, s); }
++  add(v) { return this.set(this.x + v.x, this.y + v.y, this.z + v.z); }
++  sub(v) { return this.set(this.x - v.x, this.y - v.y, this.z - v.z); }
++  subVectors(a, b) { return this.set(a.x - b.x, a.y - b.y, a.z - b.z); }
++  addVectors(a, b) { return this.set(a.x + b.x, a.y + b.y, a.z + b.z); }
++  multiplyScalar(s) { return this.set(this.x * s, this.y * s, this.z * s); }
++  divideScalar(s) { return this.multiplyScalar(s ? 1 / s : 0); }
++  normalize() { const l = this.length() || 1; return this.divideScalar(l); }
++  dot(v) { return this.x * v.x + this.y * v.y + this.z * v.z; }
++  cross(v) { return this.set(this.y * v.z - this.z * v.y, this.z * v.x - this.x * v.z, this.x * v.y - this.y * v.x); }
++  crossVectors(a, b) { return this.copy(a).cross(b); }
++  distanceTo(v) { return Math.hypot(this.x - v.x, this.y - v.y, this.z - v.z); }
++  applyAxisAngle() { return this; } applyQuaternion() { return this; } applyMatrix4() { return this; }
++  setFromMatrixPosition() { return this; } negate() { return this.multiplyScalar(-1); }
++  addScaledVector(v, k) { return this.set(this.x + v.x * k, this.y + v.y * k, this.z + v.z * k); }
++  setLength(l) { return this.normalize().multiplyScalar(l); }
++  lerpVectors(a, b, t) { return this.set(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t); }
++  equals(v) { return this.x === v.x && this.y === v.y && this.z === v.z; }
++  fromArray(a, o = 0) { return this.set(a[o], a[o + 1], a[o + 2]); }
++  toArray() { return [this.x, this.y, this.z]; }
++  length() { return Math.hypot(this.x, this.y, this.z); }
++  toString() { return `(${this.x.toFixed(1)}, ${this.y.toFixed(1)}, ${this.z.toFixed(1)})`; }
++}
++class Obj3D {
++  constructor() {
++    this.position = new V3(); this.rotation = new V3(); this.scale = new V3(1, 1, 1);
++    this.children = []; this.visible = true; this.name = ''; this.userData = {};
++  }
++  add(...o) { for (const c of o) if (c) { this.children.push(c); c.parent = this; } return this; }
++  remove(o) { const i = this.children.indexOf(o); if (i >= 0) this.children.splice(i, 1); return this; }
++  traverse(fn) { fn(this); for (const c of this.children) c.traverse && c.traverse(fn); }
++  lookAt() {} updateProjectionMatrix() {} updateMatrixWorld() {}
++  getObjectByName(n) { let f = null; this.traverse(o => { if (o.name === n) f = o; }); return f; }
++  countMeshes() { let n = 0; this.traverse(o => { if (o.isMesh) n++; }); return n; }
++}
++class Mesh extends Obj3D {
++  constructor(geometry, material) { super(); this.isMesh = true; this.geometry = geometry; this.material = material; }
++}
++class Geometry {
++  constructor() { this.attributes = {}; this.index = null; }
++  setAttribute(k, v) { this.attributes[k] = v; return this; }
++  getAttribute(k) { return this.attributes[k]; }
++  setIndex(i) { this.index = i; return this; }
++  computeVertexNormals() {} translate() { return this; } rotateX() { return this; }
++  scale() { return this; } dispose() {} center() { return this; }
++  applyMatrix4() { return this; } computeBoundingBox() { this.boundingBox = { min: new V3(), max: new V3() }; }
++}
++class Material {
++  constructor(p = {}) { Object.assign(this, p); }
++  dispose() {} clone() { return new Material(this); }
++}
++class Color {
++  constructor(c) { this.r = this.g = this.b = 1; this.set(c); }
++  set(c) {
++    if (c instanceof Color) { this.r = c.r; this.g = c.g; this.b = c.b; return this; }
++    if (typeof c === 'number') { this.r = ((c >> 16) & 255) / 255; this.g = ((c >> 8) & 255) / 255; this.b = (c & 255) / 255; return this; }
++    if (typeof c === 'string' && c[0] === '#') {
++      const h = c.slice(1); const n = parseInt(h.length === 3 ? h.replace(/./g, m => m + m) : h, 16);
++      return this.set(n);
++    }
++    return this;
++  }
++  getHex() { return (Math.round(this.r * 255) << 16) | (Math.round(this.g * 255) << 8) | Math.round(this.b * 255); }
++  getHexString() { return this.getHex().toString(16).padStart(6, '0'); }
++  clone() { return new Color(this); }
++}
++const stats = { renders: 0 };
++const THREE = {
++  Vector2: V3, Vector3: V3, Object3D: Obj3D, Group: Obj3D, Mesh, Color,
++  BufferGeometry: Geometry,
++  BufferAttribute: class { constructor(a, s) { this.array = a; this.itemSize = s; this.count = a.length / s; } },
++  Float32BufferAttribute: class { constructor(a, s) { this.array = a; this.itemSize = s; this.count = a.length / s; } },
++  Scene: class extends Obj3D { constructor() { super(); this.background = null; this.fog = null; } },
++  PerspectiveCamera: class extends Obj3D { constructor(f, a, n, fa) { super(); this.fov = f; this.aspect = a; this.near = n; this.far = fa; } },
++  WebGLRenderer: class {
++    constructor(o = {}) { this.domElement = o.canvas || { addEventListener() {}, style: {} }; this.shadowMap = {}; }
++    setPixelRatio() {} setSize() {} render() { stats.renders++; } setClearColor() {}
++  },
++  Fog: class { constructor(c, n, f) { this.color = c; this.near = n; this.far = f; } },
++  HemisphereLight: class extends Obj3D { constructor(s, g, i) { super(); this.color = new Color(s); this.groundColor = new Color(g); this.intensity = i; } },
++  DirectionalLight: class extends Obj3D { constructor(c, i) { super(); this.color = new Color(c); this.intensity = i; this.shadow = { mapSize: { set() {} }, camera: {}, bias: 0 }; } },
++  AmbientLight: class extends Obj3D {},
++  Clock: class { constructor() { this.elapsedTime = 0; } getDelta() { this.elapsedTime += 0.016; return 0.016; } },
++  DataTexture: class { constructor() { this.needsUpdate = false; } dispose() {} },
++  CanvasTexture: class { constructor() { this.repeat = { set() {} }; this.wrapS = this.wrapT = 0; } dispose() {} },
++  Texture: class { constructor() { this.repeat = { set() {} }; } dispose() {} },
++  Sprite: class extends Obj3D {}, SpriteMaterial: Material,
++  NearestFilter: 1, LinearFilter: 2, RepeatWrapping: 3, LuminanceFormat: 4,
++  DoubleSide: 2, FrontSide: 0, BackSide: 1, sRGBEncoding: 5, PCFSoftShadowMap: 6,
++  MathUtils: { lerp: (a, b, t) => a + (b - a) * t },
++};
++for (const n of ['MeshToonMaterial', 'MeshBasicMaterial', 'MeshStandardMaterial', 'MeshLambertMaterial', 'LineBasicMaterial', 'ShaderMaterial']) THREE[n] = Material;
++for (const n of ['BoxGeometry', 'PlaneGeometry', 'SphereGeometry', 'CylinderGeometry', 'ConeGeometry',
++  'DodecahedronGeometry', 'IcosahedronGeometry', 'TorusGeometry', 'CircleGeometry', 'RingGeometry',
++  'ExtrudeGeometry', 'ShapeGeometry', 'LatheGeometry', 'TubeGeometry', 'CapsuleGeometry', 'TetrahedronGeometry', 'OctahedronGeometry']) THREE[n] = Geometry;
++THREE.Shape = class {
++  constructor(pts) { this.points = pts || []; this.holes = []; this.curves = []; }
++  moveTo() {} lineTo() {} quadraticCurveTo() {} bezierCurveTo() {} absarc() {} arc() {}
++  closePath() {} splineThru() {} setFromPoints() { return this; } getPoints() { return this.points; }
++};
++THREE.Path = THREE.Shape;
++THREE.Line = class extends Obj3D {}; THREE.LineSegments = class extends Obj3D {}; THREE.Points = class extends Obj3D {};
++THREE.CatmullRomCurve3 = class { constructor(p) { this.points = p; } getPoints(n) { return this.points; } };
++THREE.Matrix4 = class { makeRotationY() { return this; } makeTranslation() { return this; } multiply() { return this; } };
++THREE.Euler = V3; THREE.Quaternion = class {};
++
++// ---------- DOM ----------
++const html = fs.readFileSync(path.join(ROOT, 'trails/index.html'), 'utf8');
++const dom = new JSDOM(html, { url: 'http://localhost:8000/trails/', pretendToBeVisual: true });
++const { window } = dom;
++global.window = window; global.document = window.document;
++global.navigator = window.navigator; global.location = window.location;
++global.THREE = THREE; window.THREE = THREE;
++global.addEventListener = window.addEventListener.bind(window);
++global.URLSearchParams = window.URLSearchParams;
++global.requestAnimationFrame = fn => { global.__raf = fn; };   // manual pumping
++window.requestAnimationFrame = global.requestAnimationFrame;
++global.localStorage = window.localStorage;
++global.matchMedia = window.matchMedia || (q => ({matches:false, media:q, addListener(){}, removeListener(){}, addEventListener(){}, removeEventListener(){}}));
++window.matchMedia = global.matchMedia;
++global.devicePixelRatio = 2; window.devicePixelRatio = 2;
++global.screen = window.screen || {width:1440, height:900};
++global.innerWidth = 1200; global.innerHeight = 800;
++global.performance = window.performance || {now: () => Date.now()};
++
++// 2D canvas stub: the game paints ground/sign/plaque textures procedurally, and jsdom
++// has no canvas backend. A no-op context is enough -- we are testing wiring, not pixels.
++const ctx2d = new Proxy({}, {
++  get(_, k) {
++    if (k === 'canvas') return {width:256, height:256};
++    if (k === 'measureText') return () => ({width: 40});
++    if (k === 'createLinearGradient' || k === 'createRadialGradient')
++      return () => ({addColorStop(){}} );
++    if (k === 'getImageData') return () => ({data: new Uint8ClampedArray(4)});
++    return typeof k === 'string' ? (() => {}) : undefined;
++  },
++  set() { return true; },
++});
++const origCreate = window.document.createElement.bind(window.document);
++window.document.createElement = (tag, ...rest) => {
++  const el = origCreate(tag, ...rest);
++  if (String(tag).toLowerCase() === 'canvas') el.getContext = () => ctx2d;
++  return el;
++};
++global.document = window.document;
++
++// canvas stub so core/render.js can construct
++const canvas = window.document.getElementById('c');
++canvas.getContext = () => null;
++Object.defineProperty(canvas, 'clientWidth', { value: 1200 });
++Object.defineProperty(canvas, 'clientHeight', { value: 800 });
++
++// fetch straight off disk, the way a static server would serve it
++global.fetch = async (url) => {
++  const rel = String(url).replace(/^.*?\/trails\//, '').replace(/^\.\.\//, '');
++  const file = path.join(ROOT, rel);
++  if (!fs.existsSync(file)) return { ok: false, status: 404, async json() { throw new Error('404'); } };
++  return { ok: true, status: 200, async json() { return JSON.parse(fs.readFileSync(file, 'utf8')); } };
++};
++window.fetch = global.fetch;
++
++// ---------- run the real bundle ----------
++const bundleHtml = fs.readFileSync(path.join(ROOT, 'dist/pup-trails.html'), 'utf8');
++const scripts = [...bundleHtml.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
++const app = scripts[scripts.length - 1];       // last block is the app; earlier one is three.js
++console.log(`app bundle: ${(app.length / 1024) | 0} KB`);
++
++const errors = [];
++process.on('unhandledRejection', e => errors.push('unhandledRejection: ' + (e && e.message)));
++const origError = console.error;
++console.error = (...a) => { errors.push('console.error: ' + a.map(String).join(' ')); };
++
++const probe = `
++;globalThis.__probe = () => ({
++  heads: getTrailheads().map(h => ({name: h.name, x: h.x, z: h.z})),
++  startHead: getStartHead(),
++  graph: !!getGraph(),
++  dogPos: dogPos ? {x: dogPos.x, z: dogPos.z} : null,
++  dogWorld: (typeof dog !== 'undefined' && dog) ? {x: dog.position.x, y: dog.position.y, z: dog.position.z, visible: dog.visible} : null,
++  wildPos: (typeof wildPos !== 'undefined' && wildPos) ? {x: wildPos.x, z: wildPos.z} : null,
++  theme: THEME.id,
++  mapScale: getMapScale(),
++  worldMeshes: getWorldGroup() ? getWorldGroup().countMeshes() : 0,
++  backdrop: !!getBackdrop(),
++});`;
++
++try {
++  (0, eval)(app + probe);
++} catch (e) {
++  origError('THREW during boot:', e.message, '\n', e.stack.split('\n').slice(0, 6).join('\n'));
++  process.exit(1);
++}
++
++// pump frames so the async boot() promise chain resolves and the loop runs
++(async () => {
++  for (let i = 0; i < 40; i++) {
++    await new Promise(r => setImmediate(r));
++    if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(i * 16); }
++  }
++  console.error = origError;
++  assertAll(window, errors, stats);
++})();
++
++// ---------- assertions ----------
++function assertAll(window, errors, stats) {
++  const d = window.document;
++  const probe = () => global.__probe();
++  const dist = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
++  const results = [];
++  const check = (name, ok, detail) => results.push({ name, ok: !!ok, detail });
++  const clickText = (sel, re) => {
++    const b = [...d.querySelectorAll(sel)].find(x => re.test(x.textContent));
++    if (!b) throw new Error(`no ${sel} matching ${re}`);
++    b.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
++  };
++
++  let s = probe();
++  const txt = sel => (d.querySelector(sel)?.textContent || '').trim();
++  const n = sel => d.querySelectorAll(sel).length;
++
++  check('default map preloads', s.graph && s.heads.length > 0, `${s.heads.length} trailheads`);
++  check('world geometry built', s.worldMeshes > 100, `${s.worldMeshes} meshes`);
++  check('horizon backdrop built', s.backdrop);
++  check('dog roster populated', n('#dogGrid button') >= 6, `${n('#dogGrid button')} dogs`);
++  check('animal roster populated', n('#animalGrid button') >= 6, `${n('#animalGrid button')} animals`);
++  check('environment picker populated', n('#envGrid button') === 3);
++  check('start-point picker populated', n('#startSel option') === s.heads.length);
++  check('a dog is selected on boot', !!d.querySelector('#dogGrid button.sel'), txt('#dogGrid button.sel'));
++  check('frames render', stats.renders > 0, `${stats.renders} frames`);
++
++  // the bug that shipped: rig built, never positioned
++  let head = s.heads[s.startHead];
++  check('dog rig stands on the trailhead', s.dogWorld && dist(s.dogWorld, head) < 0.5,
++    s.dogWorld ? `(${s.dogWorld.x.toFixed(1)}, ${s.dogWorld.z.toFixed(1)}) vs (${head.x.toFixed(1)}, ${head.z.toFixed(1)})` : 'rig not built');
++
++  clickText('#animalGrid button', /fox/i);
++  s = probe(); head = s.heads[s.startHead];
++  check('picking an animal seats it', dist(s.wildPos, head) < 0.5);
++  check('picking an animal hides the dog', s.dogWorld && s.dogWorld.visible === false);
++
++  clickText('#envGrid button', /Red rock/i);
++  s = probe();
++  check('environment switch applies theme', s.theme === 'redrock');
++  check('environment switch keeps avatar seated', dist(s.wildPos, s.heads[s.startHead]) < 0.5);
++  check('environment switch rebuilds world', s.worldMeshes > 100, `${s.worldMeshes} meshes`);
++
++  const sel = d.querySelector('#startSel');
++  const target = Math.min(3, s.heads.length - 1);
++  sel.value = String(target);
++  sel.dispatchEvent(new window.Event('change', { bubbles: true }));
++  s = probe();
++  check('start-point change moves the avatar', s.startHead === target && dist(s.wildPos, s.heads[target]) < 0.5,
++    s.heads[target].name);
++
++  const before = Math.hypot(s.heads[s.startHead].x, s.heads[s.startHead].z);
++  const ms = d.querySelector('#mapScale');
++  ms.value = '0.5';
++  ms.dispatchEvent(new window.Event('change', { bubbles: true }));
++  s = probe();
++  const after = Math.hypot(s.heads[s.startHead].x, s.heads[s.startHead].z);
++  check('map scale halves the map', Math.abs(after - before / 2) < 1, `${before.toFixed(0)}m -> ${after.toFixed(0)}m`);
++  check('map scale keeps avatar seated', dist(s.wildPos, s.heads[s.startHead]) < 0.5);
++
++  d.querySelector('#dogGrid button').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
++  s = probe();
++  check('switching back to a dog re-seats and shows it',
++    s.dogWorld.visible && dist(s.dogWorld, s.heads[s.startHead]) < 0.5);
++
++  const failed = results.filter(r => !r.ok);
++  console.log('\n---------------- smoke test ----------------');
++  for (const r of results) console.log(` ${r.ok ? 'ok  ' : 'FAIL'}  ${r.name}${r.detail ? '   (' + r.detail + ')' : ''}`);
++  if (errors.length) console.log('\n runtime errors:\n  ' + errors.join('\n  '));
++  console.log('-------------------------------------------');
++  console.log(failed.length || errors.length
++    ? `\n${failed.length} failed, ${errors.length} runtime error(s)`
++    : `\nall ${results.length} checks passed`);
++  process.exit(failed.length || errors.length ? 1 : 0);
++}
+diff --git a/trails/index.html b/trails/index.html
+index 509c497..cd409dc 100644
+--- a/trails/index.html
++++ b/trails/index.html
+@@ -30,17 +30,52 @@
+     <aside id="panel">
+       <div class="sect">
+         <h2>🐾 Who's exploring</h2>
+-        <div id="speciesGrid" class="species-grid"></div>
++        <h3 class="subhead">Dogs</h3>
++        <div id="dogGrid" class="species-grid"></div>
++        <h3 class="subhead">Wild animals</h3>
++        <div id="animalGrid" class="species-grid"></div>
++        <p class="hint" id="pupNote"></p>
++        <input type="file" id="pupFile" accept=".json,application/json" multiple>
++      </div>
++      <div class="sect">
++        <h2>🏞️ Environment</h2>
++        <div id="envGrid" class="env-grid"></div>
++        <p class="hint">Sets the sky, light, ground, plants, rock colour and horizon.
++          The trails themselves don't move.</p>
++      </div>
++      <div class="sect">
++        <h2>📐 Scale</h2>
++        <div class="ctl">
++          <label>Map size <span class="val" id="mapScaleVal">1.00×</span></label>
++          <input type="range" id="mapScale" min="0.25" max="2" step="0.05" value="1">
++        </div>
++        <div class="ctl">
++          <label>Hill exaggeration <span class="val" id="vertScaleVal">1.8×</span></label>
++          <input type="range" id="vertScale" min="0.3" max="4" step="0.1" value="1.8">
++        </div>
++        <p class="hint"><b>Map size</b> 1.00× is true scale — a 953 m trail sign means 953 real
++          metres. Shrink it for a quicker walk; your pup stays the same size, so the world
++          gets smaller around it. <b>Hill exaggeration</b> only stretches height.</p>
++      </div>
++      <div class="sect">
++        <h2>🚩 Starting point</h2>
++        <select id="startSel"><option>— load a map first —</option></select>
++        <p class="hint">Every dead-end on the trail network is a trailhead. Reaching any
++          of them after 20 m of walking ends the hike.</p>
+       </div>
+       <div class="sect">
+         <h2>🗺️ Trail world</h2>
+-        <p class="hint">Drop in a <code>.geojson</code> of paths and another of areas of
+-          interest &mdash; select both at once. Add a <code>pup-world/1</code> bundle from
++        <p class="hint">Garden of the Gods loads by default. To explore somewhere else, drop in a
++          <code>.geojson</code> of paths and another of areas of interest &mdash; select both at once. Add a <code>pup-world/1</code> bundle from
+           <code>tools/fetch_dem.py</code> for real terrain, or pass
+           <code>?world=path/to/world.json</code> in the URL. Without a bundle the map is
+           playable but flat.</p>
+         <input type="file" id="worldFile" accept=".geojson,.json,application/geo+json,application/json" multiple>
+-        <button class="btn small" id="clearLayersBtn">Clear loaded layers</button>
++        <div class="io-row">
++          <button class="btn small" id="defaultMapBtn">🏜️ Default map</button>
++          <button class="btn small" id="clearLayersBtn">Clear loaded layers</button>
++        </div>
++        <p class="hint" id="mapNote">Loading map…</p>
+       </div>
+     </aside>
+     <div id="stage">

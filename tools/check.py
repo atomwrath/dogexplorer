@@ -61,6 +61,29 @@ for entry_rel in ['src/city/main.js', 'src/creator/main.js', 'src/trails/main.js
     else:
         print(f'  ok    {entry_rel} ({len(order)} modules, no collisions)')
 
+print('checking for aliased imports/exports...')
+# build.py flattens every module into one scope and DELETES the import/export lines,
+# so `import { pups as kennelPups }` leaves no `kennelPups` binding anywhere: the name
+# is simply undefined in the bundle. It works perfectly in dev (real ES modules) and
+# throws only in the built single-file version, which is the worst possible place to
+# find out. `import * as ns` is fine -- the regex below deliberately ignores it.
+ALIAS_RE = re.compile(r'(?:^|\n)[ \t]*(?:import|export)[ \t]*\{([^}]*)\}', re.S)
+alias_fails = []
+for p in sorted(ROOT.glob('src/**/*.js')):
+    src = p.read_text(encoding='utf-8')
+    for m in ALIAS_RE.finditer(src):
+        for part in m.group(1).split(','):
+            bits = part.split()
+            if len(bits) == 3 and bits[1] == 'as':
+                line = src[:m.start()].count('\n') + 1
+                alias_fails.append(f'{p.relative_to(ROOT)}:{line}  {bits[0]} as {bits[2]}')
+if alias_fails:
+    fails.append('aliased import/export (build.py strips these, leaving the alias '
+                 'undefined in the bundle):\n  ' + '\n  '.join(alias_fails))
+    print(f'  FAIL  {len(alias_fails)} alias(es)')
+else:
+    print('  ok    no aliases')
+
 if fails:
     print('\n' + '\n\n'.join(fails))
     sys.exit(1)

@@ -29,3 +29,26 @@ canvas#c{position:absolute;inset:0;width:100%;height:100%;display:block;}
 #playHud{position:absolute;top:10px;left:10px;display:none;}
 body.play #playHud{display:block;}
 @media (max-width:760px){ .btn.icon{display:inline-block;} #panel{position:absolute;height:100%;z-index:5;} }
+
+/* --- panel controls added with the environment / scale / start pickers --- */
+.species-grid button.saved{background:#fff;border-width:3px;}
+.species-grid button.wild{background:#f2e7d5;}
+.env-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;}
+.envcard{font-family:inherit;font-weight:bold;border:3px solid var(--ink);border-radius:12px;
+  padding:8px 2px 6px;cursor:pointer;color:var(--ink);text-shadow:0 1px 0 rgba(255,255,255,.55);}
+.envcard.sel{outline:3px solid var(--orange);outline-offset:2px;}
+.envcard .em{display:block;font-size:20px;}
+.envcard .nm{display:block;font-size:10.5px;margin-top:2px;}
+.ctl{margin-top:10px;}
+.ctl label{display:flex;justify-content:space-between;font-size:12.5px;font-weight:bold;margin-bottom:4px;}
+.ctl label .val{opacity:.6;font-weight:normal;}
+.ctl input[type=range]{width:100%;accent-color:var(--orange);}
+#startSel{width:100%;font-family:inherit;font-size:12.5px;font-weight:bold;padding:7px 8px;
+  border:3px solid var(--ink);border-radius:10px;background:var(--cream);cursor:pointer;}
+#startSel:disabled{opacity:.55;cursor:default;}
+#pupFile{width:100%;font-size:11px;margin-top:6px;}
+.subhead{margin:10px 0 5px;font-size:11px;letter-spacing:1px;text-transform:uppercase;opacity:.55;}
+.subhead:first-of-type{margin-top:2px;}
+.species-grid button.sel{outline:3px solid var(--orange);outline-offset:2px;}
+.io-row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;}
+#mapNote{margin:8px 0 0;}

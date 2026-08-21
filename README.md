@@ -47,6 +47,25 @@ python3 build.py --serve     # builds, then serves at http://localhost:8000
 
 Edit anything under `src/` and reload. No bundler, no node_modules, no watch process.
 
+### Load-bearing rules
+
+- **Shared mutable arrays are cleared in place**, never reassigned — other modules hold
+  the same reference, and reassigning silently orphans them (`resetWorld()`,
+  `kennel.pups`).
+- **A driver never reads the player.** `dog/runtime.js` owns `dogPos`; `wild-driver.js`
+  owns its own `pos`. Whoever owns the player state has to push x/z across to the live
+  driver every frame (`trails/main.js`'s `syncAvatar`). Miss it and the rig renders at
+  the world origin while the camera follows the player — on a kilometres-wide map, the
+  avatar is simply never on screen, with no error anywhere.
+- **Never alias an import or export** (`import { a as b }`). `build.py` flattens every
+  module into one scope and deletes the import/export lines, so the alias is undefined
+  in the built bundle — works in dev, throws in `dist/`. `tools/check.py` enforces this.
+- **`fetch_dem.py` writes `layers` as an object** keyed by filename; `World` normalises
+  it to an array. Consumers can rely on `World.layers` being an array.
+- **Horizontal map scale belongs to `World`,** not the game layer. `World.setMapScale()`
+  re-derives the projection *and* the DEM cell grid from the bundle constants together;
+  scaling one without the other decouples vectors from terrain.
+
 ## Building single-file versions
 
 ```bash
@@ -64,6 +83,17 @@ python3 tools/check.py       # needs node on PATH
 Checks that every module parses as ESM, that each built bundle parses as a **classic script**, and that no two modules in the same bundle declare the same top-level name (they're flattened into one scope).
 
 > The classic-script check matters: `node --check` on a plain `.js` auto-detects ESM and will happily accept leftover `import`/`export` that a browser would reject, so bundles are checked as `.cjs`.
+
+### Smoke test (optional)
+
+`tools/check.py` proves the code parses. `tools/smoke.js` proves it runs: it boots the
+built bundle under jsdom with a stubbed THREE, then clicks through the pickers and
+asserts the avatar ends up where the player is.
+
+```bash
+npm install jsdom            # dev only, nothing ships
+python3 build.py && node tools/smoke.js
+```
 
 ## Tuning the game
 

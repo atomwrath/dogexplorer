@@ -12,7 +12,7 @@ import { SPECIES } from '../data/species.js';
 
 let group = null, refs = null, speciesKey = null, S = null;
 let wildLegPhase = 0, wildBodyBaseY = 0;
-const pos = new THREE.Vector3(0,0,0);
+const wildPos = new THREE.Vector3(0,0,0);
 let yaw = 0;
 
 function spawnWild(key, seed){
@@ -21,7 +21,7 @@ function spawnWild(key, seed){
   const rnd = mulberry32((seed|0) || 1);
   const built = makeAnimalModel(key, rnd);
   group = built.g; refs = built.refs;
-  group.position.copy(pos);
+  group.position.copy(wildPos);
   group.rotation.y = yaw;
   scene.add(group);
   wildLegPhase = 0;
@@ -29,6 +29,7 @@ function spawnWild(key, seed){
 }
 
 function setWildYaw(v){ yaw = v; if(group) group.rotation.y = yaw; }
+function setWildVisible(v){ if(group) group.visible = !!v; }
 
 function topSpeedFor(key){
   // SPECIES.speed is Pup City's fleeing/wander speed, tuned for a much smaller play
@@ -45,7 +46,7 @@ function spookRadiusFor(key){
 
 function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking){
   if(!group || !refs) return;
-  group.position.set(pos.x, groundY + jumpY, pos.z);
+  group.position.set(wildPos.x, groundY + jumpY, wildPos.z);
   group.rotation.y = yaw;
   const hop = !!S?.hopper;
   const strideRate = 2.2 / clamp((S?.scale||1),0.4,2.2);
@@ -64,4 +65,5 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking){
   }
 }
 
-export { spawnWild, updateWild, setWildYaw, topSpeedFor, spookRadiusFor, pos as wildPos, lerp };
+export { spawnWild, updateWild, setWildYaw, setWildVisible, topSpeedFor, spookRadiusFor,
+         wildPos };

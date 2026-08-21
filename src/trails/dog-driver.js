@@ -18,6 +18,20 @@ function spawnDog(params){
   legPhase = 0; crouchAmt = 0;
 }
 
+/* The dog's x/z live in runtime.js's `dogPos`, which updateDog() reads every frame.
+   Trails drives the player through its own `player` object, so that position has to be
+   pushed across explicitly -- exactly the way wild-driver's `wildPos` is written by
+   main.js. Without this the rig renders at the world origin no matter where the camera
+   is, which on a real 2.6 km map means it is simply never on screen. Mutate in place:
+   dogPos is a live binding several modules already hold a reference to. */
+function setDogPos(x, z){ dogPos.set(x, 0, z); }
+function getDogPos(){ return dogPos; }
+
+/* Switching to a wild animal used to leave the dog standing wherever it was last
+   drawn, because each driver only ever replaces its OWN instance. Hide rather than
+   dispose: the rig is rebuilt from params on demand and re-showing is free. */
+function setDogVisible(v){ if(dog) dog.visible = !!v; }
+
 function dogTopSpeed(){ return STATS.walk; }          // walk/run figures already tuned in dog/stats.js
 function dogRunMul(){ return STATS.run / STATS.walk; }
 
@@ -56,4 +70,5 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run){
 
 function setYaw(v){ setDogYaw(v); }
 
-export { spawnDog, updateDog, setYaw, dogTopSpeed, dogRunMul };
+export { spawnDog, updateDog, setYaw, setDogPos, getDogPos, setDogVisible,
+         dogTopSpeed, dogRunMul };

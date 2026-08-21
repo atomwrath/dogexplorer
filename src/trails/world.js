@@ -15,17 +15,19 @@
 import { clamp } from '../core/math.js';
 import { buildTerrainMesh, flattenAreaCells, groundTexture, resample, setStep, setWorld, stationHeights, terrainY } from './terrain.js';
 
-import { scene, disposeGroup } from '../core/render.js';
+import { scene, disposeGroup, sun, hemi } from '../core/render.js';
 import { toon, toonTex } from '../core/materials.js';
 import { loadWorldBundle, fetchWorldBundle } from '../data/world_bundle.js';
 import { parseFeatures, buildGraph } from './geo.js';
 import { pointInArea, areaBBox } from './geom2d.js';
 import { resetSpatialHash, hashSeg, nearestTrail } from './spatial.js';
-import { THEME, THEMES } from './themes.js';
+import { THEME, THEMES, setTheme } from './themes.js';
 import { ribbonGeom, trailMat, INK, buildSign, buildBlaze, buildGate, makeTree, makeRock,
-         pickTree, buildPOI, buildArea, buildAreaSign, POI_STYLE, shade } from './pieces.js';
+         pickTree, buildPOI, buildArea, buildAreaSign, POI_STYLE, shade,
+         buildBackdrop } from './pieces.js';
 
 let GRAPH=null, TRAILHEADS=[], POIS=[], AREAS=[], WATER=[];
+let backdropG=null;             // horizon ring, re-centred on the camera by main.js
 let bboxW={minx:0,maxx:0,minz:0,maxz:0};
 let EXTRA=[];                   // raw GeoJSON FeatureCollections dropped in-session
 let STEP_M=3;                   // contour step in metres, remembered across rebuilds
@@ -43,7 +45,8 @@ function fallbackProjector(layers){
   for(const L of layers) for(const f of (L.features||[])) if(f&&f.geometry&&f.geometry.coordinates) walk(f.geometry.coordinates);
   if(lo>hi) return null;
   const lat0=(la+ha)/2;
-  const mLon=111320*Math.cos(lat0*Math.PI/180), mLat=110540;
+  // same horizontal scale the DEM path applies via World.setMapScale()
+  const mLon=111320*Math.cos(lat0*Math.PI/180)*MAP_SCALE, mLat=110540*MAP_SCALE;
   const originLon=lo, originLat=ha;   // x >= 0 eastward, z >= 0 southward
   const proj={
     isFallback:true,
@@ -57,13 +60,64 @@ function fallbackProjector(layers){
 }
 let worldG=null;               // THREE.Group holding everything rebuildWorld() creates
 let BUNDLE=null;                // the loaded World instance
-let VERT_SCALE=1.8;             // hill exaggeration only -- see file header
 let startHead=0;
+
+/* Two independent knobs, one derived value.
+
+   EXAG is the hill-exaggeration slider the file header describes: pure taste, safe to
+   change because stretching Y alone cannot misalign vectors from terrain.
+
+   MAP_SCALE shrinks or stretches the map horizontally. The header's warning still
+   stands -- you cannot rescale vectors without resampling the heightfield to match --
+   so this is NOT applied here: it is handed to World.setMapScale(), which re-derives
+   the projection AND the DEM cell grid from the same constants, keeping them aligned
+   by construction. A bundle at scale 0.5 is a genuinely half-size map, not a stretched
+   one, and vectors still land on the right cells.
+
+   VERT_SCALE is what every draw call in this file uses, and folds both together: a map
+   shrunk to half width keeps its real-world slopes only if its hills halve too.
+   Exposed unchanged as getVertScale() so terrain.js and main.js need no edits. */
+let EXAG=1.8;
+let MAP_SCALE=1;
+let VERT_SCALE=EXAG*MAP_SCALE;
 
 function setStartHead(i){ startHead=i; }
 function getStartHead(){ return startHead; }
-function setVertScale(v){ VERT_SCALE=Math.max(0.3,v); }
+function syncScales(){ VERT_SCALE=EXAG*MAP_SCALE; }
+function setVertScale(v){ EXAG=Math.max(0.3,v); syncScales(); rebuildWorld(); }
 function getVertScale(){ return VERT_SCALE; }
+function getExaggeration(){ return EXAG; }
+function getMapScale(){ return MAP_SCALE; }
+function setMapScale(v){
+  MAP_SCALE=clamp(Number(v)||1, 0.15, 4);
+  syncScales();
+  if(BUNDLE) BUNDLE.setMapScale(MAP_SCALE);
+  rebuildWorld();
+}
+
+/* Switch landscape. Everything themed -- sky, fog, light, ground texture, tree and rock
+   palettes, densities, the horizon -- is read during rebuildWorld(), so a theme change
+   is just "set it, build it". THEME is a live binding in themes.js; reassigning it there
+   is picked up here and in pieces.js without either module re-importing anything. */
+function setThemeById(id){
+  const t=THEMES[id]; if(!t) return false;
+  setTheme(t);
+  rebuildWorld();
+  return true;
+}
+function getTheme(){ return THEME; }
+
+/* Sky, fog and light levels are scene-wide, not part of worldG, so they are applied
+   directly rather than added to the disposable group. */
+function applyThemeLighting(){
+  scene.background=new THREE.Color(THEME.sky);
+  scene.fog=new THREE.Fog(new THREE.Color(THEME.sky).getHex(),
+                          THEME.fogNear*MAP_SCALE, THEME.fogFar*MAP_SCALE);
+  hemi.color=new THREE.Color(THEME.hemiSky);
+  hemi.groundColor=new THREE.Color(THEME.hemiGround);
+  hemi.intensity=THEME.hemiInt;
+  sun.intensity=THEME.sunInt;
+}
 function getGraph(){ return GRAPH; }
 function getTrailheads(){ return TRAILHEADS; }
 function getPOIs(){ return POIS; }
@@ -115,6 +169,7 @@ async function loadWorld(urlOrBundleObj, extraLayers, stepMetres){
   BUNDLE = (typeof urlOrBundleObj==='string')
     ? await fetchWorldBundle(urlOrBundleObj)
     : loadWorldBundle(urlOrBundleObj);
+  BUNDLE.setMapScale(MAP_SCALE);
   if(extraLayers) EXTRA = extraLayers.slice();
   if(stepMetres) STEP_M = stepMetres;
   rebuildWorld();
@@ -134,10 +189,11 @@ function setContourStep(m){ STEP_M=Math.max(0.5,m); rebuildWorld(); }
 function rebuildWorld(){
   if(worldG){ scene.remove(worldG); disposeGroup(worldG); }
   worldG=new THREE.Group(); scene.add(worldG);
+  backdropG=null;
   resetSpatialHash();
 
   const layers=[...(BUNDLE ? (BUNDLE.layers||[]) : []), ...EXTRA];
-  if(!layers.length) return;
+  if(!layers.length){ applyThemeLighting(); return; }
   // A bundle's own projection is authoritative whenever one is loaded; the fallback only
   // covers the no-DEM case, where there's no heightfield to stay aligned with anyway.
   const PROJ = BUNDLE || fallbackProjector(layers);
@@ -173,6 +229,10 @@ function rebuildWorld(){
   AREAS.forEach(a=>a.rings[0].forEach(c=>grow(c[0],c[1])));
   bboxW={minx:mx,maxx:Mx,minz:mz,maxz:Mz};
   const rng=mulberry(1337);
+
+  applyThemeLighting();
+  backdropG=buildBackdrop(THEME,rng,MAP_SCALE);
+  worldG.add(backdropG);
 
   setWorld(BUNDLE || null);
   setStep(STEP_M);
@@ -353,6 +413,9 @@ function rebuildWorld(){
 function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);
   t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
 
+function getBackdrop(){ return backdropG; }
+
 export { loadWorld, rebuildWorld, addLayers, clearLayers, hasBundle, setContourStep,
+         setThemeById, getTheme, setMapScale, getMapScale, getExaggeration, getBackdrop,
          getGraph, getTrailheads, getPOIs, getAreas, getBBox,
          getWorldGroup, setStartHead, getStartHead, setVertScale, getVertScale, compass, THEMES, THEME };
