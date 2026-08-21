@@ -44,7 +44,7 @@ sys.path.insert(0, str(ROOT))
 import build as builder
 
 DECL = re.compile(r'^(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)', re.M)
-for entry_rel in ['src/city/main.js', 'src/creator/main.js']:
+for entry_rel in ['src/city/main.js', 'src/creator/main.js', 'src/trails/main.js']:
     order = []
     builder.collect(ROOT / entry_rel, set(), order)
     seen = {}

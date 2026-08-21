@@ -23,7 +23,7 @@ IMPORT_RE = re.compile(
     r'^[ \t]*import\s+(?:\{[^}]*\}|\*\s+as\s+[\w$]+|[\w$]+)?\s*(?:from\s*)?'
     r'[\'"]([^\'"]+)[\'"][ \t]*;?[ \t]*$', re.M)
 EXPORT_LINE_RE = re.compile(r'^\s*export\s*\{[^}]*\}\s*;?\s*$', re.M | re.S)
-EXPORT_DECL_RE = re.compile(r'^(\s*)export\s+(const|let|var|function|class)\s', re.M)
+EXPORT_DECL_RE = re.compile(r'^(\s*)export\s+(async\s+function|const|let|var|function|class)\s', re.M)
 
 
 def resolve(spec, importer):
@@ -102,6 +102,7 @@ def main():
     print('building single-file bundles...')
     inline(ROOT / 'city' / 'index.html', 'pup-city.html')
     inline(ROOT / 'creator' / 'index.html', 'backyard-pups.html')
+    inline(ROOT / 'trails' / 'index.html', 'pup-trails.html')
     print('done -> dist/')
     if '--serve' in sys.argv:
         os.chdir(ROOT)

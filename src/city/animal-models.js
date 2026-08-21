@@ -116,6 +116,17 @@ function quadruped(o){
       s.position.set(-i*Rr*0.32, i*Rr*0.16, 0);
       tailG.add(s);
     }
+  } else if(o.tail === 'bushy'){
+    // added for Pup Trails' canids (fox, coyote) -- stacked, tapering spheres like 'cat',
+    // but wider and without the upward curl, tapering to an optional lighter tip colour
+    const N = 6;
+    for(let i=0;i<N;i++){
+      const t = i/(N-1);
+      const tipMat = (i>=N-2 && o.tailTip) ? toon(o.tailTip) : tMat;
+      const s = M(new THREE.SphereGeometry(Rr*0.34*(1-t*0.42), 10, 8), tipMat);
+      s.position.set(-t*Rr*1.85, Rr*0.12 - t*Rr*0.1, 0);
+      tailG.add(s);
+    }
   } else if(o.tail === 'bare'){
     const c = M(new THREE.CylinderGeometry(Rr*0.05, Rr*0.1, Rr*1.6, 6), toon('#d8a0a8'));
     c.position.set(-Rr*0.5, -Rr*0.15, 0);
@@ -229,6 +240,26 @@ function makeAnimalModel(key, rnd){
           pad.position.set(-hr*0.25, hr*1.25, sd*hr*0.85);
           pad.rotation.x = -sd*0.9;
           headG.add(pad);
+        });
+      }});
+  } else if(key === 'fox'){
+    built = quadruped({body:'#c96a2e', belly:'#f3ead9', len:0.66, r:0.32, legL:0.5, legR:0.055, legs:'#2b2320',
+      headR:0.24, snoutL:0.85, snoutW:0.68, neckLen:0.12, neckUp:0.55,
+      ears:'point', tail:'bushy', tailCol:'#c96a2e', tailTip:'#f3ead9'});
+  } else if(key === 'coyote'){
+    built = quadruped({body:'#9c8467', belly:'#e2d6bf', len:0.78, r:0.36, legL:0.62, legR:0.065, legs:'#6b5a44',
+      headR:0.26, snoutL:0.8, snoutW:0.72, neckLen:0.14, neckUp:0.5,
+      ears:'point', tail:'bushy', tailCol:'#8a7358'});
+  } else if(key === 'bobcat'){
+    built = quadruped({body:'#bd9159', belly:'#ece0c8', len:0.6, r:0.32, legL:0.44, legR:0.06,
+      headR:0.25, snoutL:0.55, snoutW:0.8, neckLen:0.08, neckUp:0.6,
+      ears:'point', tail:'nub', tailCol:'#3a322a',
+      extra:({headG, hr})=>{
+        [-1,1].forEach(sd=>{
+          const tuft = M(new THREE.ConeGeometry(hr*0.06, hr*0.22, 4), toon('#2e2620'), false);
+          tuft.position.set(-hr*0.08, hr*1.28, sd*hr*0.42);
+          tuft.rotation.z = -sd*0.15;
+          headG.add(tuft);
         });
       }});
   }

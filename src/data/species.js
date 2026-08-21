@@ -12,6 +12,10 @@ const SPECIES = {
   bighorn: {nm:'Bighorn sheep', scale:1.5, speed:2.3, brav:5.6, skit:0.85, graze:true},
   bear:    {nm:'Bear',     scale:1.85, speed:2.5, brav:8.6, skit:0.72, graze:true, huffs:true},
   moose:   {nm:'Moose',    scale:2.2,  speed:2.7, brav:9.6, skit:0.72, graze:true, huffs:true},
+  // added for Pup Trails: front-country predators/scavengers that don't appear downtown
+  fox:     {nm:'Red fox',  scale:0.85, speed:2.6, brav:1.4, skit:1.2},
+  coyote:  {nm:'Coyote',   scale:1.05, speed:2.9, brav:2.2, skit:1.05},
+  bobcat:  {nm:'Bobcat',   scale:0.9,  speed:2.7, brav:1.9, skit:1.3},
 };
 
 export { SPECIES };

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Pup Trails">
+<meta name="theme-color" content="#fdf3e3">
+<meta name="description" content="Explore real trails as a dog or a wild animal — draped over actual terrain.">
+<link rel="manifest" href="../manifest.webmanifest">
+<link rel="apple-touch-icon" href="../icons/icon-192.png">
+<title>Pup Trails</title>
+<link rel="stylesheet" href="../styles/base.css">
+<link rel="stylesheet" href="../styles/trails.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="logo">
+      <div class="pawbadge">🥾</div>
+      <h1>PUP <span>TRAILS</span><small>real trails · real terrain</small></h1>
+    </div>
+    <div class="spacer"></div>
+    <button class="btn icon" id="panelBtn" title="Show / hide controls">🎒</button>
+    <button class="btn primary" id="playBtn">▶ Hit the trail</button>
+  </header>
+  <main>
+    <aside id="panel">
+      <div class="sect">
+        <h2>🐾 Who's exploring</h2>
+        <div id="speciesGrid" class="species-grid"></div>
+      </div>
+      <div class="sect">
+        <h2>🗺️ Trail world</h2>
+        <p class="hint">Drop in a <code>.geojson</code> of paths and another of areas of
+          interest &mdash; select both at once. Add a <code>pup-world/1</code> bundle from
+          <code>tools/fetch_dem.py</code> for real terrain, or pass
+          <code>?world=path/to/world.json</code> in the URL. Without a bundle the map is
+          playable but flat.</p>
+        <input type="file" id="worldFile" accept=".geojson,.json,application/geo+json,application/json" multiple>
+        <button class="btn small" id="clearLayersBtn">Clear loaded layers</button>
+      </div>
+    </aside>
+    <div id="stage">
+      <canvas id="c"></canvas>
+      <div id="playHud">
+        <button class="btn small" id="exitBtn">← Trailhead</button>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="../vendor/three.min.js"></script>
+<script type="module" src="../src/trails/main.js"></script>
+</body>
+</html>
