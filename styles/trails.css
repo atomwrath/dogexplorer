@@ -10,9 +10,10 @@ h1 span{color:var(--green);}
 h1 small{display:block;font-size:11px;opacity:.6;font-weight:normal;}
 .spacer{flex:1;}
 .btn{font-family:inherit;font-weight:bold;font-size:14px;background:#fff;border:3px solid var(--ink);
-  border-radius:12px;padding:8px 14px;cursor:pointer;}
+  border-radius:12px;padding:8px 14px;cursor:pointer;display:inline-block;}
 .btn.primary{background:var(--orange);color:#fff;}
 .btn.small{font-size:12px;padding:6px 10px;}
+.btn.wide{width:100%;text-align:center;}
 .btn.icon{width:40px;padding:6px 0;display:none;}
 main{flex:1;display:flex;min-height:0;position:relative;}
 #panel{width:280px;min-width:280px;background:var(--card);border-right:4px solid var(--ink);
@@ -23,32 +24,81 @@ canvas#c{position:absolute;inset:0;width:100%;height:100%;display:block;}
 .sect{border:3px solid var(--ink);border-radius:16px;background:#fff;padding:12px;margin-bottom:14px;}
 .sect h2{margin:0 0 8px;font-size:15px;}
 .hint{font-size:11.5px;opacity:.65;}
-.species-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;}
-.species-grid button{font-family:inherit;font-weight:bold;font-size:12px;padding:8px 4px;
-  border:3px solid var(--ink);border-radius:10px;background:var(--cream);cursor:pointer;}
 #playHud{position:absolute;top:10px;left:10px;display:none;}
 body.play #playHud{display:block;}
-@media (max-width:760px){ .btn.icon{display:inline-block;} #panel{position:absolute;height:100%;z-index:5;} }
-
-/* --- panel controls added with the environment / scale / start pickers --- */
-.species-grid button.saved{background:#fff;border-width:3px;}
-.species-grid button.wild{background:#f2e7d5;}
-.env-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;}
-.envcard{font-family:inherit;font-weight:bold;border:3px solid var(--ink);border-radius:12px;
-  padding:8px 2px 6px;cursor:pointer;color:var(--ink);text-shadow:0 1px 0 rgba(255,255,255,.55);}
-.envcard.sel{outline:3px solid var(--orange);outline-offset:2px;}
-.envcard .em{display:block;font-size:20px;}
-.envcard .nm{display:block;font-size:10.5px;margin-top:2px;}
+.io-row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;}
+.io-row .btn{flex:1;text-align:center;}
+#mapNote{margin:8px 0 0;}
 .ctl{margin-top:10px;}
 .ctl label{display:flex;justify-content:space-between;font-size:12.5px;font-weight:bold;margin-bottom:4px;}
 .ctl label .val{opacity:.6;font-weight:normal;}
 .ctl input[type=range]{width:100%;accent-color:var(--orange);}
-#startSel{width:100%;font-family:inherit;font-size:12.5px;font-weight:bold;padding:7px 8px;
-  border:3px solid var(--ink);border-radius:10px;background:var(--cream);cursor:pointer;}
-#startSel:disabled{opacity:.55;cursor:default;}
-#pupFile{width:100%;font-size:11px;margin-top:6px;}
-.subhead{margin:10px 0 5px;font-size:11px;letter-spacing:1px;text-transform:uppercase;opacity:.55;}
-.subhead:first-of-type{margin-top:2px;}
-.species-grid button.sel{outline:3px solid var(--orange);outline-offset:2px;}
-.io-row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;}
-#mapNote{margin:8px 0 0;}
+@media (max-width:760px){ .btn.icon{display:inline-block;} #panel{position:absolute;height:100%;z-index:5;} }
+
+/* --- drop zone (Trail map) --- */
+.dropzone{display:block;text-align:center;border:3px dashed var(--ink);border-radius:14px;
+  padding:16px 10px;cursor:pointer;background:var(--cream);opacity:.85;}
+.dropzone:hover,.dropzone.hover{opacity:1;background:#fff;border-color:var(--orange);}
+.dz-main{display:block;font-weight:bold;font-size:12.5px;line-height:1.5;}
+.dz-sub{display:block;font-size:10.5px;opacity:.6;margin-top:4px;}
+
+/* --- loaded-file chips --- */
+.file-chips{display:flex;flex-direction:column;gap:5px;margin-top:8px;}
+.file-chip{display:flex;align-items:center;gap:8px;border:3px solid var(--ink);border-radius:10px;
+  background:#fff;padding:6px 10px;font-size:12px;font-weight:bold;}
+.file-chip .fc-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.file-chip .fc-dot{width:9px;height:9px;border-radius:50%;flex:none;}
+.file-chip .fc-count{opacity:.6;font-weight:normal;flex:none;}
+.file-chip .fc-x{flex:none;border:none;background:none;font-family:inherit;font-weight:bold;
+  cursor:pointer;opacity:.5;font-size:14px;line-height:1;padding:0 2px;}
+.file-chip .fc-x:hover{opacity:1;}
+
+/* --- stats summary + trail list (Trail map) --- */
+.statbox{background:#fff3de;border:3px solid var(--orange);border-radius:12px;padding:9px 11px;
+  margin-top:10px;font-size:12px;font-weight:bold;color:#a5601a;line-height:1.55;}
+.statbox .flat{opacity:.65;font-weight:normal;display:block;margin-top:2px;}
+.trail-list{max-height:130px;overflow-y:auto;margin-top:8px;border-top:2px dashed #e2d5bd;padding-top:6px;}
+.trail-list .tl-row{display:flex;align-items:center;gap:7px;font-size:12px;padding:3px 2px;}
+.trail-list .tl-dot{width:8px;height:8px;border-radius:50%;flex:none;}
+
+/* --- landscape cards --- */
+.env-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;}
+.envcard{font-family:inherit;font-weight:bold;border:3px solid var(--ink);border-radius:12px;
+  padding:8px 2px 6px;cursor:pointer;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.35);}
+.envcard.sel{outline:3px solid var(--orange);outline-offset:2px;}
+.envcard .em{display:block;font-size:20px;}
+.envcard .nm{display:block;font-size:10.5px;margin-top:2px;}
+
+/* --- start-here trailhead list --- */
+.start-list{display:flex;flex-direction:column;gap:7px;margin-bottom:8px;}
+.headcard{display:flex;align-items:center;gap:10px;font-family:inherit;text-align:left;
+  border:3px solid var(--ink);border-radius:12px;background:var(--cream);padding:8px 10px;cursor:pointer;width:100%;}
+.headcard.sel{background:var(--orange);color:#fff;}
+.headcard .hc-badge{flex:none;width:26px;height:26px;border-radius:50%;background:#fff;
+  border:3px solid var(--ink);display:flex;align-items:center;justify-content:center;
+  font-weight:bold;font-size:12px;color:var(--ink);}
+.headcard.sel .hc-badge{background:var(--ink);color:#fff;border-color:#fff;}
+.headcard .hc-text{flex:1;min-width:0;}
+.headcard .hc-name{display:block;font-weight:bold;font-size:12.5px;}
+.headcard .hc-sub{display:block;font-size:10.5px;opacity:.7;}
+.headcard.sel .hc-sub{opacity:.9;}
+
+/* --- toggle pills (Dogs / Wildlife) --- */
+.toggle-row{display:flex;gap:6px;margin-bottom:8px;}
+.toggle{flex:1;font-family:inherit;font-weight:bold;font-size:12.5px;padding:8px 4px;
+  border:3px solid var(--ink);border-radius:10px;background:#fff;cursor:pointer;}
+.toggle.sel{background:var(--ink);color:#fff;}
+
+/* --- pup roster grid --- */
+.pup-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;}
+.pupcard{display:flex;flex-direction:column;gap:3px;font-family:inherit;text-align:left;
+  border:3px solid var(--ink);border-radius:12px;background:#fff;padding:8px 9px;cursor:pointer;}
+.pupcard.sel{outline:3px solid var(--orange);outline-offset:2px;}
+.pupcard .pc-top{display:flex;align-items:center;gap:6px;}
+.pupcard .pc-ic{font-size:17px;flex:none;}
+.pupcard .pc-nm{font-weight:bold;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pupcard .pc-sub{font-size:10px;opacity:.6;margin-left:23px;}
+.pupcard .pc-bar{height:4px;border-radius:2px;background:#eee2cc;overflow:hidden;margin-top:1px;}
+.pupcard .pc-bar i{display:block;height:100%;border-radius:2px;}
+.pupcard .pc-bar.speed i{background:var(--blue);}
+.pupcard .pc-bar.spook i{background:var(--pink);}

@@ -29,59 +29,73 @@
   <main>
     <aside id="panel">
       <div class="sect">
-        <h2>🐾 Who's exploring</h2>
-        <h3 class="subhead">Dogs</h3>
-        <div id="dogGrid" class="species-grid"></div>
-        <h3 class="subhead">Wild animals</h3>
-        <div id="animalGrid" class="species-grid"></div>
-        <p class="hint" id="pupNote"></p>
-        <input type="file" id="pupFile" accept=".json,application/json" multiple>
-      </div>
-      <div class="sect">
-        <h2>🏞️ Environment</h2>
-        <div id="envGrid" class="env-grid"></div>
-        <p class="hint">Sets the sky, light, ground, plants, rock colour and horizon.
-          The trails themselves don't move.</p>
-        <div class="ctl">
-          <label>Fog <span class="val" id="fogAmtVal">1.00×</span></label>
-          <input type="range" id="fogAmt" min="0.15" max="3" step="0.05" value="1">
+        <h2>🗺️ Trail map</h2>
+        <label class="dropzone" id="dropzone" for="worldFile">
+          <span class="dz-main">Drop your <code>.geojson</code> layers here<br>or tap to browse</span>
+          <span class="dz-sub">trails, points &amp; areas — several files at once</span>
+        </label>
+        <input type="file" id="worldFile" accept=".geojson,.json,application/geo+json,application/json" multiple hidden>
+        <div id="fileChips" class="file-chips"></div>
+        <div class="io-row">
+          <button class="btn small" id="saveCombinedBtn">↓ Save combined</button>
+          <button class="btn small" id="clearLayersBtn">Clear map</button>
         </div>
-        <p class="hint">Each landscape has its own default haze &mdash; this scales it up
-          or down. Applies instantly, no reload.</p>
-      </div>
-      <div class="sect">
-        <h2>📐 Scale</h2>
         <div class="ctl">
-          <label>Map size <span class="val" id="mapScaleVal">1.00×</span></label>
-          <input type="range" id="mapScale" min="0.25" max="2" step="0.05" value="1">
+          <label>World scale <span class="val" id="worldScaleVal">1 : 1</span></label>
+          <input type="range" id="worldScale" min="0" max="1000" step="1" value="0">
         </div>
         <div class="ctl">
           <label>Hill exaggeration <span class="val" id="vertScaleVal">1.8×</span></label>
           <input type="range" id="vertScale" min="0.3" max="4" step="0.1" value="1.8">
         </div>
-        <p class="hint"><b>Map size</b> 1.00× is true scale — a 953 m trail sign means 953 real
-          metres. Shrink it for a quicker walk; your pup stays the same size, so the world
-          gets smaller around it. <b>Hill exaggeration</b> only stretches height.</p>
-      </div>
-      <div class="sect">
-        <h2>🚩 Starting point</h2>
-        <select id="startSel"><option>— load a map first —</option></select>
-        <p class="hint">Every dead-end on the trail network is a trailhead. Reaching any
-          of them after 20 m of walking ends the hike.</p>
-      </div>
-      <div class="sect">
-        <h2>🗺️ Trail world</h2>
-        <p class="hint">Garden of the Gods loads by default. To explore somewhere else, drop in a
-          <code>.geojson</code> of paths and another of areas of interest &mdash; select both at once. Add a <code>pup-world/1</code> bundle from
-          <code>tools/fetch_dem.py</code> for real terrain, or pass
-          <code>?world=path/to/world.json</code> in the URL. Without a bundle the map is
-          playable but flat.</p>
-        <input type="file" id="worldFile" accept=".geojson,.json,application/geo+json,application/json" multiple>
+        <p class="hint"><b>World scale 1 : N</b> — 1:1 is true size (a 953 m sign means 953
+          real metres); a bigger N packs the whole network into a smaller, quicker walk.
+          Your pup's own size never changes, only the ground around it does.
+          <b>Hill exaggeration</b> only stretches height.</p>
+        <div class="statbox" id="mapStats"></div>
+        <div id="trailList" class="trail-list"></div>
+        <p class="hint" id="mapNote">Loading map…</p>
         <div class="io-row">
           <button class="btn small" id="defaultMapBtn">🏜️ Default map</button>
-          <button class="btn small" id="clearLayersBtn">Clear loaded layers</button>
         </div>
-        <p class="hint" id="mapNote">Loading map…</p>
+        <p class="hint">Garden of the Gods loads by default. Drop a <code>pup-world/1</code>
+          bundle from <code>tools/fetch_dem.py</code> here for real elevation, or pass
+          <code>?world=path/to/world.json</code> in the URL. Without a DEM bundle the map
+          is playable but flat.</p>
+      </div>
+      <div class="sect">
+        <h2>🏞️ Landscape</h2>
+        <div id="envGrid" class="env-grid"></div>
+        <p class="hint">Same trails, different country. The ground, trees, rocks, sky and
+          wildlife all change.</p>
+        <div class="ctl">
+          <label>Fog <span class="val" id="fogAmtVal">1.00×</span></label>
+          <input type="range" id="fogAmt" min="0.15" max="3" step="0.05" value="1">
+        </div>
+      </div>
+      <div class="sect">
+        <h2>🚩 Start here</h2>
+        <div id="startList" class="start-list"></div>
+        <button class="btn small wide" id="surpriseBtn">🎲 Surprise me</button>
+        <p class="hint">Every dead-end on your map becomes a trailhead. Pick one and your
+          pup waits there in the preview.</p>
+      </div>
+      <div class="sect">
+        <h2>🐾 Who's exploring</h2>
+        <div class="toggle-row" id="pupModeToggle">
+          <button class="toggle sel" data-mode="dog">🐕 Dogs</button>
+          <button class="toggle" data-mode="wild">🦊 Wildlife</button>
+        </div>
+        <div id="dogGrid" class="pup-grid"></div>
+        <div id="animalGrid" class="pup-grid" hidden></div>
+        <div class="io-row">
+          <button class="btn small" id="randomPupBtn">🎲 Random pup</button>
+          <label class="btn small" for="pupFile">📥 Import</label>
+        </div>
+        <input type="file" id="pupFile" accept=".json,application/json" multiple hidden>
+        <p class="hint" id="pupNote"></p>
+        <p class="hint">Blue bar is trail speed, pink is how far off you spook the
+          locals. Big animals lumber slow but clear the whole meadow.</p>
       </div>
     </aside>
     <div id="stage">

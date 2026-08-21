@@ -100,7 +100,10 @@ function setFogMultiplier(v){
   applyThemeLighting();          // fog only -- cheap enough to call straight from an input handler
 }
 function setMapScale(v){
-  MAP_SCALE=clamp(Number(v)||1, 0.15, 4);
+  // "1 : N" in the UI is N = 1/MAP_SCALE; N ranges 1 (true scale) to 1000 (heavily
+  // compacted), so MAP_SCALE itself ranges 1 down to 0.001. World.setMapScale()'s own
+  // floor is looser (0.0005) purely as headroom against float error at the N=1000 edge.
+  MAP_SCALE=clamp(Number(v)||1, 0.001, 4);
   syncScales();
   if(BUNDLE) BUNDLE.setMapScale(MAP_SCALE);
   rebuildWorld();
@@ -230,7 +233,13 @@ function rebuildWorld(){
   const areasProjected=rawAreas.map(A=>({name:A.name,kind:A.kind,props:A.props,
     rings:A.rings.map(r=>PROJ.projectCoords(r))}));
 
-  GRAPH=buildGraph(lines,16,6);
+  // *MAP_SCALE: `lines` above are already projected at the current scale, so a FIXED
+  // snap/simplify tolerance here would mean a different real-world tolerance at every
+  // World scale setting -- 16 world-units is 16 real metres at 1:1, but 512 real metres
+  // at 1:32, silently merging trailheads and junctions that are genuinely far apart.
+  // Scaling both keeps the topology (what merges into what) a function of real distance,
+  // not of how compacted the display happens to be.
+  GRAPH=buildGraph(lines,16*MAP_SCALE,6*MAP_SCALE);
   POIS=points.map(p=>({name:p.name,kind:p.kind,props:p.props,x:p.p.x,z:p.p.z,found:false}));
   AREAS=areasProjected;
   WATER=AREAS.filter(a=>a.kind==='water');
@@ -260,8 +269,22 @@ function rebuildWorld(){
   // construction -- no separate repeat.set() needed, and one WOULD be wrong here: it
   // would multiply UVs that already encode real tiling by a second, unrelated map-size
   // factor, shrinking every tile far below its intended size.
+  // Flatten the terrain UNDER each area polygon before building the visible ground mesh
+  // from it -- not after. flattenAreaCells mutates the shared band grid (a parking lot
+  // or building footprint shouldn't be stair-stepped), and buildTerrainMesh() bakes
+  // whatever the grid says into real geometry at the moment it's called. Building the
+  // ground first and flattening second meant the ground mesh baked in the OLD (stepped)
+  // heights while every area object below (buildArea uses groundYAt, which reads the
+  // NOW-flattened grid) was placed using the NEW ones -- typically higher, since
+  // flattening claims the tallest band under the footprint the same way trail corridors
+  // do. The visible result was exactly what it sounds like: areas of interest hovering
+  // above ground that had already been drawn one terrace step below them.
+  flattenAreaCells(AREAS, pointInArea, areaBBox);
+
   if(BUNDLE){
-    worldG.add(new THREE.Mesh(buildTerrainMesh(VERT_SCALE), groundMat));
+    const groundMesh = new THREE.Mesh(buildTerrainMesh(VERT_SCALE), groundMat);
+    groundMesh.name = 'ground';    // identifies it for tools/smoke.js's height probe
+    worldG.add(groundMesh);
   }else{
     const pad=80, gw=(Mx-mx)+pad*2, gh=(Mz-mz)+pad*2;
     const flat=new THREE.Mesh(new THREE.PlaneGeometry(gw,gh), groundMat);
@@ -281,12 +304,10 @@ function rebuildWorld(){
     worldG.add(flat);
   }
 
-  flattenAreaCells(AREAS, pointInArea, areaBBox);
-
   const groundYAt=(x,z)=>terrainY(x,z,VERT_SCALE);
 
   // areas (ground cover) before trails, matching draw order in the original
-  AREAS.forEach(a=>{ try{ worldG.add(buildArea(a,rng,groundYAt,nearestTrail)); }catch(err){ console.warn('area skipped',a.name,err); } });
+  AREAS.forEach((a,ai)=>{ try{ const ag=buildArea(a,rng,groundYAt,nearestTrail,VERT_SCALE); ag.name='area:'+ai; worldG.add(ag); }catch(err){ console.warn('area skipped',a.name,err); } });
 
   // Path colour/texture follows the source file's own highway/kind tag (pathKind, in
   // geo.js): a footpath stays themed dirt, a service road reads as a distinct paved grey
@@ -299,7 +320,11 @@ function rebuildWorld(){
   const mOutline=trailMat(INK);
   GRAPH.edges.forEach(e=>{
     const st=PATH_STYLE[e.kind]||PATH_STYLE.trail;
-    const W=st.w;
+    // *MAP_SCALE: these widths are real metres. Left unscaled, a compacted map (the new
+    // "World scale 1:N" control can push MAP_SCALE down to 0.001) would keep drawing a
+    // full-width trail while the ground around it shrinks -- past roughly 1:400 the
+    // ribbon would be wider than the entire map.
+    const W=st.w*MAP_SCALE;
     const rpts=resample(e.pts,3);
     const hs=stationHeights(rpts,W+2.3,VERT_SCALE);
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W+2.3,0.012,hs),mOutline));
@@ -342,7 +367,10 @@ function rebuildWorld(){
   // it's supposed to hide.
   GRAPH.nodes.forEach((n,ni)=>{
     if(n.deg<1) return;
-    const y=surfaceY(n.p[0],n.p[1],VERT_SCALE,3.5);
+    // radius *MAP_SCALE for the same reason trail width is above: the ribbons this pad
+    // has to cover shrink with the map, so its own anti-burial search radius must too --
+    // otherwise at heavy compaction it scans a radius many times the whole map's extent.
+    const y=surfaceY(n.p[0],n.p[1],VERT_SCALE,3.5*MAP_SCALE);
     const oDisc=new THREE.Mesh(new THREE.CircleGeometry(3.5,20),mOutline);
     oDisc.rotation.x=-Math.PI/2; oDisc.position.set(n.p[0],y+0.045,n.p[1]); worldG.add(oDisc);
     const disc=new THREE.Mesh(new THREE.CircleGeometry(3.0,20),trailMat(THEME.tread));
@@ -444,7 +472,7 @@ function rebuildWorld(){
     const gt=buildGate(th,i);
     // same reasoning as the junction pads above: a trailhead sits at the end of a
     // ribbon, so it needs the ribbon's own (corridor-max) height, not the raw cell.
-    gt.position.y=surfaceY(th.x,th.z,VERT_SCALE,3.5);
+    gt.position.y=surfaceY(th.x,th.z,VERT_SCALE,3.5*MAP_SCALE);
     worldG.add(gt);
   });
 }

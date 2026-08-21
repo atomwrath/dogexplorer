@@ -219,6 +219,28 @@ const probe = `
   camPitch: typeof camPitch !== 'undefined' ? camPitch : null,
   worldMeshes: getWorldGroup() ? getWorldGroup().countMeshes() : 0,
   backdrop: !!getBackdrop(),
+  areaFloat: (() => {
+    // Verifies the "areas floating in the sky" fix directly: is the FIRST area's own
+    // group.position.y (set from the post-flatten band, see world.js) actually the same
+    // height the visible ground mesh was BAKED at right under it? Before the fix these
+    // could differ by a whole terrace step, because the ground mesh was built from the
+    // band grid BEFORE flattenAreaCells touched it.
+    const areas = getAreas();
+    const wg = getWorldGroup();
+    if (!areas.length || !wg) return null;
+    const ground = wg.getObjectByName('ground');
+    const areaG = wg.getObjectByName('area:0');
+    if (!ground || !areaG) return null;
+    const bb = areaBBox(areas[0]);
+    const pos = ground.geometry.attributes.position;
+    let best = Infinity, bestY = null;
+    for (let i = 0; i < pos.count; i++) {
+      const gx = pos.array[i*3], gz = pos.array[i*3+2];
+      const d = Math.hypot(gx-bb.cx, gz-bb.cz);
+      if (d < best) { best = d; bestY = pos.array[i*3+1]; }
+    }
+    return { areaY: areaG.position.y, groundYNear: bestY, sampleDist: best };
+  })(),
 });`;
 
 try {
@@ -236,7 +258,11 @@ try {
   }
   console.error = origError;
   assertAll(window, errors, stats);
-})();
+})().catch(e => {
+  console.error = origError;
+  origError('THREW during frame pump / assertions:', e.message, '\n', e.stack);
+  process.exit(1);
+});
 
 // ---------- assertions ----------
 function assertAll(window, errors, stats) {
@@ -258,10 +284,21 @@ function assertAll(window, errors, stats) {
   check('default map preloads', s.graph && s.heads.length > 0, `${s.heads.length} trailheads`);
   check('world geometry built', s.worldMeshes > 100, `${s.worldMeshes} meshes`);
   check('horizon backdrop built', s.backdrop);
+
+  // areas of interest sit on the SAME ground the visible mesh was built at, not on
+  // whatever the band grid said after a later, unrelated mutation (the "floating in the
+  // sky" bug: flattenAreaCells ran after buildTerrainMesh had already baked geometry).
+  if (s.areaFloat) {
+    check('area-of-interest sits on the visible ground, not floating above it',
+      Math.abs(s.areaFloat.areaY - s.areaFloat.groundYNear) < 0.25,
+      `area y=${s.areaFloat.areaY.toFixed(2)}, nearest ground vertex y=${s.areaFloat.groundYNear.toFixed(2)} (${s.areaFloat.sampleDist.toFixed(1)}m away)`);
+  } else {
+    check('area-of-interest float check ran', false, 'no area/ground data in probe -- default map may have no polygons');
+  }
   check('dog roster populated', n('#dogGrid button') >= 6, `${n('#dogGrid button')} dogs`);
   check('animal roster populated', n('#animalGrid button') >= 6, `${n('#animalGrid button')} animals`);
   check('environment picker populated', n('#envGrid button') === 3);
-  check('start-point picker populated', n('#startSel option') === s.heads.length);
+  check('start-point picker populated', n('#startList .headcard') === s.heads.length);
   check('a dog is selected on boot', !!d.querySelector('#dogGrid button.sel'), txt('#dogGrid button.sel'));
   check('frames render', stats.renders > 0, `${stats.renders} frames`);
 
@@ -281,22 +318,30 @@ function assertAll(window, errors, stats) {
   check('environment switch keeps avatar seated', dist(s.wildPos, s.heads[s.startHead]) < 0.5);
   check('environment switch rebuilds world', s.worldMeshes > 100, `${s.worldMeshes} meshes`);
 
-  const sel = d.querySelector('#startSel');
   const target = Math.min(3, s.heads.length - 1);
-  sel.value = String(target);
-  sel.dispatchEvent(new window.Event('change', { bubbles: true }));
+  d.querySelectorAll('#startList .headcard')[target].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   s = probe();
   check('start-point change moves the avatar', s.startHead === target && dist(s.wildPos, s.heads[target]) < 0.5,
     s.heads[target].name);
 
+  // World scale is a log-mapped 0..1000 slider position -> "1:N", not a raw multiplier
+  // (see wireScale's posToN/nToPos) -- position 500 is the slider's midpoint, N=~32,
+  // i.e. MAP_SCALE ~1/32. Drive it the same way a real drag would: set the raw slider
+  // position, not a multiplier value.
   const before = Math.hypot(s.heads[s.startHead].x, s.heads[s.startHead].z);
-  const ms = d.querySelector('#mapScale');
-  ms.value = '0.5';
+  const beforeMapScale = s.mapScale;
+  const ms = d.querySelector('#worldScale');
+  ms.value = '500';
   ms.dispatchEvent(new window.Event('change', { bubbles: true }));
   s = probe();
   const after = Math.hypot(s.heads[s.startHead].x, s.heads[s.startHead].z);
-  check('map scale halves the map', Math.abs(after - before / 2) < 1, `${before.toFixed(0)}m -> ${after.toFixed(0)}m`);
-  check('map scale keeps avatar seated', dist(s.wildPos, s.heads[s.startHead]) < 0.5);
+  const expectRatio = s.mapScale / beforeMapScale;
+  check('world scale 1:N shrinks the map', s.mapScale < beforeMapScale,
+    `1:${Math.round(1/beforeMapScale)} -> 1:${Math.round(1/s.mapScale)}`);
+  check('world scale keeps trailhead distance proportional to the new scale',
+    Math.abs(after - before*expectRatio) < Math.max(1, before*expectRatio*0.02),
+    `${before.toFixed(0)}m -> ${after.toFixed(0)}m (expected ~${(before*expectRatio).toFixed(0)}m)`);
+  check('world scale keeps avatar seated', dist(s.wildPos, s.heads[s.startHead]) < 0.5);
 
   d.querySelector('#dogGrid button').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   s = probe();
@@ -357,6 +402,42 @@ function assertAll(window, errors, stats) {
   const upL = new window.MouseEvent('pointerup', { bubbles:true });
   upL.pointerId = 88;
   window.dispatchEvent(upL);
+
+  // --- redesigned panel: toggle, letter badges, stat bars, map stats, file chips ---
+  check('pup-mode toggle starts on Dogs', d.querySelector('#pupModeToggle .toggle.sel')?.textContent.includes('Dogs'));
+  check('wildlife grid hidden until toggled', d.querySelector('#animalGrid').hidden === true);
+  const dogVisibleBefore = probe().dogWorld?.visible;
+  d.querySelector('#pupModeToggle [data-mode="wild"]').dispatchEvent(new window.MouseEvent('click', { bubbles:true }));
+  check('toggling to Wildlife reveals its grid', d.querySelector('#animalGrid').hidden === false);
+  check('toggling to Wildlife does not touch the dog grid\'s visibility', d.querySelector('#dogGrid').hidden === true);
+  check('browsing Wildlife does not change the active avatar', probe().dogWorld?.visible === dogVisibleBefore,
+    `dog still visible=${probe().dogWorld?.visible}, nobody clicked a wildlife card`);
+  d.querySelector('#pupModeToggle [data-mode="dog"]').dispatchEvent(new window.MouseEvent('click', { bubbles:true }));
+  check('toggling back to Dogs hides Wildlife again', d.querySelector('#animalGrid').hidden === true);
+
+  check('trailhead cards carry letter badges', d.querySelector('#startList .hc-badge')?.textContent === 'A');
+
+  const speedBars = [...d.querySelectorAll('#dogGrid .pc-bar.speed i')];
+  check('pup cards render one speed bar per card', speedBars.length === n('#dogGrid button'), `${speedBars.length} bars`);
+  check('speed bars have a real, non-zero width', speedBars.every(el => /width:\s*[1-9]/.test(el.getAttribute('style')||'')));
+
+  const beforeHead = probe().startHead;
+  d.querySelector('#surpriseBtn').dispatchEvent(new window.MouseEvent('click', { bubbles:true }));
+  const sp = probe();
+  // mode is 'dog' at this point in the sequence (the "switching back to a dog" test
+  // above already clicked one) -- checking wildPos here would compare against a stale
+  // position nothing has updated since the earlier fox pick.
+  check('surprise-me seats the avatar at the trailhead it picked', dist(sp.dogWorld, sp.heads[sp.startHead]) < 0.5,
+    `head ${beforeHead} -> ${sp.startHead}`);
+
+  d.querySelector('#randomPupBtn').dispatchEvent(new window.MouseEvent('click', { bubbles:true }));
+  const rp = probe();
+  check('random pup switches to a dog and seats it', rp.dogWorld && rp.dogWorld.visible && dist(rp.dogWorld, rp.heads[rp.startHead]) < 0.5);
+
+  check('map stats box reports the loaded network', /named trail/.test(txt('#mapStats')) && /trailhead/.test(txt('#mapStats')),
+    txt('#mapStats').replace(/\s+/g,' ').slice(0,60));
+  check('trail list is populated', d.querySelectorAll('#trailList .tl-row').length > 0,
+    `${d.querySelectorAll('#trailList .tl-row').length} rows`);
 
   const failed = results.filter(r => !r.ok);
   console.log('\n---------------- smoke test ----------------');

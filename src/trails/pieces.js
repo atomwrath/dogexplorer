@@ -413,7 +413,7 @@ function buildFloatingLabel(name,em,width,topY){
   spr.renderOrder=999;
   return spr;
 }
-function buildArea(a,rng,groundYAt,nearestTrail){
+function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
   const g=new THREE.Group();
   const st=AREA_STYLE[a.kind]||AREA_STYLE.meadow;
   const shape=areaShape(a);
@@ -463,7 +463,13 @@ function buildArea(a,rng,groundYAt,nearestTrail){
   // draping every vertex individually, which is a fair simplification at the size most
   // of these polygons are (parking lots, groves, single buildings), and keeps a
   // building's walls vertical instead of trying to bend them with the slope.
-  g.position.y=(a.groundY!=null)?a.groundY:groundYAt(bb.cx,bb.cz);
+  // a.groundY is set by terrain.js's flattenAreaCells in raw METRES -- its own comment
+  // says so explicitly ("caller applies vertScale") -- but nothing was multiplying by
+  // vertScale here, while groundYAt's fallback (terrainY) already bakes it in. The
+  // mismatch (raw metres vs. metres*vertScale, a ~1.8x gap at the default exaggeration)
+  // is what put every area with a claimed band floating above -- or sunk below -- the
+  // ground mesh, which IS built with vertScale applied (buildTerrainMesh(VERT_SCALE)).
+  g.position.y=(a.groundY!=null)?a.groundY*vertScale:groundYAt(bb.cx,bb.cz);
   return g;
 }
 function areaSignTex(title,sub){

@@ -10,19 +10,20 @@
    camera follows the player, which on a 2.6 km map means it is simply never on screen.
    That was the "map loads, no dog" bug. */
 import { clamp, lerp } from '../core/math.js';
-import { setWildVisible, setWildYaw, spawnWild, topSpeedFor, updateWild, wildPos } from './wild-driver.js';
+import { setWildVisible, setWildYaw, spawnWild, spookRadiusFor, topSpeedFor, updateWild, wildPos } from './wild-driver.js';
 
 import { dogRunMul, dogTopSpeed, setDogPos, setDogVisible, setYaw, spawnDog, updateDog } from './dog-driver.js';
 
 import { cameraGroundY, surfaceY } from './terrain.js';
 
-import { addLayers, clearLayers, getBBox, getBackdrop, getExaggeration, getFogMultiplier, getGraph, getMapScale, getStartHead, getTrailheads, getVertScale, loadWorld, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale } from './world.js';
+import { addLayers, clearLayers, getBBox, getBackdrop, getExaggeration, getFogMultiplier, getGraph, getMapScale, hasBundle, getStartHead, getTrailheads, getVertScale, loadWorld, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale } from './world.js';
 
 import { THEME, THEMES } from './themes.js';
 import { renderer, scene, camera, resize } from '../core/render.js';
 import { SPECIES } from '../data/species.js';
 import { PRESETS } from '../creator/presets.js';
-import { DEFAULTS } from '../dog/params.js';
+import { DEFAULTS, randomPupParams } from '../dog/params.js';
+import { computeStats } from '../dog/stats.js';
 import { addPups, kennelPups, loadKennel, parsePupFile } from '../data/kennel.js';
 import { nearestTrail } from './spatial.js';
 
@@ -48,6 +49,9 @@ const DEFAULT_WORLD = '../data/world.json';
 let mode = 'dog';           // 'dog' | 'wild'
 let wildKey = 'fox';
 let dogChoice = {label: PRESETS[0].label, params: PRESETS[0].o};
+let browseMode = 'dog';     // which roster grid the panel is showing -- independent of
+                             // `mode` above, so you can look at Wildlife without it
+                             // changing who you're actually playing as until you tap one
 const player = { x:0, z:0, y:0, vy:0, yaw:0, speed:0, dist:0, sneaking:false, barkT:0 };
 let camYaw=0, camPitch=0.32, playing=false;
 /* Timestamp of the last manual look-drag (performance.now(), not the loop's own `t` --
@@ -87,7 +91,12 @@ function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
   // across its own width (terrain.js), so the avatar has to read ground the same way or
   // it visually sinks below the tread anywhere terrain rises to one side of the path --
   // see terrain.js's surfaceY doc comment for the full story.
-  const groundY = surfaceY(player.x, player.z, getVertScale());
+  // 2.6*MAP_SCALE, not the bare default: the trail corridor this has to match shrinks
+  // with the map (world.js scales ribbon width by MAP_SCALE too), so the search radius
+  // must shrink with it -- fixed at 2.6 world units, a heavily compacted map (the
+  // "World scale 1:N" control) would scan a radius many times the map's own size, every
+  // frame.
+  const groundY = surfaceY(player.x, player.z, getVertScale(), 2.6*getMapScale());
   if(mode==='dog'){
     setDogPos(player.x, player.z);
     setYaw(player.yaw);
@@ -302,28 +311,60 @@ function exitPlay(){
    does its job is indistinguishable from a button that is broken. */
 function rosterKey(){ return mode==='dog' ? 'dog:'+dogChoice.label : 'wild:'+wildKey; }
 
+/* Two stats become the pupcard's blue/pink bars: dogTopSpeed (well, its underlying
+   dog/stats.js curve, not the trail-only multiplier) for "trail speed", and something
+   distance-shaped for "how far off you spook the locals". Dogs and wildlife don't share
+   a stat system, so this leans on the closest analogue each already has --
+   STATS.scareRadius for a dog (how far ITS presence disturbs wildlife) and
+   spookRadiusFor() for a wild animal (how far away it notices you, the same underlying
+   idea from the other side) -- rather than inventing a third, unified number. Each is
+   normalised against the min/max across ITS OWN roster, so the bars stay meaningful
+   whether the roster is six dogs or fourteen species.
+   Returns {speedPct, spookPct}, both 0-100. */
+function dogBarStats(size){
+  const st = computeStats(size);
+  const pct = (v,lo,hi) => clamp(Math.round((v-lo)/(hi-lo)*100), 4, 100);
+  // walk range is fixed by computeStats's own formula (2.6..3.6); scareRadius likewise
+  // (3.2..8.6) -- see dog/stats.js. Using the formula's own bounds, not the roster's
+  // observed min/max, keeps a lone saved pup's bar meaningful on its own.
+  return { speedPct: pct(st.walk, 2.6, 3.6), spookPct: pct(st.scareRadius, 3.2, 8.6) };
+}
+let wildBarRange = null;
+function wildBarStats(key){
+  if(!wildBarRange){
+    const speeds = Object.keys(SPECIES).map(topSpeedFor);
+    const spooks = Object.keys(SPECIES).map(spookRadiusFor);
+    wildBarRange = { sLo:Math.min(...speeds), sHi:Math.max(...speeds),
+                      pLo:Math.min(...spooks), pHi:Math.max(...spooks) };
+  }
+  const r = wildBarRange;
+  const pct = (v,lo,hi) => clamp(Math.round((v-lo)/((hi-lo)||1)*100), 4, 100);
+  return { speedPct: pct(topSpeedFor(key), r.sLo, r.sHi), spookPct: pct(spookRadiusFor(key), r.pLo, r.pHi) };
+}
+
+function pupCard(grid, key, icon, name, sub, bars, onClick){
+  const b = document.createElement('button');
+  b.className = 'pupcard' + (key===rosterKey() ? ' sel' : '');
+  b.innerHTML = `<span class="pc-top"><span class="pc-ic">${icon}</span><span class="pc-nm">${name}</span></span>` +
+    (sub ? `<span class="pc-sub">${sub}</span>` : '') +
+    `<span class="pc-bar speed"><i style="width:${bars.speedPct}%"></i></span>` +
+    `<span class="pc-bar spook"><i style="width:${bars.spookPct}%"></i></span>`;
+  b.addEventListener('click', ()=>{ onClick(); renderRoster(); placeAtHead(getStartHead()); });
+  grid.appendChild(b);
+  return b;
+}
+
 function renderRoster(){
   const dogs=$('#dogGrid'), wild=$('#animalGrid');
-  const live=rosterKey();
-  const pick=(grid,label,key,cls,onClick)=>{
-    if(!grid) return null;
-    const b=document.createElement('button');
-    b.className=cls+(key===live?' sel':'');
-    b.textContent=label;
-    b.addEventListener('click',()=>{ onClick(); renderRoster(); placeAtHead(getStartHead()); });
-    grid.appendChild(b);
-    return b;
-  };
   if(dogs){
     dogs.innerHTML='';
     kennelPups.forEach(k=>{
-      const b=pick(dogs,'⭐ '+k.name,'dog:saved:'+k.name,'saved',()=>{
+      pupCard(dogs, 'dog:saved:'+k.name, '⭐', k.name, 'Saved pup', dogBarStats(k.params.size ?? 1), ()=>{
         mode='dog'; dogChoice={label:'saved:'+k.name, params:k.params};
       });
-      if(b && k.params.furColor) b.style.borderColor=k.params.furColor;
     });
     PRESETS.forEach(p=>{
-      pick(dogs,'🐶 '+p.label,'dog:'+p.label,'',()=>{
+      pupCard(dogs, 'dog:'+p.label, '🐕', p.label, p.sub||'', dogBarStats(p.o.size ?? 1), ()=>{
         mode='dog'; dogChoice={label:p.label, params:p.o};
       });
     });
@@ -336,7 +377,7 @@ function renderRoster(){
     const keys=[...local, ...Object.keys(SPECIES).filter(k=>!local.includes(k))];
     for(const key of keys){
       if(!SPECIES[key]) continue;
-      pick(wild,SPECIES[key].nm,'wild:'+key,'wild',()=>{ mode='wild'; wildKey=key; });
+      pupCard(wild, 'wild:'+key, '🦊', SPECIES[key].nm, '', wildBarStats(key), ()=>{ mode='wild'; wildKey=key; });
     }
   }
   const note=$('#pupNote');
@@ -345,6 +386,27 @@ function renderRoster(){
     : `${PRESETS.length} starter pups. Make your own in Backyard Pups — they show up here automatically — or import a backyard-pups.json below.`;
 }
 
+/* Dogs/Wildlife toggle: purely which grid is visible, independent of `mode` (see
+   browseMode's own comment) -- so opening the Wildlife tab to browse doesn't switch who
+   you're playing as until you actually tap a card. */
+function renderPupToggle(){
+  document.querySelectorAll('#pupModeToggle .toggle').forEach(b=>{
+    b.classList.toggle('sel', b.dataset.mode===browseMode);
+  });
+  const dogs=$('#dogGrid'), wild=$('#animalGrid');
+  if(dogs) dogs.hidden = browseMode!=='dog';
+  if(wild) wild.hidden = browseMode!=='wild';
+}
+document.querySelectorAll('#pupModeToggle .toggle').forEach(b=>{
+  b.addEventListener('click', ()=>{ browseMode=b.dataset.mode; renderPupToggle(); });
+});
+
+$('#randomPupBtn')?.addEventListener('click', ()=>{
+  const params = randomPupParams();
+  mode='dog'; browseMode='dog'; dogChoice={label:'random:'+params.name, params};
+  renderPupToggle(); renderRoster(); placeAtHead(getStartHead());
+});
+
 /* --- environment --- */
 function renderThemePicker(){
   const grid=$('#envGrid'); if(!grid) return;
@@ -352,7 +414,8 @@ function renderThemePicker(){
   Object.values(THEMES).forEach(t=>{
     const b=document.createElement('button');
     b.className='envcard'+(t.id===THEME.id?' sel':'');
-    b.style.background=t.sky;
+    b.style.background=t.grass[0];      // ground colour, not sky -- reads as a swatch of
+                                         // the actual landscape rather than just "blue"
     b.innerHTML=`<span class="em">${t.em}</span><span class="nm">${t.label}</span>`;
     b.addEventListener('click',()=>{
       if(!setThemeById(t.id)) return;
@@ -365,22 +428,32 @@ function renderThemePicker(){
 }
 
 /* --- scale ---
-   Both sliders rebuild the world, which is expensive, so the label updates on `input`
-   and the rebuild only fires on `change` (pointer release / arrow-key commit). */
+   All three sliders below can rebuild the world, which is expensive, so the label
+   updates on `input` and the rebuild only fires on `change` (pointer release /
+   arrow-key commit) -- except fog, which is cheap enough to apply live (see below). */
 function wireScale(){
-  const map=$('#mapScale'), mapV=$('#mapScaleVal');
-  const ex=$('#vertScale'), exV=$('#vertScaleVal');
+  /* World scale, shown as "1 : N" (N = 1..1000, matching real map-scale notation --
+     N=1 is true size, bigger N is more compacted) rather than the old "0.25x..2x"
+     multiplier. N spans three orders of magnitude, so the <input type=range> itself
+     runs over a plain 0..1000 "slider position" and is mapped through log10 rather than
+     used as N directly -- linear would put every value between 1:1 and 1:50 (the range
+     most trail networks actually need) into the first 5% of the handle's travel. */
+  const map=$('#worldScale'), mapV=$('#worldScaleVal');
+  const posToN = t => Math.max(1, Math.round(Math.pow(10, t/1000*3)));   // 0..1000 -> 1..1000
+  const nToPos = n => clamp(Math.log10(Math.max(1,n))/3*1000, 0, 1000);
   if(map && mapV){
-    map.value=getMapScale();
-    const show=v=>{ mapV.textContent = (+v).toFixed(2)+'\u00d7'; };
-    show(map.value);
-    map.addEventListener('input', e=> show(e.target.value));
+    map.min=0; map.max=1000; map.step=1;
+    map.value=nToPos(Math.round(1/getMapScale()));
+    const show=n=>{ mapV.textContent = '1 : '+n; };
+    show(posToN(map.value));
+    map.addEventListener('input', e=> show(posToN(+e.target.value)));
     map.addEventListener('change', e=>{
-      setMapScale(+e.target.value);
-      show(getMapScale());
+      setMapScale(1/posToN(+e.target.value));
+      show(Math.round(1/getMapScale()));
       placeAtHead(getStartHead());
     });
   }
+  const ex=$('#vertScale'), exV=$('#vertScaleVal');
   if(ex && exV){
     ex.value=getExaggeration();
     const show=v=>{ exV.textContent = (+v).toFixed(1)+'\u00d7'; };
@@ -407,32 +480,115 @@ function wireScale(){
 }
 
 /* --- starting point --- */
+/* --- starting point --- */
+function headLetter(i){ return i<26 ? String.fromCharCode(65+i) : String(i+1); }
+
 function renderStartPicker(){
-  const sel=$('#startSel'); if(!sel) return;
+  const list=$('#startList'); if(!list) return;
   const heads=getTrailheads();
-  sel.innerHTML='';
+  list.innerHTML='';
+  const surprise=$('#surpriseBtn');
   if(!heads.length){
-    sel.innerHTML='<option>— load a map first —</option>';
-    sel.disabled=true;
+    list.innerHTML='<p class="hint">— load a map first —</p>';
+    if(surprise) surprise.disabled=true;
     return;
   }
-  sel.disabled=false;
+  if(surprise) surprise.disabled=false;
+  const current=getStartHead();
   heads.forEach((h,i)=>{
-    const o=document.createElement('option');
-    o.value=String(i);
-    o.textContent=`${h.name} · ${h.where}${h.lenM?` · ${Math.round(h.lenM)} m`:''}`;
-    sel.appendChild(o);
+    const b=document.createElement('button');
+    b.className='headcard'+(i===current?' sel':'');
+    b.innerHTML=`<span class="hc-badge">${headLetter(i)}</span>` +
+      `<span class="hc-text"><span class="hc-name">${h.name}</span>` +
+      `<span class="hc-sub">${h.where} end${h.lenM?` · ${Math.round(h.lenM)} m to the next fork`:''}</span></span>`;
+    b.addEventListener('click', ()=> placeAtHead(i));
+    list.appendChild(b);
   });
-  sel.value=String(getStartHead());
 }
+$('#surpriseBtn')?.addEventListener('click', ()=>{
+  const n=getTrailheads().length; if(!n) return;
+  placeAtHead(Math.floor(Math.random()*n));
+});
+
+/* --- map stats + trail list (Trail map card) ---
+   Computed straight from the graph rebuildWorld() already built -- no separate tally
+   kept in sync by hand, so this can never drift from what's actually on screen. */
+function renderMapStats(){
+  const box=$('#mapStats'), list=$('#trailList');
+  const g=getGraph();
+  if(!box) return;
+  if(!g || !g.edges.length){ box.innerHTML=''; if(list) list.innerHTML=''; return; }
+  const names=new Set(g.edges.map(e=>e.name));
+  const km=g.edges.reduce((s,e)=>s+(e.lenM||0),0)/1000;
+  const junctions=g.nodes.filter(n=>n.deg>=3).length;   // matches world.js's own sign condition
+  box.innerHTML = `${names.size} named trail${names.size===1?'':'s'} · ${g.edges.length} segment${g.edges.length===1?'':'s'}<br>` +
+    `${junctions} signed junction${junctions===1?'':'s'} · ${getTrailheads().length} trailhead${getTrailheads().length===1?'':'s'}<br>` +
+    `${km.toFixed(1)} km of real trail` +
+    `<span class="flat">${hasBundle()?'elevation from DEM bundle':'flat — no elevation (Z) in this file'}</span>`;
+  if(list){
+    list.innerHTML='';
+    [...names].sort().forEach(name=>{
+      const e=g.edges.find(e=>e.name===name);
+      const row=document.createElement('div');
+      row.className='tl-row';
+      row.innerHTML=`<span class="tl-dot" style="background:${e?e.color:'#999'}"></span>${name}`;
+      list.appendChild(row);
+    });
+  }
+}
+
+/* --- loaded GeoJSON file chips ---
+   Purely a panel display concern -- world.js's own EXTRA array has no notion of which
+   file a feature came from (features from every dropped file get merged for rendering),
+   so this keeps its own lightweight {name, count} record just for the chip list.
+   Removing a chip removes ONLY that file's features and rebuilds from what's left,
+   which is why it re-adds every REMAINING file's layer rather than trying to subtract
+   in place -- addLayers/rebuildWorld have no notion of removal either. */
+let loadedFiles=[];   // [{name, count, layer}]
+function renderFileChips(){
+  const wrap=$('#fileChips'); if(!wrap) return;
+  wrap.innerHTML='';
+  const dots=['var(--blue)','var(--green)','var(--pink)','var(--orange)'];
+  loadedFiles.forEach((f,i)=>{
+    const chip=document.createElement('div');
+    chip.className='file-chip';
+    chip.innerHTML=`<span class="fc-dot" style="background:${dots[i%dots.length]}"></span>` +
+      `<span class="fc-name">${f.name}</span><span class="fc-count">${f.count}</span>` +
+      `<button class="fc-x" title="Remove">✕</button>`;
+    chip.querySelector('.fc-x').addEventListener('click', ()=>{
+      loadedFiles.splice(i,1);
+      clearLayers();
+      if(loadedFiles.length) addLayers(loadedFiles.map(f=>f.layer));
+      renderFileChips(); renderStartPicker(); renderMapStats();
+      if(getGraph()) placeAtHead(0);
+    });
+    wrap.appendChild(chip);
+  });
+}
+
+$('#saveCombinedBtn')?.addEventListener('click', ()=>{
+  if(!loadedFiles.length){ console.warn('no loaded GeoJSON layers to save'); return; }
+  const combined = loadedFiles.length===1 ? loadedFiles[0].layer : {
+    type:'FeatureCollection',
+    features: loadedFiles.flatMap(f=>f.layer.features||[]),
+  };
+  const blob=new Blob([JSON.stringify(combined)], {type:'application/geo+json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url; a.download='combined.geojson';
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
 
 async function boot(bundleUrl){
   loadKennel();
   renderThemePicker();
+  renderPupToggle();
   wireScale();
   await loadMap(bundleUrl || DEFAULT_WORLD, !bundleUrl);
   renderRoster();
   renderStartPicker();
+  renderMapStats();
   // seat an avatar unconditionally. With a map that means the chosen trailhead; without
   // one, the middle of an empty world -- either way you can see who you picked, which is
   // what tells you the roster works when the map does not.
@@ -461,12 +617,19 @@ async function loadMap(url, isDefault){
 }
 
 $('#defaultMapBtn')?.addEventListener('click', async ()=>{
-  if(await loadMap(DEFAULT_WORLD, true)){ renderStartPicker(); placeAtHead(0); }
+  // the default map is a DEM bundle, not dropped GeoJSON files -- it doesn't belong in
+  // the file-chip list, and replaces whatever chips/EXTRA layers were there
+  loadedFiles=[];
+  renderFileChips();
+  if(await loadMap(DEFAULT_WORLD, true)){ renderStartPicker(); renderMapStats(); placeAtHead(0); }
 });
 $('#playBtn')?.addEventListener('click', enterPlay);
 $('#exitBtn')?.addEventListener('click', exitPlay);
-$('#clearLayersBtn')?.addEventListener('click', ()=>{ clearLayers(); renderStartPicker(); });
-$('#startSel')?.addEventListener('change', e=> placeAtHead(+e.target.value));
+$('#clearLayersBtn')?.addEventListener('click', ()=>{
+  loadedFiles=[];
+  clearLayers();
+  renderFileChips(); renderStartPicker(); renderMapStats();
+});
 
 $('#worldFile')?.addEventListener('change', async e=>{
   const files=[...e.target.files];
@@ -481,6 +644,21 @@ $('#pupFile')?.addEventListener('change', async e=>{
   renderRoster();
   if(!n) console.warn('no pups found in that file');
 });
+
+/* Drag-and-drop onto the dropzone -- the <label for="worldFile"> already gives tap-to-
+   browse for free, this adds the other half. dragover must preventDefault or the
+   browser's own "navigate to the dropped file" handling wins instead of firing `drop`. */
+const dropzone=$('#dropzone');
+if(dropzone){
+  ['dragenter','dragover'].forEach(evt=>
+    dropzone.addEventListener(evt, e=>{ e.preventDefault(); dropzone.classList.add('hover'); }));
+  ['dragleave','drop'].forEach(evt=>
+    dropzone.addEventListener(evt, e=>{ e.preventDefault(); dropzone.classList.remove('hover'); }));
+  dropzone.addEventListener('drop', e=>{
+    const files=[...(e.dataTransfer?.files||[])];
+    if(files.length) loadFiles(files);
+  });
+}
 
 /* One picker for everything. A pup-world/1 bundle, a plain .geojson and a
    backyard-pups.json are all just JSON, so detect by content rather than by extension --
@@ -498,17 +676,22 @@ async function loadFiles(files){
       try{ await loadWorld(obj, [], 3); }
       catch(err){ console.error('bad world bundle:',f.name,err); }
     }else if(obj && (obj.type==='FeatureCollection' || obj.type==='Feature')){
-      layers.push(obj.type==='Feature' ? {type:'FeatureCollection',features:[obj]} : obj);
+      const layer = obj.type==='Feature' ? {type:'FeatureCollection',features:[obj]} : obj;
+      layers.push(layer);
+      // chip tracking is separate from EXTRA (world.js has no per-file memory of what it
+      // merged) -- record name+count here purely for the panel's own display
+      loadedFiles.push({name:f.name, count:(layer.features||[]).length, layer});
     }else if(obj && (obj.backyardPups || obj.pups || obj.furColor)){
       gotPups += addPups(parsePupFile(obj));
     }else{
       console.error('unrecognised file (expected a pup-world/1 bundle, GeoJSON or a pup file):', f.name);
     }
   }
-  if(layers.length) addLayers(layers);
+  if(layers.length){ addLayers(layers); renderFileChips(); }
   if(gotPups) renderRoster();
   if(!getGraph()) return;
   renderStartPicker();
+  renderMapStats();
   placeAtHead(0);
 }
 

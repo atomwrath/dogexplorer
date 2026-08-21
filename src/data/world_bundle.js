@@ -99,7 +99,10 @@ export class World {
    * (see trails/world.js), so a scaled map is not automatically flattened.
    */
   setMapScale(scale) {
-    const s = Math.max(0.05, Math.min(8, Number(scale) || 1));
+    // Lower bound loosened from 0.05 to 0.0005 to support "1:N" compaction up to
+    // N=1000 (trails/main.js). Upper bound unchanged -- the UI only ever asks to shrink,
+    // never enlarge past true scale, since "1:N" notation has no way to express that.
+    const s = Math.max(0.0005, Math.min(8, Number(scale) || 1));
     const hf = this.bundle.heightfield;
     const pr = this.bundle.projection;
     this.mapScale = s;
