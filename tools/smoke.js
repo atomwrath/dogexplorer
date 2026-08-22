@@ -152,7 +152,13 @@ window.matchMedia = global.matchMedia;
 global.devicePixelRatio = 2; window.devicePixelRatio = 2;
 global.screen = window.screen || {width:1440, height:900};
 global.innerWidth = 1200; global.innerHeight = 800;
-global.performance = window.performance || {now: () => Date.now()};
+/* NOT `window.performance`: jsdom's Performance implementation resolves `performance`
+   off the global, so assigning jsdom's own object over Node's makes now() recurse into
+   itself until the stack blows. It surfaced as an unexplained RangeError in the log for
+   a long time, and then as a real failure the moment game code called it somewhere whose
+   result mattered — enterPlay threw before setting `playing`, and every input test after
+   it failed. Use a plain stub. */
+global.performance = {now: () => Date.now()};
 
 // 2D canvas stub: the game paints ground/sign/plaque textures procedurally, and jsdom
 // has no canvas backend. A no-op context is enough -- we are testing wiring, not pixels.
@@ -215,8 +221,12 @@ const probe = `
   fogNear: scene.fog ? scene.fog.near : null,
   fogFar: scene.fog ? scene.fog.far : null,
   camFov: camera.fov,
-  camYaw: typeof camYaw !== 'undefined' ? camYaw : null,
-  camPitch: typeof camPitch !== 'undefined' ? camPitch : null,
+  camYaw: typeof getCamYaw === 'function' ? getCamYaw() : null,
+  camPitch: typeof getCamPitch === 'function' ? getCamPitch() : null,
+  critters: typeof CRITTERS !== 'undefined' ? CRITTERS.length : null,
+  sightings: typeof getCritterStats === 'function' ? getCritterStats().sightings : null,
+  bigMapOpen: typeof isBigMapOpen === 'function' ? isBigMapOpen() : null,
+  vertScale: typeof getVertScale === 'function' ? getVertScale() : null,
   worldMeshes: getWorldGroup() ? getWorldGroup().countMeshes() : 0,
   backdrop: !!getBackdrop(),
   areaFloat: (() => {
@@ -438,6 +448,225 @@ function assertAll(window, errors, stats) {
     txt('#mapStats').replace(/\s+/g,' ').slice(0,60));
   check('trail list is populated', d.querySelectorAll('#trailList .tl-row').length > 0,
     `${d.querySelectorAll('#trailList .tl-row').length} rows`);
+
+  /* ---- trail clamping, wildlife and the map ----------------------------------
+     These four features are the ones with no visible failure mode until a human
+     walks the map: a floating ribbon looks fine from the trailhead, an empty
+     critter roster looks like bad luck, and a camera that clips into a hill only
+     does it on the ascent. Assert the wiring here instead. */
+
+  // Enter play, which is what spawns the population and inits the map canvases.
+  d.querySelector('#playBtn').dispatchEvent(new window.MouseEvent('click', { bubbles:true }));
+  if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(1000); }
+  const pl = probe();
+
+  check('minimap and full-map canvases exist in the HUD',
+    !!d.querySelector('#minimap') && !!d.querySelector('#bigmap'));
+  check('play mode spawns a wildlife population', pl.critters > 0, `${pl.critters} critters`);
+  check('sightings start at zero', pl.sightings === 0);
+
+  check('M opens the full map', (() => {
+    const ev = new window.KeyboardEvent('keydown', { bubbles:true });
+    Object.defineProperty(ev, 'code', { value:'KeyM' });
+    window.dispatchEvent(ev);
+    return probe().bigMapOpen === true && d.body.classList.contains('bigmap');
+  })());
+  check('Escape closes the map before it quits the walk', (() => {
+    const ev = new window.KeyboardEvent('keydown', { bubbles:true });
+    Object.defineProperty(ev, 'code', { value:'Escape' });
+    window.dispatchEvent(ev);
+    return probe().bigMapOpen === false && d.body.classList.contains('play');
+  })());
+
+  let benchRestoreScale = 1;
+  /* The graded corridor. Three separate invariants, because they fail independently:
+     the ribbon must sit on the bench that was carved for it, the bench must have no
+     cliffs left in it, and edges meeting at a junction must arrive at the same height.
+     The last one caught a real regression -- pinning edge ends by blending toward the
+     RAW terrain height reinstated a full 5.4-unit step in the last window's worth of
+     every edge, right where trails converge. */
+  const bench = (() => {
+    if (typeof getGraph !== 'function' || typeof terrainY !== 'function') return null;
+    /* Pin the map to 1:1 first. Elevation no longer compacts with the footprint, so at
+       the scale earlier steps happen to leave behind, the LAND is near-vertical and a
+       trail faithfully following it is too -- "no cliffs" measured against a terrace step
+       is not a meaningful claim there. Restored below. */
+    benchRestoreScale = getMapScale();
+    setMapScale(1);
+    const G = getGraph(); if (!G) return null;
+    const vs = getVertScale();
+    let n = 0, off = 0, worstRise = 0;
+    for (const e of G.edges) {
+      if (!e.prof) continue;
+      for (let i = 0; i < e.prof.pts.length; i++) {
+        const [x, z] = e.prof.pts[i];
+        if (Math.abs(e.prof.ys[i] - terrainY(x, z, vs)) > 0.7) off++;
+        n++;
+        if (i) worstRise = Math.max(worstRise, Math.abs(e.prof.ys[i] - e.prof.ys[i-1]));
+      }
+    }
+    return { n, off, worstRise, step: getStep() * vs };
+  })();
+
+  check('ribbons sit on the bench graded for them',
+    bench && bench.n > 0 && bench.off / bench.n < 0.005,
+    bench ? `${bench.off} of ${bench.n} vertices off by >0.7u` : 'no profiles');
+
+  check('no terrace cliffs left along any trail',
+    bench && bench.worstRise < bench.step * 0.35,
+    bench ? `worst rise ${bench.worstRise.toFixed(2)}u vs a ${bench.step.toFixed(1)}u terrace step` : '');
+
+  check('edges meeting at a junction arrive at the same height', (() => {
+    const G = getGraph(); if (!G) return false;
+    const at = new Map();
+    for (const e of G.edges) {
+      if (!e.prof) continue;
+      const last = e.prof.hm.length - 1;
+      for (const [nid, h] of [[e.a, e.prof.hm[0]], [e.b, e.prof.hm[last]]]) {
+        if (nid == null) continue;
+        if (!at.has(nid)) at.set(nid, []);
+        at.get(nid).push(h);
+      }
+    }
+    for (const hs of at.values()) {
+      if (hs.length > 1 && (Math.max(...hs) - Math.min(...hs)) * getVertScale() > 0.01) return false;
+    }
+    return true;
+  })());
+
+  /* Ribbon self-overlap at compacted scale -- the scalloped-chevron look. A ribbon is
+     drawn by offsetting its centreline sideways by half its width; where the line turns
+     tighter than that, the inner offset crosses itself and the quad folds inside out.
+     Tread width no longer shrinks with world scale but station spacing followed the DEM
+     cell, so at 1:16 the ribbon was 12x wider than the gap between its own vertices and
+     every join disc overlapped a dozen neighbours. Checked at 1:16 because at 1:1 the
+     ratio is under 1 and the bug is invisible. */
+  check('ribbons do not fold over themselves on a compacted map', (() => {
+    setMapScale(1/16);
+    const G = getGraph(); if (!G) { setMapScale(1); return false; }
+    let folds = 0, verts = 0, tightSpacing = 0;
+    for (const e of G.edges) {
+      if (!e.prof) continue;
+      const hw = e.prof.halfWidth;
+      const rp = e.prof.pts;
+      for (let i = 1; i < rp.length - 1; i++) {
+        const a = rp[i-1], b = rp[i], c = rp[i+1];
+        const s1 = Math.hypot(b[0]-a[0], b[1]-a[1]), s2 = Math.hypot(c[0]-b[0], c[1]-b[1]);
+        if (s1 < hw * 0.5) tightSpacing++;
+        const a1 = Math.atan2(b[1]-a[1], b[0]-a[0]), a2 = Math.atan2(c[1]-b[1], c[0]-b[0]);
+        let d = a2 - a1;
+        while (d > Math.PI) d -= 2*Math.PI;
+        while (d < -Math.PI) d += 2*Math.PI;
+        verts++;
+        if (Math.abs(d) > 1e-6 && ((s1+s2)/2) / Math.abs(d) < hw) folds++;
+      }
+    }
+    setMapScale(1);
+    return verts > 0 && folds / verts < 0.005 && tightSpacing === 0;
+  })());
+
+  setMapScale(benchRestoreScale);
+
+  /* World scale is a shorten-the-walk control, not a zoom: it compacts positions and
+     leaves sizes alone. Assert both halves -- that the network really does shrink, and
+     that elevation and tread width really don't move with it.
+
+     Set an explicit 1:1 baseline first. Earlier steps in this file leave the map at
+     whatever scale they were testing, and comparing against that gave a ratio that looked
+     like a failure when the behaviour was exactly right. */
+  const scaleTest = (() => {
+    if (typeof setMapScale !== 'function') return null;
+    const restore = getMapScale();
+    setMapScale(1);
+    const bb1 = getBBox(), v1 = getVertScale(), w1 = pathWidth('trail');
+    const span1 = bb1.maxx - bb1.minx;
+    setMapScale(0.25);
+    const bb2 = getBBox(), v2 = getVertScale(), w2 = pathWidth('trail');
+    const span2 = bb2.maxx - bb2.minx;
+    setMapScale(restore);
+    return { ratio: span2 / span1, v1, v2, w1, w2 };
+  })();
+
+  check('world scale compacts the network', scaleTest && Math.abs(scaleTest.ratio - 0.25) < 0.02,
+    scaleTest ? `1:4 gives ${(scaleTest.ratio * 100).toFixed(1)}% of the 1:1 span` : '');
+  check('world scale leaves elevation and tread width alone',
+    scaleTest && scaleTest.v1 === scaleTest.v2 && scaleTest.w1 === scaleTest.w2,
+    scaleTest ? `vert ${scaleTest.v1}->${scaleTest.v2}, tread ${scaleTest.w1}->${scaleTest.w2}` : '');
+
+  /* Trailheads and the arrival screen. The trailhead filter is the one worth asserting
+     hardest: every dead-end used to become one, so the summary fired constantly and the
+     start picker was a wall of near-duplicate interior spurs. */
+  check('trailheads are a subset of dead-ends, not all of them', (() => {
+    const G = getGraph(); if (!G) return false;
+    const ends = G.nodes.filter(n => n.deg === 1).length;
+    const th = getTrailheads().length;
+    return th >= 1 && th <= Math.max(2, ends);
+  })(), `${getTrailheads().length} of ${getGraph().nodes.filter(n => n.deg === 1).length} dead-ends`);
+
+  check('no two trailheads sit on top of each other', (() => {
+    const th = getTrailheads();
+    const bb = getBBox();
+    const diag = Math.hypot(bb.maxx - bb.minx, bb.maxz - bb.minz) || 1;
+    for (let i = 0; i < th.length; i++) for (let j = i + 1; j < th.length; j++) {
+      if (Math.hypot(th[i].x - th[j].x, th[i].z - th[j].z) < diag * 0.05) return false;
+    }
+    return true;
+  })());
+
+  check('arriving at a trailhead opens the summary and pauses the walk', (() => {
+    const th = getTrailheads();
+    if (!th.length || !trailIsPlaying()) return false;
+    const target = th[(getStartHead() + 1) % th.length];
+    const pl = getTrailPlayer();
+    pl.x = target.x; pl.z = target.z; pl.dist = 500;
+    getTripState().parked = -1;
+    if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(2000); }
+    return getTripState().paused === true && d.body.classList.contains('arrived');
+  })());
+
+  check('the summary reports the walk', (() => {
+    const txt = id => (d.querySelector(id) || {}).textContent || '';
+    return /m|km/.test(txt('#arrDist')) && /^\d+:\d\d$/.test(txt('#arrTime')) &&
+           /^\d+$/.test(txt('#arrScore')) && txt('#arrTitle').length > 6;
+  })(), `${(d.querySelector('#arrTitle')||{}).textContent} — ${(d.querySelector('#arrDist')||{}).textContent}`);
+
+  check('Keep exploring resumes from the same spot', (() => {
+    const pl = getTrailPlayer();
+    const at = { x: pl.x, z: pl.z };
+    d.querySelector('#arrStay').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    return !getTripState().paused && !d.body.classList.contains('arrived') &&
+           pl.x === at.x && pl.z === at.z && trailIsPlaying();
+  })());
+
+  check('standing still at the same trailhead does not reopen it', (() => {
+    if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(2100); }
+    return !getTripState().paused;
+  })());
+
+  /* The sliders. Contour step and exaggeration both rebuild the world, so a bad range or
+     a missing clamp shows up as a broken map rather than a bad number. */
+  check('hill exaggeration accepts 0 and clamps at 2', (() => {
+    const back = getExaggeration();
+    setVertScale(0); const lo = getVertScale();
+    setVertScale(9); const hi = getVertScale();
+    setVertScale(back);
+    return lo === 0 && hi === 2;
+  })());
+  check('contour step is adjustable and rebuilds the terrain', (() => {
+    const back = getContourStep();
+    const rev = getWorldRevision();
+    setContourStep(1.5);
+    const ok = getContourStep() === 1.5 && getWorldRevision() > rev;
+    setContourStep(back);
+    return ok;
+  })());
+  check('world scale still reaches 1:1000', (() => {
+    const back = getMapScale();
+    setMapScale(0.001);
+    const ok = getMapScale() <= 0.0011;
+    setMapScale(back);
+    return ok;
+  })());
 
   const failed = results.filter(r => !r.ok);
   console.log('\n---------------- smoke test ----------------');

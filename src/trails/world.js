@@ -13,7 +13,7 @@
    separately re-tuned against an arbitrary shrink factor. Only vertical exaggeration
    remains adjustable, since stretching Y alone can't misalign vectors from terrain. */
 import { clamp } from '../core/math.js';
-import { buildTerrainMesh, flattenAreaCells, GROUND_TILE_M, groundTexture, resample, setStep, setWorld, stationHeights, surfaceY, terrainY } from './terrain.js';
+import { buildTerrainMesh, flattenAreaCells, gradeProfile, gradeTrailCells, GROUND_TILE_M, groundTexture, reliefCanvas, resample, setStep, setWorld, terrainY } from './terrain.js';
 
 import { scene, disposeGroup, sun, hemi } from '../core/render.js';
 import { toon, toonTex } from '../core/materials.js';
@@ -77,9 +77,9 @@ let startHead=0;
    VERT_SCALE is what every draw call in this file uses, and folds both together: a map
    shrunk to half width keeps its real-world slopes only if its hills halve too.
    Exposed unchanged as getVertScale() so terrain.js and main.js need no edits. */
-let EXAG=1.8;
+let EXAG=1.0;   // slider is 0..2 now; 1.8 was tuned back when MAP_SCALE divided it
 let MAP_SCALE=1;
-let VERT_SCALE=EXAG*MAP_SCALE;
+let VERT_SCALE=EXAG;
 /* Multiplies the theme's own fogNear/fogFar (a 1.0 default reproduces the theme exactly,
    independent of the exaggeration/map-scale state above). Kept separate from EXAG and
    MAP_SCALE because it only touches scene.fog -- no geometry, no rebuild -- so it can
@@ -89,8 +89,24 @@ let FOG_MUL=1;
 
 function setStartHead(i){ startHead=i; }
 function getStartHead(){ return startHead; }
-function syncScales(){ VERT_SCALE=EXAG*MAP_SCALE; }
-function setVertScale(v){ EXAG=Math.max(0.3,v); syncScales(); rebuildWorld(); }
+/* VERT_SCALE deliberately does NOT include MAP_SCALE.
+
+   "World scale 1:N" is a shorten-the-walk control, not a zoom. It compacts the POSITIONS
+   of the network -- how far apart the trailheads are, how long a loop takes -- and
+   nothing else. Sizes stay in true metres: the pup, the trees and rocks, the width of the
+   tread, and the height of the hills. Folding MAP_SCALE into VERT_SCALE (as this did)
+   flattened the terrain in step with the compaction, so at 1:32 a 180 m ridge became a
+   5 m mound and the pup towered over country it should have been dwarfed by.
+
+   The trade this makes is real and worth knowing: since relief is preserved while
+   footprint shrinks, the terrain gets genuinely steeper as you compact. Around 1:8 the
+   slopes stop reading as hills. The slider's range is capped accordingly. */
+function syncScales(){ VERT_SCALE=EXAG; }
+/* 0 .. 2. The floor is 0, not 0.3: at heavy world-scale compaction the only way to keep
+   real relief from becoming a wall is to flatten it, and 0 is a legitimate setting -- a
+   pure plan view of the network. The ceiling came down from 4 because with VERT_SCALE no
+   longer divided by the map scale, what used to read as 1.8x now reads as much more. */
+function setVertScale(v){ EXAG=clamp(Number(v)||0, 0, 2); syncScales(); rebuildWorld(); }
 function getVertScale(){ return VERT_SCALE; }
 function getExaggeration(){ return EXAG; }
 function getMapScale(){ return MAP_SCALE; }
@@ -100,9 +116,10 @@ function setFogMultiplier(v){
   applyThemeLighting();          // fog only -- cheap enough to call straight from an input handler
 }
 function setMapScale(v){
-  // "1 : N" in the UI is N = 1/MAP_SCALE; N ranges 1 (true scale) to 1000 (heavily
-  // compacted), so MAP_SCALE itself ranges 1 down to 0.001. World.setMapScale()'s own
-  // floor is looser (0.0005) purely as headroom against float error at the N=1000 edge.
+  // "1 : N" in the UI is N = 1/MAP_SCALE, across the full 1..1000 range. Elevation no
+  // longer compacts with the footprint (syncScales), so heavy compaction really does
+  // steepen the country -- that is what the exaggeration slider is for, and it now
+  // reaches 0, which flattens the map completely at any world scale.
   MAP_SCALE=clamp(Number(v)||1, 0.001, 4);
   syncScales();
   if(BUNDLE) BUNDLE.setMapScale(MAP_SCALE);
@@ -150,28 +167,93 @@ function compass(x,z){
   return dirs[(Math.round(((a+360)%360)/45))%8];
 }
 
+/* Convex hull (monotone chain) of the whole network, used below to tell an OUTER
+   dead-end from an interior one. Returned counter-clockwise; degenerate inputs come back
+   as-is, which the caller treats as "no opinion". */
+function hullOf(pts){
+  if(pts.length < 3) return pts.slice();
+  const p = pts.slice().sort((a,b)=> a[0]-b[0] || a[1]-b[1]);
+  const cross = (o,a,b)=> (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0]);
+  const half = src => {
+    const out = [];
+    for(const q of src){
+      while(out.length >= 2 && cross(out[out.length-2], out[out.length-1], q) <= 0) out.pop();
+      out.push(q);
+    }
+    out.pop();
+    return out;
+  };
+  return half(p).concat(half(p.slice().reverse()));
+}
+function distToHull(x, z, hull){
+  let best = Infinity;
+  for(let i = 0; i < hull.length; i++){
+    const a = hull[i], b = hull[(i+1)%hull.length];
+    const dx = b[0]-a[0], dz = b[1]-a[1], L2 = dx*dx+dz*dz;
+    let t = L2 ? ((x-a[0])*dx + (z-a[1])*dz)/L2 : 0;
+    t = t<0?0:(t>1?1:t);
+    best = Math.min(best, Math.hypot(x-(a[0]+t*dx), z-(a[1]+t*dz)));
+  }
+  return best;
+}
+
+/* Trailheads: where you can ENTER or LEAVE the network.
+
+   Previously every degree-1 node became one, which on a real map is far too many -- a
+   trail network is full of interior dead-ends (a spur to an overlook, a stub where the
+   surveyor's line stopped, one side of a switchback that didn't quite connect) and none
+   of those is a place you arrive from a car park. It also meant the arrival screen fired
+   constantly, since you are never far from some dead-end.
+
+   Two filters, in order:
+     OUTER    the node must sit near the convex hull of the whole network. An interior
+              spur can be a long way from anything else and still not be on the outside,
+              which is exactly the distinction "distance from the centre" fails to make.
+     SPREAD   greedily thin what survives so no two trailheads sit within a tenth of the
+              map's diagonal, keeping whichever serves the longer trail. Two dead-ends
+              either side of a car park are one trailhead, not two.
+
+   Falls back to the old every-dead-end behaviour if the filters leave fewer than two,
+   which is what happens on a small or single-path map. */
+const TH_HULL_FRAC = 0.055, TH_SPREAD_FRAC = 0.10, TH_MAX = 8;
+
 function buildTrailheads(){
   TRAILHEADS=[];
   if(!GRAPH) return;
-  GRAPH.nodes.forEach((n,ni)=>{
-    if(n.deg!==1) return;
+  const mk = ni => {
+    const n=GRAPH.nodes[ni];
     const e=GRAPH.edges.find(e=>e.a===ni||e.b===ni);
     let yaw=0;
     if(e){
       const pts=e.a===ni?e.pts:[...e.pts].reverse();
       yaw=Math.atan2(-(pts[1][1]-pts[0][1]),pts[1][0]-pts[0][0]);
     }
-    TRAILHEADS.push({node:ni,x:n.p[0],z:n.p[1],yaw,
-      name:e?e.name:'Trail',color:e?e.color:'#b58347',
-      lenM:e?e.lenM:0,where:compass(n.p[0],n.p[1])});
-  });
+    return {node:ni,x:n.p[0],z:n.p[1],yaw,name:e?e.name:'Trail',
+            color:e?e.color:'#b58347',lenM:e?e.lenM:0,where:compass(n.p[0],n.p[1])};
+  };
+  const ends=[];
+  GRAPH.nodes.forEach((n,ni)=>{ if(n.deg===1) ends.push(ni); });
+
+  const diag=Math.hypot(bboxW.maxx-bboxW.minx, bboxW.maxz-bboxW.minz)||1;
+  const all=[]; GRAPH.edges.forEach(e=>e.pts.forEach(p=>all.push(p)));
+  const hull=hullOf(all);
+
+  let cand = ends.map(mk);
+  if(hull.length>=3){
+    cand = cand.filter(t=> distToHull(t.x,t.z,hull) <= diag*TH_HULL_FRAC);
+  }
+  cand.sort((a,b)=> b.lenM-a.lenM);
+  const kept=[];
+  for(const t of cand){
+    if(kept.length>=TH_MAX) break;
+    if(kept.some(k=>Math.hypot(k.x-t.x,k.z-t.z) < diag*TH_SPREAD_FRAC)) continue;
+    kept.push(t);
+  }
+  TRAILHEADS = kept.length>=2 ? kept : ends.map(mk);
+
   if(!TRAILHEADS.length&&GRAPH.nodes.length){
     const picks=[...GRAPH.nodes.keys()].sort((a,b)=>GRAPH.nodes[a].p[1]-GRAPH.nodes[b].p[1]);
-    [picks[0],picks[picks.length-1]].forEach(ni=>{
-      const n=GRAPH.nodes[ni], e=GRAPH.edges.find(e=>e.a===ni||e.b===ni);
-      TRAILHEADS.push({node:ni,x:n.p[0],z:n.p[1],yaw:0,name:e?e.name:'Trail',
-        color:e?e.color:'#b58347',lenM:e?e.lenM:0,where:compass(n.p[0],n.p[1])});
-    });
+    [picks[0],picks[picks.length-1]].forEach(ni=>TRAILHEADS.push(mk(ni)));
   }
   TRAILHEADS.sort((a,b)=>a.name.localeCompare(b.name)||a.where.localeCompare(b.where));
   if(startHead>=TRAILHEADS.length) startHead=0;
@@ -200,9 +282,55 @@ function addLayers(layers){
 }
 function clearLayers(){ EXTRA=[]; rebuildWorld(); }
 function hasBundle(){ return !!BUNDLE; }
-function setContourStep(m){ STEP_M=Math.max(0.5,m); rebuildWorld(); }
+function setContourStep(m){ STEP_M=clamp(Number(m)||3, 0.5, 20); rebuildWorld(); }
+function getContourStep(){ return STEP_M; }
+
+/* Tread width in real metres per path kind, hoisted out of rebuildWorld's PATH_STYLE
+   because the terrain-carving pass needs the widths BEFORE the ribbon loop runs (it has
+   to cut the bench before buildTerrainMesh bakes the grid), and both must agree on the
+   number or the carve and the ribbon end up different widths. */
+const PATH_W = {trail:1.1, track:1.9, road:3.0};
+/* True metres, NOT scaled by MAP_SCALE. A tread is an object with a size, and the pup
+   has to stay the right size relative to it however compact the network is.
+
+   These are real trail widths. The previous set (2.6 / 3.7 / 4.6 m of tread, plus a flat
+   +2.3 m of ink on top) drew every footpath at the width of a fire road -- about five
+   dog-lengths across -- which is what made a graded corridor read as a stack of pancakes
+   rather than a path: the bench had to be wider still, so each cell-sized step in it was
+   a five-metre brown plateau. Singletrack is about a metre. */
+function pathWidth(kind){ return PATH_W[kind]||PATH_W.trail; }
+/* Full painted width including the ink outline -- what the bench underneath has to cover
+   if the ribbon isn't to spill off its own graded corridor onto stepped ground. */
+function pathOutlineWidth(kind){ return pathWidth(kind)*OUTLINE_MUL; }
+const OUTLINE_MUL = 1.5, SHOULDER_MUL = 1.24;
+
+/* Bumped on every rebuildWorld so cached derived data (minimap.js's relief image, the
+   critter roster) can tell "same world, new frame" from "whole world replaced" without
+   world.js needing to know those consumers exist. */
+let WORLD_REV = 0;
+function getWorldRevision(){ return WORLD_REV; }
+
+/* Height something STANDS on: the ground, or the trail tread when inside a trail's
+   corridor. Now that the ground under a trail is benched to the ribbon's own graded
+   height (terrain.js), the two agree to within the bench's cell-sized staircase and this
+   max() only smooths that last fraction of a unit away. It is the
+   single answer for the player, the critters and anything world.js plants on a path, so
+   they can't drift apart the way the avatar and the ribbons did.
+
+   Off-trail it is plain terrainY: no inflation, no floating near a rise. */
+function standingY(x,z){
+  const g = terrainY(x,z,VERT_SCALE);
+  const nt = nearestTrail(x,z);
+  if(nt.y == null || !(nt.d <= nt.hw)) return g;
+  // ease over the outer 40 cm of the corridor so stepping onto a trail that sits a hair
+  // proud of the dirt isn't a visible pop. Unscaled, like the corridor width it eases
+  // across -- both are true metres now.
+  const k = clamp((nt.hw - nt.d)/0.4, 0, 1);
+  return Math.max(g, g + (nt.y - g)*k);
+}
 
 function rebuildWorld(){
+  WORLD_REV++;
   if(worldG){ scene.remove(worldG); disposeGroup(worldG); }
   worldG=new THREE.Group(); scene.add(worldG);
   backdropG=null;
@@ -281,6 +409,54 @@ function rebuildWorld(){
   // above ground that had already been drawn one terrace step below them.
   flattenAreaCells(AREAS, pointInArea, areaBBox);
 
+  /* Trail benches, for the same before-the-mesh reason as the area flatten above, and in
+     this order relative to it: an area polygon (a parking lot) is a bigger, flatter claim
+     on the terrain than a path crossing it, so it grades first and the trail then follows
+     whatever level the lot ended up at.
+
+     One pass, unlike the version this replaces. That one measured, carved, then measured
+     again, because carving quantised heights could shift the band under a neighbouring
+     switchback. Grading writes a continuous height instead, and gradeProfile pins both
+     ends of every edge to raw terrain, so edges meeting at a node already agree without
+     needing a second look at the carved grid. */
+  /* minStep = 60% of the painted width. Station spacing otherwise follows the DEM cell
+     alone, which shrinks with world scale while the tread does not -- at 1:16 the ribbon
+     is 12x wider than the gap between its own vertices, so every join disc overlaps a
+     dozen neighbours and the trail renders as a scalloped smear. */
+  const minStep = e => pathOutlineWidth(e.kind)*0.6;
+
+  /* Two passes, to agree on junction heights.
+
+     Pass one grades every edge on its own. Pass two re-grades with each end pinned to the
+     average of what all edges meeting at that node wanted -- so ribbons converging on a
+     junction arrive together, and the correction each one carries is a small disagreement
+     with its neighbours rather than the large gap between a smoothed profile and the
+     quantised ground beneath its endpoint. Pinning to that raw ground was the first
+     attempt and it reintroduced terrace cliffs on short connectors, where the whole
+     offset has only a station or two to unwind in. */
+  GRAPH.edges.forEach(e=>{ e.prof = gradeProfile(e.pts, VERT_SCALE, 0.7, 8, minStep(e)); });
+  const nodeH = new Map();
+  const wantH = (id, h)=>{ if(id==null) return; const a=nodeH.get(id)||[]; a.push(h); nodeH.set(id,a); };
+  GRAPH.edges.forEach(e=>{ wantH(e.a, e.prof.smA); wantH(e.b, e.prof.smB); });
+  const agreed = new Map();
+  for(const [id, hs] of nodeH) agreed.set(id, hs.reduce((x,y)=>x+y,0)/hs.length);
+  GRAPH.edges.forEach(e=>{
+    e.prof = gradeProfile(e.pts, VERT_SCALE, 0.7, 8, minStep(e),
+                          agreed.has(e.a)?agreed.get(e.a):null,
+                          agreed.has(e.b)?agreed.get(e.b):null);
+    // half the PAINTED width, not the tread: the bench has to reach at least as far as
+    // the ink outline, or the ribbon's edges hang off the corridor onto stepped ground
+    e.prof.halfWidth = pathOutlineWidth(e.kind)/2;
+  });
+  gradeTrailCells(GRAPH.edges.map(e=>e.prof));
+  // hash before any geometry: buildArea's ground-cover scatter and buildAreaSign both
+  // call nearestTrail, and standingY now needs tread heights too
+  GRAPH.edges.forEach(e=>{
+    const pr = e.prof, hw = (pathWidth(e.kind)+1.5)/2;
+    for(let i=0;i<pr.pts.length-1;i++)
+      hashSeg({a:pr.pts[i], b:pr.pts[i+1], edge:e, ya:pr.ys[i], yb:pr.ys[i+1], hw});
+  });
+
   if(BUNDLE){
     const groundMesh = new THREE.Mesh(buildTerrainMesh(VERT_SCALE), groundMat);
     groundMesh.name = 'ground';    // identifies it for tools/smoke.js's height probe
@@ -313,22 +489,24 @@ function rebuildWorld(){
   // geo.js): a footpath stays themed dirt, a service road reads as a distinct paved grey
   // with a dashed centreline, a double-track gets worn wheel ruts instead of one groove.
   const PATH_STYLE={
-    trail:{w:2.6, deco:true, tread:THEME.tread, inner:THEME.inner, shoulder:THEME.shoulder},
-    track:{w:3.7, deco:true, ruts:true, tread:shade(THEME.tread,0.86), inner:shade(THEME.tread,0.6), shoulder:THEME.shoulder},
-    road:{w:4.6, deco:false, dashes:true, tread:'#716d64', inner:'#8a867a', shoulder:'#4a473f'},
+    trail:{deco:true, tread:THEME.tread, inner:THEME.inner, shoulder:THEME.shoulder},
+    track:{deco:true, ruts:true, tread:shade(THEME.tread,0.86), inner:shade(THEME.tread,0.6), shoulder:THEME.shoulder},
+    road:{deco:false, dashes:true, tread:'#716d64', inner:'#8a867a', shoulder:'#4a473f'},
   };
   const mOutline=trailMat(INK);
   GRAPH.edges.forEach(e=>{
     const st=PATH_STYLE[e.kind]||PATH_STYLE.trail;
-    // *MAP_SCALE: these widths are real metres. Left unscaled, a compacted map (the new
-    // "World scale 1:N" control can push MAP_SCALE down to 0.001) would keep drawing a
-    // full-width trail while the ground around it shrinks -- past roughly 1:400 the
-    // ribbon would be wider than the entire map.
-    const W=st.w*MAP_SCALE;
-    const rpts=resample(e.pts,3);
-    const hs=stationHeights(rpts,W+2.3,VERT_SCALE);
-    worldG.add(new THREE.Mesh(ribbonGeom(rpts,W+2.3,0.012,hs),mOutline));
-    worldG.add(new THREE.Mesh(ribbonGeom(rpts,W+1.5,0.02,hs),trailMat(st.shoulder)));
+    /* Layer widths are MULTIPLES of the tread, not the tread plus a constant. The old
+       +2.3 m outline was invisible on a 4.6 m road and overwhelming on a footpath, and it
+       is why narrowing the tread alone wouldn't have fixed the pancakes. */
+    const W=pathWidth(e.kind);
+    // e.prof is the graded profile the ground beneath was benched to, shared by every
+    // layer below plus the spatial hash. Sharing one profile is load-bearing: when each
+    // layer sampled terrain at its own slightly-offset vertex positions they disagreed by
+    // a whole terrace at any step and z-fought along the entire trail.
+    const rpts=e.prof.pts, hs=e.prof.ys;
+    worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*OUTLINE_MUL,0.012,hs),mOutline));
+    worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*SHOULDER_MUL,0.02,hs),trailMat(st.shoulder)));
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W,0.05,hs),trailMat(st.tread)));
     if(st.ruts){
       const rutMat=trailMat(shade(st.tread,0.55));
@@ -349,7 +527,6 @@ function rebuildWorld(){
         worldG.add(new THREE.Mesh(ribbonGeom([rpts[i-1],rpts[i]],0.22,0.09,hs?[hs[i-1],hs[i]]:null),dashMat));
       }
     }
-    for(let i=0;i<e.pts.length-1;i++) hashSeg({a:e.pts[i],b:e.pts[i+1],edge:e});
   });
 
   AREAS.forEach(a=>{ if(a.name) worldG.add(buildAreaSign(a,groundYAt,nearestTrail)); });
@@ -360,21 +537,30 @@ function rebuildWorld(){
   // bends within one edge, not its two endpoints), so without a pad sitting flush on
   // top, every junction -- including a loop trail whose ends snap into one node -- shows
   // a hard edge where the ribbons butt together. That only works if the pad is at the
-  // SAME height the ribbons actually are: surfaceY, not raw terrainY, matching the
-  // corridor-max height stationHeights gives every ribbon converging here (see
-  // terrain.js). Radius 3.5 covers the outline layer's half-width for every edge kind
-  // this file has (worst case, 'road', is 3.45), so the pad can't be narrower than what
-  // it's supposed to hide.
+  /* Junction pads hide the seam where several ribbons converge. Two things about them
+     were wrong once trails narrowed from fire-road width to a metre:
+
+     SIZE. The radius was a hardcoded 3.5, chosen to cover the widest ribbon of the old
+     set. That is a 7 m brown disc, and the widest ribbon is now 4.5 m. Derived from the
+     edges that actually meet here instead.
+
+     COUNT. Every node with degree >= 1 got one, which includes every degree-2 node --
+     the plain continuations buildGraph creates wherever two digitised segments join, of
+     which a real network has hundreds. Their ribbons already meet flush, so the pad was
+     covering a seam that wasn't there. On a compacted map the discs merge into a
+     continuous brown field over the whole network. Only real junctions get one now. */
   GRAPH.nodes.forEach((n,ni)=>{
     if(n.deg<1) return;
-    // radius *MAP_SCALE for the same reason trail width is above: the ribbons this pad
-    // has to cover shrink with the map, so its own anti-burial search radius must too --
-    // otherwise at heavy compaction it scans a radius many times the whole map's extent.
-    const y=surfaceY(n.p[0],n.p[1],VERT_SCALE,3.5*MAP_SCALE);
-    const oDisc=new THREE.Mesh(new THREE.CircleGeometry(3.5,20),mOutline);
-    oDisc.rotation.x=-Math.PI/2; oDisc.position.set(n.p[0],y+0.045,n.p[1]); worldG.add(oDisc);
-    const disc=new THREE.Mesh(new THREE.CircleGeometry(3.0,20),trailMat(THEME.tread));
-    disc.rotation.x=-Math.PI/2; disc.position.set(n.p[0],y+0.06,n.p[1]); worldG.add(disc);
+    const y=standingY(n.p[0],n.p[1]);
+    if(n.deg>=3){
+      let hw=0;
+      GRAPH.edges.forEach(e=>{ if(e.a===ni||e.b===ni) hw=Math.max(hw,pathOutlineWidth(e.kind)/2); });
+      const r=Math.max(hw*1.2,0.4);
+      const oDisc=new THREE.Mesh(new THREE.CircleGeometry(r,20),mOutline);
+      oDisc.rotation.x=-Math.PI/2; oDisc.position.set(n.p[0],y+0.045,n.p[1]); worldG.add(oDisc);
+      const disc=new THREE.Mesh(new THREE.CircleGeometry(r*0.84,20),trailMat(THEME.tread));
+      disc.rotation.x=-Math.PI/2; disc.position.set(n.p[0],y+0.06,n.p[1]); worldG.add(disc);
+    }
     const out=[];
     GRAPH.edges.forEach(e=>{
       if(e.a===ni) out.push({e,pts:e.pts});
@@ -472,7 +658,7 @@ function rebuildWorld(){
     const gt=buildGate(th,i);
     // same reasoning as the junction pads above: a trailhead sits at the end of a
     // ribbon, so it needs the ribbon's own (corridor-max) height, not the raw cell.
-    gt.position.y=surfaceY(th.x,th.z,VERT_SCALE,3.5*MAP_SCALE);
+    gt.position.y=standingY(th.x,th.z);
     worldG.add(gt);
   });
 }
@@ -483,6 +669,7 @@ function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a
 function getBackdrop(){ return backdropG; }
 
 export { loadWorld, rebuildWorld, addLayers, clearLayers, hasBundle, setContourStep,
+         standingY, getWorldRevision, pathWidth, getContourStep,
          setThemeById, getTheme, setMapScale, getMapScale, getExaggeration, getBackdrop,
          setFogMultiplier, getFogMultiplier,
          getGraph, getTrailheads, getPOIs, getAreas, getBBox,

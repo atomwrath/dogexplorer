@@ -14,9 +14,13 @@ import { setWildVisible, setWildYaw, spawnWild, spookRadiusFor, topSpeedFor, upd
 
 import { dogRunMul, dogTopSpeed, setDogPos, setDogVisible, setYaw, spawnDog, updateDog } from './dog-driver.js';
 
-import { cameraGroundY, surfaceY } from './terrain.js';
+import { addCamPitch, addCamYaw, addCamZoom, getCamPitch, getCamYaw, getCamZoom, setCamYaw, snapChaseCam, updateChaseCam } from './camera.js';
+import { getCritterStats, spawnCritters, resetCritters, updateCritters, WATCH_SECONDS } from './critters.js';
+import { initMinimap, isBigMapOpen, toggleBigMap, updateMinimap } from './minimap.js';
+import { comicBurst, updateFX } from '../core/fx.js';
+import { cheerBlip, initAudio } from '../core/audio.js';
 
-import { addLayers, clearLayers, getBBox, getBackdrop, getExaggeration, getFogMultiplier, getGraph, getMapScale, hasBundle, getStartHead, getTrailheads, getVertScale, loadWorld, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale } from './world.js';
+import { addLayers, clearLayers, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapScale, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, loadWorld, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY } from './world.js';
 
 import { THEME, THEMES } from './themes.js';
 import { renderer, scene, camera, resize } from '../core/render.js';
@@ -53,12 +57,18 @@ let browseMode = 'dog';     // which roster grid the panel is showing -- indepen
                              // `mode` above, so you can look at Wildlife without it
                              // changing who you're actually playing as until you tap one
 const player = { x:0, z:0, y:0, vy:0, yaw:0, speed:0, dist:0, sneaking:false, barkT:0 };
-let camYaw=0, camPitch=0.32, playing=false;
+
+/* One walk's worth of state. `parked` is the trailhead index you are currently standing
+   at: it suppresses re-triggering the arrival screen every frame while you stand there,
+   and is cleared once you walk away, so coming BACK to the same trailhead counts again.
+   `paused` freezes input and movement while the card is up but keeps rendering, because
+   "Keep exploring" has to drop you exactly where you were rather than at the start. */
+const trip = { startT:0, parked:-1, paused:false, landmarks:[] };
+let playing=false;
 /* Timestamp of the last manual look-drag (performance.now(), not the loop's own `t` --
    pointer events fire outside the loop). While recent, the auto-follow below backs off
    so it doesn't fight a hand that's actively orbiting the camera. */
 let lastLookT=-Infinity;
-const PITCH_MIN=0.05, PITCH_MAX=1.35;   // clamps: never flips under the ground or goes top-down
 let avatarKey='';           // identity of whatever is currently built, for ensureAvatar
 
 function currentTopSpeed(){ return mode==='dog' ? dogTopSpeed() : topSpeedFor(wildKey); }
@@ -87,16 +97,11 @@ function ensureAvatar(){
 }
 
 function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
-  // surfaceY, not terrainY: the trail ribbon is deliberately built on the highest band
-  // across its own width (terrain.js), so the avatar has to read ground the same way or
-  // it visually sinks below the tread anywhere terrain rises to one side of the path --
-  // see terrain.js's surfaceY doc comment for the full story.
-  // 2.6*MAP_SCALE, not the bare default: the trail corridor this has to match shrinks
-  // with the map (world.js scales ribbon width by MAP_SCALE too), so the search radius
-  // must shrink with it -- fixed at 2.6 world units, a heavily compacted map (the
-  // "World scale 1:N" control) would scan a radius many times the map's own size, every
-  // frame.
-  const groundY = surfaceY(player.x, player.z, getVertScale(), 2.6*getMapScale());
+  // standingY, not terrainY: it is the ONE definition of "what am I standing on",
+  // shared with the critters and with everything world.js plants on a path. Off-trail it
+  // is plain terrain; on-trail it reads the tread's own profile out of the spatial hash,
+  // so the avatar can't clip through the ribbon inside the short ramps at a terrace step.
+  const groundY = standingY(player.x, player.z);
   if(mode==='dog'){
     setDogPos(player.x, player.z);
     setYaw(player.yaw);
@@ -123,37 +128,36 @@ function placeAtHead(i){
     player.x=(bb.minx+bb.maxx)/2; player.z=(bb.minz+bb.maxz)/2; player.yaw=0;
   }
   player.y=0; player.vy=0; player.dist=0; player.speed=0;
-  camYaw = Math.atan2(Math.cos(player.yaw), -Math.sin(player.yaw));
+  setCamYaw(Math.atan2(Math.cos(player.yaw), -Math.sin(player.yaw)));
   ensureAvatar();
   const groundY = syncAvatar(0,0,0,0,false,false,false);
-  if(!playing) frameAvatar(groundY);
+  // snap, never ease: placing at a trailhead is a teleport, and springing the camera
+  // across a kilometre of map to catch up reads as a cutscene nobody asked for
+  snapChaseCam(player.x, player.z, groundY, getVertScale(), 13);
   renderStartPicker();
-}
-
-/* In the lobby the camera used to sit at its boot position looking at the origin, so
-   even a correctly-placed avatar was off screen until you pressed Play. Snap the camera
-   behind the avatar instead -- you should be able to see who you picked. */
-function frameAvatar(groundY){
-  const camD=13*camZoom;
-  camera.position.set(
-    player.x-Math.sin(camYaw)*camD*Math.cos(camPitch),
-    groundY+2+camD*Math.sin(camPitch),
-    player.z-Math.cos(camYaw)*camD*Math.cos(camPitch));
-  camera.lookAt(player.x, groundY+1.4, player.z);
 }
 
 /* ---------- input: trail-owned, not core/input.js (that module is wired directly to
    Pup City's player-state/modes/pickups -- creator has its own for the same reason) --- */
-const keys = {};
+const trailKeys = {};
 addEventListener('keydown', e=>{
-  keys[e.code]=true;
+  trailKeys[e.code]=true;
   if(!playing) return;
+  // while the arrival card is up only Escape does anything -- barking or jumping through
+  // a summary screen you can't see the effect of is just confusing
+  if(trip.paused){
+    if(e.code==='Escape') closeArrival();
+    return;
+  }
   if(e.code==='Space'){ e.preventDefault(); if(player.y===0) player.vy=9.5; }
   if(e.code==='KeyC') player.sneaking=!player.sneaking;
-  if(e.code==='KeyB') player.barkT=1;
-  if(e.code==='Escape') exitPlay();
+  if(e.code==='KeyB'){ initAudio(); player.barkT=1; }
+  if(e.code==='KeyM') toggleBigMap();
+  // Esc closes the map first if it's open -- quitting the whole walk because you wanted
+  // to put the map away is the kind of thing you only forgive once
+  if(e.code==='Escape'){ if(isBigMapOpen()) toggleBigMap(false); else exitPlay(); }
 });
-addEventListener('keyup', e=> keys[e.code]=false);
+addEventListener('keyup', e=> trailKeys[e.code]=false);
 
 /* Two independent pointer zones, split by which half of the canvas a drag STARTS in --
    the standard twin-stick split (move on one side, look on the other), which needs no
@@ -183,8 +187,8 @@ addEventListener('pointermove', e=>{
   }else if(look.active && e.pointerId===look.id){
     const dx=e.clientX-look.lastX, dy=e.clientY-look.lastY;
     look.lastX=e.clientX; look.lastY=e.clientY;
-    camYaw -= dx*YAW_SENS;
-    camPitch = clamp(camPitch - dy*PITCH_SENS, PITCH_MIN, PITCH_MAX);
+    addCamYaw(-dx*YAW_SENS);
+    addCamPitch(-dy*PITCH_SENS);
     lastLookT = performance.now();
   }
 });
@@ -194,14 +198,12 @@ const endPointer=e=>{
 };
 addEventListener('pointerup', endPointer); addEventListener('pointercancel', endPointer);
 
-/* Scroll to zoom -- a natural companion to free-look, and cheap: `camZoom` just scales
-   the existing orbit radius (camD) everywhere it's used, both in the lobby framing and
-   the play-loop follow, so this is the only place zoom needs to be taught about. */
-let camZoom=1;
+/* Scroll to zoom. camera.js owns the factor and applies it to the boom length in both
+   the snap and the follow path, so this is the only place zoom needs to be taught about. */
 renderer.domElement.addEventListener('wheel', e=>{
   if(!playing) return;
   e.preventDefault();
-  camZoom = clamp(camZoom + Math.sign(e.deltaY)*0.08, 0.5, 2.2);
+  addCamZoom(Math.sign(e.deltaY)*0.08);
 }, {passive:false});
 
 /* ---------- game loop ---------- */
@@ -214,26 +216,29 @@ function loop(t){
   const bd=getBackdrop();
   if(bd) bd.position.set(camera.position.x, 0, camera.position.z);
 
-  if(!playing || !getGraph()){
-    // idle: no movement, but keep the avatar breathing so the lobby isn't a still frame
+  if(!playing || !getGraph() || trip.paused){
+    // idle, or the arrival card is up: no movement, but keep the avatar breathing so
+    // neither the lobby nor the summary is a still frame. Pausing deliberately keeps the
+    // world rendered -- "Keep exploring" puts you back exactly where you are standing,
+    // and cutting to a blank panel would throw that away.
     if(avatarKey) syncAvatar(dt, t, 0, 0, player.sneaking, false, false);
     renderer.render(scene,camera);
     return;
   }
 
   let ix=0,iz=0,run=false;
-  if(keys.KeyW||keys.ArrowUp) iz-=1;
-  if(keys.KeyS||keys.ArrowDown) iz+=1;
-  if(keys.KeyA||keys.ArrowLeft) ix-=1;
-  if(keys.KeyD||keys.ArrowRight) ix+=1;
-  run=(keys.ShiftLeft||keys.ShiftRight) && !player.sneaking;
+  if(trailKeys.KeyW||trailKeys.ArrowUp) iz-=1;
+  if(trailKeys.KeyS||trailKeys.ArrowDown) iz+=1;
+  if(trailKeys.KeyA||trailKeys.ArrowLeft) ix-=1;
+  if(trailKeys.KeyD||trailKeys.ArrowRight) ix+=1;
+  run=(trailKeys.ShiftLeft||trailKeys.ShiftRight) && !player.sneaking;
   let mag=Math.hypot(ix,iz);
   if(mag>0){ix/=mag;iz/=mag;mag=1;}
   if(stick.active){
     const L=Math.hypot(stick.dx,stick.dy); mag=clamp(L,0,1);
     if(mag>0.06){ix=stick.dx/L;iz=stick.dy/L;run=mag>0.92&&!player.sneaking;} else {ix=iz=0;mag=0;}
   }
-  const fS=Math.sin(camYaw), fC=Math.cos(camYaw);
+  const fS=Math.sin(getCamYaw()), fC=Math.cos(getCamYaw());
   const wx=-fC*ix-fS*iz, wz=fS*ix-fC*iz;
   const moving=mag>0.03&&(wx||wz);
 
@@ -252,8 +257,8 @@ function loop(t){
     // out from under a manual look-drag, which is worse than not auto-following at all.
     if(performance.now()-lastLookT>900){
       const headYaw=Math.atan2(wx/L,wz/L);
-      let dc=headYaw-camYaw; while(dc>Math.PI)dc-=Math.PI*2; while(dc<-Math.PI)dc+=Math.PI*2;
-      camYaw+=dc*Math.min(1,dt*2.2);
+      let dc=headYaw-getCamYaw(); while(dc>Math.PI)dc-=Math.PI*2; while(dc<-Math.PI)dc+=Math.PI*2;
+      addCamYaw(dc*Math.min(1,dt*2.2));
     }
   }
   const bb=getBBox(), F=55;
@@ -264,38 +269,152 @@ function loop(t){
 
   const groundY = syncAvatar(dt,t,player.y,player.speed,player.sneaking,player.barkT>0,run);
 
-  // camGroundY: smoothed terrain height for the camera RIG's own altitude only -- using
-  // the true (stepped) groundY here is what made the camera hop every time the avatar
-  // crossed a terrace cell boundary. lookAt below still targets the exact avatar
-  // position, so the avatar itself stays precisely framed; only the viewpoint's own
-  // bob is damped.
-  const camD=11*camZoom;
-  const camY = cameraGroundY(player.x, player.z, getVertScale());
-  camera.position.lerp(new THREE.Vector3(
-    player.x-Math.sin(camYaw)*camD*Math.cos(camPitch),
-    camY+2+camD*Math.sin(camPitch),
-    player.z-Math.cos(camYaw)*camD*Math.cos(camPitch)
-  ), 1-Math.pow(0.001,dt));
-  camera.lookAt(player.x, groundY+player.y+1.4, player.z);
+  updateChaseCam(dt, player.x, player.z, groundY, player.y, player.speed, getVertScale(), 11);
 
-  // exit at any trailhead once you've walked away from your own start
+  updateCritters(dt, t, player.x, player.z, player.speed, currentTopSpeed(),
+                 player.sneaking, player.barkT>0);
+  updateFX(dt, t);
+  updateMinimap(player.x, player.z, player.yaw);
+  updateTrailHud();
+
+  /* Landmarks. Walking within a few metres of a POI banks it -- there is no interact
+     key, because stopping to press a button is the opposite of what a walk is. */
+  for(const poi of getPOIs()){
+    if(poi.found) continue;
+    if(Math.hypot(poi.x-player.x, poi.z-player.z) < 6){
+      poi.found = true;
+      trip.landmarks.push(poi.name || poi.kind || 'Landmark');
+      comicBurst('\ud83d\udccd ' + (poi.name||'Landmark'), poi.x, groundY+2.2, poi.z, '#e8743a');
+      cheerBlip();
+    }
+  }
+
+  /* Arriving at a trailhead opens the summary instead of quietly ending the walk. The
+     old behaviour dumped you back to the lobby with no idea what you'd done, and with no
+     way to carry on from where you stood. */
   const nh=getTrailheads().reduce((b,h,i)=>{const d=Math.hypot(h.x-player.x,h.z-player.z);
     return(!b||d<b.d)?{d,i}:b;},null);
-  if(nh && nh.d<4.5 && player.dist>20) exitPlay();
+  if(nh){
+    if(nh.d > 12 && trip.parked === nh.i) trip.parked = -1;      // walked away; it re-arms
+    if(nh.d < 5 && player.dist > 20 && trip.parked !== nh.i){
+      trip.parked = nh.i;
+      showArrival(nh.i);
+    }
+  }
 
   renderer.render(scene,camera);
 }
 
 function enterPlay(){
   if(!getGraph()){ return; }
+  initAudio();
   placeAtHead(getStartHead());
+  // fresh population per walk, so the sightings tally means "this trip" rather than
+  // "since you opened the tab"
+  spawnCritters(Date.now());
+  initMinimap();
+  getPOIs().forEach(p=>{ p.found=false; });
+  trip.startT = Date.now();
+  trip.parked = getStartHead();     // don't fire the card at the head you started from
+  trip.paused = false;
+  trip.landmarks.length = 0;
   playing=true;
   document.body.classList.add('play');
+  updateTrailHud();
 }
 function exitPlay(){
   playing=false;
+  trip.paused=false;
+  toggleBigMap(false);
+  closeArrival();
+  resetCritters();
   document.body.classList.remove('play');
   placeAtHead(getStartHead());
+}
+
+/* ---------- trailhead arrival ---------- */
+
+/* Deliberately legible rather than tuned: distance is the base, watching an animal is
+   worth about 300 m of walking, a landmark about 200, and spooking something costs a
+   little. The point is that a slow, quiet walk out-scores a fast noisy one. */
+function tripScore(st){
+  return Math.max(0, Math.round(
+    player.dist*0.2 + st.sightings*60 + trip.landmarks.length*40 - st.spooked*10));
+}
+
+function showArrival(i){
+  const th = getTrailheads()[i];
+  if(!th) return;
+  const st = getCritterStats();
+  trip.paused = true;
+  document.body.classList.add('arrived');
+
+  const secs = Math.max(0, Math.round((Date.now()-trip.startT)/1000));
+  const set = (id, v)=>{ const el=$(id); if(el) el.textContent=v; };
+  set('#arrTitle', 'You reached ' + th.name + '!');
+  set('#arrSub', 'The ' + th.where + ' trailhead \u2014 rest here or head back out.');
+  set('#arrScore', tripScore(st));
+  set('#arrDist', player.dist >= 1000
+      ? (player.dist/1000).toFixed(2)+' km' : Math.round(player.dist)+' m');
+  set('#arrTime', Math.floor(secs/60)+':'+String(secs%60).padStart(2,'0'));
+  set('#arrSeen', st.sightings);
+  set('#arrSpooked', st.spooked);
+
+  const lm = $('#arrLandmarks');
+  if(lm){
+    lm.innerHTML = '';
+    if(!trip.landmarks.length){
+      const n=document.createElement('div'); n.className='none';
+      n.textContent = getPOIs().length
+        ? 'None yet \u2014 there are ' + getPOIs().length + ' waiting out there.'
+        : 'No landmarks on this map \u2014 add a points or polygons layer.';
+      lm.appendChild(n);
+    } else for(const name of trip.landmarks){
+      const r=document.createElement('div'); r.className='arr-row';
+      r.innerHTML = '<span>\ud83d\udccd</span><span></span>';
+      r.children[1].textContent = name;
+      lm.appendChild(r);
+    }
+  }
+  const lg = $('#arrLog');
+  if(lg){
+    lg.innerHTML = '';
+    if(!st.log.length){
+      const n=document.createElement('div'); n.className='none';
+      n.textContent = 'Nothing watched yet \u2014 hold C to sneak and stay still.';
+      lg.appendChild(n);
+    } else for(const e of st.log){
+      const r=document.createElement('div'); r.className='arr-row';
+      r.innerHTML = '<span></span><span></span><span class="n"></span>';
+      r.children[0].textContent = e.emo;
+      r.children[1].textContent = e.nm;
+      r.children[2].textContent = '\u00d7' + e.n;
+      lg.appendChild(r);
+    }
+  }
+}
+
+function closeArrival(){
+  trip.paused=false;
+  document.body.classList.remove('arrived');
+}
+
+/* Sightings / spooked tally plus the watch meter. Cheap enough to run every frame --
+   it's four textContent writes and one style width -- and gating it behind a change
+   check would cost more in bookkeeping than it saves. */
+function updateTrailHud(){
+  const st = getCritterStats();
+  const seen = $('#hudSeen'), oops = $('#hudSpooked'), meter = $('#watchMeter'), fill = $('#watchFill'), name = $('#watchName');
+  if(seen) seen.textContent = '\u2728 ' + st.sightings;
+  if(oops) oops.textContent = '\ud83d\udca8 ' + st.spooked;
+  if(meter){
+    const w = st.watching;
+    meter.classList.toggle('on', !!w);
+    if(w){
+      if(fill) fill.style.width = Math.round(w.progress*100) + '%';
+      if(name) name.textContent = w.progress >= 1 ? w.name + ' spotted!' : 'Watching ' + w.name + '\u2026';
+    }
+  }
 }
 
 /* ---------- UI wiring ----------
@@ -374,8 +493,8 @@ function renderRoster(){
     // every species in the shared roster, theme-appropriate ones first so the list reads
     // as "what you'd meet out here" before "everything that exists"
     const local=(THEME.wildlife||[]);
-    const keys=[...local, ...Object.keys(SPECIES).filter(k=>!local.includes(k))];
-    for(const key of keys){
+    const trailKeys=[...local, ...Object.keys(SPECIES).filter(k=>!local.includes(k))];
+    for(const key of trailKeys){
       if(!SPECIES[key]) continue;
       pupCard(wild, 'wild:'+key, '🦊', SPECIES[key].nm, '', wildBarStats(key), ()=>{ mode='wild'; wildKey=key; });
     }
@@ -439,8 +558,11 @@ function wireScale(){
      used as N directly -- linear would put every value between 1:1 and 1:50 (the range
      most trail networks actually need) into the first 5% of the handle's travel. */
   const map=$('#worldScale'), mapV=$('#worldScaleVal');
+  /* Full 1:1 .. 1:1000. Elevation no longer compacts alongside the footprint, so heavy
+     compaction genuinely steepens the country -- the Hill exaggeration slider (which now
+     reaches 0) is the counterweight, rather than the range being clipped for you. */
   const posToN = t => Math.max(1, Math.round(Math.pow(10, t/1000*3)));   // 0..1000 -> 1..1000
-  const nToPos = n => clamp(Math.log10(Math.max(1,n))/3*1000, 0, 1000);
+  const nToPos = n => clamp(Math.log10(Math.max(1,n))/3*1000, 0, 1000);  // inverse of posToN
   if(map && mapV){
     map.min=0; map.max=1000; map.step=1;
     map.value=nToPos(Math.round(1/getMapScale()));
@@ -453,20 +575,58 @@ function wireScale(){
       placeAtHead(getStartHead());
     });
   }
+  /* Hill exaggeration: 0..2 as asked, but on a SQUARED handle rather than a linear one.
+
+     Linear was unusable in combination with full-range world scale. Elevation no longer
+     compacts with the footprint, so slope steepens in exact proportion: at 1:16 the same
+     hills are sixteen times steeper, and the setting you actually want is around 0.06 --
+     the first three percent of a linear handle's travel. Squaring gives most of the
+     travel to the low end, where the useful values now live, without changing the range.
+
+     The readout says how steep the result is against real-world slope, because that ratio
+     is EXAG / MAP_SCALE and there is no way to guess it from either slider alone. */
   const ex=$('#vertScale'), exV=$('#vertScaleVal');
+  const exToPos = v => clamp(Math.sqrt(Math.max(0,v)/2)*1000, 0, 1000);
+  const posToEx = t => Math.round(2*Math.pow(t/1000, 2)*1000)/1000;
   if(ex && exV){
-    ex.value=getExaggeration();
-    const show=v=>{ exV.textContent = (+v).toFixed(1)+'\u00d7'; };
-    show(ex.value);
-    ex.addEventListener('input', e=> show(e.target.value));
+    ex.min=0; ex.max=1000; ex.step=1;
+    ex.value=exToPos(getExaggeration());
+    const show=v=>{
+      const ratio = v/Math.max(1e-6, getMapScale());
+      const how = v<=0 ? 'flat'
+        : ratio>=1.05 ? Math.round(ratio*10)/10+'\u00d7 real slope'
+        : ratio<=0.95 ? Math.round(10/ratio)/10+'\u00d7 gentler than real'
+        : 'true slope';
+      exV.textContent = (+v).toFixed(2)+'\u00d7 \u2014 '+how;
+    };
+    show(getExaggeration());
+    ex.addEventListener('input', e=> show(posToEx(+e.target.value)));
     ex.addEventListener('change', e=>{
-      setVertScale(+e.target.value);
+      setVertScale(posToEx(+e.target.value));
       show(getExaggeration());
       placeAtHead(getStartHead());
     });
+    // world scale changes the ratio too, so the readout has to follow it
+    $('#worldScale')?.addEventListener('change', ()=> show(getExaggeration()));
   }
   // fog touches scene.fog only -- no rebuild, so it applies live on every `input` tick
   // instead of waiting for `change` the way the two rebuild-triggering sliders above do.
+  /* Contour step. It rebuilds the terrain mesh, so it commits on 'change' (pointer up)
+     rather than 'input' like the cheap fog slider -- dragging it live would rebuild the
+     whole grid on every pixel of handle travel. */
+  const cs=$('#contourStep'), csV=$('#contourVal');
+  if(cs && csV){
+    cs.value=getContourStep();
+    const showC=v=>{ csV.textContent = (+v).toFixed(1)+' m'; };
+    showC(cs.value);
+    cs.addEventListener('input', e=> showC(e.target.value));
+    cs.addEventListener('change', e=>{
+      setContourStep(+e.target.value);
+      showC(getContourStep());
+      placeAtHead(getStartHead());
+    });
+  }
+
   const fog=$('#fogAmt'), fogV=$('#fogAmtVal');
   if(fog && fogV){
     fog.value=getFogMultiplier();
@@ -623,8 +783,13 @@ $('#defaultMapBtn')?.addEventListener('click', async ()=>{
   renderFileChips();
   if(await loadMap(DEFAULT_WORLD, true)){ renderStartPicker(); renderMapStats(); placeAtHead(0); }
 });
+$('#mapBtn')?.addEventListener('click', ()=> toggleBigMap());
+$('#bigmapClose')?.addEventListener('click', ()=> toggleBigMap(false));
+
 $('#playBtn')?.addEventListener('click', enterPlay);
 $('#exitBtn')?.addEventListener('click', exitPlay);
+$('#arrStay')?.addEventListener('click', closeArrival);
+$('#arrFinish')?.addEventListener('click', exitPlay);
 $('#clearLayersBtn')?.addEventListener('click', ()=>{
   loadedFiles=[];
   clearLayers();
@@ -695,7 +860,16 @@ async function loadFiles(files){
   placeAtHead(0);
 }
 
-export { boot, enterPlay, exitPlay, placeAtHead };
+/* Test seams. build.py flattens every module into one classic script, where top-level
+   `let`/`const` bindings are NOT reachable from outside but function declarations are --
+   so tools/smoke.js can call getGraph() but could never see `playing` or `player`. These
+   three exist so the harness can drive and inspect a walk without main.js having to
+   promote its state to globals. */
+function trailIsPlaying(){ return playing; }
+function getTrailPlayer(){ return player; }
+function getTripState(){ return trip; }
+
+export { boot, enterPlay, exitPlay, placeAtHead, trailIsPlaying, getTrailPlayer, getTripState };
 
 // auto-boot from a `?world=` query param, or wait for the panel's own load button
 {

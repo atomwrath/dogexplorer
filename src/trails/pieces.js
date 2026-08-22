@@ -134,9 +134,16 @@ function gateText(letter,name){
   const t=new THREE.CanvasTexture(c);t.minFilter=THREE.LinearFilter;return t;
 }
 /* A walk-through arch straddling the trail at each outer end — this is the exit. */
+/* Scaled as a whole rather than by editing every dimension: the arch was modelled at
+   about 4.3 m tall with a 5.5 m beam, which suited the old fire-road-width trails and
+   towers over a metre-wide footpath. 0.55 puts the beam at roughly 2.4 m -- a trailhead
+   arch you could walk under. Scaling the group works because its origin sits on the
+   ground, so everything shrinks toward the feet rather than floating. */
+const GATE_SCALE = 0.55;
 function buildGate(h,i){
   const g=new THREE.Group();
   g.position.set(h.x,0,h.z);
+  g.scale.setScalar(GATE_SCALE);
   g.rotation.y=h.yaw; // +X of the group runs up the trail, so posts sit on ±Z
   const wood=toon('#7a4e28'),beamC=toon('#8a5c30');
   for(const sd of[-1,1]){

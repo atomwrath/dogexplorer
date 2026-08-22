@@ -65,17 +65,26 @@ Edit anything under `src/` and reload. No bundler, no node_modules, no watch pro
 - **Horizontal map scale belongs to `World`,** not the game layer. `World.setMapScale()`
   re-derives the projection *and* the DEM cell grid from the bundle constants together;
   scaling one without the other decouples vectors from terrain.
-- **`surfaceY`, not `terrainY`, for anything standing ON a trail.** Trail ribbons are
-  deliberately built on the highest terrace band across their own width
-  (`stationHeights`), so a taller neighbouring cell can never poke through the tread —
-  but that means the ribbon's visual height can sit above the exact per-cell height at
-  its centreline. The avatar, trailhead gates and junction signs/pads all read ground
-  through `terrain.js`'s `surfaceY()` (same corridor-max logic, as a point query) for
-  exactly this reason; using raw `terrainY` for any of them visually buries it under the
-  ribbon the moment terrain rises to one side of the path. `cameraGroundY()` is a THIRD,
-  separate height source — distance-weighted average, not max — used only for the
-  camera rig's own altitude, so its viewpoint doesn't hop at every terrace step the way
-  reading `surfaceY`/`terrainY` directly would.
+- **`standingY()`, not `terrainY`, for anything standing ON a trail.** Trail ribbons are
+  clamped to the ground and split at every terrace crossing (`terrain.js`'s
+  `treadProfile`), so the tread has its own honest height that differs from the raw cell
+  height only inside the short ramp at each step. `world.js`'s `standingY()` is the ONE
+  answer to "what am I standing on": raw terrain off-trail, the tread's interpolated
+  height inside a corridor. The avatar, the critters, trailhead gates and junction
+  signs/pads all read it, and they must all read the SAME one — the previous split
+  (ribbons on a corridor maximum, avatar on a smaller-radius maximum) is what let the pup
+  sink into the tread. `cameraGroundY()` is a separate height source — distance-weighted
+  average, not max — used ONLY for the camera rig's own altitude.
+- **One tread profile per edge, shared by every consumer.** `e.prof` is measured once per
+  rebuild and used by all six ribbon layers, the spatial hash and `standingY`. When the
+  layers each sampled terrain at their own slightly-offset vertices they disagreed by a
+  whole terrace at any step and z-fought down the length of the trail.
+- **Lengths in `src/trails/` scale with `MAP_SCALE`,** including ones that look like pure
+  geometry constants. The tread ramp was a fixed 0.35 world units; at 1:32 that is longer
+  than a whole DEM cell, so the two vertices straddling a crossing clamp past each other
+  and one gets labelled with the band it just left — a silent one-terrace error that only
+  appears on a compacted map. `tools/smoke.js` asserts every ribbon vertex sits on its own
+  terrace, which is how that was caught.
 - **Ground texture UV is absolute world x/z, tiled at a fixed metre size**
   (`GROUND_TILE_M` in `terrain.js`), not normalised to the map's own bounding box. The
   bounding-box version stretches one non-repeating image over the entire terrain — every

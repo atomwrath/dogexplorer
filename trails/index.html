@@ -45,13 +45,22 @@
           <input type="range" id="worldScale" min="0" max="1000" step="1" value="0">
         </div>
         <div class="ctl">
-          <label>Hill exaggeration <span class="val" id="vertScaleVal">1.8×</span></label>
-          <input type="range" id="vertScale" min="0.3" max="4" step="0.1" value="1.8">
+          <label>Hill exaggeration <span class="val" id="vertScaleVal">1.00×</span></label>
+          <input type="range" id="vertScale" min="0" max="1000" step="1" value="707">
+        </div>
+        <div class="ctl">
+          <label>Contour step <span class="val" id="contourVal">3.0 m</span></label>
+          <input type="range" id="contourStep" min="0.5" max="12" step="0.5" value="3">
         </div>
         <p class="hint"><b>World scale 1 : N</b> — 1:1 is true size (a 953 m sign means 953
           real metres); a bigger N packs the whole network into a smaller, quicker walk.
           Your pup's own size never changes, only the ground around it does.
-          <b>Hill exaggeration</b> only stretches height.</p>
+          <b>Hill exaggeration</b> only stretches height — 0 flattens the map completely.
+          It is independent of world scale, which means compacting the map really does
+          steepen it: at 1:16 the same hills are 16× steeper, so drop exaggeration to
+          about 1/16 to keep slopes looking real. The readout tells you where you are.
+          <b>Contour step</b> is how many metres of real elevation each terrace is worth:
+          smaller means finer, more numerous steps.</p>
         <div class="statbox" id="mapStats"></div>
         <div id="trailList" class="trail-list"></div>
         <p class="hint" id="mapNote">Loading map…</p>
@@ -102,6 +111,47 @@
       <canvas id="c"></canvas>
       <div id="playHud">
         <button class="btn small" id="exitBtn">← Trailhead</button>
+        <div id="hudTally">
+          <span class="tally" id="hudSeen" title="Wildlife watched">✨ 0</span>
+          <span class="tally" id="hudSpooked" title="Wildlife you sent running">💨 0</span>
+        </div>
+        <div id="watchMeter">
+          <span id="watchName">Watching…</span>
+          <span class="wm-bar"><i id="watchFill"></i></span>
+        </div>
+      </div>
+      <div id="miniWrap">
+        <canvas id="minimap"></canvas>
+        <button class="btn small" id="mapBtn" title="Full map (M)">🗺</button>
+      </div>
+      <div id="arrivalWrap">
+        <div id="arrivalCard">
+          <h2 id="arrTitle">You reached the trailhead!</h2>
+          <p class="arr-sub" id="arrSub"></p>
+          <div class="arr-score"><b id="arrScore">0</b><span>trail score</span></div>
+          <div class="arr-grid">
+            <div class="arr-stat"><b id="arrDist">0 m</b><span>explored</span></div>
+            <div class="arr-stat"><b id="arrTime">0:00</b><span>on the trail</span></div>
+            <div class="arr-stat"><b id="arrSeen">0</b><span>animals watched</span></div>
+            <div class="arr-stat"><b id="arrSpooked">0</b><span>animals spooked</span></div>
+          </div>
+          <div class="arr-panel">
+            <h3>📍 Landmarks found</h3>
+            <div id="arrLandmarks"></div>
+          </div>
+          <div class="arr-panel">
+            <h3>👀 Sightings log</h3>
+            <div id="arrLog"></div>
+          </div>
+          <div class="arr-actions">
+            <button class="btn" id="arrStay">↩ Keep exploring</button>
+            <button class="btn primary" id="arrFinish">✓ Finish here</button>
+          </div>
+        </div>
+      </div>
+      <div id="bigmapWrap">
+        <canvas id="bigmap"></canvas>
+        <button class="btn small" id="bigmapClose">✕ Close map</button>
       </div>
     </div>
   </main>

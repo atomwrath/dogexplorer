@@ -102,3 +102,75 @@ body.play #playHud{display:block;}
 .pupcard .pc-bar i{display:block;height:100%;border-radius:2px;}
 .pupcard .pc-bar.speed i{background:var(--blue);}
 .pupcard .pc-bar.spook i{background:var(--pink);}
+
+/* --- play HUD: wildlife tally + watch meter ---------------------------------
+   Both live inside #playHud, so the existing `body.play` rule already handles
+   showing and hiding them; nothing here needs its own visibility state. */
+#hudTally{display:flex;gap:6px;margin-top:8px;}
+.tally{background:var(--card);border:3px solid var(--ink);border-radius:11px;
+  padding:4px 10px;font-size:13px;font-weight:bold;}
+#watchMeter{display:none;align-items:center;gap:8px;margin-top:8px;max-width:240px;
+  background:var(--card);border:3px solid var(--ink);border-radius:12px;padding:5px 10px;
+  font-size:12px;font-weight:bold;}
+#watchMeter.on{display:flex;}
+#watchMeter .wm-bar{flex:1;height:8px;border-radius:4px;background:#e2d5bd;overflow:hidden;}
+#watchMeter .wm-bar i{display:block;height:100%;width:0;background:var(--orange);
+  border-radius:4px;transition:width .12s linear;}
+
+/* --- corner minimap ---------------------------------------------------------
+   A disc rather than a rectangle: it reads as a spyglass onto the paper map
+   instead of a second screen, and the circular clip in minimap.js means the
+   corners never show a hard cut through the terrain image. */
+#miniWrap{position:absolute;top:10px;right:10px;display:none;flex-direction:column;
+  align-items:center;gap:6px;}
+body.play #miniWrap{display:flex;}
+body.bigmap #miniWrap{display:none;}
+#minimap{width:172px;height:172px;border-radius:50%;border:4px solid var(--ink);
+  background:#e9dcbe;box-shadow:0 3px 0 rgba(61,42,32,.25);display:block;}
+
+/* --- full-sheet map --- */
+#bigmapWrap{position:absolute;inset:0;display:none;z-index:8;background:rgba(45,32,22,.55);
+  padding:14px;box-sizing:border-box;}
+body.bigmap #bigmapWrap{display:block;}
+#bigmap{width:100%;height:100%;display:block;border:4px solid var(--ink);border-radius:16px;
+  background:#e9dcbe;box-sizing:border-box;}
+#bigmapClose{position:absolute;top:24px;left:24px;}
+
+@media (max-width:760px){
+  #minimap{width:118px;height:118px;}
+  #miniWrap{top:8px;right:8px;}
+  #watchMeter{max-width:190px;}
+}
+
+/* --- trailhead arrival screen ------------------------------------------------
+   Shown when you walk into a trailhead mid-walk. Deliberately a card over the
+   live scene rather than a return to the lobby: "Keep exploring" has to put you
+   back exactly where you were standing, so the world stays rendered behind it. */
+#arrivalWrap{position:absolute;inset:0;display:none;z-index:12;
+  background:rgba(45,32,22,.5);overflow:auto;padding:18px;box-sizing:border-box;}
+body.arrived #arrivalWrap{display:flex;align-items:flex-start;justify-content:center;}
+#arrivalCard{background:var(--card);border:4px solid var(--ink);border-radius:22px;
+  box-shadow:0 6px 0 rgba(61,42,32,.3);padding:20px;max-width:460px;width:100%;
+  margin:auto;box-sizing:border-box;}
+#arrivalCard h2{margin:0 0 2px;font-size:26px;}
+#arrivalCard .arr-sub{margin:0 0 14px;color:#7b6653;font-size:14px;}
+.arr-score{background:var(--orange);border:3px solid var(--ink);border-radius:14px;
+  padding:12px;text-align:center;margin-bottom:10px;}
+.arr-score b{display:block;font-size:40px;color:#fff;line-height:1;}
+.arr-score span{font-size:13px;font-weight:bold;color:#fff8e6;}
+.arr-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;}
+.arr-stat{background:#f7efdd;border:3px solid var(--ink);border-radius:14px;padding:10px 12px;}
+.arr-stat b{display:block;font-size:22px;line-height:1.1;}
+.arr-stat span{font-size:12px;color:#7b6653;}
+.arr-panel{background:#f7efdd;border:3px solid var(--ink);border-radius:14px;
+  padding:10px 12px;margin-bottom:10px;}
+.arr-panel h3{margin:0 0 6px;font-size:15px;}
+.arr-panel .none{color:#8d7a66;font-size:13px;}
+.arr-row{display:flex;align-items:center;gap:8px;font-size:14px;padding:2px 0;}
+.arr-row .n{margin-left:auto;color:var(--orange);font-weight:bold;}
+.arr-actions{display:flex;gap:10px;}
+.arr-actions .btn{flex:1;}
+@media (max-width:520px){
+  #arrivalCard h2{font-size:21px;}
+  .arr-score b{font-size:32px;}
+}

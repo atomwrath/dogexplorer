@@ -1,0 +1,1725 @@
+diff --git a/README.md b/README.md
+index 7e3fccf..1621a07 100644
+--- a/README.md
++++ b/README.md
+@@ -65,17 +65,36 @@ Edit anything under `src/` and reload. No bundler, no node_modules, no watch pro
+ - **Horizontal map scale belongs to `World`,** not the game layer. `World.setMapScale()`
+   re-derives the projection *and* the DEM cell grid from the bundle constants together;
+   scaling one without the other decouples vectors from terrain.
+-- **`surfaceY`, not `terrainY`, for anything standing ON a trail.** Trail ribbons are
+-  deliberately built on the highest terrace band across their own width
+-  (`stationHeights`), so a taller neighbouring cell can never poke through the tread —
+-  but that means the ribbon's visual height can sit above the exact per-cell height at
+-  its centreline. The avatar, trailhead gates and junction signs/pads all read ground
+-  through `terrain.js`'s `surfaceY()` (same corridor-max logic, as a point query) for
+-  exactly this reason; using raw `terrainY` for any of them visually buries it under the
+-  ribbon the moment terrain rises to one side of the path. `cameraGroundY()` is a THIRD,
+-  separate height source — distance-weighted average, not max — used only for the
+-  camera rig's own altitude, so its viewpoint doesn't hop at every terrace step the way
+-  reading `surfaceY`/`terrainY` directly would.
++- **Trails are graded corridors, not stepped ribbons.** `terrain.js`'s `gradeProfile()`
++  smooths the DEM along each centreline into a continuous height, and `gradeTrailCells()`
++  writes that height back into the band grid as a **fractional** band. `BAND` is a
++  `Float32Array` for exactly this reason: whole bands away from paths (terraced country),
++  fractional bands under them (a graded bench). The cut bank and fill embankment are then
++  just ordinary risers between a fractional cell and a whole-numbered one, so
++  `buildTerrainMesh` already draws them — no skirts, no second mesh, no holes to stitch.
++- **Pin edge ends with a decaying offset, never by blending toward raw height.** Both ends
++  of every profile must land on the node's raw band so edges meeting at a junction agree.
++  Blending toward raw does that but re-imports the quantised steps into the last window's
++  worth of every edge — a full 5.4-unit cliff right where trails converge. Add a decaying
++  offset to the smooth curve instead. `tools/smoke.js` asserts no rise between consecutive
++  vertices exceeds a third of a terrace step.
++- **`standingY()`, not `terrainY`, for anything standing ON a trail.** One answer to "what
++  am I standing on": raw terrain off-trail, the tread's interpolated height inside a
++  corridor. Avatar, critters, trailhead gates and junction pads all read it, and must all
++  read the SAME one — the previous split (ribbons on a corridor maximum, avatar on a
++  smaller-radius maximum) is what let the pup sink into the tread. `cameraGroundY()` is a
++  separate source — distance-weighted average, not max — used only for the camera rig.
++- **One profile per edge, shared by every consumer.** `e.prof` is measured once per rebuild
++  and used by all six ribbon layers, the spatial hash, the bench carve and `standingY`.
++  When the layers each sampled terrain at their own offset vertices they disagreed by a
++  whole terrace at any step and z-fought down the length of the trail.
++- **World scale compacts positions only.** `VERT_SCALE` is `EXAG` alone — deliberately NOT
++  multiplied by `MAP_SCALE`. "World scale 1:N" shortens the walk; it is not a zoom. Sizes
++  stay in true metres (pup, trees, rocks, tread width, hill height) and only the spacing
++  between features shrinks. The consequence is that relief is preserved while footprint
++  shrinks, so terrain steepens as you compact — which is why N is capped at 8. Distances
++  *between* true-size things (critter spook radii) are unscaled too; positions *on* the
++  network (graph snap tolerances, critter placement offsets, fog) still scale.
+ - **Ground texture UV is absolute world x/z, tiled at a fixed metre size**
+   (`GROUND_TILE_M` in `terrain.js`), not normalised to the map's own bounding box. The
+   bounding-box version stretches one non-repeating image over the entire terrain — every
+diff --git a/src/trails/camera.js b/src/trails/camera.js
+new file mode 100644
+index 0000000..b40e48c
+--- /dev/null
++++ b/src/trails/camera.js
+@@ -0,0 +1,136 @@
++/* The chase camera, lifted out of main.js so the vertical behaviour can be reasoned
++   about on its own -- it was the whole problem.
++
++   WHY THE OLD ONE FELT WRONG going up and down. Three separate causes stacked:
++
++   1. The look target read the avatar's TRUE ground height, which on a terraced mesh
++      jumps a full contour step the instant you cross a cell boundary. The rig's own
++      altitude was smoothed (cameraGroundY) but the target was not, so every step
++      snapped the camera's PITCH -- and a pitch snap is far more noticeable than a
++      position snap, because it moves the whole horizon.
++   2. Position used a plain exponential lerp with the same rate on all three axes. That
++      is fine for the horizontal chase, where the target moves continuously, but on the
++      vertical it turns a step input into a visible exponential lurch: fastest at the
++      moment of the step, which is exactly when you notice it.
++   3. Nothing checked the ground under the CAMERA. Walking uphill, the rig sat at a
++      height derived from the avatar's position and promptly buried itself in the slope
++      behind, so the view clipped into terrain on every climb.
++
++   The fixes, in order: spring the look target instead of tracking it rigidly; use a
++   critically damped spring (not a lerp) on the rig's height, so a step produces an
++   ease-in AND an ease-out with no overshoot; and lift the rig whenever the ground
++   beneath it demands clearance.
++
++   Yaw/pitch/zoom live here too, since they're camera state -- main.js's pointer handlers
++   drive them through this module's accessor functions rather than owning the variables. */
++import { clamp, lerp } from '../core/math.js';
++import { camera } from '../core/render.js';
++import { cameraGroundY } from './terrain.js';
++
++const PITCH_MIN = 0.05, PITCH_MAX = 1.35;  // never flips under the ground or goes top-down
++
++let camYawV = 0, pitch = 0.32, zoom = 1;
++let rigY = 0, rigVY = 0;                    // spring state for the rig's own altitude
++let lookY = 0, lookVY = 0;                  // spring state for the look target's height
++const camLook = new THREE.Vector3();
++let primed = false;                         // false until the first snap(), so the very
++                                            // first frame doesn't spring in from origin
++
++function getCamYaw(){ return camYawV; }
++function setCamYaw(v){ camYawV = v; }
++function addCamYaw(d){ camYawV += d; }
++function getCamPitch(){ return pitch; }
++function addCamPitch(d){ pitch = clamp(pitch + d, PITCH_MIN, PITCH_MAX); }
++function getCamZoom(){ return zoom; }
++function addCamZoom(d){ zoom = clamp(zoom + d, 0.5, 2.2); }
++
++/* Critically damped implicit spring. Implicit rather than the usual explicit form
++   because a browser tab that loses focus hands back a huge first dt, and the explicit
++   version diverges spectacularly on one -- the camera launches into orbit and never
++   comes back. This one is unconditionally stable at any dt. Returns [position, velocity]. */
++function spring(x, v, target, dt, omega){
++  const f = 1 + 2*dt*omega;
++  const oo = omega*omega, hoo = dt*oo, hhoo = dt*hoo;
++  const detInv = 1/(f + hhoo);
++  return [(f*x + dt*v + hhoo*target)*detInv, (v + hoo*(target - x))*detInv];
++}
++
++/* Where the rig wants to be for a given focus point and boom length. */
++function orbitPoint(x, y, z, dist){
++  return [x - Math.sin(camYawV)*dist*Math.cos(pitch),
++          y + dist*Math.sin(pitch),
++          z - Math.cos(camYawV)*dist*Math.cos(pitch)];
++}
++
++/* Teleport the camera into position with no easing: trailhead placement, mode switches,
++   and the lobby preview, where springing in from wherever the camera happened to be
++   reads as a swoop nobody asked for. */
++function snapChaseCam(px, pz, groundY, vertScale, dist = 13){
++  const d = dist*zoom;
++  rigY = groundY; rigVY = 0;
++  lookY = groundY + 1.4; lookVY = 0;
++  const [cx, cy, cz] = orbitPoint(px, rigY + 2, pz, d);
++  camera.position.set(cx, cy, cz);
++  camLook.set(px, lookY, pz);
++  camera.lookAt(camLook);
++  primed = true;
++  void vertScale;
++}
++
++/* One frame of follow.
++     px,pz      avatar position
++     groundY    the surface the avatar is standing on (world.js standingY)
++     jumpY      hop offset, already included in the avatar's rendered height
++     speed      current ground speed, m/s -- used only for the framing nudge below
++     vertScale  world.js's exaggeration, needed to sample terrain under the rig itself */
++function updateChaseCam(dt, px, pz, groundY, jumpY, speed, vertScale, dist = 11){
++  if(!primed){ snapChaseCam(px, pz, groundY, vertScale, dist); return; }
++
++  /* Rig altitude. cameraGroundY is already the terrain smoothed over a few cells, so
++     this spring is smoothing a smooth signal -- deliberately. The first pass removes the
++     step's spatial abruptness, this one removes its temporal abruptness, and it takes
++     both to stop a contour crossing registering as a bump. */
++  const targetRigY = cameraGroundY(px, pz, vertScale) + 2;
++  [rigY, rigVY] = spring(rigY, rigVY, targetRigY, dt, 3.1);
++
++  /* Look target height. Springs toward the avatar's real head height -- the avatar stays
++     precisely framed in the steady state, but a terrace step no longer whips the pitch.
++     Faster than the rig (omega 5.2 vs 3.1) so the subject settles before the viewpoint
++     does, which is the order that reads as a camera operator following someone rather
++     than the world lurching. */
++  const targetLookY = groundY + jumpY + 1.4;
++  [lookY, lookVY] = spring(lookY, lookVY, targetLookY, dt, 5.2);
++
++  /* Ease the boom out a little at speed. Small on purpose: enough to widen the frame
++     when the pup breaks into a run, not enough to read as a zoom. */
++  const d = dist*zoom*(1 + clamp(speed, 0, 8)*0.022);
++
++  const [gx, gy, gz] = orbitPoint(px, rigY, pz, d);
++
++  /* Horizontal chase stays an exponential lerp -- the target moves continuously there,
++     so there's nothing to smooth out and a spring would only add lag. */
++  const k = 1 - Math.pow(0.0016, dt);
++  camera.position.x = lerp(camera.position.x, gx, k);
++  camera.position.z = lerp(camera.position.z, gz, k);
++  camera.position.y = lerp(camera.position.y, gy, k);
++
++  /* Ground clearance under the RIG, not under the avatar. Climbing a slope, the point
++     behind and below the pup can be inside the hillside; without this the view clips
++     through terrain on exactly the ascents this game is made of. Pushing up (rather than
++     pulling the boom in) keeps the framing distance stable, so it reads as the camera
++     rising over a crest instead of snapping closer. Asymmetric response -- rise quickly
++     to avoid the clip, sink back slowly -- so cresting a ridge doesn't drop the camera
++     back down faster than the ground does. */
++  const clearance = cameraGroundY(camera.position.x, camera.position.z, vertScale) + 1.6;
++  if(camera.position.y < clearance){
++    camera.position.y = lerp(camera.position.y, clearance, 1 - Math.pow(0.0005, dt));
++  }
++
++  camLook.x = lerp(camLook.x, px, 1 - Math.pow(0.0005, dt));
++  camLook.z = lerp(camLook.z, pz, 1 - Math.pow(0.0005, dt));
++  camLook.y = lookY;
++  camera.lookAt(camLook);
++}
++
++export { updateChaseCam, snapChaseCam, getCamYaw, setCamYaw, addCamYaw,
++         getCamPitch, addCamPitch, getCamZoom, addCamZoom, PITCH_MIN, PITCH_MAX };
+diff --git a/src/trails/critters.js b/src/trails/critters.js
+new file mode 100644
+index 0000000..f5fba72
+--- /dev/null
++++ b/src/trails/critters.js
+@@ -0,0 +1,256 @@
++/* Wildlife you meet ON the trail -- as distinct from wild-driver.js, which is the animal
++   you PLAY as. Two different jobs, so two modules: this one owns a population with its
++   own AI, that one owns a single player-controlled rig.
++
++   Not a reuse of city/animals.js, though the behaviour rhymes. That module is welded to
++   downtown: pointBlocked/inWater/LEVEL/ENV for its world, play/modes for its game state,
++   ui.js for its HUD, and a scoring model where scaring things IS the objective. Out here
++   the objective is the opposite -- the interesting verb is getting close enough to watch
++   something without it noticing, and chasing it off is the failure case you can also
++   choose on purpose. What IS shared is everything that should be: the rig
++   (makeAnimalModel), the alert bubble, the stats table (SPECIES) and the spook-radius
++   curve (spookRadiusFor), all imported rather than re-derived.
++
++   THE TWO VERBS
++     Watch  -- hold still inside a critter's notice radius without spooking it, and a
++               meter fills. Sneaking (C) roughly triples how close you can get, which is
++               what makes the sneak button worth pressing on a trail.
++     Chase  -- run at one, or bark, and it bolts. Counted separately from sightings,
++               because the game should be able to tell you which kind of walk you had. */
++import { clamp, lerp, mulberry32 } from '../core/math.js';
++import { scene, disposeGroup } from '../core/render.js';
++import { makeAnimalModel, makeAlert } from '../city/animal-models.js';
++import { comicBurst } from '../core/fx.js';
++import { cheerBlip, yipHigh } from '../core/audio.js';
++import { SPECIES } from '../data/species.js';
++import { spookRadiusFor } from './wild-driver.js';
++import { makeShadow } from './pieces.js';
++import { THEME } from './themes.js';
++import { getBBox, getGraph, getMapScale, standingY } from './world.js';
++
++const CRITTERS = [];              // live population; cleared in place, never reassigned
++let sightings = 0, spooked = 0;
++let watchBest = null;             // {name, progress 0..1} for the HUD meter, per frame
++
++const WATCH_SECONDS = 3.2;        // how long you must hold still to bank a sighting
++const POPULATION = 14;
++
++function getCritters(){ return CRITTERS; }
++function getCritterStats(){ return {sightings, spooked, watching: watchBest}; }
++
++/* Cleared in place. Other modules (minimap.js) hold this same array reference, and
++   reassigning it here would leave them reading a detached copy forever -- the repo's
++   one load-bearing mutation rule, and it applies to new arrays as much as old ones. */
++function resetCritters(){
++  while(CRITTERS.length){
++    const c = CRITTERS.pop();
++    scene.remove(c.g); disposeGroup(c.g);
++  }
++  sightings = 0; spooked = 0; watchBest = null;
++}
++
++/* Somewhere plausible for an animal to be: near enough to a trail that you'll actually
++   run into it, far enough off it that it isn't standing in the tread. Sampling along the
++   graph rather than uniformly over the bbox matters on a real map -- a trail network
++   covers a small fraction of its own bounding box, and uniform scatter puts most of the
++   wildlife somewhere you will never walk. */
++function pickSpot(rnd){
++  const G = getGraph();
++  const bb = getBBox();
++  if(!G || !G.edges.length) return null;
++  const S = getMapScale();
++  for(let attempt = 0; attempt < 30; attempt++){
++    const e = G.edges[Math.floor(rnd()*G.edges.length)];
++    if(!e || e.pts.length < 2) continue;
++    const i = Math.floor(rnd()*(e.pts.length-1));
++    const a = e.pts[i], b = e.pts[i+1], t = rnd();
++    const x0 = a[0]+(b[0]-a[0])*t, z0 = a[1]+(b[1]-a[1])*t;
++    const ang = rnd()*Math.PI*2, r = (9 + rnd()*26)*S;
++    const x = x0 + Math.cos(ang)*r, z = z0 + Math.sin(ang)*r;
++    if(x < bb.minx || x > bb.maxx || z < bb.minz || z > bb.maxz) continue;
++    return {x, z};
++  }
++  return null;
++}
++
++function placeCritter(key, rnd){
++  const S = SPECIES[key];
++  if(!S) return;
++  const spot = pickSpot(rnd);
++  if(!spot) return;
++  const model = makeAnimalModel(key, rnd);
++  model.g.scale.setScalar(S.scale);
++  const alert = makeAlert();
++  alert.position.y = S.scale*1.6 + 0.55;
++  alert.visible = false;
++  model.g.add(alert);
++  // the shadow is what sells "standing on that terrace" over "hovering near it" -- the
++  // same reason pieces.js built it for the POI props
++  const shadow = makeShadow(0.55*S.scale);
++  shadow.position.y = 0.02;
++  model.g.add(shadow);
++  scene.add(model.g);
++  CRITTERS.push({
++    key, S, g: model.g, refs: model.refs, alert,
++    hopper: !!S.hopper,
++    x: spot.x, z: spot.z, y: standingY(spot.x, spot.z), yaw: rnd()*6.28,
++    state: 'graze', timer: rnd()*3, walkPh: rnd()*6, hop: rnd()*6,
++    target: {x: spot.x, z: spot.z},
++    home: {x: spot.x, z: spot.z},
++    watchT: 0, sighted: false, fledT: 0,
++  });
++}
++
++/* Roster comes from the theme, so a red-rock map gets bighorn and a forest gets bears --
++   the same list that already drives the scenery, rather than a second parallel one. */
++function spawnCritters(seed){
++  resetCritters();
++  const G = getGraph();
++  if(!G || !G.edges.length) return;
++  const rnd = mulberry32((seed|0) || 20260821);
++  const roster = (THEME.wildlife && THEME.wildlife.length) ? THEME.wildlife : ['rabbit','squirrel','deer'];
++  for(let i = 0; i < POPULATION; i++) placeCritter(roster[i % roster.length], rnd);
++}
++
++/* Move one critter toward a point; returns remaining distance. No obstacle map out here
++   (there is no pointBlocked on a trail map), so this is a straight seek with a bbox
++   clamp -- open country, nothing to steer around but the scenery. */
++function seek(c, tx, tz, sp, dt){
++  const dx = tx - c.x, dz = tz - c.z;
++  const dist = Math.hypot(dx, dz) || 1e-4;
++  const ang = Math.atan2(dz, dx);
++  c.x += Math.cos(ang)*sp*dt;
++  c.z += Math.sin(ang)*sp*dt;
++  c.yaw = Math.atan2(-Math.sin(ang), Math.cos(ang));
++  return dist;
++}
++
++function wanderTarget(c, rnd){
++  const S = getMapScale();
++  // *S: this is a POSITION on the compacted network, so it shrinks with it. The spook and
++  // notice radii below deliberately do not -- those are distances between the pup and an
++  // animal, both of which stay true size at any world scale.
++  const ang = rnd()*Math.PI*2, r = (2 + rnd()*7)*S;
++  return {x: c.home.x + Math.cos(ang)*r, z: c.home.z + Math.sin(ang)*r};
++}
++
++function bolt(c, px, pz){
++  if(c.state === 'flee') return;
++  c.state = 'flee';
++  c.fledT = 0;
++  const away = Math.atan2(c.z - pz, c.x - px);
++  c.target = {x: c.x + Math.cos(away)*140, z: c.z + Math.sin(away)*140};
++  c.alert.visible = true;
++  c.watchT = 0;
++  spooked++;
++  yipHigh(0.7);
++}
++
++/* Per frame. `topSpeed` is the player's own top speed, so "how fast am I moving" is
++   normalised against the animal you happen to be playing as -- a sprinting moose and a
++   sprinting rabbit should be equally alarming. */
++function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
++  const rnd = Math.random;
++  const S = getMapScale();
++  const bb = getBBox();
++  watchBest = null;
++
++  for(let i = CRITTERS.length - 1; i >= 0; i--){
++    const c = CRITTERS[i];
++    const dx = c.x - px, dz = c.z - pz;
++    const dist = Math.hypot(dx, dz);
++
++    /* How loud you are right now. Sneaking is the whole point of the mechanic, so it
++       gets the biggest single multiplier; barking overrides everything, because a bark
++       should always cost you the animal you were creeping up on. */
++    const pace = clamp(speed/Math.max(0.1, topSpeed), 0, 1);
++    const noise = barking ? 2.4 : (sneaking ? 0.34 : 0.55 + pace*1.15);
++    const spookR = spookRadiusFor(c.key)*noise;
++    const noticeR = spookRadiusFor(c.key)*2.4;
++
++    if(c.state !== 'flee'){
++      if(dist < spookR){
++        bolt(c, px, pz);
++      }else if(dist < noticeR){
++        /* Watchful: it has clocked you and is standing, head up, facing you. Holding
++           this state is what banks a sighting -- so the reward for sneaking is that the
++           watchful window exists at all, instead of going straight to flee. */
++        c.state = 'watchful';
++        c.yaw = Math.atan2(dz, -dx);
++        c.alert.visible = true;
++        if(!c.sighted){
++          c.watchT += dt;
++          const p = clamp(c.watchT/WATCH_SECONDS, 0, 1);
++          if(!watchBest || p > watchBest.progress) watchBest = {name: c.S.nm, progress: p};
++          if(c.watchT >= WATCH_SECONDS){
++            c.sighted = true;
++            sightings++;
++            comicBurst('✨ ' + c.S.nm + '!', c.x, c.y + c.S.scale*1.7, c.z, '#ffd94a');
++            cheerBlip();
++          }
++        }
++      }else if(c.state === 'watchful'){
++        c.state = 'graze';
++        c.alert.visible = false;
++        c.watchT = Math.max(0, c.watchT - dt*0.6);   // decays, so you can't bank it in sips
++        c.target = wanderTarget(c, rnd);
++      }
++    }
++
++    if(c.state === 'flee'){
++      c.fledT += dt;
++      seek(c, c.target.x, c.target.z, c.S.speed*2.9, dt);
++      // gone: respawn somewhere else on the network so the map doesn't slowly empty out
++      if(c.fledT > 7 || dist > 130 ||
++         c.x < bb.minx || c.x > bb.maxx || c.z < bb.minz || c.z > bb.maxz){
++        const spot = pickSpot(rnd);
++        if(spot){
++          c.x = spot.x; c.z = spot.z; c.home = {x: spot.x, z: spot.z};
++          c.target = {x: spot.x, z: spot.z};
++        }
++        c.state = 'graze'; c.fledT = 0; c.watchT = 0; c.sighted = false;
++        c.alert.visible = false;
++      }
++    }else if(c.state === 'graze'){
++      c.timer -= dt;
++      if(c.timer <= 0){
++        c.timer = 1.6 + rnd()*3.4;
++        c.target = wanderTarget(c, rnd);
++      }
++      if(seek(c, c.target.x, c.target.z, c.S.speed*0.34, dt) < 0.5) c.timer = Math.min(c.timer, 0.6);
++    }
++
++    /* Ground follow. standingY is the same surface the player reads, so a critter on the
++       trail stands on the tread and one beside it stands on the dirt -- and both step
++       with the terraces rather than through them. Lerped rather than assigned because a
++       terrace crossing is a step input here too, just a less conspicuous one. */
++    const gy = standingY(c.x, c.z);
++    c.y = lerp(c.y, gy, 1 - Math.pow(0.0008, dt));
++
++    const still = c.state === 'watchful' || (c.state === 'graze' && c.timer > 0.6 && rnd() < 0);
++    const fleeing = c.state === 'flee';
++    if(c.hopper){
++      c.hop += dt*(fleeing ? 11 : 2.4);
++      c.g.position.set(c.x, c.y + (still ? 0 : Math.abs(Math.sin(c.hop))*0.22*c.S.scale), c.z);
++    }else{
++      if(!still) c.walkPh += dt*(fleeing ? 13 : 4);
++      const amp = still ? 0 : (fleeing ? 0.62 : 0.26);
++      (c.refs.legs||[]).forEach((leg, li)=>{
++        leg.rotation.z = Math.sin(c.walkPh + ((li===0||li===3) ? 0 : Math.PI))*amp;
++      });
++      c.g.position.set(c.x, c.y, c.z);
++    }
++    c.g.rotation.y = c.yaw;
++    // head down to feed while grazing, up and alert while watched -- the read that tells
++    // you at a glance whether you've been noticed
++    if(c.refs.headG){
++      const want = (c.state === 'graze' && !fleeing) ? 0.6 + Math.sin(t*0.0016 + i)*0.12 : 0;
++      c.refs.headG.rotation.z = lerp(c.refs.headG.rotation.z, want, 1 - Math.pow(0.02, dt));
++    }
++    if(c.refs.tailG) c.refs.tailG.rotation.x = Math.sin(t*0.005 + i)*(fleeing ? 0.4 : 0.16);
++    if(c.alert.material) c.alert.material.opacity = c.sighted ? 0.35 : 1;
++  }
++}
++
++export { CRITTERS, getCritters, getCritterStats, spawnCritters, resetCritters,
++         updateCritters, WATCH_SECONDS };
+diff --git a/src/trails/main.js b/src/trails/main.js
+index 0790ca9..261d565 100644
+--- a/src/trails/main.js
++++ b/src/trails/main.js
+@@ -14,9 +14,13 @@ import { setWildVisible, setWildYaw, spawnWild, spookRadiusFor, topSpeedFor, upd
+ 
+ import { dogRunMul, dogTopSpeed, setDogPos, setDogVisible, setYaw, spawnDog, updateDog } from './dog-driver.js';
+ 
+-import { cameraGroundY, surfaceY } from './terrain.js';
++import { addCamPitch, addCamYaw, addCamZoom, getCamPitch, getCamYaw, getCamZoom, setCamYaw, snapChaseCam, updateChaseCam } from './camera.js';
++import { getCritterStats, spawnCritters, resetCritters, updateCritters, WATCH_SECONDS } from './critters.js';
++import { initMinimap, isBigMapOpen, toggleBigMap, updateMinimap } from './minimap.js';
++import { updateFX } from '../core/fx.js';
++import { initAudio } from '../core/audio.js';
+ 
+-import { addLayers, clearLayers, getBBox, getBackdrop, getExaggeration, getFogMultiplier, getGraph, getMapScale, hasBundle, getStartHead, getTrailheads, getVertScale, loadWorld, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale } from './world.js';
++import { addLayers, clearLayers, getBBox, getBackdrop, getExaggeration, getFogMultiplier, getGraph, getMapScale, hasBundle, getStartHead, getTrailheads, getVertScale, loadWorld, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY } from './world.js';
+ 
+ import { THEME, THEMES } from './themes.js';
+ import { renderer, scene, camera, resize } from '../core/render.js';
+@@ -53,12 +57,11 @@ let browseMode = 'dog';     // which roster grid the panel is showing -- indepen
+                              // `mode` above, so you can look at Wildlife without it
+                              // changing who you're actually playing as until you tap one
+ const player = { x:0, z:0, y:0, vy:0, yaw:0, speed:0, dist:0, sneaking:false, barkT:0 };
+-let camYaw=0, camPitch=0.32, playing=false;
++let playing=false;
+ /* Timestamp of the last manual look-drag (performance.now(), not the loop's own `t` --
+    pointer events fire outside the loop). While recent, the auto-follow below backs off
+    so it doesn't fight a hand that's actively orbiting the camera. */
+ let lastLookT=-Infinity;
+-const PITCH_MIN=0.05, PITCH_MAX=1.35;   // clamps: never flips under the ground or goes top-down
+ let avatarKey='';           // identity of whatever is currently built, for ensureAvatar
+ 
+ function currentTopSpeed(){ return mode==='dog' ? dogTopSpeed() : topSpeedFor(wildKey); }
+@@ -87,16 +90,11 @@ function ensureAvatar(){
+ }
+ 
+ function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
+-  // surfaceY, not terrainY: the trail ribbon is deliberately built on the highest band
+-  // across its own width (terrain.js), so the avatar has to read ground the same way or
+-  // it visually sinks below the tread anywhere terrain rises to one side of the path --
+-  // see terrain.js's surfaceY doc comment for the full story.
+-  // 2.6*MAP_SCALE, not the bare default: the trail corridor this has to match shrinks
+-  // with the map (world.js scales ribbon width by MAP_SCALE too), so the search radius
+-  // must shrink with it -- fixed at 2.6 world units, a heavily compacted map (the
+-  // "World scale 1:N" control) would scan a radius many times the map's own size, every
+-  // frame.
+-  const groundY = surfaceY(player.x, player.z, getVertScale(), 2.6*getMapScale());
++  // standingY, not terrainY: it is the ONE definition of "what am I standing on",
++  // shared with the critters and with everything world.js plants on a path. Off-trail it
++  // is plain terrain; on-trail it reads the tread's own profile out of the spatial hash,
++  // so the avatar can't clip through the ribbon inside the short ramps at a terrace step.
++  const groundY = standingY(player.x, player.z);
+   if(mode==='dog'){
+     setDogPos(player.x, player.z);
+     setYaw(player.yaw);
+@@ -123,37 +121,30 @@ function placeAtHead(i){
+     player.x=(bb.minx+bb.maxx)/2; player.z=(bb.minz+bb.maxz)/2; player.yaw=0;
+   }
+   player.y=0; player.vy=0; player.dist=0; player.speed=0;
+-  camYaw = Math.atan2(Math.cos(player.yaw), -Math.sin(player.yaw));
++  setCamYaw(Math.atan2(Math.cos(player.yaw), -Math.sin(player.yaw)));
+   ensureAvatar();
+   const groundY = syncAvatar(0,0,0,0,false,false,false);
+-  if(!playing) frameAvatar(groundY);
++  // snap, never ease: placing at a trailhead is a teleport, and springing the camera
++  // across a kilometre of map to catch up reads as a cutscene nobody asked for
++  snapChaseCam(player.x, player.z, groundY, getVertScale(), 13);
+   renderStartPicker();
+ }
+ 
+-/* In the lobby the camera used to sit at its boot position looking at the origin, so
+-   even a correctly-placed avatar was off screen until you pressed Play. Snap the camera
+-   behind the avatar instead -- you should be able to see who you picked. */
+-function frameAvatar(groundY){
+-  const camD=13*camZoom;
+-  camera.position.set(
+-    player.x-Math.sin(camYaw)*camD*Math.cos(camPitch),
+-    groundY+2+camD*Math.sin(camPitch),
+-    player.z-Math.cos(camYaw)*camD*Math.cos(camPitch));
+-  camera.lookAt(player.x, groundY+1.4, player.z);
+-}
+-
+ /* ---------- input: trail-owned, not core/input.js (that module is wired directly to
+    Pup City's player-state/modes/pickups -- creator has its own for the same reason) --- */
+-const keys = {};
++const trailKeys = {};
+ addEventListener('keydown', e=>{
+-  keys[e.code]=true;
++  trailKeys[e.code]=true;
+   if(!playing) return;
+   if(e.code==='Space'){ e.preventDefault(); if(player.y===0) player.vy=9.5; }
+   if(e.code==='KeyC') player.sneaking=!player.sneaking;
+-  if(e.code==='KeyB') player.barkT=1;
+-  if(e.code==='Escape') exitPlay();
++  if(e.code==='KeyB'){ initAudio(); player.barkT=1; }
++  if(e.code==='KeyM') toggleBigMap();
++  // Esc closes the map first if it's open -- quitting the whole walk because you wanted
++  // to put the map away is the kind of thing you only forgive once
++  if(e.code==='Escape'){ if(isBigMapOpen()) toggleBigMap(false); else exitPlay(); }
+ });
+-addEventListener('keyup', e=> keys[e.code]=false);
++addEventListener('keyup', e=> trailKeys[e.code]=false);
+ 
+ /* Two independent pointer zones, split by which half of the canvas a drag STARTS in --
+    the standard twin-stick split (move on one side, look on the other), which needs no
+@@ -183,8 +174,8 @@ addEventListener('pointermove', e=>{
+   }else if(look.active && e.pointerId===look.id){
+     const dx=e.clientX-look.lastX, dy=e.clientY-look.lastY;
+     look.lastX=e.clientX; look.lastY=e.clientY;
+-    camYaw -= dx*YAW_SENS;
+-    camPitch = clamp(camPitch - dy*PITCH_SENS, PITCH_MIN, PITCH_MAX);
++    addCamYaw(-dx*YAW_SENS);
++    addCamPitch(-dy*PITCH_SENS);
+     lastLookT = performance.now();
+   }
+ });
+@@ -194,14 +185,12 @@ const endPointer=e=>{
+ };
+ addEventListener('pointerup', endPointer); addEventListener('pointercancel', endPointer);
+ 
+-/* Scroll to zoom -- a natural companion to free-look, and cheap: `camZoom` just scales
+-   the existing orbit radius (camD) everywhere it's used, both in the lobby framing and
+-   the play-loop follow, so this is the only place zoom needs to be taught about. */
+-let camZoom=1;
++/* Scroll to zoom. camera.js owns the factor and applies it to the boom length in both
++   the snap and the follow path, so this is the only place zoom needs to be taught about. */
+ renderer.domElement.addEventListener('wheel', e=>{
+   if(!playing) return;
+   e.preventDefault();
+-  camZoom = clamp(camZoom + Math.sign(e.deltaY)*0.08, 0.5, 2.2);
++  addCamZoom(Math.sign(e.deltaY)*0.08);
+ }, {passive:false});
+ 
+ /* ---------- game loop ---------- */
+@@ -222,18 +211,18 @@ function loop(t){
+   }
+ 
+   let ix=0,iz=0,run=false;
+-  if(keys.KeyW||keys.ArrowUp) iz-=1;
+-  if(keys.KeyS||keys.ArrowDown) iz+=1;
+-  if(keys.KeyA||keys.ArrowLeft) ix-=1;
+-  if(keys.KeyD||keys.ArrowRight) ix+=1;
+-  run=(keys.ShiftLeft||keys.ShiftRight) && !player.sneaking;
++  if(trailKeys.KeyW||trailKeys.ArrowUp) iz-=1;
++  if(trailKeys.KeyS||trailKeys.ArrowDown) iz+=1;
++  if(trailKeys.KeyA||trailKeys.ArrowLeft) ix-=1;
++  if(trailKeys.KeyD||trailKeys.ArrowRight) ix+=1;
++  run=(trailKeys.ShiftLeft||trailKeys.ShiftRight) && !player.sneaking;
+   let mag=Math.hypot(ix,iz);
+   if(mag>0){ix/=mag;iz/=mag;mag=1;}
+   if(stick.active){
+     const L=Math.hypot(stick.dx,stick.dy); mag=clamp(L,0,1);
+     if(mag>0.06){ix=stick.dx/L;iz=stick.dy/L;run=mag>0.92&&!player.sneaking;} else {ix=iz=0;mag=0;}
+   }
+-  const fS=Math.sin(camYaw), fC=Math.cos(camYaw);
++  const fS=Math.sin(getCamYaw()), fC=Math.cos(getCamYaw());
+   const wx=-fC*ix-fS*iz, wz=fS*ix-fC*iz;
+   const moving=mag>0.03&&(wx||wz);
+ 
+@@ -252,8 +241,8 @@ function loop(t){
+     // out from under a manual look-drag, which is worse than not auto-following at all.
+     if(performance.now()-lastLookT>900){
+       const headYaw=Math.atan2(wx/L,wz/L);
+-      let dc=headYaw-camYaw; while(dc>Math.PI)dc-=Math.PI*2; while(dc<-Math.PI)dc+=Math.PI*2;
+-      camYaw+=dc*Math.min(1,dt*2.2);
++      let dc=headYaw-getCamYaw(); while(dc>Math.PI)dc-=Math.PI*2; while(dc<-Math.PI)dc+=Math.PI*2;
++      addCamYaw(dc*Math.min(1,dt*2.2));
+     }
+   }
+   const bb=getBBox(), F=55;
+@@ -264,19 +253,13 @@ function loop(t){
+ 
+   const groundY = syncAvatar(dt,t,player.y,player.speed,player.sneaking,player.barkT>0,run);
+ 
+-  // camGroundY: smoothed terrain height for the camera RIG's own altitude only -- using
+-  // the true (stepped) groundY here is what made the camera hop every time the avatar
+-  // crossed a terrace cell boundary. lookAt below still targets the exact avatar
+-  // position, so the avatar itself stays precisely framed; only the viewpoint's own
+-  // bob is damped.
+-  const camD=11*camZoom;
+-  const camY = cameraGroundY(player.x, player.z, getVertScale());
+-  camera.position.lerp(new THREE.Vector3(
+-    player.x-Math.sin(camYaw)*camD*Math.cos(camPitch),
+-    camY+2+camD*Math.sin(camPitch),
+-    player.z-Math.cos(camYaw)*camD*Math.cos(camPitch)
+-  ), 1-Math.pow(0.001,dt));
+-  camera.lookAt(player.x, groundY+player.y+1.4, player.z);
++  updateChaseCam(dt, player.x, player.z, groundY, player.y, player.speed, getVertScale(), 11);
++
++  updateCritters(dt, t, player.x, player.z, player.speed, currentTopSpeed(),
++                 player.sneaking, player.barkT>0);
++  updateFX(dt, t);
++  updateMinimap(player.x, player.z, player.yaw);
++  updateTrailHud();
+ 
+   // exit at any trailhead once you've walked away from your own start
+   const nh=getTrailheads().reduce((b,h,i)=>{const d=Math.hypot(h.x-player.x,h.z-player.z);
+@@ -288,16 +271,42 @@ function loop(t){
+ 
+ function enterPlay(){
+   if(!getGraph()){ return; }
++  initAudio();
+   placeAtHead(getStartHead());
++  // fresh population per walk, so the sightings tally means "this trip" rather than
++  // "since you opened the tab"
++  spawnCritters(Date.now());
++  initMinimap();
+   playing=true;
+   document.body.classList.add('play');
++  updateTrailHud();
+ }
+ function exitPlay(){
+   playing=false;
++  toggleBigMap(false);
++  resetCritters();
+   document.body.classList.remove('play');
+   placeAtHead(getStartHead());
+ }
+ 
++/* Sightings / spooked tally plus the watch meter. Cheap enough to run every frame --
++   it's four textContent writes and one style width -- and gating it behind a change
++   check would cost more in bookkeeping than it saves. */
++function updateTrailHud(){
++  const st = getCritterStats();
++  const seen = $('#hudSeen'), oops = $('#hudSpooked'), meter = $('#watchMeter'), fill = $('#watchFill'), name = $('#watchName');
++  if(seen) seen.textContent = '\u2728 ' + st.sightings;
++  if(oops) oops.textContent = '\ud83d\udca8 ' + st.spooked;
++  if(meter){
++    const w = st.watching;
++    meter.classList.toggle('on', !!w);
++    if(w){
++      if(fill) fill.style.width = Math.round(w.progress*100) + '%';
++      if(name) name.textContent = w.progress >= 1 ? w.name + ' spotted!' : 'Watching ' + w.name + '\u2026';
++    }
++  }
++}
++
+ /* ---------- UI wiring ----------
+    Sighting log, exit-gate stats screen and full minimap drawing from the standalone
+    build are still not ported -- flagged rather than silently dropped. */
+@@ -374,8 +383,8 @@ function renderRoster(){
+     // every species in the shared roster, theme-appropriate ones first so the list reads
+     // as "what you'd meet out here" before "everything that exists"
+     const local=(THEME.wildlife||[]);
+-    const keys=[...local, ...Object.keys(SPECIES).filter(k=>!local.includes(k))];
+-    for(const key of keys){
++    const trailKeys=[...local, ...Object.keys(SPECIES).filter(k=>!local.includes(k))];
++    for(const key of trailKeys){
+       if(!SPECIES[key]) continue;
+       pupCard(wild, 'wild:'+key, '🦊', SPECIES[key].nm, '', wildBarStats(key), ()=>{ mode='wild'; wildKey=key; });
+     }
+@@ -439,8 +448,12 @@ function wireScale(){
+      used as N directly -- linear would put every value between 1:1 and 1:50 (the range
+      most trail networks actually need) into the first 5% of the handle's travel. */
+   const map=$('#worldScale'), mapV=$('#worldScaleVal');
+-  const posToN = t => Math.max(1, Math.round(Math.pow(10, t/1000*3)));   // 0..1000 -> 1..1000
+-  const nToPos = n => clamp(Math.log10(Math.max(1,n))/3*1000, 0, 1000);
++  /* 1:1 .. 1:8, not 1:1000. World scale now compacts positions WITHOUT flattening
++     elevation (see world.js's syncScales), so relief is preserved while the footprint
++     shrinks and the country gets steeper as you compact. Past roughly 1:8 this map's
++     180 m of relief no longer reads as hills — it reads as walls. */
++  const posToN = t => Math.max(1, Math.round(Math.pow(8, t/1000)));      // 0..1000 -> 1..8
++  const nToPos = n => clamp(Math.log(Math.max(1,n))/Math.log(8)*1000, 0, 1000);   // inverse of posToN
+   if(map && mapV){
+     map.min=0; map.max=1000; map.step=1;
+     map.value=nToPos(Math.round(1/getMapScale()));
+@@ -623,6 +636,9 @@ $('#defaultMapBtn')?.addEventListener('click', async ()=>{
+   renderFileChips();
+   if(await loadMap(DEFAULT_WORLD, true)){ renderStartPicker(); renderMapStats(); placeAtHead(0); }
+ });
++$('#mapBtn')?.addEventListener('click', ()=> toggleBigMap());
++$('#bigmapClose')?.addEventListener('click', ()=> toggleBigMap(false));
++
+ $('#playBtn')?.addEventListener('click', enterPlay);
+ $('#exitBtn')?.addEventListener('click', exitPlay);
+ $('#clearLayersBtn')?.addEventListener('click', ()=>{
+diff --git a/src/trails/minimap.js b/src/trails/minimap.js
+new file mode 100644
+index 0000000..ebab4ba
+--- /dev/null
++++ b/src/trails/minimap.js
+@@ -0,0 +1,246 @@
++/* Minimap. Two views off one drawing: a corner disc while you walk, and a full-screen
++   sheet on M / the 🗺 button.
++
++   ARCHITECTURE, and why it isn't just "draw the graph each frame". A real trail network
++   is thousands of polyline points plus area rings plus a DEM-wide relief image; redrawing
++   that at 60 fps to fill a 190 px disc is absurd. So everything static -- relief, areas,
++   trails, POIs, trailhead pins -- is rendered ONCE into an offscreen atlas at a fixed
++   world-to-pixel scale, and each frame blits the sub-rectangle it needs and draws only
++   the handful of things that actually move. Rebuilt when world.js's revision counter
++   changes, which is the one signal that means "this is a different world now" -- so
++   world.js doesn't have to know this module exists.
++
++   NORTH-UP, not heading-up. A rotating minimap is easier to steer by and much harder to
++   learn a place from, and this game is about a real place you might actually walk. The
++   pup's arrow rotates instead, and the big sheet reads like the paper map at the
++   trailhead kiosk -- which is also why the styling is ink-on-parchment rather than the
++   usual glowing HUD: it belongs to the world, not to the interface.
++
++   Wildlife only appears once you've WATCHED it (critters.js banks a sighting). Pinning
++   an animal to your map is the reward for the sneak, and showing every critter would
++   delete the mechanic outright. */
++import { clamp } from '../core/math.js';
++import { getAreas, getBBox, getGraph, getMapScale, getPOIs, getTrailheads, getWorldRevision } from './world.js';
++import { reliefCanvas } from './terrain.js';
++import { getCritters } from './critters.js';
++import { THEME } from './themes.js';
++
++const INK_MAP = '#3a2517';
++const TRAIL_INK = {trail:'#9c6a35', track:'#8a6a45', road:'#6f6b62'};
++
++let atlas = null;              // {canvas, x0, z0, w, h, ppm}
++let atlasRev = -1;
++let miniCv = null, miniCtx = null, bigCv = null, bigCtx = null;
++let bigOpen = false;
++
++function isBigMapOpen(){ return bigOpen; }
++
++function initMinimap(){
++  miniCv = document.getElementById('minimap');
++  bigCv = document.getElementById('bigmap');
++  if(miniCv) miniCtx = miniCv.getContext('2d');
++  if(bigCv) bigCtx = bigCv.getContext('2d');
++}
++
++function toggleBigMap(force){
++  bigOpen = (force === undefined) ? !bigOpen : !!force;
++  document.body.classList.toggle('bigmap', bigOpen);
++}
++
++/* ---------- the static atlas ---------- */
++
++function buildAtlas(){
++  const G = getGraph();
++  if(!G) { atlas = null; return; }
++  const bb = getBBox(), pad = 70*getMapScale();
++  const wx = (bb.maxx - bb.minx) + pad*2, wz = (bb.maxz - bb.minz) + pad*2;
++  if(!(wx > 0 && wz > 0)) { atlas = null; return; }
++  // cap the long side so a 3 km network doesn't allocate a 12k-pixel canvas
++  const ppm = clamp(Math.min(2000/wx, 2000/wz), 0.06, 4);
++  const cv = document.createElement('canvas');
++  cv.width = Math.max(2, Math.round(wx*ppm));
++  cv.height = Math.max(2, Math.round(wz*ppm));
++  const g = cv.getContext('2d');
++  if(!g){ atlas = null; return; }
++  const x0 = bb.minx - pad, z0 = bb.minz - pad;
++  const X = x => (x - x0)*ppm, Z = z => (z - z0)*ppm;
++
++  g.fillStyle = '#e9dcbe';
++  g.fillRect(0, 0, cv.width, cv.height);
++
++  // relief underlay, straight from the same band grid the terrain mesh is built from
++  const relief = reliefCanvas(THEME);
++  if(relief){
++    g.save();
++    g.globalAlpha = 0.85;
++    g.imageSmoothingEnabled = true;
++    g.drawImage(relief.canvas, X(relief.x0), Z(relief.z0), relief.w*ppm, relief.h*ppm);
++    g.restore();
++  }
++
++  // areas: a wash of colour with a dashed boundary, the way a park map prints them
++  const AREA_TINT = {water:'#79b7d6', forest:'#5c7f52', meadow:'#9fae62',
++                     parking:'#b9ae97', rock:'#a6866c', building:'#a08b76'};
++  g.lineWidth = Math.max(1, ppm*1.1);
++  for(const a of getAreas()){
++    if(!a.rings || !a.rings.length) continue;
++    g.beginPath();
++    for(const ring of a.rings){
++      ring.forEach((p, i) => i ? g.lineTo(X(p[0]), Z(p[1])) : g.moveTo(X(p[0]), Z(p[1])));
++      g.closePath();
++    }
++    g.fillStyle = AREA_TINT[a.kind] || '#a8b184';
++    g.globalAlpha = a.kind === 'water' ? 0.75 : 0.4;
++    g.fill();
++    g.globalAlpha = 0.7;
++    g.strokeStyle = INK_MAP;
++    g.setLineDash([ppm*3, ppm*2.4]);
++    g.stroke();
++    g.setLineDash([]);
++  }
++  g.globalAlpha = 1;
++
++  // trails: ink casing then fill, so crossings read cleanly at any zoom
++  const strokeEdges = (width, colorOf) => {
++    g.lineCap = 'round'; g.lineJoin = 'round';
++    for(const e of G.edges){
++      if(e.pts.length < 2) continue;
++      g.beginPath();
++      e.pts.forEach((p, i) => i ? g.lineTo(X(p[0]), Z(p[1])) : g.moveTo(X(p[0]), Z(p[1])));
++      g.lineWidth = width;
++      g.strokeStyle = colorOf(e);
++      g.stroke();
++    }
++  };
++  strokeEdges(Math.max(2.2, ppm*4.2), () => INK_MAP);
++  strokeEdges(Math.max(1.2, ppm*2.4), e => TRAIL_INK[e.kind] || TRAIL_INK.trail);
++
++  // points of interest
++  for(const p of getPOIs()){
++    const r = Math.max(2, ppm*2.6);
++    g.beginPath(); g.arc(X(p.x), Z(p.z), r, 0, 7);
++    g.fillStyle = '#fff8e6'; g.fill();
++    g.lineWidth = Math.max(1, ppm*0.9); g.strokeStyle = INK_MAP; g.stroke();
++  }
++  // trailheads get a square so they never read as just another POI
++  for(const h of getTrailheads()){
++    const r = Math.max(2.6, ppm*3.2);
++    g.fillStyle = '#e8743a'; g.strokeStyle = INK_MAP; g.lineWidth = Math.max(1, ppm);
++    g.fillRect(X(h.x)-r, Z(h.z)-r, r*2, r*2);
++    g.strokeRect(X(h.x)-r, Z(h.z)-r, r*2, r*2);
++  }
++
++  atlas = {canvas: cv, x0, z0, w: wx, h: wz, ppm};
++}
++
++function ensureAtlas(){
++  const rev = getWorldRevision();
++  if(rev !== atlasRev || !atlas){ atlasRev = rev; buildAtlas(); }
++  return atlas;
++}
++
++/* ---------- live markers ---------- */
++
++function drawPup(g, cx, cy, yaw, scale){
++  // world yaw: 0 faces +x, and +z is south, so screen angle is -yaw with y down
++  g.save();
++  g.translate(cx, cy);
++  g.rotate(-yaw + Math.PI/2);
++  g.beginPath();
++  g.moveTo(0, -9*scale); g.lineTo(6.4*scale, 7*scale);
++  g.lineTo(0, 3.4*scale); g.lineTo(-6.4*scale, 7*scale);
++  g.closePath();
++  g.fillStyle = '#e8743a'; g.fill();
++  g.lineWidth = 2.4*scale; g.strokeStyle = '#fff8e6'; g.stroke();
++  g.lineWidth = 1.2*scale; g.strokeStyle = INK_MAP; g.stroke();
++  g.restore();
++}
++
++function drawSighted(g, X, Z, scale){
++  for(const c of getCritters()){
++    if(!c.sighted) continue;
++    const x = X(c.x), y = Z(c.z);
++    g.beginPath(); g.arc(x, y, 4.2*scale, 0, 7);
++    g.fillStyle = '#ffd94a'; g.fill();
++    g.lineWidth = 1.4*scale; g.strokeStyle = INK_MAP; g.stroke();
++  }
++}
++
++/* Fit the backing store to the element's real pixel size. Called every frame because the
++   corner map lives in a flex layout and iOS's visual viewport resizes underneath it
++   without firing anything useful; the early-out makes the common case free. */
++function fitCanvas(cv){
++  const dpr = Math.min(window.devicePixelRatio || 1, 2);
++  const w = Math.round(cv.clientWidth*dpr), h = Math.round(cv.clientHeight*dpr);
++  if(w < 2 || h < 2) return false;
++  if(cv.width !== w || cv.height !== h){ cv.width = w; cv.height = h; }
++  return true;
++}
++
++function updateMinimap(px, pz, yaw){
++  const at = ensureAtlas();
++
++  if(miniCv && miniCtx && miniCv.clientWidth > 0 && fitCanvas(miniCv)){
++    const g = miniCtx, W = miniCv.width, H = miniCv.height;
++    g.setTransform(1, 0, 0, 1, 0, 0);
++    g.clearRect(0, 0, W, H);
++    const span = 230*getMapScale();          // metres across the disc
++    const ppx = W/span;
++    g.save();
++    g.beginPath(); g.arc(W/2, H/2, Math.min(W, H)/2, 0, 7); g.clip();
++    g.fillStyle = '#e9dcbe'; g.fillRect(0, 0, W, H);
++    if(at){
++      const sx = (px - span/2 - at.x0)*at.ppm, sy = (pz - span/2 - at.z0)*at.ppm;
++      const sw = span*at.ppm;
++      g.imageSmoothingEnabled = true;
++      g.drawImage(at.canvas, sx, sy, sw, sw*(H/W), 0, 0, W, H);
++    }
++    const X = x => (x - px)*ppx + W/2, Z = z => (z - pz)*ppx + H/2;
++    const dpr = W/miniCv.clientWidth;
++    drawSighted(g, X, Z, dpr);
++    drawPup(g, W/2, H/2, yaw, dpr*1.15);
++    g.restore();
++  }
++
++  if(bigOpen && bigCv && bigCtx && fitCanvas(bigCv)){
++    const g = bigCtx, W = bigCv.width, H = bigCv.height;
++    const dpr = W/bigCv.clientWidth;
++    g.setTransform(1, 0, 0, 1, 0, 0);
++    g.clearRect(0, 0, W, H);
++    g.fillStyle = '#e9dcbe'; g.fillRect(0, 0, W, H);
++    if(at){
++      const s = Math.min(W/(at.w*at.ppm), H/(at.h*at.ppm));
++      const dw = at.w*at.ppm*s, dh = at.h*at.ppm*s;
++      const ox = (W-dw)/2, oy = (H-dh)/2;
++      g.imageSmoothingEnabled = true;
++      g.drawImage(at.canvas, ox, oy, dw, dh);
++      const X = x => ox + (x - at.x0)*at.ppm*s, Z = z => oy + (z - at.z0)*at.ppm*s;
++      drawSighted(g, X, Z, dpr*1.6);
++      drawPup(g, X(px), Z(pz), yaw, dpr*2.2);
++      // trail names along the sheet, which the corner disc has no room for
++      g.font = `bold ${13*dpr}px "Comic Sans MS","Chalkboard SE",sans-serif`;
++      g.textAlign = 'center'; g.textBaseline = 'middle';
++      const seen = new Set();
++      for(const e of (getGraph()?.edges || [])){
++        if(!e.name || seen.has(e.name) || e.pts.length < 3) continue;
++        seen.add(e.name);
++        const m = e.pts[Math.floor(e.pts.length/2)];
++        g.lineWidth = 4*dpr; g.strokeStyle = 'rgba(255,248,230,.9)';
++        g.strokeText(e.name, X(m[0]), Z(m[1]) - 11*dpr);
++        g.fillStyle = INK_MAP;
++        g.fillText(e.name, X(m[0]), Z(m[1]) - 11*dpr);
++      }
++    }
++    // north arrow
++    g.save();
++    g.translate(W - 42*dpr, 42*dpr);
++    g.beginPath(); g.moveTo(0, -17*dpr); g.lineTo(8*dpr, 12*dpr); g.lineTo(0, 6*dpr); g.lineTo(-8*dpr, 12*dpr);
++    g.closePath();
++    g.fillStyle = INK_MAP; g.fill();
++    g.font = `bold ${13*dpr}px "Comic Sans MS","Chalkboard SE",sans-serif`;
++    g.textAlign = 'center'; g.fillText('N', 0, -24*dpr);
++    g.restore();
++  }
++}
++
++export { initMinimap, updateMinimap, toggleBigMap, isBigMapOpen };
+diff --git a/src/trails/spatial.js b/src/trails/spatial.js
+index 1620f2e..a37b9a7 100644
+--- a/src/trails/spatial.js
++++ b/src/trails/spatial.js
+@@ -1,7 +1,17 @@
+-/* Nearest-trail spatial hash. No elevation field on segments any more -- the old
+-   standalone build stored per-vertex Z here so the player could match the tread's exact
+-   drape; now that elevation comes from the DEM (terrain.js), the tread's height already
+-   equals the ground's height wherever it counts, so this only needs 2D position. */
++/* Nearest-trail spatial hash.
++
++   It DOES carry elevation again. The previous version dropped the per-segment height on
++   the reasoning that "the tread's height already equals the ground's height wherever it
++   counts" -- which was true only because the ribbons were being lifted to a corridor
++   maximum and the avatar was being lifted to match. Now that gradeProfile gives each
++   trail a continuous height and gradeTrailCells benches the ground to it (terrain.js),
++   the tread has its own honest height -- close to the cell height beneath it, but not
++   identical, since the bench is a staircase of cell-sized treads and the ribbon is the
++   smooth line through them. world.js's standingY reads it to keep anything walking there
++   on top of the tread rather than through it.
++
++   Segments are hashed from the SAME profile the ribbon geometry is built from, so `y`
++   below is the tread's actual rendered height, not a re-derivation of it. */
+ const HASH_CELL=14;
+ let SEG_HASH=new Map();
+ 
+@@ -15,15 +25,23 @@ function hashSeg(seg){
+       const k=cx+'_'+cz;if(!SEG_HASH.has(k))SEG_HASH.set(k,[]);SEG_HASH.get(k).push(seg);
+     }
+ }
++/* {d, edge, y, hw}: distance to the centreline, the edge it belongs to, the tread height
++   interpolated along that segment, and the corridor half-width. `y` is null when the
++   segment was hashed without a height profile (the flat, no-DEM fallback path), which
++   callers must treat as "no opinion", not as "height zero". */
+ function nearestTrail(x,z){
+-  const segs=SEG_HASH.get(hashKey(x,z));let best=1e9,edge=null;
++  const segs=SEG_HASH.get(hashKey(x,z));
++  let best=1e9,edge=null,y=null,hw=0;
+   if(segs)for(const s of segs){
+     const dx=s.b[0]-s.a[0],dz=s.b[1]-s.a[1],L2=dx*dx+dz*dz;
+     let t=L2===0?0:((x-s.a[0])*dx+(z-s.a[1])*dz)/L2;t=t<0?0:(t>1?1:t);
+     const d=Math.hypot(x-(s.a[0]+t*dx),z-(s.a[1]+t*dz));
+-    if(d<best){best=d;edge=s.edge;}
++    if(d<best){
++      best=d;edge=s.edge;hw=s.hw||0;
++      y=(s.ya==null||s.yb==null)?null:s.ya+(s.yb-s.ya)*t;
++    }
+   }
+-  return{d:best,edge};
++  return{d:best,edge,y,hw};
+ }
+ 
+ export { resetSpatialHash, hashKey, hashSeg, nearestTrail };
+diff --git a/src/trails/terrain.js b/src/trails/terrain.js
+index f954472..c5e9676 100644
+--- a/src/trails/terrain.js
++++ b/src/trails/terrain.js
+@@ -14,7 +14,14 @@ import { clamp } from '../core/math.js';
+ 
+ let WORLD = null;   // the loaded World instance (see data/world_bundle.js)
+ let STEP = 3;        // contour step, in metres — matches --cell intent from fetch_dem.py
+-let BAND = null;     // Int32Array, one terrace band index per DEM cell (mutable copy)
++/* Float32Array, one terrace band per DEM cell. FLOAT, not Int, and that is the whole
++   mechanism behind the graded trail corridor below. Away from paths every cell holds a
++   whole band index and the ground is the terraced landscape it always was; under a trail
++   the cells hold FRACTIONAL bands, so the same buildTerrainMesh() draws a fine, smoothly
++   climbing bench along the corridor instead — and the cut bank and fill embankment on
++   either side come out of it for free, because those are nothing but the risers between a
++   fractional cell and a whole-numbered one. */
++let BAND = null;
+ let GROUND_M = 0;    // WORLD.minM cached, the datum: 0 in-game = the map's lowest point
+ 
+ function setWorld(w){ WORLD = w; GROUND_M = w ? w.minM : 0; rebuildBands(); }
+@@ -27,7 +34,7 @@ function rebuildBands(){
+   // World.terraceGrid(step) already gives band indices in the same row-major layout as
+   // World.heights — copy it so area grading below can edit bands without mutating the
+   // shared World instance, which other systems may also be reading from.
+-  BAND = Int32Array.from(WORLD.terraceGrid(STEP));
++  BAND = Float32Array.from(WORLD.terraceGrid(STEP));
+ }
+ 
+ /* World-units ground height at (x,z): terrace band -> metres above datum -> VERT_SCALE.
+@@ -83,78 +90,129 @@ function flattenAreaCells(areas, pointInArea, areaBBox){
+   }
+ }
+ 
+-/* Highest terrace band within radius `r` of a point -- the shared core of the
+-   anti-burial technique. Circular rather than the segment-corridor shape stationHeights
+-   uses below; close enough for a point query, and simple enough to also serve callers
+-   that have no direction to sweep (surfaceY, below). */
+-function maxBandNear(x,z,r){
+-  if(!WORLD||!BAND)return NaN;
+-  const i0=clamp(WORLD.cellI(x-r),0,WORLD.width-1), i1=clamp(WORLD.cellI(x+r),0,WORLD.width-1),
+-        j0=clamp(WORLD.cellJ(z-r),0,WORLD.height-1), j1=clamp(WORLD.cellJ(z+r),0,WORLD.height-1);
+-  let m=-Infinity;
+-  for(let j=j0;j<=j1;j++)for(let k=i0;k<=i1;k++){
+-    const c=WORLD.cellCentre(k,j);
+-    if(Math.hypot(c.x-x,c.z-z)>r)continue;
+-    const band=BAND[j*WORLD.width+k];
+-    if(band>m)m=band;
+-  }
+-  return m;
++/* Terrace band at a point — whole away from trails, fractional inside a graded corridor.
++   `heightM` is the same value in metres above the datum, which is the unit the grading
++   maths works in; `bandOfM` converts back. */
++function bandAt(x,z){
++  if(!WORLD||!BAND)return 0;
++  return BAND[clamp(WORLD.cellJ(z),0,WORLD.height-1)*WORLD.width+clamp(WORLD.cellI(x),0,WORLD.width-1)];
+ }
++function bandY(band,vertScale){ return (band*STEP-GROUND_M)*vertScale; }
++function heightM(x,z){ return bandAt(x,z)*STEP-GROUND_M; }
++function bandOfM(h){ return (h+GROUND_M)/STEP; }
++
++/* ---------- graded trail corridor ----------
++
++   THE PROBLEM THIS REPLACES. Terracing quantises elevation to whole contour bands, which
++   turns every gentle grade into flat-then-cliff. On this map that is a 5.4-unit riser
++   every 37 m of path -- about seven times the pup's shoulder height. Earlier versions
++   argued over whether the ribbon should step with the terrain (it then hung in the air
++   over the low half of each crossing) or the avatar should be lifted to meet the ribbon
++   (it then floated whenever terrain merely rose nearby). Both were answers to the wrong
++   question: a trail crossing a 5.4-unit cliff has no good rendering.
++
++   What a real trail does is cut a bench -- it holds a steady grade, and the hillside is
++   cut away above it and filled below. That is what these two functions do:
++
++     gradeProfile()     smooths the DEM along the centreline into a continuous height, so
++                        the path climbs at the grade the land actually has rather than in
++                        whole-contour jumps.
++     gradeTrailCells()  writes that height back into the band grid as a FRACTIONAL band,
++                        so the ground under the corridor becomes the graded bench while
++                        the terraced country either side stays terraced.
++
++   The cut bank and the fill embankment are then just ordinary terrace risers between a
++   fractional corridor cell and its whole-numbered neighbour, which means buildTerrainMesh
++   already draws them. No skirt geometry, no holes to stitch, no second mesh. */
++
++/* Smooth the DEM along a centreline into a continuous, walkable profile.
++
++   Both ends are pinned to the raw terrain height, with the smoothing tapered in over the
++   window length. That is not cosmetic -- it is what makes junctions work. Two edges
++   meeting at a node read the same raw band there, so with the ends pinned they arrive at
++   the SAME height and their ribbons meet flush. Smooth straight through the ends instead
++   and each edge lands on its own idea of where the junction is, off by up to a full band.
++
++   The window is expressed in DEM cells rather than world units so it means the same thing
++   at any map scale -- the same reason resample's step and the graph tolerances are. */
++function gradeProfile(pts, vertScale, stepCells = 0.7, windowCells = 8){
++  const rp = resample(pts, WORLD ? WORLD.cell*stepCells : 3);
++  const n = rp.length;
++  if(!WORLD || !BAND || n < 2) return {pts: rp, ys: new Array(n).fill(0), hm: new Array(n).fill(0)};
++
++  const arc = new Float64Array(n);
++  for(let i = 1; i < n; i++) arc[i] = arc[i-1] + Math.hypot(rp[i][0]-rp[i-1][0], rp[i][1]-rp[i-1][1]);
++  const raw = new Float64Array(n);
++  for(let i = 0; i < n; i++) raw[i] = heightM(rp[i][0], rp[i][1]);
+ 
+-/* Station heights for a trail ribbon: the highest terrace under the ribbon's own
+-   footprint at each vertex, guaranteeing the tread can't be buried by construction —
+-   same technique as the draped-Z version, reading from the DEM-derived bands instead. */
+-function stationHeights(rpts,w,vertScale){
+-  if(!WORLD||!BAND)return null;
+-  const n=rpts.length,out=new Array(n);
+-  const seg=new Array(n-1);
+-  for(let i=0;i<n-1;i++){
+-    const p=rpts[i],q=rpts[i+1],r=w/2;
+-    const i0=clamp(WORLD.cellI(Math.min(p[0],q[0])-r),0,WORLD.width-1),
+-          i1=clamp(WORLD.cellI(Math.max(p[0],q[0])+r),0,WORLD.width-1),
+-          j0=clamp(WORLD.cellJ(Math.min(p[1],q[1])-r),0,WORLD.height-1),
+-          j1=clamp(WORLD.cellJ(Math.max(p[1],q[1])+r),0,WORLD.height-1);
+-    const dqx=q[0]-p[0],dqz=q[1]-p[1],L2=dqx*dqx+dqz*dqz||1,reach=r+WORLD.cell*0.75;
+-    let m=-Infinity;
+-    for(let j=j0;j<=j1;j++)for(let k=i0;k<=i1;k++){
+-      const c=WORLD.cellCentre(k,j);
+-      let t=((c.x-p[0])*dqx+(c.z-p[1])*dqz)/L2;t=t<0?0:(t>1?1:t);
+-      if(Math.hypot(c.x-(p[0]+t*dqx),c.z-(p[1]+t*dqz))>reach)continue;
+-      const band=BAND[j*WORLD.width+k];
+-      if(band>m)m=band;
++  // Two box passes over a sliding arc-length window approximate a Gaussian at a fraction
++  // of the cost, and the running sum keeps each pass linear in the station count.
++  const win = WORLD.cell*windowCells;
++  let cur = raw;
++  for(let pass = 0; pass < 2; pass++){
++    const out = new Float64Array(n);
++    let lo = 0, hi = 0, sum = 0, cnt = 0;
++    for(let i = 0; i < n; i++){
++      while(hi < n && arc[hi] <= arc[i] + win){ sum += cur[hi]; cnt++; hi++; }
++      while(arc[lo] < arc[i] - win){ sum -= cur[lo]; cnt--; lo++; }
++      out[i] = cnt ? sum/cnt : cur[i];
+     }
+-    if(!isFinite(m))m=BAND[WORLD.cellJ(p[1])*WORLD.width+WORLD.cellI(p[0])];
+-    seg[i]=m;
++    cur = out;
+   }
+-  for(let i=0;i<n;i++){
+-    const a=i>0?seg[i-1]:-Infinity,b=i<n-1?seg[i]:-Infinity;
+-    let band=Math.max(a,b);
+-    if(!isFinite(band))band=BAND[WORLD.cellJ(rpts[i][1])*WORLD.width+WORLD.cellI(rpts[i][0])];
+-    out[i]=(band*STEP-GROUND_M)*vertScale;
++
++  /* Pin the ends by adding a DECAYING OFFSET, not by blending toward the raw height.
++
++     Blending toward raw was the obvious way to do it and it was wrong: raw is the
++     terraced height, so the last window's worth of every edge inherited the quantised
++     steps the grading exists to remove — leaving a full 5.4-unit cliff near junctions,
++     which is precisely where trails converge and you are most likely to be standing.
++
++     Offsetting instead keeps the smooth shape everywhere and simply slides its ends onto
++     the node heights, spreading the correction over the window as a little extra grade
++     (at most a band over the window, ~12%). Endpoints still land exactly on the raw band
++     at the node, so edges meeting there still agree to the last decimal. */
++  let total = arc[n-1] || 1;
++  const w2 = Math.min(win, total/2);          // short edges: shrink the window rather than
++                                              // let the two tapers overlap and miss
++  const offA = raw[0] - cur[0], offB = raw[n-1] - cur[n-1];
++  const hm = new Array(n), ys = new Array(n);
++  for(let i = 0; i < n; i++){
++    const a = 1 - clamp(arc[i]/w2, 0, 1), b = 1 - clamp((total - arc[i])/w2, 0, 1);
++    hm[i] = cur[i] + offA*a + offB*b;
++    ys[i] = hm[i]*vertScale;
+   }
+-  return out;
++  return {pts: rp, ys, hm};
+ }
+ 
+-/* Ground height for something with real footprint, not a single point.
+-   `terrainY` is nearest-cell: correct for a flat-bottomed object exactly the size of
+-   one cell, but the trail ribbon above deliberately does NOT use that -- it takes the
+-   highest band across its own width so a taller neighbouring cell can never poke through
+-   the tread. Anything placed directly on the trail (the avatar, trailhead gates, node
+-   signs) needs to sit on that SAME inflated surface, or it visually sinks below the
+-   ribbon at exactly the spots where terrain rises to one side of the path -- a hairpin
+-   or a junction where two legs of a loop sit on different terraces is the worst case,
+-   because the corridor there is pulled up by the far leg while the near leg (and
+-   anything standing on it) stays at its own true, lower height.
++/* Write the graded profiles into the band grid, so the ground under each corridor IS the
++   bench its ribbon sits on. Runs in the same slot flattenAreaCells does and for the same
++   reason: buildTerrainMesh bakes the grid into geometry the moment it is called.
+ 
+-   `radius` should roughly match the trail corridor's half-width (world.js's
+-   PATH_STYLE), not the whole DEM -- this only exists to match the ribbon's own anti-
+-   burial margin, not to flatten real elevation change generally. Off-trail callers keep
+-   using plain terrainY, so slopes and cliffs away from a path are unaffected. */
+-function surfaceY(x,z,vertScale,radius=2.6){
+-  if(!WORLD||!BAND)return 0;
+-  let band=maxBandNear(x,z,radius);
+-  if(!isFinite(band))band=BAND[WORLD.cellJ(z)*WORLD.width+WORLD.cellI(x)];
+-  return (band*STEP-GROUND_M)*vertScale;
++   Every profile is resolved in ONE pass over a shared claim map keyed by cell, keeping
++   whichever station sits closest to that cell's centre. Per-profile last-write-wins would
++   hand a cell to whichever trail happened to be processed last rather than to the trail
++   actually running through it — which goes wrong exactly where it is most visible, at
++   junctions and wherever two trails run close together. */
++function gradeTrailCells(profiles){
++  if(!WORLD || !BAND) return;
++  const claim = new Map();
++  for(const {pts, hm, halfWidth} of profiles){
++    // reach a cell centre either side, so the bench is wider than the tread it carries
++    const r = halfWidth + WORLD.cell*0.5;
++    for(let i = 0; i < pts.length; i++){
++      const p = pts[i];
++      const i0 = clamp(WORLD.cellI(p[0]-r),0,WORLD.width-1), i1 = clamp(WORLD.cellI(p[0]+r),0,WORLD.width-1),
++            j0 = clamp(WORLD.cellJ(p[1]-r),0,WORLD.height-1), j1 = clamp(WORLD.cellJ(p[1]+r),0,WORLD.height-1);
++      for(let j = j0; j <= j1; j++) for(let k = i0; k <= i1; k++){
++        const c = WORLD.cellCentre(k, j);
++        const d = Math.hypot(c.x-p[0], c.z-p[1]);
++        if(d > r) continue;
++        const key = j*WORLD.width + k, prev = claim.get(key);
++        if(!prev || d < prev.d) claim.set(key, {d, h: hm[i]});
++      }
++    }
++  }
++  for(const [key, v] of claim) BAND[key] = bandOfM(v.h);
+ }
+ 
+ /* Smoothed height for camera framing ONLY -- never for placing anything on the ground.
+@@ -263,6 +321,55 @@ function buildTerrainMesh(vertScale){
+   return geo;
+ }
+ 
++/* One-off top-down relief image of the band grid, for the minimap to use as its base
++   layer. Drawn once per world rebuild (minimap.js caches it against world.js's revision
++   counter) rather than per frame, because it is a full pass over the DEM.
++
++   Two channels of information, both derived from the SAME band array the terrain mesh is
++   built from, so the map can never disagree with the ground you're standing on: a
++   hypsometric tint (low = the theme's own grass, high = its rock) and a west-lit
++   hillshade from the band difference with the neighbour uphill. Contour lines fall out
++   for free -- a band change IS a contour crossing -- so they're stroked at every band
++   edge instead of being computed separately. */
++function reliefCanvas(theme){
++  if(!WORLD || !BAND) return null;
++  const W = WORLD.width, H = WORLD.height;
++  const c = document.createElement('canvas');
++  c.width = W; c.height = H;
++  const g = c.getContext('2d');
++  // headless runs (tools/smoke.js's canvas stub, jsdom without the canvas package) give
++  // back either nothing or a partial context -- bail rather than half-draw
++  if(!g || typeof g.createImageData !== 'function') return null;
++  const img = g.createImageData(W, H);
++  if(!img || !img.data) return null;
++  let lo = Infinity, hi = -Infinity;
++  for(let i = 0; i < BAND.length; i++){ if(BAND[i] < lo) lo = BAND[i]; if(BAND[i] > hi) hi = BAND[i]; }
++  const span = Math.max(1, hi - lo);
++  const low = new THREE.Color(theme.grass ? theme.grass[0] : '#5c7f42');
++  const high = new THREE.Color(theme.rocks ? theme.rocks[0] : '#a8836a');
++  for(let j = 0; j < H; j++) for(let i = 0; i < W; i++){
++    const b = BAND[j*W+i];
++    const t = (b - lo)/span;
++    // hillshade: compare with the neighbour to the north-west, the light direction the
++    // scene's own sun already comes from
++    const bn = BAND[Math.max(0, j-1)*W + Math.max(0, i-1)];
++    const shade = clamp(1 + (b - bn)*0.16, 0.72, 1.3);
++    // rounded: without it the fractional bands along a graded corridor would ink a
++    // contour line at every single cell down the length of every trail
++    const rb = Math.round(b);
++    const edge = (rb !== Math.round(BAND[j*W + Math.min(W-1, i+1)]) ||
++                  rb !== Math.round(BAND[Math.min(H-1, j+1)*W + i])) ? 0.78 : 1;
++    const o = (j*W+i)*4;
++    img.data[o]   = clamp((low.r + (high.r-low.r)*t) * 255 * shade * edge, 0, 255);
++    img.data[o+1] = clamp((low.g + (high.g-low.g)*t) * 255 * shade * edge, 0, 255);
++    img.data[o+2] = clamp((low.b + (high.b-low.b)*t) * 255 * shade * edge, 0, 255);
++    img.data[o+3] = 255;
++  }
++  g.putImageData(img, 0, 0);
++  // world-space rect the image covers, so the minimap never has to know the grid layout
++  return {canvas: c, x0: WORLD.originX, z0: WORLD.originZ, w: W*WORLD.cell, h: H*WORLD.cell};
++}
++
+ function groundTexture(theme){
+   const c=document.createElement('canvas');c.width=c.height=256;
+   const x=c.getContext('2d');
+@@ -278,5 +385,6 @@ function groundTexture(theme){
+   const t=new THREE.CanvasTexture(c);t.wrapS=t.wrapT=THREE.RepeatWrapping;return t;
+ }
+ 
+-export { setWorld, setStep, getWorld, getStep, terrainY, surfaceY, cameraGroundY, rawGroundY, flattenAreaCells,
+-         stationHeights, resample, buildTerrainMesh, groundTexture, GROUND_TILE_M };
++export { setWorld, setStep, getWorld, getStep, terrainY, cameraGroundY, rawGroundY, flattenAreaCells,
++         bandAt, bandY, heightM, bandOfM, gradeProfile, gradeTrailCells, reliefCanvas,
++         resample, buildTerrainMesh, groundTexture, GROUND_TILE_M };
+diff --git a/src/trails/world.js b/src/trails/world.js
+index e81eac4..107c4f9 100644
+--- a/src/trails/world.js
++++ b/src/trails/world.js
+@@ -13,7 +13,7 @@
+    separately re-tuned against an arbitrary shrink factor. Only vertical exaggeration
+    remains adjustable, since stretching Y alone can't misalign vectors from terrain. */
+ import { clamp } from '../core/math.js';
+-import { buildTerrainMesh, flattenAreaCells, GROUND_TILE_M, groundTexture, resample, setStep, setWorld, stationHeights, surfaceY, terrainY } from './terrain.js';
++import { buildTerrainMesh, flattenAreaCells, gradeProfile, gradeTrailCells, GROUND_TILE_M, groundTexture, reliefCanvas, resample, setStep, setWorld, terrainY } from './terrain.js';
+ 
+ import { scene, disposeGroup, sun, hemi } from '../core/render.js';
+ import { toon, toonTex } from '../core/materials.js';
+@@ -79,7 +79,7 @@ let startHead=0;
+    Exposed unchanged as getVertScale() so terrain.js and main.js need no edits. */
+ let EXAG=1.8;
+ let MAP_SCALE=1;
+-let VERT_SCALE=EXAG*MAP_SCALE;
++let VERT_SCALE=EXAG;
+ /* Multiplies the theme's own fogNear/fogFar (a 1.0 default reproduces the theme exactly,
+    independent of the exaggeration/map-scale state above). Kept separate from EXAG and
+    MAP_SCALE because it only touches scene.fog -- no geometry, no rebuild -- so it can
+@@ -89,7 +89,19 @@ let FOG_MUL=1;
+ 
+ function setStartHead(i){ startHead=i; }
+ function getStartHead(){ return startHead; }
+-function syncScales(){ VERT_SCALE=EXAG*MAP_SCALE; }
++/* VERT_SCALE deliberately does NOT include MAP_SCALE.
++
++   "World scale 1:N" is a shorten-the-walk control, not a zoom. It compacts the POSITIONS
++   of the network -- how far apart the trailheads are, how long a loop takes -- and
++   nothing else. Sizes stay in true metres: the pup, the trees and rocks, the width of the
++   tread, and the height of the hills. Folding MAP_SCALE into VERT_SCALE (as this did)
++   flattened the terrain in step with the compaction, so at 1:32 a 180 m ridge became a
++   5 m mound and the pup towered over country it should have been dwarfed by.
++
++   The trade this makes is real and worth knowing: since relief is preserved while
++   footprint shrinks, the terrain gets genuinely steeper as you compact. Around 1:8 the
++   slopes stop reading as hills. The slider's range is capped accordingly. */
++function syncScales(){ VERT_SCALE=EXAG; }
+ function setVertScale(v){ EXAG=Math.max(0.3,v); syncScales(); rebuildWorld(); }
+ function getVertScale(){ return VERT_SCALE; }
+ function getExaggeration(){ return EXAG; }
+@@ -100,10 +112,10 @@ function setFogMultiplier(v){
+   applyThemeLighting();          // fog only -- cheap enough to call straight from an input handler
+ }
+ function setMapScale(v){
+-  // "1 : N" in the UI is N = 1/MAP_SCALE; N ranges 1 (true scale) to 1000 (heavily
+-  // compacted), so MAP_SCALE itself ranges 1 down to 0.001. World.setMapScale()'s own
+-  // floor is looser (0.0005) purely as headroom against float error at the N=1000 edge.
+-  MAP_SCALE=clamp(Number(v)||1, 0.001, 4);
++  // "1 : N" in the UI is N = 1/MAP_SCALE. N now tops out at 8 rather than 1000: with
++  // elevation no longer compacting alongside the footprint (syncScales), heavier
++  // compaction turns real hills into walls. The floor here is 1/8 with a little headroom.
++  MAP_SCALE=clamp(Number(v)||1, 0.1, 4);
+   syncScales();
+   if(BUNDLE) BUNDLE.setMapScale(MAP_SCALE);
+   rebuildWorld();
+@@ -202,7 +214,42 @@ function clearLayers(){ EXTRA=[]; rebuildWorld(); }
+ function hasBundle(){ return !!BUNDLE; }
+ function setContourStep(m){ STEP_M=Math.max(0.5,m); rebuildWorld(); }
+ 
++/* Tread width in real metres per path kind, hoisted out of rebuildWorld's PATH_STYLE
++   because the terrain-carving pass needs the widths BEFORE the ribbon loop runs (it has
++   to cut the bench before buildTerrainMesh bakes the grid), and both must agree on the
++   number or the carve and the ribbon end up different widths. */
++const PATH_W = {trail:2.6, track:3.7, road:4.6};
++/* True metres, NOT scaled by MAP_SCALE. A tread is an object with a size, and the pup
++   has to stay the right size relative to it however compact the network is. */
++function pathWidth(kind){ return PATH_W[kind]||PATH_W.trail; }
++
++/* Bumped on every rebuildWorld so cached derived data (minimap.js's relief image, the
++   critter roster) can tell "same world, new frame" from "whole world replaced" without
++   world.js needing to know those consumers exist. */
++let WORLD_REV = 0;
++function getWorldRevision(){ return WORLD_REV; }
++
++/* Height something STANDS on: the ground, or the trail tread when inside a trail's
++   corridor. Now that the ground under a trail is benched to the ribbon's own graded
++   height (terrain.js), the two agree to within the bench's cell-sized staircase and this
++   max() only smooths that last fraction of a unit away. It is the
++   single answer for the player, the critters and anything world.js plants on a path, so
++   they can't drift apart the way the avatar and the ribbons did.
++
++   Off-trail it is plain terrainY: no inflation, no floating near a rise. */
++function standingY(x,z){
++  const g = terrainY(x,z,VERT_SCALE);
++  const nt = nearestTrail(x,z);
++  if(nt.y == null || !(nt.d <= nt.hw)) return g;
++  // ease over the outer 40 cm of the corridor so stepping onto a trail that sits a hair
++  // proud of the dirt isn't a visible pop. Unscaled, like the corridor width it eases
++  // across -- both are true metres now.
++  const k = clamp((nt.hw - nt.d)/0.4, 0, 1);
++  return Math.max(g, g + (nt.y - g)*k);
++}
++
+ function rebuildWorld(){
++  WORLD_REV++;
+   if(worldG){ scene.remove(worldG); disposeGroup(worldG); }
+   worldG=new THREE.Group(); scene.add(worldG);
+   backdropG=null;
+@@ -281,6 +328,29 @@ function rebuildWorld(){
+   // above ground that had already been drawn one terrace step below them.
+   flattenAreaCells(AREAS, pointInArea, areaBBox);
+ 
++  /* Trail benches, for the same before-the-mesh reason as the area flatten above, and in
++     this order relative to it: an area polygon (a parking lot) is a bigger, flatter claim
++     on the terrain than a path crossing it, so it grades first and the trail then follows
++     whatever level the lot ended up at.
++
++     One pass, unlike the version this replaces. That one measured, carved, then measured
++     again, because carving quantised heights could shift the band under a neighbouring
++     switchback. Grading writes a continuous height instead, and gradeProfile pins both
++     ends of every edge to raw terrain, so edges meeting at a node already agree without
++     needing a second look at the carved grid. */
++  GRAPH.edges.forEach(e=>{
++    e.prof = gradeProfile(e.pts, VERT_SCALE);
++    e.prof.halfWidth = pathWidth(e.kind)/2;
++  });
++  gradeTrailCells(GRAPH.edges.map(e=>e.prof));
++  // hash before any geometry: buildArea's ground-cover scatter and buildAreaSign both
++  // call nearestTrail, and standingY now needs tread heights too
++  GRAPH.edges.forEach(e=>{
++    const pr = e.prof, hw = (pathWidth(e.kind)+1.5)/2;
++    for(let i=0;i<pr.pts.length-1;i++)
++      hashSeg({a:pr.pts[i], b:pr.pts[i+1], edge:e, ya:pr.ys[i], yb:pr.ys[i+1], hw});
++  });
++
+   if(BUNDLE){
+     const groundMesh = new THREE.Mesh(buildTerrainMesh(VERT_SCALE), groundMat);
+     groundMesh.name = 'ground';    // identifies it for tools/smoke.js's height probe
+@@ -324,9 +394,12 @@ function rebuildWorld(){
+     // "World scale 1:N" control can push MAP_SCALE down to 0.001) would keep drawing a
+     // full-width trail while the ground around it shrinks -- past roughly 1:400 the
+     // ribbon would be wider than the entire map.
+-    const W=st.w*MAP_SCALE;
+-    const rpts=resample(e.pts,3);
+-    const hs=stationHeights(rpts,W+2.3,VERT_SCALE);
++    const W=st.w;
++    // e.prof is the graded profile the ground beneath was benched to, shared by every
++    // layer below plus the spatial hash. Sharing one profile is load-bearing: when each
++    // layer sampled terrain at its own slightly-offset vertex positions they disagreed by
++    // a whole terrace at any step and z-fought along the entire trail.
++    const rpts=e.prof.pts, hs=e.prof.ys;
+     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W+2.3,0.012,hs),mOutline));
+     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W+1.5,0.02,hs),trailMat(st.shoulder)));
+     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W,0.05,hs),trailMat(st.tread)));
+@@ -349,7 +422,6 @@ function rebuildWorld(){
+         worldG.add(new THREE.Mesh(ribbonGeom([rpts[i-1],rpts[i]],0.22,0.09,hs?[hs[i-1],hs[i]]:null),dashMat));
+       }
+     }
+-    for(let i=0;i<e.pts.length-1;i++) hashSeg({a:e.pts[i],b:e.pts[i+1],edge:e});
+   });
+ 
+   AREAS.forEach(a=>{ if(a.name) worldG.add(buildAreaSign(a,groundYAt,nearestTrail)); });
+@@ -360,17 +432,13 @@ function rebuildWorld(){
+   // bends within one edge, not its two endpoints), so without a pad sitting flush on
+   // top, every junction -- including a loop trail whose ends snap into one node -- shows
+   // a hard edge where the ribbons butt together. That only works if the pad is at the
+-  // SAME height the ribbons actually are: surfaceY, not raw terrainY, matching the
+-  // corridor-max height stationHeights gives every ribbon converging here (see
+-  // terrain.js). Radius 3.5 covers the outline layer's half-width for every edge kind
+-  // this file has (worst case, 'road', is 3.45), so the pad can't be narrower than what
+-  // it's supposed to hide.
++  // SAME height the ribbons actually are -- standingY, which reads the tread profile
++  // itself rather than guessing at it from the terrain around the node. Radius 3.5
++  // covers the outline layer's half-width for every edge kind this file has (worst case,
++  // 'road', is 3.45), so the pad can't be narrower than what it's supposed to hide.
+   GRAPH.nodes.forEach((n,ni)=>{
+     if(n.deg<1) return;
+-    // radius *MAP_SCALE for the same reason trail width is above: the ribbons this pad
+-    // has to cover shrink with the map, so its own anti-burial search radius must too --
+-    // otherwise at heavy compaction it scans a radius many times the whole map's extent.
+-    const y=surfaceY(n.p[0],n.p[1],VERT_SCALE,3.5*MAP_SCALE);
++    const y=standingY(n.p[0],n.p[1]);
+     const oDisc=new THREE.Mesh(new THREE.CircleGeometry(3.5,20),mOutline);
+     oDisc.rotation.x=-Math.PI/2; oDisc.position.set(n.p[0],y+0.045,n.p[1]); worldG.add(oDisc);
+     const disc=new THREE.Mesh(new THREE.CircleGeometry(3.0,20),trailMat(THEME.tread));
+@@ -472,7 +540,7 @@ function rebuildWorld(){
+     const gt=buildGate(th,i);
+     // same reasoning as the junction pads above: a trailhead sits at the end of a
+     // ribbon, so it needs the ribbon's own (corridor-max) height, not the raw cell.
+-    gt.position.y=surfaceY(th.x,th.z,VERT_SCALE,3.5*MAP_SCALE);
++    gt.position.y=standingY(th.x,th.z);
+     worldG.add(gt);
+   });
+ }
+@@ -483,6 +551,7 @@ function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a
+ function getBackdrop(){ return backdropG; }
+ 
+ export { loadWorld, rebuildWorld, addLayers, clearLayers, hasBundle, setContourStep,
++         standingY, getWorldRevision, pathWidth,
+          setThemeById, getTheme, setMapScale, getMapScale, getExaggeration, getBackdrop,
+          setFogMultiplier, getFogMultiplier,
+          getGraph, getTrailheads, getPOIs, getAreas, getBBox,
+diff --git a/styles/trails.css b/styles/trails.css
+index 0c27a2d..14f0c04 100644
+--- a/styles/trails.css
++++ b/styles/trails.css
+@@ -102,3 +102,42 @@ body.play #playHud{display:block;}
+ .pupcard .pc-bar i{display:block;height:100%;border-radius:2px;}
+ .pupcard .pc-bar.speed i{background:var(--blue);}
+ .pupcard .pc-bar.spook i{background:var(--pink);}
++
++/* --- play HUD: wildlife tally + watch meter ---------------------------------
++   Both live inside #playHud, so the existing `body.play` rule already handles
++   showing and hiding them; nothing here needs its own visibility state. */
++#hudTally{display:flex;gap:6px;margin-top:8px;}
++.tally{background:var(--card);border:3px solid var(--ink);border-radius:11px;
++  padding:4px 10px;font-size:13px;font-weight:bold;}
++#watchMeter{display:none;align-items:center;gap:8px;margin-top:8px;max-width:240px;
++  background:var(--card);border:3px solid var(--ink);border-radius:12px;padding:5px 10px;
++  font-size:12px;font-weight:bold;}
++#watchMeter.on{display:flex;}
++#watchMeter .wm-bar{flex:1;height:8px;border-radius:4px;background:#e2d5bd;overflow:hidden;}
++#watchMeter .wm-bar i{display:block;height:100%;width:0;background:var(--orange);
++  border-radius:4px;transition:width .12s linear;}
++
++/* --- corner minimap ---------------------------------------------------------
++   A disc rather than a rectangle: it reads as a spyglass onto the paper map
++   instead of a second screen, and the circular clip in minimap.js means the
++   corners never show a hard cut through the terrain image. */
++#miniWrap{position:absolute;top:10px;right:10px;display:none;flex-direction:column;
++  align-items:center;gap:6px;}
++body.play #miniWrap{display:flex;}
++body.bigmap #miniWrap{display:none;}
++#minimap{width:172px;height:172px;border-radius:50%;border:4px solid var(--ink);
++  background:#e9dcbe;box-shadow:0 3px 0 rgba(61,42,32,.25);display:block;}
++
++/* --- full-sheet map --- */
++#bigmapWrap{position:absolute;inset:0;display:none;z-index:8;background:rgba(45,32,22,.55);
++  padding:14px;box-sizing:border-box;}
++body.bigmap #bigmapWrap{display:block;}
++#bigmap{width:100%;height:100%;display:block;border:4px solid var(--ink);border-radius:16px;
++  background:#e9dcbe;box-sizing:border-box;}
++#bigmapClose{position:absolute;top:24px;left:24px;}
++
++@media (max-width:760px){
++  #minimap{width:118px;height:118px;}
++  #miniWrap{top:8px;right:8px;}
++  #watchMeter{max-width:190px;}
++}
+diff --git a/tools/smoke.js b/tools/smoke.js
+index febcb8a..7f224d2 100644
+--- a/tools/smoke.js
++++ b/tools/smoke.js
+@@ -215,8 +215,12 @@ const probe = `
+   fogNear: scene.fog ? scene.fog.near : null,
+   fogFar: scene.fog ? scene.fog.far : null,
+   camFov: camera.fov,
+-  camYaw: typeof camYaw !== 'undefined' ? camYaw : null,
+-  camPitch: typeof camPitch !== 'undefined' ? camPitch : null,
++  camYaw: typeof getCamYaw === 'function' ? getCamYaw() : null,
++  camPitch: typeof getCamPitch === 'function' ? getCamPitch() : null,
++  critters: typeof CRITTERS !== 'undefined' ? CRITTERS.length : null,
++  sightings: typeof getCritterStats === 'function' ? getCritterStats().sightings : null,
++  bigMapOpen: typeof isBigMapOpen === 'function' ? isBigMapOpen() : null,
++  vertScale: typeof getVertScale === 'function' ? getVertScale() : null,
+   worldMeshes: getWorldGroup() ? getWorldGroup().countMeshes() : 0,
+   backdrop: !!getBackdrop(),
+   areaFloat: (() => {
+@@ -439,6 +443,110 @@ function assertAll(window, errors, stats) {
+   check('trail list is populated', d.querySelectorAll('#trailList .tl-row').length > 0,
+     `${d.querySelectorAll('#trailList .tl-row').length} rows`);
+ 
++  /* ---- trail clamping, wildlife and the map ----------------------------------
++     These four features are the ones with no visible failure mode until a human
++     walks the map: a floating ribbon looks fine from the trailhead, an empty
++     critter roster looks like bad luck, and a camera that clips into a hill only
++     does it on the ascent. Assert the wiring here instead. */
++
++  // Enter play, which is what spawns the population and inits the map canvases.
++  d.querySelector('#playBtn').dispatchEvent(new window.MouseEvent('click', { bubbles:true }));
++  if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(1000); }
++  const pl = probe();
++
++  check('minimap and full-map canvases exist in the HUD',
++    !!d.querySelector('#minimap') && !!d.querySelector('#bigmap'));
++  check('play mode spawns a wildlife population', pl.critters > 0, `${pl.critters} critters`);
++  check('sightings start at zero', pl.sightings === 0);
++
++  check('M opens the full map', (() => {
++    const ev = new window.KeyboardEvent('keydown', { bubbles:true });
++    Object.defineProperty(ev, 'code', { value:'KeyM' });
++    window.dispatchEvent(ev);
++    return probe().bigMapOpen === true && d.body.classList.contains('bigmap');
++  })());
++  check('Escape closes the map before it quits the walk', (() => {
++    const ev = new window.KeyboardEvent('keydown', { bubbles:true });
++    Object.defineProperty(ev, 'code', { value:'Escape' });
++    window.dispatchEvent(ev);
++    return probe().bigMapOpen === false && d.body.classList.contains('play');
++  })());
++
++  /* The graded corridor. Three separate invariants, because they fail independently:
++     the ribbon must sit on the bench that was carved for it, the bench must have no
++     cliffs left in it, and edges meeting at a junction must arrive at the same height.
++     The last one caught a real regression -- pinning edge ends by blending toward the
++     RAW terrain height reinstated a full 5.4-unit step in the last window's worth of
++     every edge, right where trails converge. */
++  const bench = (() => {
++    if (typeof getGraph !== 'function' || typeof terrainY !== 'function') return null;
++    const G = getGraph(); if (!G) return null;
++    const vs = getVertScale();
++    let n = 0, off = 0, worstRise = 0;
++    for (const e of G.edges) {
++      if (!e.prof) continue;
++      for (let i = 0; i < e.prof.pts.length; i++) {
++        const [x, z] = e.prof.pts[i];
++        if (Math.abs(e.prof.ys[i] - terrainY(x, z, vs)) > 0.7) off++;
++        n++;
++        if (i) worstRise = Math.max(worstRise, Math.abs(e.prof.ys[i] - e.prof.ys[i-1]));
++      }
++    }
++    return { n, off, worstRise, step: getStep() * vs };
++  })();
++
++  check('ribbons sit on the bench graded for them',
++    bench && bench.n > 0 && bench.off / bench.n < 0.005,
++    bench ? `${bench.off} of ${bench.n} vertices off by >0.7u` : 'no profiles');
++
++  check('no terrace cliffs left along any trail',
++    bench && bench.worstRise < bench.step * 0.35,
++    bench ? `worst rise ${bench.worstRise.toFixed(2)}u vs a ${bench.step.toFixed(1)}u terrace step` : '');
++
++  check('edges meeting at a junction arrive at the same height', (() => {
++    const G = getGraph(); if (!G) return false;
++    const at = new Map();
++    for (const e of G.edges) {
++      if (!e.prof) continue;
++      const last = e.prof.hm.length - 1;
++      for (const [nid, h] of [[e.a, e.prof.hm[0]], [e.b, e.prof.hm[last]]]) {
++        if (nid == null) continue;
++        if (!at.has(nid)) at.set(nid, []);
++        at.get(nid).push(h);
++      }
++    }
++    for (const hs of at.values()) {
++      if (hs.length > 1 && (Math.max(...hs) - Math.min(...hs)) * getVertScale() > 0.01) return false;
++    }
++    return true;
++  })());
++
++  /* World scale is a shorten-the-walk control, not a zoom: it compacts positions and
++     leaves sizes alone. Assert both halves -- that the network really does shrink, and
++     that elevation and tread width really don't move with it.
++
++     Set an explicit 1:1 baseline first. Earlier steps in this file leave the map at
++     whatever scale they were testing, and comparing against that gave a ratio that looked
++     like a failure when the behaviour was exactly right. */
++  const scaleTest = (() => {
++    if (typeof setMapScale !== 'function') return null;
++    const restore = getMapScale();
++    setMapScale(1);
++    const bb1 = getBBox(), v1 = getVertScale(), w1 = pathWidth('trail');
++    const span1 = bb1.maxx - bb1.minx;
++    setMapScale(0.25);
++    const bb2 = getBBox(), v2 = getVertScale(), w2 = pathWidth('trail');
++    const span2 = bb2.maxx - bb2.minx;
++    setMapScale(restore);
++    return { ratio: span2 / span1, v1, v2, w1, w2 };
++  })();
++
++  check('world scale compacts the network', scaleTest && Math.abs(scaleTest.ratio - 0.25) < 0.02,
++    scaleTest ? `1:4 gives ${(scaleTest.ratio * 100).toFixed(1)}% of the 1:1 span` : '');
++  check('world scale leaves elevation and tread width alone',
++    scaleTest && scaleTest.v1 === scaleTest.v2 && scaleTest.w1 === scaleTest.w2,
++    scaleTest ? `vert ${scaleTest.v1}->${scaleTest.v2}, tread ${scaleTest.w1}->${scaleTest.w2}` : '');
++
+   const failed = results.filter(r => !r.ok);
+   console.log('\n---------------- smoke test ----------------');
+   for (const r of results) console.log(` ${r.ok ? 'ok  ' : 'FAIL'}  ${r.name}${r.detail ? '   (' + r.detail + ')' : ''}`);
+diff --git a/trails/index.html b/trails/index.html
+index 55c16ba..c06759a 100644
+--- a/trails/index.html
++++ b/trails/index.html
+@@ -102,6 +102,22 @@
+       <canvas id="c"></canvas>
+       <div id="playHud">
+         <button class="btn small" id="exitBtn">← Trailhead</button>
++        <div id="hudTally">
++          <span class="tally" id="hudSeen" title="Wildlife watched">✨ 0</span>
++          <span class="tally" id="hudSpooked" title="Wildlife you sent running">💨 0</span>
++        </div>
++        <div id="watchMeter">
++          <span id="watchName">Watching…</span>
++          <span class="wm-bar"><i id="watchFill"></i></span>
++        </div>
++      </div>
++      <div id="miniWrap">
++        <canvas id="minimap"></canvas>
++        <button class="btn small" id="mapBtn" title="Full map (M)">🗺</button>
++      </div>
++      <div id="bigmapWrap">
++        <canvas id="bigmap"></canvas>
++        <button class="btn small" id="bigmapClose">✕ Close map</button>
+       </div>
+     </div>
+   </main>

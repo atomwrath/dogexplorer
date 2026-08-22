@@ -14,7 +14,14 @@ import { clamp } from '../core/math.js';
 
 let WORLD = null;   // the loaded World instance (see data/world_bundle.js)
 let STEP = 3;        // contour step, in metres — matches --cell intent from fetch_dem.py
-let BAND = null;     // Int32Array, one terrace band index per DEM cell (mutable copy)
+/* Float32Array, one terrace band per DEM cell. FLOAT, not Int, and that is the whole
+   mechanism behind the graded trail corridor below. Away from paths every cell holds a
+   whole band index and the ground is the terraced landscape it always was; under a trail
+   the cells hold FRACTIONAL bands, so the same buildTerrainMesh() draws a fine, smoothly
+   climbing bench along the corridor instead — and the cut bank and fill embankment on
+   either side come out of it for free, because those are nothing but the risers between a
+   fractional cell and a whole-numbered one. */
+let BAND = null;
 let GROUND_M = 0;    // WORLD.minM cached, the datum: 0 in-game = the map's lowest point
 
 function setWorld(w){ WORLD = w; GROUND_M = w ? w.minM : 0; rebuildBands(); }
@@ -27,7 +34,7 @@ function rebuildBands(){
   // World.terraceGrid(step) already gives band indices in the same row-major layout as
   // World.heights — copy it so area grading below can edit bands without mutating the
   // shared World instance, which other systems may also be reading from.
-  BAND = Int32Array.from(WORLD.terraceGrid(STEP));
+  BAND = Float32Array.from(WORLD.terraceGrid(STEP));
 }
 
 /* World-units ground height at (x,z): terrace band -> metres above datum -> VERT_SCALE.
@@ -83,78 +90,235 @@ function flattenAreaCells(areas, pointInArea, areaBBox){
   }
 }
 
-/* Highest terrace band within radius `r` of a point -- the shared core of the
-   anti-burial technique. Circular rather than the segment-corridor shape stationHeights
-   uses below; close enough for a point query, and simple enough to also serve callers
-   that have no direction to sweep (surfaceY, below). */
-function maxBandNear(x,z,r){
-  if(!WORLD||!BAND)return NaN;
-  const i0=clamp(WORLD.cellI(x-r),0,WORLD.width-1), i1=clamp(WORLD.cellI(x+r),0,WORLD.width-1),
-        j0=clamp(WORLD.cellJ(z-r),0,WORLD.height-1), j1=clamp(WORLD.cellJ(z+r),0,WORLD.height-1);
-  let m=-Infinity;
-  for(let j=j0;j<=j1;j++)for(let k=i0;k<=i1;k++){
-    const c=WORLD.cellCentre(k,j);
-    if(Math.hypot(c.x-x,c.z-z)>r)continue;
-    const band=BAND[j*WORLD.width+k];
-    if(band>m)m=band;
-  }
-  return m;
+/* Terrace band at a point — whole away from trails, fractional inside a graded corridor.
+   `heightM` is the same value in metres above the datum, which is the unit the grading
+   maths works in; `bandOfM` converts back. */
+function bandAt(x,z){
+  if(!WORLD||!BAND)return 0;
+  return BAND[clamp(WORLD.cellJ(z),0,WORLD.height-1)*WORLD.width+clamp(WORLD.cellI(x),0,WORLD.width-1)];
 }
+function bandY(band,vertScale){ return (band*STEP-GROUND_M)*vertScale; }
+function heightM(x,z){ return bandAt(x,z)*STEP-GROUND_M; }
+function bandOfM(h){ return (h+GROUND_M)/STEP; }
 
-/* Station heights for a trail ribbon: the highest terrace under the ribbon's own
-   footprint at each vertex, guaranteeing the tread can't be buried by construction —
-   same technique as the draped-Z version, reading from the DEM-derived bands instead. */
-function stationHeights(rpts,w,vertScale){
-  if(!WORLD||!BAND)return null;
-  const n=rpts.length,out=new Array(n);
-  const seg=new Array(n-1);
-  for(let i=0;i<n-1;i++){
-    const p=rpts[i],q=rpts[i+1],r=w/2;
-    const i0=clamp(WORLD.cellI(Math.min(p[0],q[0])-r),0,WORLD.width-1),
-          i1=clamp(WORLD.cellI(Math.max(p[0],q[0])+r),0,WORLD.width-1),
-          j0=clamp(WORLD.cellJ(Math.min(p[1],q[1])-r),0,WORLD.height-1),
-          j1=clamp(WORLD.cellJ(Math.max(p[1],q[1])+r),0,WORLD.height-1);
-    const dqx=q[0]-p[0],dqz=q[1]-p[1],L2=dqx*dqx+dqz*dqz||1,reach=r+WORLD.cell*0.75;
-    let m=-Infinity;
-    for(let j=j0;j<=j1;j++)for(let k=i0;k<=i1;k++){
-      const c=WORLD.cellCentre(k,j);
-      let t=((c.x-p[0])*dqx+(c.z-p[1])*dqz)/L2;t=t<0?0:(t>1?1:t);
-      if(Math.hypot(c.x-(p[0]+t*dqx),c.z-(p[1]+t*dqz))>reach)continue;
-      const band=BAND[j*WORLD.width+k];
-      if(band>m)m=band;
+/* ---------- graded trail corridor ----------
+
+   THE PROBLEM THIS REPLACES. Terracing quantises elevation to whole contour bands, which
+   turns every gentle grade into flat-then-cliff. On this map that is a 5.4-unit riser
+   every 37 m of path -- about seven times the pup's shoulder height. Earlier versions
+   argued over whether the ribbon should step with the terrain (it then hung in the air
+   over the low half of each crossing) or the avatar should be lifted to meet the ribbon
+   (it then floated whenever terrain merely rose nearby). Both were answers to the wrong
+   question: a trail crossing a 5.4-unit cliff has no good rendering.
+
+   What a real trail does is cut a bench -- it holds a steady grade, and the hillside is
+   cut away above it and filled below. That is what these two functions do:
+
+     gradeProfile()     smooths the DEM along the centreline into a continuous height, so
+                        the path climbs at the grade the land actually has rather than in
+                        whole-contour jumps.
+     gradeTrailCells()  writes that height back into the band grid as a FRACTIONAL band,
+                        so the ground under the corridor becomes the graded bench while
+                        the terraced country either side stays terraced.
+
+   The cut bank and the fill embankment are then just ordinary terrace risers between a
+   fractional corridor cell and its whole-numbered neighbour, which means buildTerrainMesh
+   already draws them. No skirt geometry, no holes to stitch, no second mesh. */
+
+/* Ease corners a ribbon of half-width `hw` could not physically turn.
+
+   A ribbon is drawn by offsetting the centreline sideways by its half-width. Where the
+   centreline turns tighter than that half-width, the INNER offset crosses itself and the
+   quad folds inside out -- on screen a chain of chevrons and scallops instead of a path.
+   Digitised trail data is full of such corners (a switchback apex is a single vertex),
+   and they only become a problem once the ribbon is wide relative to the turn, which on a
+   compacted map it always is.
+
+   Rather than clamp the width or special-case the geometry, relax the offending corners:
+   each pass pulls a too-tight vertex toward the midpoint of its neighbours, in proportion
+   to how far past the limit it is, leaving everything else untouched. Endpoints never
+   move -- they are what makes edges meeting at a junction agree. */
+/* Walk a polyline emitting a point every `step` of arc length. Unlike resample(), which
+   keeps the input's own vertices and only subdivides long gaps, this also DISCARDS
+   vertices that are closer together than `step` -- which is the half that matters here.
+   A digitised trail has vertices a few metres apart in real terms; compact the map to
+   1:16 and they are 25 cm apart while the ribbon is still 1.65 m wide, and no amount of
+   subdividing fixes a spacing floor. Endpoints are always kept, since junction agreement
+   depends on them. */
+function resampleUniform(pts, step){
+  if(pts.length < 2 || !(step > 0)) return pts.map(p => [p[0], p[1]]);
+  const out = [[pts[0][0], pts[0][1]]];
+  let carry = 0;
+  for(let i = 1; i < pts.length; i++){
+    const a = pts[i-1], b = pts[i];
+    const dx = b[0]-a[0], dz = b[1]-a[1], L = Math.hypot(dx, dz);
+    if(L < 1e-9) continue;
+    let d = step - carry;
+    while(d <= L){
+      out.push([a[0] + dx*(d/L), a[1] + dz*(d/L)]);
+      d += step;
     }
-    if(!isFinite(m))m=BAND[WORLD.cellJ(p[1])*WORLD.width+WORLD.cellI(p[0])];
-    seg[i]=m;
+    carry = L - (d - step);
   }
-  for(let i=0;i<n;i++){
-    const a=i>0?seg[i-1]:-Infinity,b=i<n-1?seg[i]:-Infinity;
-    let band=Math.max(a,b);
-    if(!isFinite(band))band=BAND[WORLD.cellJ(rpts[i][1])*WORLD.width+WORLD.cellI(rpts[i][0])];
-    out[i]=(band*STEP-GROUND_M)*vertScale;
-  }
+  const last = pts[pts.length-1], tail = out[out.length-1];
+  // replace rather than append a final point that would sit right on top of the previous
+  if(Math.hypot(last[0]-tail[0], last[1]-tail[1]) < step*0.5 && out.length > 1) out.pop();
+  out.push([last[0], last[1]]);
   return out;
 }
 
-/* Ground height for something with real footprint, not a single point.
-   `terrainY` is nearest-cell: correct for a flat-bottomed object exactly the size of
-   one cell, but the trail ribbon above deliberately does NOT use that -- it takes the
-   highest band across its own width so a taller neighbouring cell can never poke through
-   the tread. Anything placed directly on the trail (the avatar, trailhead gates, node
-   signs) needs to sit on that SAME inflated surface, or it visually sinks below the
-   ribbon at exactly the spots where terrain rises to one side of the path -- a hairpin
-   or a junction where two legs of a loop sit on different terraces is the worst case,
-   because the corridor there is pulled up by the far leg while the near leg (and
-   anything standing on it) stays at its own true, lower height.
+function roundCorners(pts, hw){
+  if(!(hw > 0) || pts.length < 3) return pts;
+  let cur = pts.map(p => [p[0], p[1]]);
+  for(let pass = 0; pass < 8; pass++){
+    const next = cur.map(p => [p[0], p[1]]);
+    let moved = false;
+    for(let i = 1; i < cur.length-1; i++){
+      const a = cur[i-1], b = cur[i], c = cur[i+1];
+      const a1 = Math.atan2(b[1]-a[1], b[0]-a[0]), a2 = Math.atan2(c[1]-b[1], c[0]-b[0]);
+      let d = a2-a1; while(d > Math.PI) d -= 2*Math.PI; while(d < -Math.PI) d += 2*Math.PI;
+      if(Math.abs(d) < 1e-6) continue;
+      const seg = (Math.hypot(b[0]-a[0], b[1]-a[1]) + Math.hypot(c[0]-b[0], c[1]-b[1]))/2;
+      const R = seg/Math.abs(d);                 // local turn radius
+      if(R >= hw) continue;
+      const k = Math.min(0.5, (1 - R/hw)*0.5);   // how hard to pull it in
+      next[i][0] = b[0] + ((a[0]+c[0])/2 - b[0])*k;
+      next[i][1] = b[1] + ((a[1]+c[1])/2 - b[1])*k;
+      moved = true;
+    }
+    cur = next;
+    if(!moved) break;
+  }
+  return cur;
+}
 
-   `radius` should roughly match the trail corridor's half-width (world.js's
-   PATH_STYLE), not the whole DEM -- this only exists to match the ribbon's own anti-
-   burial margin, not to flatten real elevation change generally. Off-trail callers keep
-   using plain terrainY, so slopes and cliffs away from a path are unaffected. */
-function surfaceY(x,z,vertScale,radius=2.6){
-  if(!WORLD||!BAND)return 0;
-  let band=maxBandNear(x,z,radius);
-  if(!isFinite(band))band=BAND[WORLD.cellJ(z)*WORLD.width+WORLD.cellI(x)];
-  return (band*STEP-GROUND_M)*vertScale;
+/* Smooth the DEM along a centreline into a continuous, walkable profile.
+
+   Both ends are pinned to the raw terrain height, with the smoothing tapered in over the
+   window length. That is not cosmetic -- it is what makes junctions work. Two edges
+   meeting at a node read the same raw band there, so with the ends pinned they arrive at
+   the SAME height and their ribbons meet flush. Smooth straight through the ends instead
+   and each edge lands on its own idea of where the junction is, off by up to a full band.
+
+   The window is expressed in DEM cells rather than world units so it means the same thing
+   at any map scale -- the same reason resample's step and the graph tolerances are. */
+const MAX_STATIONS = 3000, MAX_BENCH_CELLS = 7;
+function gradeProfile(pts, vertScale, stepCells = 0.7, windowCells = 8, minStepM = 0, endA = null, endB = null){
+  /* Station spacing follows the DEM cell, but with a floor derived from the line's own
+     length. World scale runs to 1:1000, where a 3 m cell becomes 3 mm -- sampling at
+     0.7 of that would put a third of a million stations on a single trail and hang the
+     rebuild. The floor caps it at MAX_STATIONS with no effect at any sane scale. */
+  let lineLen = 0;
+  for(let i = 1; i < pts.length; i++) lineLen += Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1]);
+  const stepM = Math.max(WORLD ? WORLD.cell*stepCells : 3, lineLen/MAX_STATIONS, minStepM);
+  /* Resample, relax the corners, resample again. The second pass matters: roundCorners
+     pulls tight vertices toward their neighbours' midpoint, which shortens the line
+     locally and undoes some of the even spacing the first pass established -- and even
+     spacing is precisely what keeps the join discs from piling up. The rounding target is
+     1.3x the half-width rather than exactly it, so corners land clear of the fold
+     threshold instead of right on it. */
+  const rp = resampleUniform(
+    roundCorners(resampleUniform(pts, stepM), (minStepM/0.6/2)*1.3), stepM);
+  const n = rp.length;
+  if(!WORLD || !BAND || n < 2) return {pts: rp, ys: new Array(n).fill(0), hm: new Array(n).fill(0)};
+
+  const arc = new Float64Array(n);
+  for(let i = 1; i < n; i++) arc[i] = arc[i-1] + Math.hypot(rp[i][0]-rp[i-1][0], rp[i][1]-rp[i-1][1]);
+  const raw = new Float64Array(n);
+  for(let i = 0; i < n; i++) raw[i] = heightM(rp[i][0], rp[i][1]);
+
+  /* Two box passes over a sliding arc-length window approximate a Gaussian at a fraction
+     of the cost, and the running sum keeps each pass linear in the station count.
+
+     The window is at least six stations wide. Sizing it from the DEM cell alone was a
+     silent failure at compacted world scale: the cell shrinks with the map but station
+     spacing now has a floor in true metres (it has to clear the ribbon's own width), so
+     past about 1:20 the window was NARROWER than one station. A box filter over a single
+     sample is the identity -- the profile came back as raw quantised terrain, and every
+     terrace cliff the grading exists to remove was still there, with nothing in the code
+     looking obviously wrong. */
+  const win = Math.max(WORLD.cell*windowCells, stepM*6);
+  let cur = raw;
+  for(let pass = 0; pass < 2; pass++){
+    const out = new Float64Array(n);
+    let lo = 0, hi = 0, sum = 0, cnt = 0;
+    for(let i = 0; i < n; i++){
+      while(hi < n && arc[hi] <= arc[i] + win){ sum += cur[hi]; cnt++; hi++; }
+      while(arc[lo] < arc[i] - win){ sum -= cur[lo]; cnt--; lo++; }
+      out[i] = cnt ? sum/cnt : cur[i];
+    }
+    cur = out;
+  }
+
+  /* Pin the ends by adding a DECAYING OFFSET, not by blending toward a target height.
+
+     Blending toward the target was the obvious way and it was wrong: it drags the last
+     window's worth of every edge onto a value the smoothing exists to replace, which put
+     a full terrace cliff right where trails converge. Offsetting keeps the smooth shape
+     everywhere and just slides its ends, spreading the correction over the window.
+
+     WHAT to pin to matters as much. Pinning to RAW terrain height (what this did first)
+     makes the offset as large as the difference between a smoothed profile and the
+     quantised ground under its endpoint -- which on steep or compacted ground is several
+     terraces. Spread over a short edge that is a cliff again, just relocated: a two-metre
+     connector has room for two stations, so the whole offset lands between them. Callers
+     therefore pass endA/endB: a height agreed between all edges meeting at that node, so
+     the offset is the small disagreement between neighbours rather than the large gap to
+     raw ground. endA/endB null falls back to raw, which is right for a genuine dead-end
+     with nothing to agree with.
+
+     The window still stretches to swallow a big offset if one turns up (SAFE_GRADE), so a
+     pathological input degrades to a ramp rather than a step. */
+  let total = arc[n-1] || 1;
+  const tA = endA == null ? raw[0] : endA, tB = endB == null ? raw[n-1] : endB;
+  const offA = tA - cur[0], offB = tB - cur[n-1];
+  const SAFE_GRADE = 0.35;
+  const need = Math.max(Math.abs(offA), Math.abs(offB))/SAFE_GRADE;
+  const w2 = Math.min(Math.max(win, need), total/2) || total/2 || 1;
+  const hm = new Array(n), ys = new Array(n);
+  for(let i = 0; i < n; i++){
+    const a = 1 - clamp(arc[i]/w2, 0, 1), b = 1 - clamp((total - arc[i])/w2, 0, 1);
+    hm[i] = cur[i] + offA*a + offB*b;
+    ys[i] = hm[i]*vertScale;
+  }
+  // smoothed (unpinned) end heights, so the caller can build the node consensus above
+  return {pts: rp, ys, hm, smA: cur[0], smB: cur[n-1]};
+}
+
+/* Write the graded profiles into the band grid, so the ground under each corridor IS the
+   bench its ribbon sits on. Runs in the same slot flattenAreaCells does and for the same
+   reason: buildTerrainMesh bakes the grid into geometry the moment it is called.
+
+   Every profile is resolved in ONE pass over a shared claim map keyed by cell, keeping
+   whichever station sits closest to that cell's centre. Per-profile last-write-wins would
+   hand a cell to whichever trail happened to be processed last rather than to the trail
+   actually running through it — which goes wrong exactly where it is most visible, at
+   junctions and wherever two trails run close together. */
+function gradeTrailCells(profiles){
+  if(!WORLD || !BAND) return;
+  const claim = new Map();
+  for(const {pts, hm, halfWidth} of profiles){
+    /* Reach a cell centre either side, so the bench is wider than the tread it carries --
+       but never more than MAX_BENCH_CELLS of them. Tread widths are true metres and do
+       NOT shrink with world scale (that is the point of the control), so at heavy
+       compaction the ratio of trail width to cell size explodes: at 1:1000 an unclamped
+       radius covers about 240,000 cells per station. The clamp costs nothing at any scale
+       where the trail is narrower than the map, and past that the map is a blob anyway. */
+    const r = Math.min(halfWidth + WORLD.cell*0.5, WORLD.cell*MAX_BENCH_CELLS);
+    for(let i = 0; i < pts.length; i++){
+      const p = pts[i];
+      const i0 = clamp(WORLD.cellI(p[0]-r),0,WORLD.width-1), i1 = clamp(WORLD.cellI(p[0]+r),0,WORLD.width-1),
+            j0 = clamp(WORLD.cellJ(p[1]-r),0,WORLD.height-1), j1 = clamp(WORLD.cellJ(p[1]+r),0,WORLD.height-1);
+      for(let j = j0; j <= j1; j++) for(let k = i0; k <= i1; k++){
+        const c = WORLD.cellCentre(k, j);
+        const d = Math.hypot(c.x-p[0], c.z-p[1]);
+        if(d > r) continue;
+        const key = j*WORLD.width + k, prev = claim.get(key);
+        if(!prev || d < prev.d) claim.set(key, {d, h: hm[i]});
+      }
+    }
+  }
+  for(const [key, v] of claim) BAND[key] = bandOfM(v.h);
 }
 
 /* Smoothed height for camera framing ONLY -- never for placing anything on the ground.
@@ -263,6 +427,55 @@ function buildTerrainMesh(vertScale){
   return geo;
 }
 
+/* One-off top-down relief image of the band grid, for the minimap to use as its base
+   layer. Drawn once per world rebuild (minimap.js caches it against world.js's revision
+   counter) rather than per frame, because it is a full pass over the DEM.
+
+   Two channels of information, both derived from the SAME band array the terrain mesh is
+   built from, so the map can never disagree with the ground you're standing on: a
+   hypsometric tint (low = the theme's own grass, high = its rock) and a west-lit
+   hillshade from the band difference with the neighbour uphill. Contour lines fall out
+   for free -- a band change IS a contour crossing -- so they're stroked at every band
+   edge instead of being computed separately. */
+function reliefCanvas(theme){
+  if(!WORLD || !BAND) return null;
+  const W = WORLD.width, H = WORLD.height;
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const g = c.getContext('2d');
+  // headless runs (tools/smoke.js's canvas stub, jsdom without the canvas package) give
+  // back either nothing or a partial context -- bail rather than half-draw
+  if(!g || typeof g.createImageData !== 'function') return null;
+  const img = g.createImageData(W, H);
+  if(!img || !img.data) return null;
+  let lo = Infinity, hi = -Infinity;
+  for(let i = 0; i < BAND.length; i++){ if(BAND[i] < lo) lo = BAND[i]; if(BAND[i] > hi) hi = BAND[i]; }
+  const span = Math.max(1, hi - lo);
+  const low = new THREE.Color(theme.grass ? theme.grass[0] : '#5c7f42');
+  const high = new THREE.Color(theme.rocks ? theme.rocks[0] : '#a8836a');
+  for(let j = 0; j < H; j++) for(let i = 0; i < W; i++){
+    const b = BAND[j*W+i];
+    const t = (b - lo)/span;
+    // hillshade: compare with the neighbour to the north-west, the light direction the
+    // scene's own sun already comes from
+    const bn = BAND[Math.max(0, j-1)*W + Math.max(0, i-1)];
+    const shade = clamp(1 + (b - bn)*0.16, 0.72, 1.3);
+    // rounded: without it the fractional bands along a graded corridor would ink a
+    // contour line at every single cell down the length of every trail
+    const rb = Math.round(b);
+    const edge = (rb !== Math.round(BAND[j*W + Math.min(W-1, i+1)]) ||
+                  rb !== Math.round(BAND[Math.min(H-1, j+1)*W + i])) ? 0.78 : 1;
+    const o = (j*W+i)*4;
+    img.data[o]   = clamp((low.r + (high.r-low.r)*t) * 255 * shade * edge, 0, 255);
+    img.data[o+1] = clamp((low.g + (high.g-low.g)*t) * 255 * shade * edge, 0, 255);
+    img.data[o+2] = clamp((low.b + (high.b-low.b)*t) * 255 * shade * edge, 0, 255);
+    img.data[o+3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  // world-space rect the image covers, so the minimap never has to know the grid layout
+  return {canvas: c, x0: WORLD.originX, z0: WORLD.originZ, w: W*WORLD.cell, h: H*WORLD.cell};
+}
+
 function groundTexture(theme){
   const c=document.createElement('canvas');c.width=c.height=256;
   const x=c.getContext('2d');
@@ -278,5 +491,6 @@ function groundTexture(theme){
   const t=new THREE.CanvasTexture(c);t.wrapS=t.wrapT=THREE.RepeatWrapping;return t;
 }
 
-export { setWorld, setStep, getWorld, getStep, terrainY, surfaceY, cameraGroundY, rawGroundY, flattenAreaCells,
-         stationHeights, resample, buildTerrainMesh, groundTexture, GROUND_TILE_M };
+export { setWorld, setStep, getWorld, getStep, terrainY, cameraGroundY, rawGroundY, flattenAreaCells,
+         bandAt, bandY, heightM, bandOfM, gradeProfile, gradeTrailCells, reliefCanvas,
+         resample, buildTerrainMesh, groundTexture, GROUND_TILE_M };
