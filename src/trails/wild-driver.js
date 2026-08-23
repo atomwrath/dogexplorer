@@ -9,9 +9,11 @@ import { clamp, lerp, mulberry32 } from '../core/math.js';
 import { scene, disposeGroup } from '../core/render.js';
 import { makeAnimalModel } from '../city/animal-models.js';
 import { SPECIES } from '../data/species.js';
+import { gaitStep, climbPose } from './gait.js';
 
 let group = null, refs = null, speciesKey = null, S = null;
-let wildLegPhase = 0, wildBodyBaseY = 0;
+let wildLegPhase = 0, wildBodyBaseY = 0, wildClimbAmt = 0;
+let wildLegLen = 0.4;      // hip pivot height above ground, WORLD units (see dog-driver)
 const wildPos = new THREE.Vector3(0,0,0);
 let yaw = 0;
 
@@ -24,9 +26,20 @@ function spawnWild(key, seed){
   group.position.copy(wildPos);
   group.rotation.y = yaw;
   scene.add(group);
-  wildLegPhase = 0;
+  wildLegPhase = 0; wildClimbAmt = 0;
   wildBodyBaseY = refs.bodyG ? refs.bodyG.position.y : 0;
+  wildLegLen = measureWildLegLen();
 }
+
+/* Same rule as the dog: the foot-lock is only correct if this is the pivot's height in
+   WORLD units, after whatever scale makeAnimalModel baked into the group. */
+function measureWildLegLen(){
+  if(!refs || !refs.legs || !refs.legs.length || !group) return 0.4;
+  const local = wildBodyBaseY + (refs.legs[0].position.y || 0);
+  return Math.max(0.05, local*(group.scale ? group.scale.x : 1));
+}
+function wildLegLength(){ return wildLegLen; }
+function wildShadowRadius(){ return wildLegLen*1.25; }
 
 function setWildYaw(v){ yaw = v; if(group) group.rotation.y = yaw; }
 function setWildVisible(v){ if(group) group.visible = !!v; }
@@ -44,26 +57,42 @@ function spookRadiusFor(key){
   return clamp(16 - s.brav*1.3, 4, 14) * (s.scale||1);
 }
 
-function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking){
+function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb){
   if(!group || !refs) return;
   group.position.set(wildPos.x, groundY + jumpY, wildPos.z);
   group.rotation.y = yaw;
   const hop = !!S?.hopper;
-  const strideRate = 2.2 / clamp((S?.scale||1),0.4,2.2);
-  wildLegPhase += speed*dt*strideRate*(sneaking?0.85:1);
-  const swing = clamp(speed*(hop?0.16:0.1),0,hop?0.9:0.78);
-  (refs.legs||[]).forEach((leg,i)=>{
+  /* Foot-locked, exactly as the dog is -- see gait.js. A hopper is the one honest
+     exception: both hind legs move together and the animal is airborne for much of the
+     cycle, so it covers more ground per stride than a pendulum sweep can account for.
+     It gets a longer stride ratio and a lower cadence rather than a free-running phase. */
+  const g = gaitStep(wildLegLen, speed, dt,
+    hop ? {maxRatio:2.6, cadence:1.7} : (sneaking ? {maxRatio:1.05, cadence:2.9} : null));
+  wildLegPhase += g.dPhase;
+  const swing = hop ? Math.min(0.95, g.swing*1.25) : g.swing;
+
+  wildClimbAmt = lerp(wildClimbAmt, clamp(climb||0, 0, 1), 1-Math.pow(0.0001,dt));
+  const legs = refs.legs||[];
+  const cp = wildClimbAmt > 0.002 ? climbPose(wildClimbAmt, t, legs.length) : null;
+  legs.forEach((leg,i)=>{
     const phase = hop ? (i>1?Math.PI:0) : ((i%2?Math.PI:0)+(i>1?Math.PI*0.5:0));
-    leg.rotation.z = Math.sin(wildLegPhase+phase)*swing;
+    const walkZ = Math.sin(wildLegPhase+phase)*swing;
+    leg.rotation.z = cp ? lerp(walkZ, cp.legs[i], wildClimbAmt) : walkZ;
   });
   if(refs.tailG) refs.tailG.rotation.y = Math.sin(t*0.01)*0.4 + (barking?Math.sin(t*0.05)*0.7:0);
   if(refs.headG) refs.headG.rotation.z = barking?0.2:(sneaking?-0.1:Math.sin(t*0.0025)*0.05);
   if(refs.bodyG){
     // absolute, not accumulated -- set relative to the base height captured at spawn,
     // or the bob would compound every frame instead of oscillating around one baseline
-    refs.bodyG.position.y = wildBodyBaseY + Math.abs(Math.sin(wildLegPhase))*clamp(speed*(hop?0.02:0.01),0,hop?0.3:0.12);
+    // see dog-driver: the bound is what makes the airborne part of a gallop legible.
+    // A hopper already bounds by nature, so it gets a bigger one.
+    const bound = g.bound*wildLegLen*(hop?0.75:0.42)*Math.max(0, Math.sin(wildLegPhase));
+    refs.bodyG.position.y = wildBodyBaseY
+      + Math.abs(Math.sin(wildLegPhase))*clamp(speed*(hop?0.02:0.01),0,hop?0.3:0.12)
+      + bound + (cp ? cp.rise*wildLegLen : 0);
+    refs.bodyG.rotation.z = cp ? cp.pitch : 0;
   }
 }
 
 export { spawnWild, updateWild, setWildYaw, setWildVisible, topSpeedFor, spookRadiusFor,
-         wildPos };
+         wildPos, wildLegLength, wildShadowRadius };

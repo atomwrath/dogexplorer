@@ -930,6 +930,121 @@ function attachWantedStar(a){
   a.star = sp;
 }
 
+/* ==== src/trails/gait.js ==== */
+/* Gait maths shared by dog-driver.js and wild-driver.js. Pure — no THREE, no DOM, no
+   knowledge of either rig beyond "it has four hip pivots that rotate about Z".
+
+   WHY THIS EXISTS AT ALL: the paws were sliding.
+
+   Both drivers used to advance the leg phase at a rate pulled out of the air --
+   `2.6 / legLength` for the dog -- with no relationship to how far the animal actually
+   moved. That constant sets a stride length whether you meant it to or not: the body
+   travels `speed` metres per second while the legs complete `speed * 2.6 / 2pi` cycles,
+   which works out at 2.4 m of ground per stride. A trail pup is about 1.15 m nose to
+   tail with a hip roughly 0.42 m off the ground (dog-driver.js's TRAIL_DOG_SCALE shrank
+   the shared rig by 0.3, and nothing downstream was ever re-tuned for it), so its real
+   stride is nearer 0.5 m. The legs were therefore cycling about five times too slowly
+   for the distance covered, which is exactly the "moving too slow and sliding along the
+   ground" the eye picks up instantly: a planted paw was travelling backwards at a fifth
+   of the speed the body went forwards.
+
+   THE FIX IS TO DERIVE BOTH NUMBERS FROM ONE STRIDE LENGTH. Swing amplitude and phase
+   rate are not independent knobs -- pick either and the other follows, or the foot
+   slips. For a leg of length L swinging +/-θ about its hip, the paw sweeps 2*L*sin(θ)
+   of ground per cycle. Foot-lock means the phase advances exactly 2π over that distance.
+   Compute the amplitude FROM the stride and the rate FROM the same stride and the
+   contact patch is stationary by construction, at any speed, for any pup's proportions.
+
+   Stride is chosen from speed against a target cadence, then clamped by the leg itself:
+   a pendulum cannot out-reach 2L, and a real quadruped only exceeds that by flexing a
+   spine these rigs do not have. At a sprint the clamp binds and cadence rises instead --
+   the honest trade, since a fast little dog SHOULD look frantic, and any other choice
+   here reintroduces the slide we are removing. */
+
+
+const TWO_PI = Math.PI*2;
+
+/* Ratios are of LEG LENGTH, not of body length or world units, so a short-legged corgi
+   and a long-legged coyote both get proportionate strides with no per-species tuning.
+   The 0.92 sin cap keeps the leg off its own singularity (a 90-degree swing has no
+   forward component left to give) and keeps the pose readable rather than doing splits. */
+const STRIDE_MIN_RATIO = 0.55;
+/* A pendulum leg cannot sweep more than 2L, so a stride longer than that has to be paid
+   for by a FLIGHT PHASE -- ground covered while no paw is down. That is not a fudge, it
+   is what a galloping animal actually does, and modelling it explicitly is what lets the
+   cadence stay believable at speed without the paws going back to skating. Below this
+   the animal walks and trots with every stride fully planted; above it, it bounds. */
+const STRIDE_MAX_RATIO = 3.0;
+const MAX_SIN_SWING = 0.92;
+
+/* Target cadence in strides/sec at a walk. Whenever speed allows a stride inside the
+   ratio band, the animal walks at about this cadence and lengthens its stride to go
+   faster -- which is what real quadrupeds do until they run out of leg. */
+const TARGET_CADENCE = 2.35;
+
+/* legLen is the hip pivot's height above the ground IN WORLD UNITS -- i.e. after every
+   scale the rig carries, including the driver's own shrink factor. Passing a rig-local
+   length is the one mistake that silently reproduces the original bug, so drivers
+   measure it off the live object rather than recomputing it from params. */
+function gaitStep(legLen, speed, dt, opts){
+  const L = Math.max(1e-4, legLen);
+  const o = opts || {};
+  const minR = o.minRatio != null ? o.minRatio : STRIDE_MIN_RATIO;
+  const maxR = o.maxRatio != null ? o.maxRatio : STRIDE_MAX_RATIO;
+  const cad  = o.cadence  != null ? o.cadence  : TARGET_CADENCE;
+  const sp = Math.max(0, speed);
+
+  const wanted = sp/Math.max(0.01, cad);
+  const stride = clamp(wanted, L*minR, L*maxR);
+  // what the leg itself can sweep while planted...
+  const reach = Math.min(stride, 2*L*MAX_SIN_SWING);
+  // ...and the remainder, covered airborne. Zero at walking speeds; grows into a gallop.
+  const flight = Math.max(0, stride - reach);
+  const sinSwing = clamp(reach/(2*L), 0, MAX_SIN_SWING);
+  /* THE FOOT-LOCK INVARIANT, and the one line to get right: reach + flight == stride,
+     and the phase advances 2π over exactly `stride`. So while a paw is down it moves
+     backwards at precisely body speed, and the only ground not accounted for by a
+     planted paw is the ground crossed with all four feet off it. */
+  return {
+    swing: Math.asin(sinSwing),
+    dPhase: sp*dt*TWO_PI/Math.max(1e-4, stride),
+    stride,
+    reach,
+    flight,
+    // 0 at a walk, ->1 in a full gallop; drivers use it to add a bound so the airborne
+    // part of the cycle is something you can SEE rather than an accounting trick
+    bound: clamp(flight/Math.max(1e-4, stride), 0, 1),
+    cadence: sp/Math.max(1e-4, stride),
+  };
+}
+
+/* Scrambling up a ledge. `amt` is 0..1 and comes from the movement code, which is the
+   only thing that knows a step-up actually happened; the drivers just pose to it.
+
+   Front legs reach up and over the lip while the hind pair stays planted and pushes --
+   the read is "hauling itself up", not "walking with a tilt". `+x is the nose` on both
+   rigs (dog/build.js puts headG at +bodyRx, animal-models.js at +L), and hips rotate
+   about Z with positive Z swinging a paw FORWARD, so every sign below follows from that
+   one convention. Returns per-leg targets for the caller to blend toward, rather than
+   writing them, so the drivers keep sole ownership of their own refs. */
+function climbPose(amt, t, legCount){
+  const a = clamp(amt, 0, 1);
+  // alternating paw scrabble, fast and small -- a climb is not a walk cycle
+  const scrab = Math.sin(t*0.026)*0.38*a;
+  const legs = [];
+  for(let i=0;i<legCount;i++){
+    const front = i<2;
+    legs.push(front
+      ? a*(1.05 + (i===0 ? scrab : -scrab))    // reach: paws up onto the lip
+      : a*(-0.62 + (i===2 ? -scrab : scrab))); // push: hind legs extend behind
+  }
+  return {
+    legs,
+    pitch: a*0.40,      // bodyG.rotation.z -- nose up, because forward is +x
+    rise:  a*0.11,      // a little hop of the body as it hauls up
+  };
+}
+
 /* ==== src/trails/wild-driver.js ==== */
 /* Playing AS a wild animal, not just watching one, is new — neither Pup City (wildlife
    is AI-only) nor Backyard Pups (dogs only) has a player-controlled non-dog creature,
@@ -943,8 +1058,10 @@ function attachWantedStar(a){
 
 
 
+
 let group = null, refs = null, speciesKey = null, S = null;
-let wildLegPhase = 0, wildBodyBaseY = 0;
+let wildLegPhase = 0, wildBodyBaseY = 0, wildClimbAmt = 0;
+let wildLegLen = 0.4;      // hip pivot height above ground, WORLD units (see dog-driver)
 const wildPos = new THREE.Vector3(0,0,0);
 let yaw = 0;
 
@@ -957,9 +1074,20 @@ function spawnWild(key, seed){
   group.position.copy(wildPos);
   group.rotation.y = yaw;
   scene.add(group);
-  wildLegPhase = 0;
+  wildLegPhase = 0; wildClimbAmt = 0;
   wildBodyBaseY = refs.bodyG ? refs.bodyG.position.y : 0;
+  wildLegLen = measureWildLegLen();
 }
+
+/* Same rule as the dog: the foot-lock is only correct if this is the pivot's height in
+   WORLD units, after whatever scale makeAnimalModel baked into the group. */
+function measureWildLegLen(){
+  if(!refs || !refs.legs || !refs.legs.length || !group) return 0.4;
+  const local = wildBodyBaseY + (refs.legs[0].position.y || 0);
+  return Math.max(0.05, local*(group.scale ? group.scale.x : 1));
+}
+function wildLegLength(){ return wildLegLen; }
+function wildShadowRadius(){ return wildLegLen*1.25; }
 
 function setWildYaw(v){ yaw = v; if(group) group.rotation.y = yaw; }
 function setWildVisible(v){ if(group) group.visible = !!v; }
@@ -977,24 +1105,40 @@ function spookRadiusFor(key){
   return clamp(16 - s.brav*1.3, 4, 14) * (s.scale||1);
 }
 
-function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking){
+function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb){
   if(!group || !refs) return;
   group.position.set(wildPos.x, groundY + jumpY, wildPos.z);
   group.rotation.y = yaw;
   const hop = !!S?.hopper;
-  const strideRate = 2.2 / clamp((S?.scale||1),0.4,2.2);
-  wildLegPhase += speed*dt*strideRate*(sneaking?0.85:1);
-  const swing = clamp(speed*(hop?0.16:0.1),0,hop?0.9:0.78);
-  (refs.legs||[]).forEach((leg,i)=>{
+  /* Foot-locked, exactly as the dog is -- see gait.js. A hopper is the one honest
+     exception: both hind legs move together and the animal is airborne for much of the
+     cycle, so it covers more ground per stride than a pendulum sweep can account for.
+     It gets a longer stride ratio and a lower cadence rather than a free-running phase. */
+  const g = gaitStep(wildLegLen, speed, dt,
+    hop ? {maxRatio:2.6, cadence:1.7} : (sneaking ? {maxRatio:1.05, cadence:2.9} : null));
+  wildLegPhase += g.dPhase;
+  const swing = hop ? Math.min(0.95, g.swing*1.25) : g.swing;
+
+  wildClimbAmt = lerp(wildClimbAmt, clamp(climb||0, 0, 1), 1-Math.pow(0.0001,dt));
+  const legs = refs.legs||[];
+  const cp = wildClimbAmt > 0.002 ? climbPose(wildClimbAmt, t, legs.length) : null;
+  legs.forEach((leg,i)=>{
     const phase = hop ? (i>1?Math.PI:0) : ((i%2?Math.PI:0)+(i>1?Math.PI*0.5:0));
-    leg.rotation.z = Math.sin(wildLegPhase+phase)*swing;
+    const walkZ = Math.sin(wildLegPhase+phase)*swing;
+    leg.rotation.z = cp ? lerp(walkZ, cp.legs[i], wildClimbAmt) : walkZ;
   });
   if(refs.tailG) refs.tailG.rotation.y = Math.sin(t*0.01)*0.4 + (barking?Math.sin(t*0.05)*0.7:0);
   if(refs.headG) refs.headG.rotation.z = barking?0.2:(sneaking?-0.1:Math.sin(t*0.0025)*0.05);
   if(refs.bodyG){
     // absolute, not accumulated -- set relative to the base height captured at spawn,
     // or the bob would compound every frame instead of oscillating around one baseline
-    refs.bodyG.position.y = wildBodyBaseY + Math.abs(Math.sin(wildLegPhase))*clamp(speed*(hop?0.02:0.01),0,hop?0.3:0.12);
+    // see dog-driver: the bound is what makes the airborne part of a gallop legible.
+    // A hopper already bounds by nature, so it gets a bigger one.
+    const bound = g.bound*wildLegLen*(hop?0.75:0.42)*Math.max(0, Math.sin(wildLegPhase));
+    refs.bodyG.position.y = wildBodyBaseY
+      + Math.abs(Math.sin(wildLegPhase))*clamp(speed*(hop?0.02:0.01),0,hop?0.3:0.12)
+      + bound + (cp ? cp.rise*wildLegLen : 0);
+    refs.bodyG.rotation.z = cp ? cp.pitch : 0;
   }
 }
 
@@ -1500,8 +1644,11 @@ function setDog(params){
 
 
 
+
 let legPhase = 0;
 let crouchAmt = 0;
+let climbAmt = 0;
+let dogLegLen = 0.4;     // hip pivot height above ground, WORLD units -- see measureLegLen
 
 /* The shared rig sizes itself directly in world units via g.scale.setScalar(p.size)
    inside dog/build.js -- tuned to look right in Pup City's own stylised world (city
@@ -1521,10 +1668,24 @@ let crouchAmt = 0;
    speed exactly as it does in Backyard Pups; only what you SEE changes. */
 const TRAIL_DOG_SCALE = 0.3;
 
+/* The gait is foot-locked against this length (see gait.js), so it has to be the pivot's
+   real height in WORLD units -- measured off the built rig after every scale it carries,
+   including TRAIL_DOG_SCALE above. Deriving it from params instead is precisely how the
+   original slide got in: the rig was shrunk by 0.3 and the stride constant was not. */
+function measureLegLen(){
+  if(!R || !R.legs || !R.legs.length || !dog) return 0.4;
+  const local = (R.bodyBaseY || 0) + (R.legs[0].position.y || 0);
+  return Math.max(0.05, local*(dog.scale ? dog.scale.x : 1));
+}
+function dogLegLength(){ return dogLegLen; }
+// half-width of the contact patch the blob shadow should cover
+function dogShadowRadius(){ return dogLegLen*1.25; }
+
 function spawnDog(params){
   setDog(params);
   dog.scale.multiplyScalar(TRAIL_DOG_SCALE);
-  legPhase = 0; crouchAmt = 0;
+  legPhase = 0; crouchAmt = 0; climbAmt = 0;
+  dogLegLen = measureLegLen();
 }
 
 /* The dog's x/z live in runtime.js's `dogPos`, which updateDog() reads every frame.
@@ -1552,7 +1713,7 @@ function dogRunMul(){ return STATS.run / STATS.walk; }
 /* Called once per frame with the resolved ground height under the dog's feet (from
    terrain.js) and the current motion state. Everything below only touches `dog`/`R`,
    the live bindings runtime.js exports — never rebuilds geometry. */
-function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run){
+function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb){
   if(!dog || !R) return;
   const size = P ? P.size : 1;
   // dog.position is in SCENE space, unlike dog.scale -- shrinking the group above
@@ -1563,14 +1724,23 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run){
   dog.position.set(dogPos.x, groundY + jumpY - crouchAmt, dogPos.z);
   dog.rotation.y = dogYaw;
 
-  // gait tied to DISTANCE travelled, not wall-clock time -- a slow first step should
-  // look slow, not like a fast twitch with small amplitude
-  const strideRate = 2.6/clamp((P?P.legLength:1),0.45,1.8);
-  legPhase += speed*dt*strideRate*(sneaking?0.85:1);
-  const swing = clamp(speed*(sneaking?0.11:0.1),0,0.78);
+  /* Foot-locked gait. Amplitude AND phase rate both come out of one stride length, so
+     the planted paw is stationary against the ground at any speed -- see gait.js for why
+     picking those two independently is what made the old rig skate. A sneaking pup takes
+     shorter, quicker steps: a lower stride ratio, not a slower phase, or it slides again. */
+  const g = gaitStep(dogLegLen, speed, dt, sneaking ? {maxRatio:1.05, cadence:2.9} : null);
+  legPhase += g.dPhase;
+  const swing = g.swing;
+
+  // climb blends OVER the walk cycle rather than replacing it, so a scramble that starts
+  // mid-stride doesn't snap the legs to a new pose
+  climbAmt = lerp(climbAmt, clamp(climb||0, 0, 1), 1-Math.pow(0.0001,dt));
+  const cp = climbAmt > 0.002 ? climbPose(climbAmt, t, R.legs.length) : null;
+
   R.legs.forEach((leg,i)=>{
     const phase=(i%2?Math.PI:0)+(i>1?Math.PI*0.5:0);
-    leg.rotation.z = Math.sin(legPhase+phase)*swing;
+    const walkZ = Math.sin(legPhase+phase)*swing;
+    leg.rotation.z = cp ? lerp(walkZ, cp.legs[i], climbAmt) : walkZ;
   });
   if(R.tail){
     R.tail.rotation.y = Math.sin(t*(sneaking?0.004:0.012))*(sneaking?0.15:0.5)
@@ -1582,11 +1752,116 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run){
   if(R.jaw) R.jaw.rotation.x = barking ? -0.35 : 0;
   if(R.bubble) R.bubble.visible = barking;
   if(R.bodyG){
-    R.bodyG.position.y = R.bodyBaseY + Math.abs(Math.sin(legPhase))*clamp(speed*0.012,0,0.14);
+    // bob scales with the rig, not with raw speed in metres: the old constant was tuned
+    // pre-shrink and is nearly invisible at 0.3x
+    const bob = Math.abs(Math.sin(legPhase))*clamp(speed*0.012,0,0.14)*TRAIL_DOG_SCALE*3;
+    /* The bound makes the flight phase visible. gaitStep only says how much ground is
+       covered with no paw down; without lifting the body for it, a gallop would read as
+       a fast trot whose feet mysteriously outrun their own reach. One hump per stride,
+       scaled by the leg so it stays proportionate on any pup. */
+    const bound = g.bound*dogLegLen*0.42*Math.max(0, Math.sin(legPhase));
+    R.bodyG.position.y = R.bodyBaseY + bob + bound + (cp ? cp.rise*dogLegLen : 0);
+    R.bodyG.rotation.z = cp ? cp.pitch : 0;
   }
 }
 
 function setYaw(v){ setDogYaw(v); }
+
+/* ==== src/trails/shadow.js ==== */
+/* A blob shadow under the player.
+
+   Not a real shadow map: core/quality.js turns renderer shadows down or off on weaker
+   devices, and a cast shadow from a single directional light over kilometres of terrain
+   would need a cascade to look like anything. A painted blob costs one transparent quad,
+   never varies with device tier, and in a flat-shaded cartoon world reads better than a
+   correct shadow would.
+
+   It earns its place by doing the one job the avatar cannot do for itself: saying where
+   the ground is. Mid-jump the pup and the terrain behind it are both just shapes, and
+   without a contact patch there is no way to tell a low hop from a high one, or to judge
+   whether you are going to clear the ledge you aimed at. So the blob shrinks and fades
+   with height rather than staying constant -- the gap between pup and blob IS the
+   altitude readout, which matters now that clearing a step is a thing you deliberately
+   jump for.
+
+   Lives in the scene, NOT in worldG: worldG is emptied and rebuilt on every scale,
+   exaggeration or contour change (world.js's resetWorld), and the shadow belongs to the
+   avatar, which survives all of those. */
+
+
+
+let mesh = null, tex = null, baseOpacity = 0.34;
+
+/* Soft-edged radial blob. Wrapped because the 2D canvas is the one browser API this
+   file needs and headless harnesses stub it loosely -- a hard-edged fallback disc is a
+   perfectly acceptable degradation, an exception during world build is not. */
+function blobTexture(){
+  try{
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 64;
+    const g = cv.getContext('2d');
+    if(!g || typeof g.createRadialGradient !== 'function') return null;
+    const grd = g.createRadialGradient(32,32,0,32,32,32);
+    grd.addColorStop(0,   'rgba(0,0,0,0.60)');
+    grd.addColorStop(0.45,'rgba(0,0,0,0.40)');
+    grd.addColorStop(1,   'rgba(0,0,0,0)');
+    g.fillStyle = grd;
+    g.fillRect(0,0,64,64);
+    return new THREE.CanvasTexture(cv);
+  }catch(err){
+    return null;
+  }
+}
+
+function ensureShadow(){
+  if(mesh) return mesh;
+  try{
+    tex = blobTexture();
+    const mat = new THREE.MeshBasicMaterial({
+      color: tex ? 0xffffff : 0x000000,
+      transparent: true,
+      opacity: baseOpacity,
+      /* depthWrite off so the blob never occludes the terrain it lies on, and
+         polygonOffset so it wins the z-fight against a tread it is sitting flush with
+         instead of strobing along the trail. */
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
+    if(tex) mat.map = tex;
+    mesh = new THREE.Mesh(new THREE.PlaneGeometry(1,1), mat);
+    mesh.rotation.x = -Math.PI/2;      // scale.x -> world x, scale.y -> world z
+    mesh.renderOrder = 2;
+    mesh.frustumCulled = false;        // it is always near the camera; culling it is a bug source
+    mesh.name = 'playerShadow';        // tools/smoke.js looks it up by name
+    scene.add(mesh);
+  }catch(err){
+    mesh = null;
+  }
+  return mesh;
+}
+
+/* radius: roughly the avatar's own half-width in world units.
+   jumpY:  height above the ground, the same value the drivers get. */
+function updateShadow(x, z, groundY, jumpY, radius, visible){
+  const m = ensureShadow();
+  if(!m) return;
+  m.visible = !!visible;
+  if(!visible) return;
+  const h = Math.max(0, jumpY || 0);
+  const r = Math.max(0.05, radius || 0.4);
+  // fade and grow with altitude; both bottom out so a high jump still leaves a mark to
+  // aim at rather than vanishing exactly when it is most useful
+  const fade = clamp(1 - h/(r*7), 0.18, 1);
+  const grow = clamp(1 + h/(r*9), 1, 1.5);
+  m.position.set(x, groundY + 0.06, z);
+  m.scale.set(r*2*grow, r*2*grow, 1);
+  m.material.opacity = baseOpacity*fade;
+}
+
+function setShadowVisible(v){ const m = ensureShadow(); if(m) m.visible = !!v; }
+function getShadow(){ return mesh; }
 
 /* ==== src/trails/terrain.js ==== */
 /* Terraced terrain, sourced from a real DEM via data/world_bundle.js — NOT from Z
@@ -5301,6 +5576,7 @@ function parsePupFile(data){
 
 
 
+
 /* Trail networks run to real kilometres; Pup City's camera (far=300, tuned for one city
    block) would clip most of a trail map. Extend it rather than touch the shared file. */
 // far: trail networks run to real kilometres; Pup City's far=300 (tuned for one city
@@ -5326,7 +5602,19 @@ let dogChoice = {label: PRESETS[0].label, params: PRESETS[0].o};
 let browseMode = 'dog';     // which roster grid the panel is showing -- independent of
                              // `mode` above, so you can look at Wildlife without it
                              // changing who you're actually playing as until you tap one
-const player = { x:0, z:0, y:0, vy:0, yaw:0, speed:0, dist:0, sneaking:false, barkT:0 };
+const player = { x:0, z:0, y:0, vy:0, yaw:0, speed:0, dist:0, sneaking:false, barkT:0,
+                 /* climbT counts DOWN while the pup is scrambling up a step. It is set
+                    only by an on-foot step-up (see moveOffTrail) -- never by a jump,
+                    which is the whole point: jumping a ledge is the fast way over it and
+                    costs nothing, walking up one costs you speed. */
+                 climbT:0, climbAmt:0 };
+const CLIMB_DUR = 0.42;    // seconds of scramble per step-up, refreshed on each new step
+const CLIMB_SLOW = 0.45;   // top-speed multiplier while scrambling
+/* Test seam. `const` bindings do not survive the smoke harness's eval boundary the way
+   function declarations do (same reason getSignCount and getBigView exist), so the two
+   climb tunables are readable through calls rather than asserted on directly. */
+function climbSlowFactor(){ return CLIMB_SLOW; }
+function climbDuration(){ return CLIMB_DUR; }
 
 /* One walk's worth of state. `parked` is the trailhead index you are currently standing
    at: it suppresses re-triggering the arrival screen every frame while you stand there,
@@ -5372,15 +5660,22 @@ function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
   // is plain terrain; on-trail it reads the tread's own profile out of the spatial hash,
   // so the avatar can't clip through the ribbon inside the short ramps at a terrace step.
   const groundY = standingY(player.x, player.z);
+  // eased 0..1: full while the scramble timer runs, decaying once it expires, so the
+  // pose settles back into the walk instead of popping flat the instant the step is done
+  const climb = player.climbT > 0 ? player.climbAmt : 0;
+  let radius = 0.5;
   if(mode==='dog'){
     setDogPos(player.x, player.z);
     setYaw(player.yaw);
-    updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run);
+    updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb);
+    radius = dogShadowRadius();
   }else{
     wildPos.set(player.x, 0, player.z);
     setWildYaw(player.yaw);
-    updateWild(dt, t, groundY, jumpY, speed, sneaking, barking);
+    updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb);
+    radius = wildShadowRadius();
   }
+  updateShadow(player.x, player.z, groundY, jumpY, radius, true);
   return groundY;
 }
 
@@ -5432,9 +5727,20 @@ function moveOffTrail(stepX, stepZ){
     if(!dx && !dz) return false;
     const nx=player.x+dx, nz=player.z+dz;
     const gThere = standingY(nx, nz);
+    const rise = gThere - gHere;
     // walkable if it is at most a single step up, or if we are already airborne high
     // enough to clear it -- which is precisely what makes jumping the answer to a ledge
-    if(gThere - gHere > lim && feet < gThere - 0.05) return false;
+    const airborneOver = feet >= gThere - 0.05;
+    if(rise > lim && !airborneOver) return false;
+    /* A step-up done ON FOOT costs speed and triggers the scramble. Clearing the same
+       rise while airborne does neither -- the jump already paid for it, and taxing it
+       twice would make jumping strictly worse than walking, which inverts the whole
+       point of having a jump. `player.y <= 0.02` is the test for "on the ground": being
+       mid-jump is exactly the case we are exempting. */
+    if(rise > lim*0.25 && player.y <= 0.02){
+      player.climbT = CLIMB_DUR;
+      player.climbAmt = clamp(rise/Math.max(1e-4, lim), 0.35, 1);
+    }
     player.x=nx; player.z=nz;
     /* Preserve ABSOLUTE height across the move and let the loop's gravity do the rest.
        Walking off a ledge thus leaves the pup briefly airborne with a positive `y` and it
@@ -5561,7 +5867,11 @@ function loop(t){
   const nt = nearestTrail(player.x,player.z);
   const onTrail = nt.d<1.5;
   const surf = onTrail ? 1 : 0.6;
-  const top = currentTopSpeed()*(player.sneaking?0.5:(run?currentRunMul():1))*surf*(stick.active?mag:1);
+  if(player.climbT > 0) player.climbT = Math.max(0, player.climbT - dt);
+  // scrambling drags the top speed down; it does NOT touch the jump, which is what makes
+  // "jump the big steps" the faster line through broken ground
+  const climbDrag = player.climbT > 0 ? CLIMB_SLOW : 1;
+  const top = currentTopSpeed()*(player.sneaking?0.5:(run?currentRunMul():1))*surf*climbDrag*(stick.active?mag:1);
   player.speed = lerp(player.speed, moving?top:0, 1-Math.pow(0.0009,dt));
   if(moving){
     const L=Math.hypot(wx,wz);

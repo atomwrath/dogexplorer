@@ -666,6 +666,142 @@ function assertAll(window, errors, stats) {
     moveTest && Math.abs(moveTest.lim - getContourStep()*getVertScale()*1.05) < 1e-9,
     moveTest ? `${moveTest.lim.toFixed(3)}u` : '');
 
+  /* THE GAIT MUST BE FOOT-LOCKED. This is the whole fix for the paws skating: the swing
+     amplitude and the phase rate are two views of one stride length, and if they
+     disagree the planted paw travels at a different speed from the body. Check the
+     invariant directly -- the ground swept per stride cycle (2*L*sin(swing)) must equal
+     the distance the body covers in that cycle (speed / cadence) -- across a wide range
+     of speeds and leg lengths, since the old bug was invisible at exactly one of them. */
+  check('gait is foot-locked: paw sweep matches ground covered, at every speed', (() => {
+    if (typeof gaitStep !== 'function') return false;
+    for (const L of [0.18, 0.42, 0.9, 1.6]) {
+      for (const sp of [0.2, 0.8, 1.9, 3.8, 7.5]) {
+        const g = gaitStep(L, sp, 1 / 60);
+        const sweep = 2 * L * Math.sin(g.swing);         // ground the paw sweeps while planted
+        const covered = sp / g.cadence;                  // ground the body covers per cycle
+        // planted sweep plus airborne flight must account for ALL the ground -- no slip
+        if (Math.abs((sweep + g.flight) - covered) > 1e-6) return false;
+        if (Math.abs(sweep - g.reach) > 1e-6) return false;
+        // flight is the remainder AFTER the leg has reached as far as it can, so it is
+        // zero exactly when the stride fits inside the leg's sweep -- which depends on
+        // leg length, not on speed alone (a short leg bounds sooner than a long one)
+        const fits = g.stride <= 2 * L * 0.92 + 1e-9;
+        if (fits !== (g.flight <= 1e-9)) return false;
+        // and the phase rate must deliver exactly that cadence
+        const cyclesPerSec = g.dPhase * 60 / (Math.PI * 2);
+        if (Math.abs(cyclesPerSec - g.cadence) > 1e-6) return false;
+      }
+    }
+    return true;
+  })());
+
+  // the regression itself: the old constant gave a ~2.4 m stride to a dog whose hip is
+  // ~0.42 m off the ground. Stride must stay proportionate to the leg, not to a constant.
+  check('stride length stays proportionate to leg length', (() => {
+    if (typeof gaitStep !== 'function') return false;
+    for (const L of [0.18, 0.42, 0.9, 1.6]) {
+      for (const sp of [0.5, 3.8, 9]) {
+        const r = gaitStep(L, sp, 1 / 60).stride / L;
+        if (r > 3.05 || r < 0.4) return false;
+      }
+    }
+    return true;
+  })());
+  /* The original bug stated as a proportion: the old code advanced the phase at a fixed
+     2.6 rad per metre travelled, which is a 2.42 m stride for EVERY animal regardless of
+     size. For a trail pup whose hip is ~0.24 m off the ground that is roughly ten leg
+     lengths per step -- the paws could not possibly keep up, so they skated. */
+  check('the old fixed stride was wildly out of proportion; the new one is not', (() => {
+    if (typeof gaitStep !== 'function' || typeof dogLegLength !== 'function') return false;
+    const L = dogLegLength();
+    if (!(L > 0.05 && L < 1.5)) return false;
+    const oldStride = Math.PI * 2 / 2.6;              // metres per cycle, any animal
+    const newStride = gaitStep(L, 3.0, 1 / 60).stride;
+    return oldStride / L > 4 && newStride / L <= 3.05 && newStride < oldStride;
+  })(), (() => {
+    const L = dogLegLength();
+    return `hip ${L.toFixed(2)}m: old stride ${(Math.PI*2/2.6/L).toFixed(1)} leg-lengths, now ${(gaitStep(L,3,1/60).stride/L).toFixed(1)}`;
+  })());
+
+  // climbing: an on-foot step-up must cost speed and pose the rig; a jump over the same
+  // rise must cost nothing
+  check('walking up a step triggers the climb and slows the player', (() => {
+    const pl = getTrailPlayer();
+    const G = getGraph(); if (!G || typeof moveOffTrail !== 'function') return false;
+    const bb = getBBox(); const lim = stepUpLimit();
+    const save = { x: pl.x, z: pl.z, y: pl.y, climbT: pl.climbT };
+    let sawClimb = false, sawJumpFree = false;
+    for (let i = 0; i < 4000 && !(sawClimb && sawJumpFree); i++) {
+      const x = bb.minx + (bb.maxx - bb.minx) * (i * 0.7317 % 1);
+      const z = bb.minz + (bb.maxz - bb.minz) * (i * 0.3179 % 1);
+      if (nearestTrail(x, z).d < 4) continue;
+      const g0 = standingY(x, z);
+      for (const [dx, dz] of [[0.6,0],[0,0.6],[-0.6,0],[0,-0.6]]) {
+        const rise = standingY(x + dx, z + dz) - g0;
+        if (rise <= lim * 0.4 || rise > lim) continue;   // a step you can walk up
+        pl.x = x; pl.z = z; pl.y = 0; pl.climbT = 0;
+        moveOffTrail(dx, dz);
+        if (pl.climbT > 0) sawClimb = true;
+        // same rise, but airborne over it: must NOT be taxed
+        pl.x = x; pl.z = z; pl.y = rise + 0.3; pl.climbT = 0;
+        moveOffTrail(dx, dz);
+        if (pl.climbT === 0) sawJumpFree = true;
+        break;
+      }
+    }
+    Object.assign(pl, save);
+    return sawClimb && sawJumpFree;
+  })());
+
+  check('the climb slowdown is a real penalty but not a stop', (() => {
+    if (typeof climbSlowFactor !== 'function' || typeof climbDuration !== 'function') return false;
+    return climbSlowFactor() > 0.2 && climbSlowFactor() < 0.85
+        && climbDuration() > 0.1 && climbDuration() < 1.5;
+  })(), typeof climbSlowFactor === 'function' ? `${climbSlowFactor()}x top speed for ${climbDuration()}s` : 'missing');
+
+  check('the climb pose lifts the front legs and pitches the body nose-up', (() => {
+    if (typeof climbPose !== 'function') return false;
+    const p0 = climbPose(0, 0, 4), p1 = climbPose(1, 0, 4);
+    // +x is the nose on both rigs and +z rotation swings a paw forward, so a climb means
+    // front legs positive, hind legs negative, body pitched positive
+    return p0.pitch === 0 && p1.pitch > 0.15
+      && p1.legs[0] > 0.4 && p1.legs[1] > 0.4
+      && p1.legs[2] < 0 && p1.legs[3] < 0;
+  })());
+
+  // shadow: exists in the scene (not worldG, which is rebuilt), sits under the avatar,
+  // and fades with height so the gap reads as altitude
+  check('a shadow is drawn under the player', (() => {
+    if (typeof getShadow !== 'function') return false;
+    const sh = getShadow();
+    return !!sh && sh.visible === true && sh.name === 'playerShadow';
+  })());
+  check('the shadow survives a world rebuild', (() => {
+    if (typeof getShadow !== 'function') return false;
+    const before = getShadow();
+    const step0 = getContourStep();
+    setContourStep(step0 === 3 ? 4 : 3);                 // forces resetWorld + rebuild
+    if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(3000); }
+    const after = getShadow();
+    // put it back: later checks measure terrace heights and would otherwise be graded
+    // against a step this test moved out from under them
+    setContourStep(step0);
+    if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(3100); }
+    return !!after && after === before && after.visible === true && getContourStep() === step0;
+  })());
+  check('the shadow tracks the avatar and fades as it rises', (() => {
+    if (typeof updateShadow !== 'function' || typeof getShadow !== 'function') return false;
+    const sh = getShadow(); if (!sh) return false;
+    updateShadow(12, -7, 3, 0, 0.5, true);
+    const grounded = sh.material.opacity;
+    const at = { x: sh.position.x, y: sh.position.y, z: sh.position.z };
+    updateShadow(12, -7, 3, 2.5, 0.5, true);
+    const lifted = sh.material.opacity;
+    return Math.abs(at.x - 12) < 1e-6 && Math.abs(at.z + 7) < 1e-6
+      && at.y > 3 && at.y < 3.2            // sits just proud of the ground, not buried
+      && lifted < grounded && lifted > 0;
+  })());
+
   let benchRestoreScale = 1;
   /* The graded corridor. Three separate invariants, because they fail independently:
      the ribbon must sit on the bench that was carved for it, the bench must have no

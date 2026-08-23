@@ -9,9 +9,12 @@
    be the wrong direction for the dependency arrow to point. */
 import { clamp, lerp } from '../core/math.js';
 import { P, dog, R, dogPos, dogYaw, STATS, setDog, setDogYaw } from '../dog/runtime.js';
+import { gaitStep, climbPose } from './gait.js';
 
 let legPhase = 0;
 let crouchAmt = 0;
+let climbAmt = 0;
+let dogLegLen = 0.4;     // hip pivot height above ground, WORLD units -- see measureLegLen
 
 /* The shared rig sizes itself directly in world units via g.scale.setScalar(p.size)
    inside dog/build.js -- tuned to look right in Pup City's own stylised world (city
@@ -31,10 +34,24 @@ let crouchAmt = 0;
    speed exactly as it does in Backyard Pups; only what you SEE changes. */
 const TRAIL_DOG_SCALE = 0.3;
 
+/* The gait is foot-locked against this length (see gait.js), so it has to be the pivot's
+   real height in WORLD units -- measured off the built rig after every scale it carries,
+   including TRAIL_DOG_SCALE above. Deriving it from params instead is precisely how the
+   original slide got in: the rig was shrunk by 0.3 and the stride constant was not. */
+function measureLegLen(){
+  if(!R || !R.legs || !R.legs.length || !dog) return 0.4;
+  const local = (R.bodyBaseY || 0) + (R.legs[0].position.y || 0);
+  return Math.max(0.05, local*(dog.scale ? dog.scale.x : 1));
+}
+function dogLegLength(){ return dogLegLen; }
+// half-width of the contact patch the blob shadow should cover
+function dogShadowRadius(){ return dogLegLen*1.25; }
+
 function spawnDog(params){
   setDog(params);
   dog.scale.multiplyScalar(TRAIL_DOG_SCALE);
-  legPhase = 0; crouchAmt = 0;
+  legPhase = 0; crouchAmt = 0; climbAmt = 0;
+  dogLegLen = measureLegLen();
 }
 
 /* The dog's x/z live in runtime.js's `dogPos`, which updateDog() reads every frame.
@@ -62,7 +79,7 @@ function dogRunMul(){ return STATS.run / STATS.walk; }
 /* Called once per frame with the resolved ground height under the dog's feet (from
    terrain.js) and the current motion state. Everything below only touches `dog`/`R`,
    the live bindings runtime.js exports — never rebuilds geometry. */
-function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run){
+function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb){
   if(!dog || !R) return;
   const size = P ? P.size : 1;
   // dog.position is in SCENE space, unlike dog.scale -- shrinking the group above
@@ -73,14 +90,23 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run){
   dog.position.set(dogPos.x, groundY + jumpY - crouchAmt, dogPos.z);
   dog.rotation.y = dogYaw;
 
-  // gait tied to DISTANCE travelled, not wall-clock time -- a slow first step should
-  // look slow, not like a fast twitch with small amplitude
-  const strideRate = 2.6/clamp((P?P.legLength:1),0.45,1.8);
-  legPhase += speed*dt*strideRate*(sneaking?0.85:1);
-  const swing = clamp(speed*(sneaking?0.11:0.1),0,0.78);
+  /* Foot-locked gait. Amplitude AND phase rate both come out of one stride length, so
+     the planted paw is stationary against the ground at any speed -- see gait.js for why
+     picking those two independently is what made the old rig skate. A sneaking pup takes
+     shorter, quicker steps: a lower stride ratio, not a slower phase, or it slides again. */
+  const g = gaitStep(dogLegLen, speed, dt, sneaking ? {maxRatio:1.05, cadence:2.9} : null);
+  legPhase += g.dPhase;
+  const swing = g.swing;
+
+  // climb blends OVER the walk cycle rather than replacing it, so a scramble that starts
+  // mid-stride doesn't snap the legs to a new pose
+  climbAmt = lerp(climbAmt, clamp(climb||0, 0, 1), 1-Math.pow(0.0001,dt));
+  const cp = climbAmt > 0.002 ? climbPose(climbAmt, t, R.legs.length) : null;
+
   R.legs.forEach((leg,i)=>{
     const phase=(i%2?Math.PI:0)+(i>1?Math.PI*0.5:0);
-    leg.rotation.z = Math.sin(legPhase+phase)*swing;
+    const walkZ = Math.sin(legPhase+phase)*swing;
+    leg.rotation.z = cp ? lerp(walkZ, cp.legs[i], climbAmt) : walkZ;
   });
   if(R.tail){
     R.tail.rotation.y = Math.sin(t*(sneaking?0.004:0.012))*(sneaking?0.15:0.5)
@@ -92,11 +118,20 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run){
   if(R.jaw) R.jaw.rotation.x = barking ? -0.35 : 0;
   if(R.bubble) R.bubble.visible = barking;
   if(R.bodyG){
-    R.bodyG.position.y = R.bodyBaseY + Math.abs(Math.sin(legPhase))*clamp(speed*0.012,0,0.14);
+    // bob scales with the rig, not with raw speed in metres: the old constant was tuned
+    // pre-shrink and is nearly invisible at 0.3x
+    const bob = Math.abs(Math.sin(legPhase))*clamp(speed*0.012,0,0.14)*TRAIL_DOG_SCALE*3;
+    /* The bound makes the flight phase visible. gaitStep only says how much ground is
+       covered with no paw down; without lifting the body for it, a gallop would read as
+       a fast trot whose feet mysteriously outrun their own reach. One hump per stride,
+       scaled by the leg so it stays proportionate on any pup. */
+    const bound = g.bound*dogLegLen*0.42*Math.max(0, Math.sin(legPhase));
+    R.bodyG.position.y = R.bodyBaseY + bob + bound + (cp ? cp.rise*dogLegLen : 0);
+    R.bodyG.rotation.z = cp ? cp.pitch : 0;
   }
 }
 
 function setYaw(v){ setDogYaw(v); }
 
 export { spawnDog, updateDog, setYaw, setDogPos, getDogPos, setDogVisible,
-         dogTopSpeed, dogRunMul };
+         dogTopSpeed, dogRunMul, dogLegLength, dogShadowRadius };

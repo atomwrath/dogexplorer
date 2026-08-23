@@ -10,9 +10,10 @@
    camera follows the player, which on a 2.6 km map means it is simply never on screen.
    That was the "map loads, no dog" bug. */
 import { clamp, lerp } from '../core/math.js';
-import { setWildVisible, setWildYaw, spawnWild, spookRadiusFor, topSpeedFor, updateWild, wildPos } from './wild-driver.js';
+import { setWildVisible, setWildYaw, spawnWild, spookRadiusFor, topSpeedFor, updateWild, wildPos, wildShadowRadius } from './wild-driver.js';
 
-import { dogRunMul, dogTopSpeed, setDogPos, setDogVisible, setYaw, spawnDog, updateDog } from './dog-driver.js';
+import { dogRunMul, dogTopSpeed, setDogPos, setDogVisible, setYaw, spawnDog, updateDog, dogShadowRadius } from './dog-driver.js';
+import { updateShadow, setShadowVisible } from './shadow.js';
 
 import { addCamPitch, addCamYaw, addCamZoom, getCamPitch, getCamYaw, getCamZoom, setCamYaw, snapChaseCam, updateChaseCam } from './camera.js';
 import { getCritterStats, spawnCritters, resetCritters, updateCritters, WATCH_SECONDS } from './critters.js';
@@ -56,7 +57,19 @@ let dogChoice = {label: PRESETS[0].label, params: PRESETS[0].o};
 let browseMode = 'dog';     // which roster grid the panel is showing -- independent of
                              // `mode` above, so you can look at Wildlife without it
                              // changing who you're actually playing as until you tap one
-const player = { x:0, z:0, y:0, vy:0, yaw:0, speed:0, dist:0, sneaking:false, barkT:0 };
+const player = { x:0, z:0, y:0, vy:0, yaw:0, speed:0, dist:0, sneaking:false, barkT:0,
+                 /* climbT counts DOWN while the pup is scrambling up a step. It is set
+                    only by an on-foot step-up (see moveOffTrail) -- never by a jump,
+                    which is the whole point: jumping a ledge is the fast way over it and
+                    costs nothing, walking up one costs you speed. */
+                 climbT:0, climbAmt:0 };
+const CLIMB_DUR = 0.42;    // seconds of scramble per step-up, refreshed on each new step
+const CLIMB_SLOW = 0.45;   // top-speed multiplier while scrambling
+/* Test seam. `const` bindings do not survive the smoke harness's eval boundary the way
+   function declarations do (same reason getSignCount and getBigView exist), so the two
+   climb tunables are readable through calls rather than asserted on directly. */
+function climbSlowFactor(){ return CLIMB_SLOW; }
+function climbDuration(){ return CLIMB_DUR; }
 
 /* One walk's worth of state. `parked` is the trailhead index you are currently standing
    at: it suppresses re-triggering the arrival screen every frame while you stand there,
@@ -102,15 +115,22 @@ function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
   // is plain terrain; on-trail it reads the tread's own profile out of the spatial hash,
   // so the avatar can't clip through the ribbon inside the short ramps at a terrace step.
   const groundY = standingY(player.x, player.z);
+  // eased 0..1: full while the scramble timer runs, decaying once it expires, so the
+  // pose settles back into the walk instead of popping flat the instant the step is done
+  const climb = player.climbT > 0 ? player.climbAmt : 0;
+  let radius = 0.5;
   if(mode==='dog'){
     setDogPos(player.x, player.z);
     setYaw(player.yaw);
-    updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run);
+    updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb);
+    radius = dogShadowRadius();
   }else{
     wildPos.set(player.x, 0, player.z);
     setWildYaw(player.yaw);
-    updateWild(dt, t, groundY, jumpY, speed, sneaking, barking);
+    updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb);
+    radius = wildShadowRadius();
   }
+  updateShadow(player.x, player.z, groundY, jumpY, radius, true);
   return groundY;
 }
 
@@ -162,9 +182,20 @@ function moveOffTrail(stepX, stepZ){
     if(!dx && !dz) return false;
     const nx=player.x+dx, nz=player.z+dz;
     const gThere = standingY(nx, nz);
+    const rise = gThere - gHere;
     // walkable if it is at most a single step up, or if we are already airborne high
     // enough to clear it -- which is precisely what makes jumping the answer to a ledge
-    if(gThere - gHere > lim && feet < gThere - 0.05) return false;
+    const airborneOver = feet >= gThere - 0.05;
+    if(rise > lim && !airborneOver) return false;
+    /* A step-up done ON FOOT costs speed and triggers the scramble. Clearing the same
+       rise while airborne does neither -- the jump already paid for it, and taxing it
+       twice would make jumping strictly worse than walking, which inverts the whole
+       point of having a jump. `player.y <= 0.02` is the test for "on the ground": being
+       mid-jump is exactly the case we are exempting. */
+    if(rise > lim*0.25 && player.y <= 0.02){
+      player.climbT = CLIMB_DUR;
+      player.climbAmt = clamp(rise/Math.max(1e-4, lim), 0.35, 1);
+    }
     player.x=nx; player.z=nz;
     /* Preserve ABSOLUTE height across the move and let the loop's gravity do the rest.
        Walking off a ledge thus leaves the pup briefly airborne with a positive `y` and it
@@ -291,7 +322,11 @@ function loop(t){
   const nt = nearestTrail(player.x,player.z);
   const onTrail = nt.d<1.5;
   const surf = onTrail ? 1 : 0.6;
-  const top = currentTopSpeed()*(player.sneaking?0.5:(run?currentRunMul():1))*surf*(stick.active?mag:1);
+  if(player.climbT > 0) player.climbT = Math.max(0, player.climbT - dt);
+  // scrambling drags the top speed down; it does NOT touch the jump, which is what makes
+  // "jump the big steps" the faster line through broken ground
+  const climbDrag = player.climbT > 0 ? CLIMB_SLOW : 1;
+  const top = currentTopSpeed()*(player.sneaking?0.5:(run?currentRunMul():1))*surf*climbDrag*(stick.active?mag:1);
   player.speed = lerp(player.speed, moving?top:0, 1-Math.pow(0.0009,dt));
   if(moving){
     const L=Math.hypot(wx,wz);
