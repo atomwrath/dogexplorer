@@ -31,6 +31,7 @@ let backdropG=null;             // horizon ring, re-centred on the camera by mai
 let bboxW={minx:0,maxx:0,minz:0,maxz:0};
 let EXTRA=[];                   // raw GeoJSON FeatureCollections dropped in-session
 let STEP_M=3;                   // contour step in metres, remembered across rebuilds
+let SIGN_COUNT={wanted:0,built:0,minGap:0};   // last rebuild's signpost thinning tally
 
 /* Local equirectangular projection used ONLY when no DEM bundle is loaded, so a plain
    pair of .geojson files (trails + areas) is playable on flat ground. It deliberately
@@ -77,15 +78,20 @@ let startHead=0;
    VERT_SCALE is what every draw call in this file uses, and folds both together: a map
    shrunk to half width keeps its real-world slopes only if its hills halve too.
    Exposed unchanged as getVertScale() so terrain.js and main.js need no edits. */
-let EXAG=1.0;   // slider is 0..2 now; 1.8 was tuned back when MAP_SCALE divided it
-let MAP_SCALE=1;
+/* Startup defaults -- product-chosen, not just "neutral": 1:5 shortens the walk to
+   something you can preview in a few seconds, 0.25x exaggeration keeps the compacted
+   terrain from reading as a wall (see the trade-off note above), and 3x fog hides the
+   flat draw-distance edge on the default map without anyone touching a slider. Contour
+   step's own default (STEP_M above) already matched what we want, so it's untouched. */
+let EXAG=0.25;  // slider is 0..2 now; 1.8 was tuned back when MAP_SCALE divided it
+let MAP_SCALE=0.2;   // "1 : N" in the UI, N = 1/MAP_SCALE -> 1:5
 let VERT_SCALE=EXAG;
 /* Multiplies the theme's own fogNear/fogFar (a 1.0 default reproduces the theme exactly,
    independent of the exaggeration/map-scale state above). Kept separate from EXAG and
    MAP_SCALE because it only touches scene.fog -- no geometry, no rebuild -- so it can
    apply on every slider `input` event for a genuinely live preview instead of waiting
    for `change` the way the two rebuild-triggering sliders have to. */
-let FOG_MUL=1;
+let FOG_MUL=3;
 
 function setStartHead(i){ startHead=i; }
 function getStartHead(){ return startHead; }
@@ -284,6 +290,7 @@ function clearLayers(){ EXTRA=[]; rebuildWorld(); }
 function hasBundle(){ return !!BUNDLE; }
 function setContourStep(m){ STEP_M=clamp(Number(m)||3, 0.5, 20); rebuildWorld(); }
 function getContourStep(){ return STEP_M; }
+function getSignCount(){ return SIGN_COUNT; }
 
 /* Tread width in real metres per path kind, hoisted out of rebuildWorld's PATH_STYLE
    because the terrain-carving pass needs the widths BEFORE the ribbon loop runs (it has
@@ -549,6 +556,7 @@ function rebuildWorld(){
      which a real network has hundreds. Their ribbons already meet flush, so the pad was
      covering a seam that wasn't there. On a compacted map the discs merge into a
      continuous brown field over the whole network. Only real junctions get one now. */
+  const signWanted=[];      // collected here, thinned and built after the loop (see below)
   GRAPH.nodes.forEach((n,ni)=>{
     if(n.deg<1) return;
     const y=standingY(n.p[0],n.p[1]);
@@ -575,11 +583,57 @@ function rebuildWorld(){
       const arms=[],seen=new Set();
       out.forEach(o=>{const a=armOf(o);const k=a.label+'|'+Math.round(a.angle*4);
         if(seen.has(k))return;seen.add(k);arms.push(a);});
-      const sg=buildSign(n,arms); sg.position.y=y; worldG.add(sg);
+      signWanted.push({n, y, arms, deg:n.deg});
     }else if(n.deg===1&&out.length){
-      const sg=buildSign(n,[armOf(out[0])]); sg.position.y=y; worldG.add(sg);
+      signWanted.push({n, y, arms:[armOf(out[0])], deg:1});
     }
   });
+
+  /* Thin the signposts before building any of them.
+
+     Every junction wanting its own sign is right on a sparse network and absurd on a real
+     one: the default map has 162 junctions, many of them metres apart where a single
+     trail is cut repeatedly by side spurs, so a walker arrives at a thicket of identical
+     posts all naming the same two trails. (Connecting trails properly -- see geo.js's
+     splitT -- roughly doubled the junction count, which made this worse, not better: the
+     topology is now correct and the signage has to catch up with it.)
+
+     Greedy spatial thinning, best-first. "Best" is the sign that tells you the most:
+     the number of DISTINCT trail names it can point at, then the junction's degree, then
+     total trail length through it -- so where a cluster gets one sign, it is the one at
+     the genuinely informative fork rather than whichever node happened to be first in
+     the array. A kept sign then suppresses every candidate inside its radius.
+
+     Two radii, and the larger wins. SIGN_MIN_M is a real-world distance, so at true scale
+     signs are a sensible walk apart; SIGN_MIN_U is a floor in world units, because sign
+     posts are true-metre objects whose size does NOT shrink with world scale (the same
+     rule as the pup and the trees), so at heavy compaction a purely real-world spacing
+     would still let them overlap physically.
+
+     Dead ends are exempt from being suppressed BY the radius only when they are
+     trailheads -- the "you are here" post at the map's entrances is the one sign nobody
+     wants deduplicated away. */
+  {
+    const SIGN_MIN_M = 70, SIGN_MIN_U = 9;
+    const minGap = Math.max(SIGN_MIN_M*MAP_SCALE, SIGN_MIN_U);
+    const isHead = (n)=>TRAILHEADS.some(h=>Math.hypot(h.x-n.p[0], h.z-n.p[1]) < 0.5);
+    const score = s => {
+      const names = new Set(s.arms.map(a=>a.label)).size;
+      return names*1000 + s.deg*10 + Math.min(9, s.arms.length);
+    };
+    const ranked = signWanted.map(s=>({s, head:isHead(s.n), sc:score(s)}))
+      // trailheads first, then the most informative junctions
+      .sort((a,b)=> (b.head-a.head) || (b.sc-a.sc));
+    const kept=[];
+    for(const c of ranked){
+      const p=c.s.n.p;
+      // a trailhead post is always placed; everything else must clear the kept ones
+      if(!c.head && kept.some(k=>Math.hypot(k.s.n.p[0]-p[0], k.s.n.p[1]-p[1]) < minGap)) continue;
+      kept.push(c);
+    }
+    kept.forEach(c=>{ const sg=buildSign(c.s.n, c.s.arms); sg.position.y=c.s.y; worldG.add(sg); });
+    SIGN_COUNT = {wanted:signWanted.length, built:kept.length, minGap};
+  }
 
   // decorative edge stones + blaze posts
   const stoneMat=toon(THEME.rocks[0]);
@@ -669,7 +723,7 @@ function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a
 function getBackdrop(){ return backdropG; }
 
 export { loadWorld, rebuildWorld, addLayers, clearLayers, hasBundle, setContourStep,
-         standingY, getWorldRevision, pathWidth, getContourStep,
+         standingY, getWorldRevision, pathWidth, getContourStep, getSignCount,
          setThemeById, getTheme, setMapScale, getMapScale, getExaggeration, getBackdrop,
          setFogMultiplier, getFogMultiplier,
          getGraph, getTrailheads, getPOIs, getAreas, getBBox,

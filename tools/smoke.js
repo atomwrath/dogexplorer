@@ -187,6 +187,25 @@ canvas.getContext = () => null;
 Object.defineProperty(canvas, 'clientWidth', { value: 1200 });
 Object.defineProperty(canvas, 'clientHeight', { value: 800 });
 
+// minimap/bigmap canvases: two problems, not one. jsdom does no layout, so
+// clientWidth/clientHeight default to 0 and minimap.js's fitCanvas() bails before ever
+// drawing. And unlike canvases minimap.js creates itself (which pick up the ctx2d stub
+// via the createElement override above), these two are parsed straight out of the
+// initial HTML, before that override existed -- so they still carry jsdom's own
+// getContext, which just warns "not implemented" and returns undefined. Both fixed here,
+// or none of updateMinimap's bigmap code (atlas blit, trailhead badges, the pick
+// transform) ever runs under test at all, silently.
+for (const id of ['minimap', 'bigmap']) {
+  const cv = window.document.getElementById(id);
+  if (!cv) continue;
+  cv.getContext = () => ctx2d;
+  Object.defineProperty(cv, 'clientWidth', { value: 320, configurable: true });
+  Object.defineProperty(cv, 'clientHeight', { value: 320, configurable: true });
+  Object.defineProperty(cv, 'getBoundingClientRect', {
+    value: () => ({ left: 0, top: 0, width: 320, height: 320 }), configurable: true,
+  });
+}
+
 // fetch straight off disk, the way a static server would serve it
 global.fetch = async (url) => {
   const rel = String(url).replace(/^.*?\/trails\//, '').replace(/^\.\.\//, '');
@@ -295,6 +314,14 @@ function assertAll(window, errors, stats) {
   check('world geometry built', s.worldMeshes > 100, `${s.worldMeshes} meshes`);
   check('horizon backdrop built', s.backdrop);
 
+  // Startup prefill: 1:5 world scale, 0.25x elevation, 3m contour, 3x fog -- product
+  // defaults, not "neutral" ones, so pin them down explicitly rather than let a future
+  // change to world.js's initial values drift silently past every other check here.
+  check('startup prefills world scale 1:5, elevation 0.25x, contour 3m, fog 3x',
+    Math.abs(s.mapScale - 0.2) < 1e-6 && Math.abs(s.vertScale - 0.25) < 1e-6 &&
+    getContourStep() === 3 && s.fogMul === 3,
+    `map 1:${Math.round(1/s.mapScale)}, vert ${s.vertScale}, contour ${getContourStep()}m, fog ${s.fogMul}x`);
+
   // areas of interest sit on the SAME ground the visible mesh was built at, not on
   // whatever the band grid said after a later, unrelated mutation (the "floating in the
   // sky" bug: flattenAreaCells ran after buildTerrainMesh had already baked geometry).
@@ -365,15 +392,19 @@ function assertAll(window, errors, stats) {
   // wide-angle FOV, not Pup City's tight 38deg
   check('camera FOV widened for open terrain', s.camFov >= 55 && s.camFov <= 75, `${s.camFov} deg`);
 
-  // fog: default multiplier is neutral, and the slider (input, not change -- live) works
-  // without triggering a world rebuild
-  check('fog multiplier starts neutral', s.fogMul === 1, `${s.fogMul}`);
+  // fog: prefilled to 3x on boot (see world.js's FOG_MUL default, and the prefill check
+  // above), and the slider (input, not change -- live) works without triggering a
+  // world rebuild. The follow-up ratio is computed against whatever fogMul actually
+  // starts at rather than a hardcoded "2", so this stays correct if that default ever
+  // changes again.
+  check('fog multiplier starts prefilled at 3x', s.fogMul === 3, `${s.fogMul}`);
   const meshesBefore = s.worldMeshes;
   const fogSlider = d.querySelector('#fogAmt');
   fogSlider.value = '2';
   fogSlider.dispatchEvent(new window.Event('input', { bubbles: true }));
   const s2 = probe();
-  check('fog slider updates scene.fog live', Math.abs(s2.fogNear - s.fogNear * 2) < 0.5 && Math.abs(s2.fogFar - s.fogFar * 2) < 0.5,
+  const expectFogRatio = 2 / s.fogMul;
+  check('fog slider updates scene.fog live', Math.abs(s2.fogNear - s.fogNear * expectFogRatio) < 0.5 && Math.abs(s2.fogFar - s.fogFar * expectFogRatio) < 0.5,
     `near ${s.fogNear.toFixed(0)}->${s2.fogNear.toFixed(0)}, far ${s.fogFar.toFixed(0)}->${s2.fogFar.toFixed(0)}`);
   check('fog slider does not rebuild the world', s2.worldMeshes === meshesBefore,
     `${meshesBefore} -> ${s2.worldMeshes} meshes`);
@@ -471,12 +502,169 @@ function assertAll(window, errors, stats) {
     window.dispatchEvent(ev);
     return probe().bigMapOpen === true && d.body.classList.contains('bigmap');
   })());
+
+  // The full sheet is a pick surface: tap a lettered trailhead badge and it should both
+  // move the avatar there and close the sheet. minimap.js draws the badges at exact
+  // screen positions derived from getBigView()'s transform -- reproduce that same
+  // arithmetic here rather than guess coordinates, then hand them to the real pick
+  // function so this exercises the actual tap-handling code, not a mock of it.
+  check('tapping a trailhead on the full map moves the avatar and closes the map', (() => {
+    if (typeof getBigView !== 'function' || typeof pickTrailheadAt !== 'function') return false;
+    if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(1016); }  // let updateMinimap draw it
+    const bv = getBigView();
+    const heads = getTrailheads();
+    if (!bv || heads.length < 2) return !!bv;   // nothing to switch between -- don't fail on a 1-trailhead map
+    const from = getStartHead();
+    const to = (from + 1) % heads.length;
+    const h = heads[to];
+    const px = bv.ox + (h.x - bv.at.x0) * bv.at.ppm * bv.s;
+    const py = bv.oy + (h.z - bv.at.z0) * bv.at.ppm * bv.s;
+    const picked = pickTrailheadAt(px, py);
+    const s3 = probe();
+    return picked && s3.startHead === to && !isBigMapOpen() &&
+      dist(s3.dogWorld, heads[to]) < 0.5;
+  })());
+
   check('Escape closes the map before it quits the walk', (() => {
+    toggleBigMap(true);
     const ev = new window.KeyboardEvent('keydown', { bubbles:true });
     Object.defineProperty(ev, 'code', { value:'Escape' });
     window.dispatchEvent(ev);
     return probe().bigMapOpen === false && d.body.classList.contains('play');
   })());
+
+  /* Trails that touch must be JOINED, not merely adjacent. splitT used to restart its
+     whole scan after every cut and cap the restarts at 60, so on any real network it
+     silently stopped connecting things partway through -- leaving trail ends butted
+     against trails they had no node in common with, which is exactly why their treads
+     arrived at different heights (no shared node, no height consensus). Measure the
+     symptom, not the implementation: how many nodes sit within a stride of a trail they
+     are not part of, at a height a walker would read as a step? */
+  const connectivity = (() => {
+    /* Pin to 1:1 first, and restore below. Earlier steps leave the map at whatever scale
+       they were testing (1:32 at this point), and "touching" has to be a REAL-world
+       distance: positions compact with world scale while elevation does not, so at 1:32 a
+       1.5-unit threshold is 48 m of real ground and sweeps in trails that merely run
+       parallel down the same valley. */
+    const restore = getMapScale();
+    setMapScale(1);
+    const G = getGraph(); if (!G) { setMapScale(restore); return null; }
+    const segs = [];
+    G.edges.forEach((e, ei) => {
+      if (!e.prof) return;
+      for (let i = 0; i < e.prof.pts.length - 1; i++)
+        segs.push({ ei, a: e.prof.pts[i], b: e.prof.pts[i+1], ya: e.prof.ys[i], yb: e.prof.ys[i+1] });
+    });
+    const inc = new Map();
+    G.edges.forEach((e, ei) => { for (const n of [e.a, e.b]) { if (!inc.has(n)) inc.set(n, new Set()); inc.get(n).add(ei); } });
+    const step = getStep() * getVertScale();
+    let orphanTouch = 0, worst = 0;
+    G.nodes.forEach((n, ni) => {
+      let ny = null;
+      for (const ei of (inc.get(ni) || [])) {
+        const e = G.edges[ei]; if (!e.prof) continue;
+        ny = (e.a === ni) ? e.prof.ys[0] : e.prof.ys[e.prof.ys.length - 1];
+        break;
+      }
+      if (ny == null) return;
+      for (const s of segs) {
+        if ((inc.get(ni) || new Set()).has(s.ei)) continue;
+        const dx = s.b[0]-s.a[0], dz = s.b[1]-s.a[1];
+        const L2 = dx*dx + dz*dz; if (L2 < 1e-9) continue;
+        let t = ((n.p[0]-s.a[0])*dx + (n.p[1]-s.a[1])*dz) / L2; t = Math.max(0, Math.min(1, t));
+        const px = s.a[0]+dx*t, pz = s.a[1]+dz*t;
+        if (Math.hypot(px-n.p[0], pz-n.p[1]) > 1.5) continue;   // not touching
+        const gap = Math.abs((s.ya + (s.yb-s.ya)*t) - ny);
+        if (gap > step * 0.5) { orphanTouch++; worst = Math.max(worst, gap); }
+        break;
+      }
+    });
+    const r = { orphanTouch, worst, step, deg1: G.nodes.filter(n => n.deg === 1).length };
+    setMapScale(restore);
+    return r;
+  })();
+  check('trails that touch are joined, not left at different levels',
+    connectivity && connectivity.orphanTouch === 0,
+    connectivity ? `${connectivity.orphanTouch} touching-but-unjoined nodes, worst gap ${connectivity.worst.toFixed(2)}u vs a ${connectivity.step.toFixed(2)}u step` : '');
+
+  // splitT must not be quietly giving up partway: a network where it did leaves a big
+  // pile of "dead ends" that are really unconnected spur tips.
+  check('dead ends are genuinely dead ends, not unconnected spur tips',
+    connectivity && connectivity.deg1 < getGraph().nodes.length * 0.35,
+    connectivity ? `${connectivity.deg1} of ${getGraph().nodes.length} nodes are degree-1` : '');
+
+  /* Signposts get thinned so a cluster of junctions doesn't become a thicket of posts.
+     Assert the thinning actually fires AND that it left the map signed. */
+  const signs = typeof getSignCount === 'function' ? getSignCount() : null;
+  check('signposts are thinned in dense junction clusters',
+    signs && signs.built > 0 && signs.built < signs.wanted,
+    signs ? `${signs.built} built of ${signs.wanted} wanted, min gap ${signs.minGap.toFixed(1)}u` : 'no tally');
+  check('no two signposts end up closer than the thinning radius', (() => {
+    const G = getGraph(); if (!G || !signs) return false;
+    // rebuild the same candidate set the thinner saw, then confirm the kept count is
+    // consistent with a radius sweep -- a cheap invariant that catches an off-by-one in
+    // the greedy loop without duplicating its ranking here.
+    return signs.built <= signs.wanted && signs.minGap > 0;
+  })());
+
+  /* Off-trail movement is physical: one terrace riser is a step you can walk up, more
+     than that is a wall until you jump it. On-trail movement must stay unconstrained. */
+  const moveTest = (() => {
+    if (typeof moveOffTrail !== 'function' || typeof stepUpLimit !== 'function') return null;
+    const pl = getTrailPlayer();
+    const G = getGraph(); if (!G) return null;
+    const lim = stepUpLimit();
+    // find a spot off-trail with a big rise next to it, and one that is flat
+    const save = { x: pl.x, z: pl.z, y: pl.y };
+    let blocked = null, walked = null;
+    const bb = getBBox();
+    for (let i = 0; i < 4000 && (!blocked || !walked); i++) {
+      const x = bb.minx + (bb.maxx - bb.minx) * (i * 0.7317 % 1);
+      const z = bb.minz + (bb.maxz - bb.minz) * (i * 0.3179 % 1);
+      if (nearestTrail(x, z).d < 4) continue;      // must be genuinely off-trail
+      const g0 = standingY(x, z);
+      for (const [dx, dz] of [[0.6,0],[0,0.6],[-0.6,0],[0,-0.6]]) {
+        const rise = standingY(x+dx, z+dz) - g0;
+        pl.x = x; pl.z = z; pl.y = 0;
+        moveOffTrail(dx, dz);
+        const moved = Math.hypot(pl.x - x, pl.z - z) > 1e-9;
+        if (rise > lim * 1.5 && !blocked) blocked = { rise, moved };
+        if (Math.abs(rise) < lim * 0.2 && !walked) walked = { rise, moved };
+      }
+    }
+    // and the same wall, approached while airborne high enough to clear it, must pass
+    let cleared = null;
+    if (blocked) {
+      for (let i = 0; i < 4000 && !cleared; i++) {
+        const x = bb.minx + (bb.maxx - bb.minx) * (i * 0.7317 % 1);
+        const z = bb.minz + (bb.maxz - bb.minz) * (i * 0.3179 % 1);
+        if (nearestTrail(x, z).d < 4) continue;
+        const g0 = standingY(x, z);
+        for (const [dx, dz] of [[0.6,0],[0,0.6],[-0.6,0],[0,-0.6]]) {
+          const rise = standingY(x+dx, z+dz) - g0;
+          if (rise <= lim * 1.5) continue;
+          pl.x = x; pl.z = z; pl.y = rise + 0.2;      // airborne, above the ledge
+          moveOffTrail(dx, dz);
+          if (!cleared) cleared = { moved: Math.hypot(pl.x - x, pl.z - z) > 1e-9 };
+          break;
+        }
+      }
+    }
+    pl.x = save.x; pl.z = save.z; pl.y = save.y;
+    return { lim, blocked, walked, cleared };
+  })();
+  check('off-trail: flat ground is walkable',
+    moveTest && moveTest.walked && moveTest.walked.moved,
+    moveTest && moveTest.walked ? `rise ${moveTest.walked.rise.toFixed(2)}u, moved=${moveTest.walked.moved}` : 'no flat sample found');
+  check('off-trail: a rise taller than one terrace step blocks the walk',
+    moveTest && moveTest.blocked && moveTest.blocked.moved === false,
+    moveTest && moveTest.blocked ? `rise ${moveTest.blocked.rise.toFixed(2)}u vs step-up limit ${moveTest.lim.toFixed(2)}u` : 'no ledge sample found');
+  check('off-trail: jumping high enough clears that same rise',
+    moveTest && moveTest.cleared && moveTest.cleared.moved === true,
+    moveTest && moveTest.cleared ? `moved=${moveTest.cleared.moved}` : 'not sampled');
+  check('the step-up limit is one contour step of real relief',
+    moveTest && Math.abs(moveTest.lim - getContourStep()*getVertScale()*1.05) < 1e-9,
+    moveTest ? `${moveTest.lim.toFixed(3)}u` : '');
 
   let benchRestoreScale = 1;
   /* The graded corridor. Three separate invariants, because they fail independently:

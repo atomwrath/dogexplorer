@@ -47,7 +47,7 @@ h1 small{display:block;font-size:11px;opacity:.6;font-weight:normal;}
 .btn.icon{width:40px;padding:6px 0;display:none;}
 main{flex:1;display:flex;min-height:0;position:relative;}
 #panel{width:280px;min-width:280px;background:var(--card);border-right:4px solid var(--ink);
-  overflow-y:auto;padding:14px;}
+  overflow-y:auto;padding:14px;transition:margin-left .35s ease;}
 body.play #panel{display:none;}
 #stage{flex:1;position:relative;}
 canvas#c{position:absolute;inset:0;width:100%;height:100%;display:block;}
@@ -63,7 +63,13 @@ body.play #playHud{display:block;}
 .ctl label{display:flex;justify-content:space-between;font-size:12.5px;font-weight:bold;margin-bottom:4px;}
 .ctl label .val{opacity:.6;font-weight:normal;}
 .ctl input[type=range]{width:100%;accent-color:var(--orange);}
-@media (max-width:760px){ .btn.icon{display:inline-block;} #panel{position:absolute;height:100%;z-index:5;} }
+@media (max-width:760px){
+  .btn.icon{display:inline-block;}
+  #panel{position:absolute;height:100%;z-index:5;}
+  /* panelBtn (🎒) toggles this so the live preview -- pup, terrain, minimap -- is
+     reachable on a phone without the options column permanently covering it. */
+  body.nopanel #panel{margin-left:-300px;}
+}
 
 /* --- drop zone (Trail map) --- */
 .dropzone{display:block;text-align:center;border:3px dashed var(--ink);border-radius:14px;
@@ -121,6 +127,11 @@ body.play #playHud{display:block;}
 
 /* --- pup roster grid --- */
 .pup-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;}
+/* main.js toggles the `hidden` attribute to switch between the Dogs and Wildlife grids,
+   but `.pup-grid{display:grid}` above beats the UA stylesheet's `[hidden]{display:none}`
+   on specificity, so both grids showed at once regardless of which tab was selected.
+   This override restores `hidden` as the deciding rule. */
+.pup-grid[hidden]{display:none;}
 .pupcard{display:flex;flex-direction:column;gap:3px;font-family:inherit;text-align:left;
   border:3px solid var(--ink);border-radius:12px;background:#fff;padding:8px 9px;cursor:pointer;}
 .pupcard.sel{outline:3px solid var(--orange);outline-offset:2px;}
@@ -151,9 +162,12 @@ body.play #playHud{display:block;}
    A disc rather than a rectangle: it reads as a spyglass onto the paper map
    instead of a second screen, and the circular clip in minimap.js means the
    corners never show a hard cut through the terrain image. */
-#miniWrap{position:absolute;top:10px;right:10px;display:none;flex-direction:column;
+/* Visible on the startup/selection screen too, not just body.play -- it's the pup's
+   live preview companion, showing where the currently selected trailhead sits, and the
+   🗺 button is how you reach the full map (with clickable trailheads) before you've
+   even hit Play. */
+#miniWrap{position:absolute;top:10px;right:10px;display:flex;flex-direction:column;
   align-items:center;gap:6px;}
-body.play #miniWrap{display:flex;}
 body.bigmap #miniWrap{display:none;}
 #minimap{width:172px;height:172px;border-radius:50%;border:4px solid var(--ink);
   background:#e9dcbe;box-shadow:0 3px 0 rgba(61,42,32,.25);display:block;}
@@ -163,8 +177,21 @@ body.bigmap #miniWrap{display:none;}
   padding:14px;box-sizing:border-box;}
 body.bigmap #bigmapWrap{display:block;}
 #bigmap{width:100%;height:100%;display:block;border:4px solid var(--ink);border-radius:16px;
-  background:#e9dcbe;box-sizing:border-box;}
+  background:#e9dcbe;box-sizing:border-box;cursor:grab;touch-action:none;}
+#bigmap:active{cursor:grabbing;}
 #bigmapClose{position:absolute;top:24px;left:24px;}
+#bigmapZoom{position:absolute;bottom:24px;right:24px;display:flex;flex-direction:column;gap:8px;}
+#bigmapZoom .btn{width:44px;height:44px;padding:0;font-size:20px;line-height:1;
+  display:flex;align-items:center;justify-content:center;}
+.bigmap-hint{position:absolute;left:24px;bottom:24px;max-width:230px;margin:0;
+  background:#fff8e6;border:3px solid var(--ink);border-radius:12px;padding:7px 11px;
+  font-size:11.5px;font-weight:bold;opacity:.9;}
+@media (max-width:760px){
+  #bigmapZoom{bottom:14px;right:14px;gap:6px;}
+  #bigmapZoom .btn{width:40px;height:40px;font-size:17px;}
+  .bigmap-hint{left:14px;bottom:14px;max-width:170px;font-size:10.5px;padding:6px 9px;}
+  #bigmapClose{top:14px;left:14px;}
+}
 
 @media (max-width:760px){
   #minimap{width:118px;height:118px;}
@@ -344,6 +371,12 @@ body.arrived #arrivalWrap{display:flex;align-items:flex-start;justify-content:ce
       <div id="bigmapWrap">
         <canvas id="bigmap"></canvas>
         <button class="btn small" id="bigmapClose">✕ Close map</button>
+        <div id="bigmapZoom">
+          <button class="btn small" id="bigZoomIn" title="Zoom in">➕</button>
+          <button class="btn small" id="bigZoomOut" title="Zoom out">➖</button>
+        </div>
+        <p class="hint bigmap-hint">Tap a lettered trailhead to start there. Drag to pan,
+          scroll or ➕/➖ to zoom.</p>
       </div>
     </div>
   </main>
@@ -3495,32 +3528,138 @@ function ptSeg(p,a,b){
 function polyLen(pts){let s=0;for(let i=1;i<pts.length;i++)s+=Math.sqrt(d2(pts[i-1],pts[i]));return s;}
 // split lines where another line's endpoint lands mid-segment (T junction)
 // split lines where another line's endpoint lands mid-segment (T junction)
+/* Cut `lines` wherever they meet, so the graph actually knows they are connected.
+
+   WHY THIS IS NOT COSMETIC. buildGraph only ever joins lines at their ENDPOINTS, so a
+   spur whose tip lands in the middle of another trail is, topologically, two strangers
+   that happen to touch. world.js then grades every edge independently and pins its ends
+   to a consensus taken across the edges meeting AT A NODE -- and if there is no node,
+   there is no consensus, so the two treads arrive at whatever height their own smoothing
+   produced. That is the visible "two trails connect at different levels" step: on the
+   default map 93 trail ends sat within 4 m of a trail they were not joined to, 48 of
+   them more than half a terrace step out, the worst by three full steps.
+
+   WHY IT USED TO GIVE UP. The previous implementation restarted its entire scan after
+   every single split (`break outer`) and capped the restarts at 60. A real network needs
+   hundreds, so it silently stopped after 60 cuts and left the rest disconnected -- the
+   cap was reached exactly, on the default map, every load. Nothing logged, nothing threw;
+   the network was simply wrong past that point.
+
+   THE FIX IS A DIFFERENT SHAPE, not a bigger number. One pass collects every cut each
+   line needs, then applies them all at once, so the cost is one scan per round instead of
+   one scan per cut. A handful of rounds converges, because a cut point introduced this
+   round can itself land on a third line next round. Bounded either way.
+
+   Two kinds of meeting are handled, and they are genuinely different:
+     - a T: one line's ENDPOINT lands on another's interior. Cut the through-line.
+     - an X: two lines CROSS in the middle, neither ending there. Cut BOTH.
+   The X case was never handled at all, which is why crossings stayed at independent
+   heights even when everything else lined up. */
+function segCross(p,q,r,s){
+  // proper segment intersection, returning parameters along each; null when parallel or
+  // when the crossing falls outside either segment
+  const dx1=q[0]-p[0], dz1=q[1]-p[1], dx2=s[0]-r[0], dz2=s[1]-r[1];
+  const den=dx1*dz2-dz1*dx2;
+  if(Math.abs(den)<1e-12) return null;
+  const t=((r[0]-p[0])*dz2-(r[1]-p[1])*dx2)/den;
+  const u=((r[0]-p[0])*dz1-(r[1]-p[1])*dx1)/den;
+  if(t<=0||t>=1||u<=0||u>=1) return null;
+  return {t,u,q:[p[0]+dx1*t, p[1]+dz1*t]};
+}
+
+function lineBBox(pts){
+  let x0=1e15,x1=-1e15,z0=1e15,z1=-1e15;
+  for(const p of pts){ if(p[0]<x0)x0=p[0]; if(p[0]>x1)x1=p[0]; if(p[1]<z0)z0=p[1]; if(p[1]>z1)z1=p[1]; }
+  return {x0,x1,z0,z1};
+}
+
+/* Apply a set of {k, q} cuts to one line, in arc order, dropping any that would leave a
+   stub shorter than `tol` (including two cuts landing on top of each other, which is what
+   several spurs converging on the same spot produces). Mirrors what the old one-at-a-time
+   splice did, just for all cuts at once. */
+function applyCuts(L, cuts, tol){
+  const pts=L.pts;
+  const arc=[0];
+  for(let k=1;k<pts.length;k++) arc[k]=arc[k-1]+Math.hypot(pts[k][0]-pts[k-1][0],pts[k][1]-pts[k-1][1]);
+  const total=arc[pts.length-1];
+  const cs=cuts.map(c=>({k:c.k, q:c.q,
+                         s:arc[c.k]+Math.hypot(c.q[0]-pts[c.k][0], c.q[1]-pts[c.k][1])}))
+               .sort((a,b)=>a.s-b.s);
+  const keep=[];
+  let last=0;
+  for(const c of cs){
+    if(c.s-last<tol) continue;        // too close to the start, or to the cut before it
+    if(total-c.s<tol) continue;       // too close to the far end
+    keep.push(c); last=c.s;
+  }
+  if(!keep.length) return null;
+  const out=[];
+  let startK=0, startPt=pts[0];
+  for(const c of keep){
+    const piece=[startPt].concat(pts.slice(startK+1, c.k+1));
+    piece.push(c.q);
+    out.push({name:L.name, kind:L.kind, pts:piece});
+    startK=c.k; startPt=c.q;
+  }
+  out.push({name:L.name, kind:L.kind, pts:[startPt].concat(pts.slice(startK+1))});
+  return out;
+}
+
+const SPLIT_ROUNDS = 12;
 function splitT(lines,tol){
-  let guard=0,changed=true;
-  while(changed&&guard++<60){
-    changed=false;
+  const t2=tol*tol;
+  for(let round=0; round<SPLIT_ROUNDS; round++){
+    const boxes=lines.map(L=>lineBBox(L.pts));
+    const cuts=lines.map(()=>[]);
+
+    // --- T junctions: an endpoint landing on another line's interior ---
     const eps=[];
-    lines.forEach((L,i)=>{eps.push({p:L.pts[0],i});eps.push({p:L.pts[L.pts.length-1],i});});
-    outer:
+    lines.forEach((L,i)=>{ eps.push({p:L.pts[0],i}); eps.push({p:L.pts[L.pts.length-1],i}); });
     for(const ep of eps){
       for(let j=0;j<lines.length;j++){
-        if(j===ep.i)continue;
+        if(j===ep.i) continue;
+        const bb=boxes[j];
+        if(ep.p[0]<bb.x0-tol||ep.p[0]>bb.x1+tol||ep.p[1]<bb.z0-tol||ep.p[1]>bb.z1+tol) continue;
         const pts=lines[j].pts;
-        if(d2(ep.p,pts[0])<tol*tol||d2(ep.p,pts[pts.length-1])<tol*tol)continue;
+        // already meets this line at one of ITS ends -- buildGraph's endpoint snap has it
+        if(d2(ep.p,pts[0])<t2||d2(ep.p,pts[pts.length-1])<t2) continue;
+        let best=null;
         for(let k=0;k<pts.length-1;k++){
           const r=ptSeg(ep.p,pts[k],pts[k+1]);
-          if(r.d<tol){
-            const A=pts.slice(0,k+1);A.push(r.q);
-            const B=[r.q].concat(pts.slice(k+1));
-            if(polyLen(A)>tol&&polyLen(B)>tol){
-              const nm=lines[j].name,nk=lines[j].kind;
-              lines.splice(j,1,{name:nm,kind:nk,pts:A},{name:nm,kind:nk,pts:B});
-              changed=true;break outer;
-            }
+          if(r.d<tol&&(!best||r.d<best.d)) best={k, q:r.q, d:r.d};
+        }
+        if(best) cuts[j].push(best);
+      }
+    }
+
+    // --- X crossings: two lines crossing mid-span, neither ending there. Both get cut,
+    //     at the SAME point, so buildGraph's endpoint snap then fuses them into one node.
+    for(let i=0;i<lines.length;i++){
+      for(let j=i+1;j<lines.length;j++){
+        const A=boxes[i], B=boxes[j];
+        if(A.x1<B.x0-tol||A.x0>B.x1+tol||A.z1<B.z0-tol||A.z0>B.z1+tol) continue;
+        const pa=lines[i].pts, pb=lines[j].pts;
+        for(let k=0;k<pa.length-1;k++){
+          for(let m=0;m<pb.length-1;m++){
+            const c=segCross(pa[k],pa[k+1],pb[m],pb[m+1]);
+            if(!c) continue;
+            cuts[i].push({k, q:c.q.slice(), d:0});
+            cuts[j].push({k:m, q:c.q.slice(), d:0});
           }
         }
       }
     }
+
+    let changed=false;
+    const next=[];
+    for(let j=0;j<lines.length;j++){
+      if(!cuts[j].length){ next.push(lines[j]); continue; }
+      const pieces=applyCuts(lines[j], cuts[j], tol);
+      if(pieces){ changed=true; next.push(...pieces); }
+      else next.push(lines[j]);
+    }
+    lines=next;
+    if(!changed) break;
   }
   return lines;
 }
@@ -3658,6 +3797,7 @@ let backdropG=null;             // horizon ring, re-centred on the camera by mai
 let bboxW={minx:0,maxx:0,minz:0,maxz:0};
 let EXTRA=[];                   // raw GeoJSON FeatureCollections dropped in-session
 let STEP_M=3;                   // contour step in metres, remembered across rebuilds
+let SIGN_COUNT={wanted:0,built:0,minGap:0};   // last rebuild's signpost thinning tally
 
 /* Local equirectangular projection used ONLY when no DEM bundle is loaded, so a plain
    pair of .geojson files (trails + areas) is playable on flat ground. It deliberately
@@ -3704,15 +3844,20 @@ let startHead=0;
    VERT_SCALE is what every draw call in this file uses, and folds both together: a map
    shrunk to half width keeps its real-world slopes only if its hills halve too.
    Exposed unchanged as getVertScale() so terrain.js and main.js need no edits. */
-let EXAG=1.0;   // slider is 0..2 now; 1.8 was tuned back when MAP_SCALE divided it
-let MAP_SCALE=1;
+/* Startup defaults -- product-chosen, not just "neutral": 1:5 shortens the walk to
+   something you can preview in a few seconds, 0.25x exaggeration keeps the compacted
+   terrain from reading as a wall (see the trade-off note above), and 3x fog hides the
+   flat draw-distance edge on the default map without anyone touching a slider. Contour
+   step's own default (STEP_M above) already matched what we want, so it's untouched. */
+let EXAG=0.25;  // slider is 0..2 now; 1.8 was tuned back when MAP_SCALE divided it
+let MAP_SCALE=0.2;   // "1 : N" in the UI, N = 1/MAP_SCALE -> 1:5
 let VERT_SCALE=EXAG;
 /* Multiplies the theme's own fogNear/fogFar (a 1.0 default reproduces the theme exactly,
    independent of the exaggeration/map-scale state above). Kept separate from EXAG and
    MAP_SCALE because it only touches scene.fog -- no geometry, no rebuild -- so it can
    apply on every slider `input` event for a genuinely live preview instead of waiting
    for `change` the way the two rebuild-triggering sliders have to. */
-let FOG_MUL=1;
+let FOG_MUL=3;
 
 function setStartHead(i){ startHead=i; }
 function getStartHead(){ return startHead; }
@@ -3911,6 +4056,7 @@ function clearLayers(){ EXTRA=[]; rebuildWorld(); }
 function hasBundle(){ return !!BUNDLE; }
 function setContourStep(m){ STEP_M=clamp(Number(m)||3, 0.5, 20); rebuildWorld(); }
 function getContourStep(){ return STEP_M; }
+function getSignCount(){ return SIGN_COUNT; }
 
 /* Tread width in real metres per path kind, hoisted out of rebuildWorld's PATH_STYLE
    because the terrain-carving pass needs the widths BEFORE the ribbon loop runs (it has
@@ -4176,6 +4322,7 @@ function rebuildWorld(){
      which a real network has hundreds. Their ribbons already meet flush, so the pad was
      covering a seam that wasn't there. On a compacted map the discs merge into a
      continuous brown field over the whole network. Only real junctions get one now. */
+  const signWanted=[];      // collected here, thinned and built after the loop (see below)
   GRAPH.nodes.forEach((n,ni)=>{
     if(n.deg<1) return;
     const y=standingY(n.p[0],n.p[1]);
@@ -4202,11 +4349,57 @@ function rebuildWorld(){
       const arms=[],seen=new Set();
       out.forEach(o=>{const a=armOf(o);const k=a.label+'|'+Math.round(a.angle*4);
         if(seen.has(k))return;seen.add(k);arms.push(a);});
-      const sg=buildSign(n,arms); sg.position.y=y; worldG.add(sg);
+      signWanted.push({n, y, arms, deg:n.deg});
     }else if(n.deg===1&&out.length){
-      const sg=buildSign(n,[armOf(out[0])]); sg.position.y=y; worldG.add(sg);
+      signWanted.push({n, y, arms:[armOf(out[0])], deg:1});
     }
   });
+
+  /* Thin the signposts before building any of them.
+
+     Every junction wanting its own sign is right on a sparse network and absurd on a real
+     one: the default map has 162 junctions, many of them metres apart where a single
+     trail is cut repeatedly by side spurs, so a walker arrives at a thicket of identical
+     posts all naming the same two trails. (Connecting trails properly -- see geo.js's
+     splitT -- roughly doubled the junction count, which made this worse, not better: the
+     topology is now correct and the signage has to catch up with it.)
+
+     Greedy spatial thinning, best-first. "Best" is the sign that tells you the most:
+     the number of DISTINCT trail names it can point at, then the junction's degree, then
+     total trail length through it -- so where a cluster gets one sign, it is the one at
+     the genuinely informative fork rather than whichever node happened to be first in
+     the array. A kept sign then suppresses every candidate inside its radius.
+
+     Two radii, and the larger wins. SIGN_MIN_M is a real-world distance, so at true scale
+     signs are a sensible walk apart; SIGN_MIN_U is a floor in world units, because sign
+     posts are true-metre objects whose size does NOT shrink with world scale (the same
+     rule as the pup and the trees), so at heavy compaction a purely real-world spacing
+     would still let them overlap physically.
+
+     Dead ends are exempt from being suppressed BY the radius only when they are
+     trailheads -- the "you are here" post at the map's entrances is the one sign nobody
+     wants deduplicated away. */
+  {
+    const SIGN_MIN_M = 70, SIGN_MIN_U = 9;
+    const minGap = Math.max(SIGN_MIN_M*MAP_SCALE, SIGN_MIN_U);
+    const isHead = (n)=>TRAILHEADS.some(h=>Math.hypot(h.x-n.p[0], h.z-n.p[1]) < 0.5);
+    const score = s => {
+      const names = new Set(s.arms.map(a=>a.label)).size;
+      return names*1000 + s.deg*10 + Math.min(9, s.arms.length);
+    };
+    const ranked = signWanted.map(s=>({s, head:isHead(s.n), sc:score(s)}))
+      // trailheads first, then the most informative junctions
+      .sort((a,b)=> (b.head-a.head) || (b.sc-a.sc));
+    const kept=[];
+    for(const c of ranked){
+      const p=c.s.n.p;
+      // a trailhead post is always placed; everything else must clear the kept ones
+      if(!c.head && kept.some(k=>Math.hypot(k.s.n.p[0]-p[0], k.s.n.p[1]-p[1]) < minGap)) continue;
+      kept.push(c);
+    }
+    kept.forEach(c=>{ const sg=buildSign(c.s.n, c.s.arms); sg.position.y=c.s.y; worldG.add(sg); });
+    SIGN_COUNT = {wanted:signWanted.length, built:kept.length, minGap};
+  }
 
   // decorative edge stones + blaze posts
   const stoneMat=toon(THEME.rocks[0]);
@@ -4581,7 +4774,20 @@ function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
 
    Wildlife only appears once you've WATCHED it (critters.js banks a sighting). Pinning
    an animal to your map is the reward for the sneak, and showing every critter would
-   delete the mechanic outright. */
+   delete the mechanic outright.
+
+   NO TRAIL NAMES ON THE SHEET. An earlier version printed each trail's name along its
+   centreline the way a paper map does; on a network with real names crammed into a
+   small canvas it read as clutter, not signage, so it's gone. Trailheads carry the same
+   lettered badge the "Start here" list uses instead -- one glance ties the map to the
+   list, and the letters stay legible at any zoom because they're drawn live, not baked
+   into the atlas raster.
+
+   The full sheet is a pick surface too: tap a lettered trailhead to start there,
+   drag to pan, wheel/pinch or the ➕➖ buttons to zoom. Panning and zooming only ever
+   touch the CAMERA onto the atlas (a scale + a focus point) -- the atlas itself is
+   still built once per world revision, so zooming in doesn't re-render anything, it
+   just draws a bigger crop of the same offscreen image. */
 
 
 
@@ -4590,25 +4796,133 @@ function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
 
 const INK_MAP = '#3a2517';
 const TRAIL_INK = {trail:'#9c6a35', track:'#8a6a45', road:'#6f6b62'};
+const BIG_ZOOM_MIN = 1, BIG_ZOOM_MAX = 10;
 
 let atlas = null;              // {canvas, x0, z0, w, h, ppm}
 let atlasRev = -1;
 let miniCv = null, miniCtx = null, bigCv = null, bigCtx = null;
 let bigOpen = false;
+let bigZoom = 1;               // 1 = whole atlas fit to the sheet, higher = zoomed in
+let bigFocus = null;           // world {x,z} centred on the sheet; null -> atlas centre
+let bigView = null;            // last-drawn transform, for pointer/wheel picking: {ox,oy,s,dpr,at,W,H}
+let onTrailheadPick = null;    // main.js's placeAtHead, wired through initMinimap
+let bigWired = false;          // guards against double-binding listeners if init runs twice
 
 function isBigMapOpen(){ return bigOpen; }
 
-function initMinimap(){
+// Same lettering as main.js's start-picker (A, B, C... then plain numbers past Z) so a
+// badge on the map and a card in the "Start here" list always agree. Duplicated rather
+// than imported: main.js imports THIS module, and the two never need to be the same
+// function, only produce the same letters for the same index.
+function headLetterMM(i){ return i<26 ? String.fromCharCode(65+i) : String(i+1); }
+
+function clampToAtlas(pt, at){
+  return { x: clamp(pt.x, at.x0, at.x0+at.w), z: clamp(pt.z, at.z0, at.z0+at.h) };
+}
+
+function setBigZoom(z){ bigZoom = clamp(z, BIG_ZOOM_MIN, BIG_ZOOM_MAX); }
+
+/* Zoom by `factor`, anchored on the atlas point currently under canvas-pixel (px,py) --
+   pass the sheet's own centre (or omit) to zoom in place, since the focus point IS what
+   sits at centre by construction (see the draw transform below), so a centre-anchored
+   zoom needs no focus recompute at all. Wheel zoom passes the cursor instead, so the
+   spot under the pointer doesn't drift out from under it as you scroll. */
+function zoomBigToward(factor, px, py){
+  if(!bigView){ setBigZoom(bigZoom*factor); return; }
+  const {ox, oy, s, at, W, H} = bigView;
+  const cx = px==null ? W/2 : px, cy = py==null ? H/2 : py;
+  const kOld = at.ppm*s;
+  const wx = at.x0 + (cx-ox)/kOld, wz = at.z0 + (cy-oy)/kOld;
+  setBigZoom(bigZoom*factor);
+  const kNew = at.ppm*bigView.baseS*bigZoom;
+  bigFocus = clampToAtlas({ x: wx-(cx-W/2)/kNew, z: wz-(cy-H/2)/kNew }, at);
+}
+
+function pickTrailheadAt(px, py){
+  if(!bigView || !onTrailheadPick) return false;
+  const {ox, oy, s, at, dpr} = bigView;
+  const k = at.ppm*s;
+  const heads = getTrailheads();
+  let best=-1, bestD=Infinity;
+  for(let i=0;i<heads.length;i++){
+    const h=heads[i];
+    const d = Math.hypot(ox+(h.x-at.x0)*k-px, oy+(h.z-at.z0)*k-py);
+    if(d<bestD){ bestD=d; best=i; }
+  }
+  const hitR = Math.max(24*(dpr||1), 34);       // generous tap target, bigger than the drawn badge
+  if(best<0 || bestD>hitR) return false;
+  onTrailheadPick(best);
+  toggleBigMap(false);          // picked -> close the sheet so the live preview shows it
+  return true;
+}
+
+/* Drag-to-pan + tap-to-pick, as one pointer sequence: a real drag pans, a pointer that
+   never moved past a small threshold is a tap and tries to pick a trailhead instead.
+   Wheel zooms toward the cursor. Buttons zoom in place (see zoomBigToward above). */
+function wireBigMapControls(){
+  if(bigWired || !bigCv) return;
+  bigWired = true;
+  const toCanvasPt = e=>{
+    const rect = bigCv.getBoundingClientRect();
+    const dpr = bigCv.width / Math.max(1, rect.width);
+    return { x:(e.clientX-rect.left)*dpr, y:(e.clientY-rect.top)*dpr, dpr };
+  };
+  let drag = null;
+  bigCv.addEventListener('pointerdown', e=>{
+    const p = toCanvasPt(e);
+    drag = { id:e.pointerId, sx:e.clientX, sy:e.clientY, moved:false, dpr:p.dpr,
+             focus0: bigFocus ? {...bigFocus} : null };
+    bigCv.setPointerCapture?.(e.pointerId);
+  });
+  bigCv.addEventListener('pointermove', e=>{
+    if(!drag || e.pointerId!==drag.id || !bigView) return;
+    const dx=e.clientX-drag.sx, dy=e.clientY-drag.sy;
+    if(!drag.moved && Math.hypot(dx,dy) < 5) return;
+    drag.moved = true;
+    const {s, at} = bigView, k = at.ppm*s;
+    const base = drag.focus0 || bigFocus || {x:at.x0+at.w/2, z:at.z0+at.h/2};
+    bigFocus = clampToAtlas({ x: base.x-(dx*drag.dpr)/k, z: base.z-(dy*drag.dpr)/k }, at);
+  });
+  const endDrag = e=>{
+    if(!drag || e.pointerId!==drag.id) return;
+    if(!drag.moved){ const p=toCanvasPt(e); pickTrailheadAt(p.x, p.y); }
+    drag = null;
+  };
+  bigCv.addEventListener('pointerup', endDrag);
+  bigCv.addEventListener('pointercancel', ()=>{ drag=null; });
+  bigCv.addEventListener('wheel', e=>{
+    e.preventDefault();
+    const p = toCanvasPt(e);
+    zoomBigToward(e.deltaY<0 ? 1.2 : 1/1.2, p.x, p.y);
+  }, {passive:false});
+  document.getElementById('bigZoomIn')?.addEventListener('click', ()=> zoomBigToward(1.4));
+  document.getElementById('bigZoomOut')?.addEventListener('click', ()=> zoomBigToward(1/1.4));
+}
+
+/* `onPick(i)` is main.js's placeAtHead -- called with a trailhead index when the sheet
+   is tapped on one. Kept as a callback rather than an import so this module never needs
+   to know about player state, avatars or cameras, only "which trailhead". */
+function initMinimap(onPick){
+  onTrailheadPick = onPick || null;
   miniCv = document.getElementById('minimap');
   bigCv = document.getElementById('bigmap');
   if(miniCv) miniCtx = miniCv.getContext('2d');
   if(bigCv) bigCtx = bigCv.getContext('2d');
+  wireBigMapControls();
 }
 
 function toggleBigMap(force){
-  bigOpen = (force === undefined) ? !bigOpen : !!force;
+  const next = (force === undefined) ? !bigOpen : !!force;
+  if(next && !bigOpen){ bigZoom = 1; bigFocus = null; }   // fresh fit-to-screen every open
+  bigOpen = next;
   document.body.classList.toggle('bigmap', bigOpen);
 }
+
+// Test seam, same reason main.js exports trailIsPlaying/getTrailPlayer/getTripState:
+// `bigView` is a top-level `let`, invisible to tools/smoke.js once flattened into the
+// built bundle, so a plain getter is the only way the harness can compute an exact
+// on-screen trailhead position and drive a real tap-to-pick end to end.
+function getBigView(){ return bigView; }
 
 /* ---------- the static atlas ---------- */
 
@@ -4729,6 +5043,33 @@ function drawSighted(g, X, Z, scale){
   }
 }
 
+/* Lettered, tappable trailhead badges for the full sheet -- constant SCREEN size
+   regardless of zoom (like a map pin), same lettering as the "Start here" list so the
+   two always agree. The selected one gets a bright ring so "where am I starting" reads
+   at a glance even before you've moved. Drawn live rather than baked into the atlas: a
+   handful of circles is cheap every frame, and it keeps the letters crisp at any zoom
+   instead of blurring along with the raster underneath them. */
+function drawTrailheadLabels(g, X, Z, scale, selectedIdx){
+  const heads = getTrailheads();
+  const r = 9*scale;
+  heads.forEach((h, i)=>{
+    const x = X(h.x), y = Z(h.z);
+    const sel = i===selectedIdx;
+    if(sel){
+      g.beginPath(); g.arc(x, y, r+4*scale, 0, 7);
+      g.lineWidth = Math.max(1.5, 2*scale); g.strokeStyle = '#ffd94a'; g.stroke();
+    }
+    g.beginPath(); g.arc(x, y, r, 0, 7);
+    g.fillStyle = sel ? '#ffd94a' : '#e8743a';
+    g.fill();
+    g.lineWidth = Math.max(1.5, 2*scale); g.strokeStyle = INK_MAP; g.stroke();
+    g.font = `bold ${11*scale}px "Comic Sans MS","Chalkboard SE",sans-serif`;
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillStyle = sel ? INK_MAP : '#fff8e6';
+    g.fillText(headLetterMM(i), x, y + 0.5*scale);
+  });
+}
+
 /* Fit the backing store to the element's real pixel size. Called every frame because the
    corner map lives in a flex layout and iOS's visual viewport resizes underneath it
    without firing anything useful; the early-out makes the common case free. */
@@ -4772,27 +5113,24 @@ function updateMinimap(px, pz, yaw){
     g.clearRect(0, 0, W, H);
     g.fillStyle = '#e9dcbe'; g.fillRect(0, 0, W, H);
     if(at){
-      const s = Math.min(W/(at.w*at.ppm), H/(at.h*at.ppm));
+      // fit-to-screen scale, then the user's own zoom on top of it; centred on bigFocus
+      // (default: the atlas centre) rather than always the bbox centre, so panning and
+      // zooming compose the same way a real map app's camera does.
+      const baseS = Math.min(W/(at.w*at.ppm), H/(at.h*at.ppm));
+      const s = baseS*bigZoom;
+      if(!bigFocus) bigFocus = { x: at.x0+at.w/2, z: at.z0+at.h/2 };
+      const ox = W/2 - (bigFocus.x-at.x0)*at.ppm*s;
+      const oy = H/2 - (bigFocus.z-at.z0)*at.ppm*s;
       const dw = at.w*at.ppm*s, dh = at.h*at.ppm*s;
-      const ox = (W-dw)/2, oy = (H-dh)/2;
       g.imageSmoothingEnabled = true;
       g.drawImage(at.canvas, ox, oy, dw, dh);
+      bigView = {ox, oy, s, baseS, at, W, H, dpr};
       const X = x => ox + (x - at.x0)*at.ppm*s, Z = z => oy + (z - at.z0)*at.ppm*s;
+      drawTrailheadLabels(g, X, Z, dpr*1.3, getStartHead());
       drawSighted(g, X, Z, dpr*1.6);
       drawPup(g, X(px), Z(pz), yaw, dpr*2.2);
-      // trail names along the sheet, which the corner disc has no room for
-      g.font = `bold ${13*dpr}px "Comic Sans MS","Chalkboard SE",sans-serif`;
-      g.textAlign = 'center'; g.textBaseline = 'middle';
-      const seen = new Set();
-      for(const e of (getGraph()?.edges || [])){
-        if(!e.name || seen.has(e.name) || e.pts.length < 3) continue;
-        seen.add(e.name);
-        const m = e.pts[Math.floor(e.pts.length/2)];
-        g.lineWidth = 4*dpr; g.strokeStyle = 'rgba(255,248,230,.9)';
-        g.strokeText(e.name, X(m[0]), Z(m[1]) - 11*dpr);
-        g.fillStyle = INK_MAP;
-        g.fillText(e.name, X(m[0]), Z(m[1]) - 11*dpr);
-      }
+    } else {
+      bigView = null;
     }
     // north arrow
     g.save();
@@ -5069,6 +5407,50 @@ function placeAtHead(i){
   renderStartPicker();
 }
 
+/* ---------- off-trail movement ----------
+
+   On the tread, movement is unconstrained (see the loop). Off it, it is physical, and the
+   rule comes straight out of the terracing: ONE terrace riser is a step you can walk up,
+   anything taller is a wall you have to jump. Tying the limit to the contour step rather
+   than to a tuned constant is what makes the landscape readable -- the bands are the only
+   vertical quantum this world has, so if you can see two of them between you and a ledge
+   you already know the walk won't do it.
+
+   `player.y` is height ABOVE the ground beneath the player, NOT an absolute altitude.
+   Every comparison here therefore converts to absolute feet height (ground + y) and back
+   again; getting that backwards is what makes an avatar sink through hillsides. */
+function stepUpLimit(){
+  // one riser, plus a hair, so a step exactly one band tall is never a coin flip
+  return getContourStep()*getVertScale()*1.05;
+}
+
+function moveOffTrail(stepX, stepZ){
+  const lim = stepUpLimit();
+  const gHere = standingY(player.x, player.z);
+  const feet = gHere + player.y;
+  const tryMove = (dx, dz)=>{
+    if(!dx && !dz) return false;
+    const nx=player.x+dx, nz=player.z+dz;
+    const gThere = standingY(nx, nz);
+    // walkable if it is at most a single step up, or if we are already airborne high
+    // enough to clear it -- which is precisely what makes jumping the answer to a ledge
+    if(gThere - gHere > lim && feet < gThere - 0.05) return false;
+    player.x=nx; player.z=nz;
+    /* Preserve ABSOLUTE height across the move and let the loop's gravity do the rest.
+       Walking off a ledge thus leaves the pup briefly airborne with a positive `y` and it
+       falls, instead of the old behaviour -- which re-read the ground every frame and
+       slid the avatar down the cliff face as though it were a ramp. Stepping UP resolves
+       to y=0 on the same frame, so a kerb stays a step rather than becoming a launch. */
+    player.y = Math.max(0, feet - gThere);
+    return true;
+  };
+  // Try the full move, then each axis alone, so a glancing approach to a bank slides
+  // along it instead of stopping dead against it.
+  if(tryMove(stepX, stepZ)) return;
+  if(tryMove(stepX, 0)) return;
+  tryMove(0, stepZ);
+}
+
 /* ---------- input: trail-owned, not core/input.js (that module is wired directly to
    Pup City's player-state/modes/pickups -- creator has its own for the same reason) --- */
 const trailKeys = {};
@@ -5152,8 +5534,10 @@ function loop(t){
     // idle, or the arrival card is up: no movement, but keep the avatar breathing so
     // neither the lobby nor the summary is a still frame. Pausing deliberately keeps the
     // world rendered -- "Keep exploring" puts you back exactly where you are standing,
-    // and cutting to a blank panel would throw that away.
+    // and cutting to a blank panel would throw that away. The minimap keeps drawing here
+    // too, now that it's part of the startup/selection screen and not just the play HUD.
     if(avatarKey) syncAvatar(dt, t, 0, 0, player.sneaking, false, false);
+    updateMinimap(player.x, player.z, player.yaw);
     renderer.render(scene,camera);
     return;
   }
@@ -5175,12 +5559,24 @@ function loop(t){
   const moving=mag>0.03&&(wx||wz);
 
   const nt = nearestTrail(player.x,player.z);
-  const surf = nt.d<1.5 ? 1 : 0.6;
+  const onTrail = nt.d<1.5;
+  const surf = onTrail ? 1 : 0.6;
   const top = currentTopSpeed()*(player.sneaking?0.5:(run?currentRunMul():1))*surf*(stick.active?mag:1);
   player.speed = lerp(player.speed, moving?top:0, 1-Math.pow(0.0009,dt));
   if(moving){
     const L=Math.hypot(wx,wz);
-    player.x+=wx/L*player.speed*dt; player.z+=wz/L*player.speed*dt; player.dist+=player.speed*dt;
+    const stepX=wx/L*player.speed*dt, stepZ=wz/L*player.speed*dt;
+    const before={x:player.x, z:player.z};
+    if(onTrail){
+      /* On the tread, movement stays exactly as it was: the graded corridor is a
+         continuous, walkable bench by construction (terrain.js's gradeProfile), so there
+         is nothing to climb and clamping against terrain here would only fight the
+         grading. Walking a trail should feel frictionless -- that IS the trail. */
+      player.x+=stepX; player.z+=stepZ;
+    }else{
+      moveOffTrail(stepX, stepZ);
+    }
+    player.dist += Math.hypot(player.x-before.x, player.z-before.z);
     const targetYaw=Math.atan2(-wz/L,wx/L);
     let dy=targetYaw-player.yaw; while(dy>Math.PI)dy-=Math.PI*2; while(dy<-Math.PI)dy+=Math.PI*2;
     player.yaw+=dy*Math.min(1,dt*10);
@@ -5244,7 +5640,6 @@ function enterPlay(){
   // fresh population per walk, so the sightings tally means "this trip" rather than
   // "since you opened the tab"
   spawnCritters(Date.now());
-  initMinimap();
   getPOIs().forEach(p=>{ p.found=false; });
   trip.startT = Date.now();
   trip.parked = getStartHead();     // don't fire the card at the head you started from
@@ -5677,6 +6072,9 @@ async function boot(bundleUrl){
   renderThemePicker();
   renderPupToggle();
   wireScale();
+  // the callback lets the full-sheet map hand back "which trailhead got tapped" without
+  // minimap.js needing to know anything about players, avatars or cameras
+  initMinimap(i => placeAtHead(i));
   await loadMap(bundleUrl || DEFAULT_WORLD, !bundleUrl);
   renderRoster();
   renderStartPicker();
@@ -5717,6 +6115,13 @@ $('#defaultMapBtn')?.addEventListener('click', async ()=>{
 });
 $('#mapBtn')?.addEventListener('click', ()=> toggleBigMap());
 $('#bigmapClose')?.addEventListener('click', ()=> toggleBigMap(false));
+// mobile only (see trails.css's body.nopanel rule): slides the options panel off-screen
+// so the live pup/minimap preview underneath is reachable without leaving the setup
+// screen. Desktop never shows this button (icon.btn is display:none above 760px).
+$('#panelBtn')?.addEventListener('click', ()=>{
+  document.body.classList.toggle('nopanel');
+  setTimeout(resize, 380);
+});
 
 $('#playBtn')?.addEventListener('click', enterPlay);
 $('#exitBtn')?.addEventListener('click', exitPlay);

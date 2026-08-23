@@ -18,34 +18,155 @@
 
    Wildlife only appears once you've WATCHED it (critters.js banks a sighting). Pinning
    an animal to your map is the reward for the sneak, and showing every critter would
-   delete the mechanic outright. */
+   delete the mechanic outright.
+
+   NO TRAIL NAMES ON THE SHEET. An earlier version printed each trail's name along its
+   centreline the way a paper map does; on a network with real names crammed into a
+   small canvas it read as clutter, not signage, so it's gone. Trailheads carry the same
+   lettered badge the "Start here" list uses instead -- one glance ties the map to the
+   list, and the letters stay legible at any zoom because they're drawn live, not baked
+   into the atlas raster.
+
+   The full sheet is a pick surface too: tap a lettered trailhead to start there,
+   drag to pan, wheel/pinch or the ➕➖ buttons to zoom. Panning and zooming only ever
+   touch the CAMERA onto the atlas (a scale + a focus point) -- the atlas itself is
+   still built once per world revision, so zooming in doesn't re-render anything, it
+   just draws a bigger crop of the same offscreen image. */
 import { clamp } from '../core/math.js';
-import { getAreas, getBBox, getGraph, getMapScale, getPOIs, getTrailheads, getWorldRevision } from './world.js';
+import { getAreas, getBBox, getGraph, getMapScale, getPOIs, getStartHead, getTrailheads, getWorldRevision } from './world.js';
 import { reliefCanvas } from './terrain.js';
 import { getCritters } from './critters.js';
 import { THEME } from './themes.js';
 
 const INK_MAP = '#3a2517';
 const TRAIL_INK = {trail:'#9c6a35', track:'#8a6a45', road:'#6f6b62'};
+const BIG_ZOOM_MIN = 1, BIG_ZOOM_MAX = 10;
 
 let atlas = null;              // {canvas, x0, z0, w, h, ppm}
 let atlasRev = -1;
 let miniCv = null, miniCtx = null, bigCv = null, bigCtx = null;
 let bigOpen = false;
+let bigZoom = 1;               // 1 = whole atlas fit to the sheet, higher = zoomed in
+let bigFocus = null;           // world {x,z} centred on the sheet; null -> atlas centre
+let bigView = null;            // last-drawn transform, for pointer/wheel picking: {ox,oy,s,dpr,at,W,H}
+let onTrailheadPick = null;    // main.js's placeAtHead, wired through initMinimap
+let bigWired = false;          // guards against double-binding listeners if init runs twice
 
 function isBigMapOpen(){ return bigOpen; }
 
-function initMinimap(){
+// Same lettering as main.js's start-picker (A, B, C... then plain numbers past Z) so a
+// badge on the map and a card in the "Start here" list always agree. Duplicated rather
+// than imported: main.js imports THIS module, and the two never need to be the same
+// function, only produce the same letters for the same index.
+function headLetterMM(i){ return i<26 ? String.fromCharCode(65+i) : String(i+1); }
+
+function clampToAtlas(pt, at){
+  return { x: clamp(pt.x, at.x0, at.x0+at.w), z: clamp(pt.z, at.z0, at.z0+at.h) };
+}
+
+function setBigZoom(z){ bigZoom = clamp(z, BIG_ZOOM_MIN, BIG_ZOOM_MAX); }
+
+/* Zoom by `factor`, anchored on the atlas point currently under canvas-pixel (px,py) --
+   pass the sheet's own centre (or omit) to zoom in place, since the focus point IS what
+   sits at centre by construction (see the draw transform below), so a centre-anchored
+   zoom needs no focus recompute at all. Wheel zoom passes the cursor instead, so the
+   spot under the pointer doesn't drift out from under it as you scroll. */
+function zoomBigToward(factor, px, py){
+  if(!bigView){ setBigZoom(bigZoom*factor); return; }
+  const {ox, oy, s, at, W, H} = bigView;
+  const cx = px==null ? W/2 : px, cy = py==null ? H/2 : py;
+  const kOld = at.ppm*s;
+  const wx = at.x0 + (cx-ox)/kOld, wz = at.z0 + (cy-oy)/kOld;
+  setBigZoom(bigZoom*factor);
+  const kNew = at.ppm*bigView.baseS*bigZoom;
+  bigFocus = clampToAtlas({ x: wx-(cx-W/2)/kNew, z: wz-(cy-H/2)/kNew }, at);
+}
+
+function pickTrailheadAt(px, py){
+  if(!bigView || !onTrailheadPick) return false;
+  const {ox, oy, s, at, dpr} = bigView;
+  const k = at.ppm*s;
+  const heads = getTrailheads();
+  let best=-1, bestD=Infinity;
+  for(let i=0;i<heads.length;i++){
+    const h=heads[i];
+    const d = Math.hypot(ox+(h.x-at.x0)*k-px, oy+(h.z-at.z0)*k-py);
+    if(d<bestD){ bestD=d; best=i; }
+  }
+  const hitR = Math.max(24*(dpr||1), 34);       // generous tap target, bigger than the drawn badge
+  if(best<0 || bestD>hitR) return false;
+  onTrailheadPick(best);
+  toggleBigMap(false);          // picked -> close the sheet so the live preview shows it
+  return true;
+}
+
+/* Drag-to-pan + tap-to-pick, as one pointer sequence: a real drag pans, a pointer that
+   never moved past a small threshold is a tap and tries to pick a trailhead instead.
+   Wheel zooms toward the cursor. Buttons zoom in place (see zoomBigToward above). */
+function wireBigMapControls(){
+  if(bigWired || !bigCv) return;
+  bigWired = true;
+  const toCanvasPt = e=>{
+    const rect = bigCv.getBoundingClientRect();
+    const dpr = bigCv.width / Math.max(1, rect.width);
+    return { x:(e.clientX-rect.left)*dpr, y:(e.clientY-rect.top)*dpr, dpr };
+  };
+  let drag = null;
+  bigCv.addEventListener('pointerdown', e=>{
+    const p = toCanvasPt(e);
+    drag = { id:e.pointerId, sx:e.clientX, sy:e.clientY, moved:false, dpr:p.dpr,
+             focus0: bigFocus ? {...bigFocus} : null };
+    bigCv.setPointerCapture?.(e.pointerId);
+  });
+  bigCv.addEventListener('pointermove', e=>{
+    if(!drag || e.pointerId!==drag.id || !bigView) return;
+    const dx=e.clientX-drag.sx, dy=e.clientY-drag.sy;
+    if(!drag.moved && Math.hypot(dx,dy) < 5) return;
+    drag.moved = true;
+    const {s, at} = bigView, k = at.ppm*s;
+    const base = drag.focus0 || bigFocus || {x:at.x0+at.w/2, z:at.z0+at.h/2};
+    bigFocus = clampToAtlas({ x: base.x-(dx*drag.dpr)/k, z: base.z-(dy*drag.dpr)/k }, at);
+  });
+  const endDrag = e=>{
+    if(!drag || e.pointerId!==drag.id) return;
+    if(!drag.moved){ const p=toCanvasPt(e); pickTrailheadAt(p.x, p.y); }
+    drag = null;
+  };
+  bigCv.addEventListener('pointerup', endDrag);
+  bigCv.addEventListener('pointercancel', ()=>{ drag=null; });
+  bigCv.addEventListener('wheel', e=>{
+    e.preventDefault();
+    const p = toCanvasPt(e);
+    zoomBigToward(e.deltaY<0 ? 1.2 : 1/1.2, p.x, p.y);
+  }, {passive:false});
+  document.getElementById('bigZoomIn')?.addEventListener('click', ()=> zoomBigToward(1.4));
+  document.getElementById('bigZoomOut')?.addEventListener('click', ()=> zoomBigToward(1/1.4));
+}
+
+/* `onPick(i)` is main.js's placeAtHead -- called with a trailhead index when the sheet
+   is tapped on one. Kept as a callback rather than an import so this module never needs
+   to know about player state, avatars or cameras, only "which trailhead". */
+function initMinimap(onPick){
+  onTrailheadPick = onPick || null;
   miniCv = document.getElementById('minimap');
   bigCv = document.getElementById('bigmap');
   if(miniCv) miniCtx = miniCv.getContext('2d');
   if(bigCv) bigCtx = bigCv.getContext('2d');
+  wireBigMapControls();
 }
 
 function toggleBigMap(force){
-  bigOpen = (force === undefined) ? !bigOpen : !!force;
+  const next = (force === undefined) ? !bigOpen : !!force;
+  if(next && !bigOpen){ bigZoom = 1; bigFocus = null; }   // fresh fit-to-screen every open
+  bigOpen = next;
   document.body.classList.toggle('bigmap', bigOpen);
 }
+
+// Test seam, same reason main.js exports trailIsPlaying/getTrailPlayer/getTripState:
+// `bigView` is a top-level `let`, invisible to tools/smoke.js once flattened into the
+// built bundle, so a plain getter is the only way the harness can compute an exact
+// on-screen trailhead position and drive a real tap-to-pick end to end.
+function getBigView(){ return bigView; }
 
 /* ---------- the static atlas ---------- */
 
@@ -166,6 +287,33 @@ function drawSighted(g, X, Z, scale){
   }
 }
 
+/* Lettered, tappable trailhead badges for the full sheet -- constant SCREEN size
+   regardless of zoom (like a map pin), same lettering as the "Start here" list so the
+   two always agree. The selected one gets a bright ring so "where am I starting" reads
+   at a glance even before you've moved. Drawn live rather than baked into the atlas: a
+   handful of circles is cheap every frame, and it keeps the letters crisp at any zoom
+   instead of blurring along with the raster underneath them. */
+function drawTrailheadLabels(g, X, Z, scale, selectedIdx){
+  const heads = getTrailheads();
+  const r = 9*scale;
+  heads.forEach((h, i)=>{
+    const x = X(h.x), y = Z(h.z);
+    const sel = i===selectedIdx;
+    if(sel){
+      g.beginPath(); g.arc(x, y, r+4*scale, 0, 7);
+      g.lineWidth = Math.max(1.5, 2*scale); g.strokeStyle = '#ffd94a'; g.stroke();
+    }
+    g.beginPath(); g.arc(x, y, r, 0, 7);
+    g.fillStyle = sel ? '#ffd94a' : '#e8743a';
+    g.fill();
+    g.lineWidth = Math.max(1.5, 2*scale); g.strokeStyle = INK_MAP; g.stroke();
+    g.font = `bold ${11*scale}px "Comic Sans MS","Chalkboard SE",sans-serif`;
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillStyle = sel ? INK_MAP : '#fff8e6';
+    g.fillText(headLetterMM(i), x, y + 0.5*scale);
+  });
+}
+
 /* Fit the backing store to the element's real pixel size. Called every frame because the
    corner map lives in a flex layout and iOS's visual viewport resizes underneath it
    without firing anything useful; the early-out makes the common case free. */
@@ -209,27 +357,24 @@ function updateMinimap(px, pz, yaw){
     g.clearRect(0, 0, W, H);
     g.fillStyle = '#e9dcbe'; g.fillRect(0, 0, W, H);
     if(at){
-      const s = Math.min(W/(at.w*at.ppm), H/(at.h*at.ppm));
+      // fit-to-screen scale, then the user's own zoom on top of it; centred on bigFocus
+      // (default: the atlas centre) rather than always the bbox centre, so panning and
+      // zooming compose the same way a real map app's camera does.
+      const baseS = Math.min(W/(at.w*at.ppm), H/(at.h*at.ppm));
+      const s = baseS*bigZoom;
+      if(!bigFocus) bigFocus = { x: at.x0+at.w/2, z: at.z0+at.h/2 };
+      const ox = W/2 - (bigFocus.x-at.x0)*at.ppm*s;
+      const oy = H/2 - (bigFocus.z-at.z0)*at.ppm*s;
       const dw = at.w*at.ppm*s, dh = at.h*at.ppm*s;
-      const ox = (W-dw)/2, oy = (H-dh)/2;
       g.imageSmoothingEnabled = true;
       g.drawImage(at.canvas, ox, oy, dw, dh);
+      bigView = {ox, oy, s, baseS, at, W, H, dpr};
       const X = x => ox + (x - at.x0)*at.ppm*s, Z = z => oy + (z - at.z0)*at.ppm*s;
+      drawTrailheadLabels(g, X, Z, dpr*1.3, getStartHead());
       drawSighted(g, X, Z, dpr*1.6);
       drawPup(g, X(px), Z(pz), yaw, dpr*2.2);
-      // trail names along the sheet, which the corner disc has no room for
-      g.font = `bold ${13*dpr}px "Comic Sans MS","Chalkboard SE",sans-serif`;
-      g.textAlign = 'center'; g.textBaseline = 'middle';
-      const seen = new Set();
-      for(const e of (getGraph()?.edges || [])){
-        if(!e.name || seen.has(e.name) || e.pts.length < 3) continue;
-        seen.add(e.name);
-        const m = e.pts[Math.floor(e.pts.length/2)];
-        g.lineWidth = 4*dpr; g.strokeStyle = 'rgba(255,248,230,.9)';
-        g.strokeText(e.name, X(m[0]), Z(m[1]) - 11*dpr);
-        g.fillStyle = INK_MAP;
-        g.fillText(e.name, X(m[0]), Z(m[1]) - 11*dpr);
-      }
+    } else {
+      bigView = null;
     }
     // north arrow
     g.save();
@@ -243,4 +388,4 @@ function updateMinimap(px, pz, yaw){
   }
 }
 
-export { initMinimap, updateMinimap, toggleBigMap, isBigMapOpen };
+export { initMinimap, updateMinimap, toggleBigMap, isBigMapOpen, getBigView };

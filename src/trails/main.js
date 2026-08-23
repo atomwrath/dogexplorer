@@ -137,6 +137,50 @@ function placeAtHead(i){
   renderStartPicker();
 }
 
+/* ---------- off-trail movement ----------
+
+   On the tread, movement is unconstrained (see the loop). Off it, it is physical, and the
+   rule comes straight out of the terracing: ONE terrace riser is a step you can walk up,
+   anything taller is a wall you have to jump. Tying the limit to the contour step rather
+   than to a tuned constant is what makes the landscape readable -- the bands are the only
+   vertical quantum this world has, so if you can see two of them between you and a ledge
+   you already know the walk won't do it.
+
+   `player.y` is height ABOVE the ground beneath the player, NOT an absolute altitude.
+   Every comparison here therefore converts to absolute feet height (ground + y) and back
+   again; getting that backwards is what makes an avatar sink through hillsides. */
+function stepUpLimit(){
+  // one riser, plus a hair, so a step exactly one band tall is never a coin flip
+  return getContourStep()*getVertScale()*1.05;
+}
+
+function moveOffTrail(stepX, stepZ){
+  const lim = stepUpLimit();
+  const gHere = standingY(player.x, player.z);
+  const feet = gHere + player.y;
+  const tryMove = (dx, dz)=>{
+    if(!dx && !dz) return false;
+    const nx=player.x+dx, nz=player.z+dz;
+    const gThere = standingY(nx, nz);
+    // walkable if it is at most a single step up, or if we are already airborne high
+    // enough to clear it -- which is precisely what makes jumping the answer to a ledge
+    if(gThere - gHere > lim && feet < gThere - 0.05) return false;
+    player.x=nx; player.z=nz;
+    /* Preserve ABSOLUTE height across the move and let the loop's gravity do the rest.
+       Walking off a ledge thus leaves the pup briefly airborne with a positive `y` and it
+       falls, instead of the old behaviour -- which re-read the ground every frame and
+       slid the avatar down the cliff face as though it were a ramp. Stepping UP resolves
+       to y=0 on the same frame, so a kerb stays a step rather than becoming a launch. */
+    player.y = Math.max(0, feet - gThere);
+    return true;
+  };
+  // Try the full move, then each axis alone, so a glancing approach to a bank slides
+  // along it instead of stopping dead against it.
+  if(tryMove(stepX, stepZ)) return;
+  if(tryMove(stepX, 0)) return;
+  tryMove(0, stepZ);
+}
+
 /* ---------- input: trail-owned, not core/input.js (that module is wired directly to
    Pup City's player-state/modes/pickups -- creator has its own for the same reason) --- */
 const trailKeys = {};
@@ -220,8 +264,10 @@ function loop(t){
     // idle, or the arrival card is up: no movement, but keep the avatar breathing so
     // neither the lobby nor the summary is a still frame. Pausing deliberately keeps the
     // world rendered -- "Keep exploring" puts you back exactly where you are standing,
-    // and cutting to a blank panel would throw that away.
+    // and cutting to a blank panel would throw that away. The minimap keeps drawing here
+    // too, now that it's part of the startup/selection screen and not just the play HUD.
     if(avatarKey) syncAvatar(dt, t, 0, 0, player.sneaking, false, false);
+    updateMinimap(player.x, player.z, player.yaw);
     renderer.render(scene,camera);
     return;
   }
@@ -243,12 +289,24 @@ function loop(t){
   const moving=mag>0.03&&(wx||wz);
 
   const nt = nearestTrail(player.x,player.z);
-  const surf = nt.d<1.5 ? 1 : 0.6;
+  const onTrail = nt.d<1.5;
+  const surf = onTrail ? 1 : 0.6;
   const top = currentTopSpeed()*(player.sneaking?0.5:(run?currentRunMul():1))*surf*(stick.active?mag:1);
   player.speed = lerp(player.speed, moving?top:0, 1-Math.pow(0.0009,dt));
   if(moving){
     const L=Math.hypot(wx,wz);
-    player.x+=wx/L*player.speed*dt; player.z+=wz/L*player.speed*dt; player.dist+=player.speed*dt;
+    const stepX=wx/L*player.speed*dt, stepZ=wz/L*player.speed*dt;
+    const before={x:player.x, z:player.z};
+    if(onTrail){
+      /* On the tread, movement stays exactly as it was: the graded corridor is a
+         continuous, walkable bench by construction (terrain.js's gradeProfile), so there
+         is nothing to climb and clamping against terrain here would only fight the
+         grading. Walking a trail should feel frictionless -- that IS the trail. */
+      player.x+=stepX; player.z+=stepZ;
+    }else{
+      moveOffTrail(stepX, stepZ);
+    }
+    player.dist += Math.hypot(player.x-before.x, player.z-before.z);
     const targetYaw=Math.atan2(-wz/L,wx/L);
     let dy=targetYaw-player.yaw; while(dy>Math.PI)dy-=Math.PI*2; while(dy<-Math.PI)dy+=Math.PI*2;
     player.yaw+=dy*Math.min(1,dt*10);
@@ -312,7 +370,6 @@ function enterPlay(){
   // fresh population per walk, so the sightings tally means "this trip" rather than
   // "since you opened the tab"
   spawnCritters(Date.now());
-  initMinimap();
   getPOIs().forEach(p=>{ p.found=false; });
   trip.startT = Date.now();
   trip.parked = getStartHead();     // don't fire the card at the head you started from
@@ -745,6 +802,9 @@ async function boot(bundleUrl){
   renderThemePicker();
   renderPupToggle();
   wireScale();
+  // the callback lets the full-sheet map hand back "which trailhead got tapped" without
+  // minimap.js needing to know anything about players, avatars or cameras
+  initMinimap(i => placeAtHead(i));
   await loadMap(bundleUrl || DEFAULT_WORLD, !bundleUrl);
   renderRoster();
   renderStartPicker();
@@ -785,6 +845,13 @@ $('#defaultMapBtn')?.addEventListener('click', async ()=>{
 });
 $('#mapBtn')?.addEventListener('click', ()=> toggleBigMap());
 $('#bigmapClose')?.addEventListener('click', ()=> toggleBigMap(false));
+// mobile only (see trails.css's body.nopanel rule): slides the options panel off-screen
+// so the live pup/minimap preview underneath is reachable without leaving the setup
+// screen. Desktop never shows this button (icon.btn is display:none above 760px).
+$('#panelBtn')?.addEventListener('click', ()=>{
+  document.body.classList.toggle('nopanel');
+  setTimeout(resize, 380);
+});
 
 $('#playBtn')?.addEventListener('click', enterPlay);
 $('#exitBtn')?.addEventListener('click', exitPlay);

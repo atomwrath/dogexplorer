@@ -105,32 +105,138 @@ function ptSeg(p,a,b){
 function polyLen(pts){let s=0;for(let i=1;i<pts.length;i++)s+=Math.sqrt(d2(pts[i-1],pts[i]));return s;}
 // split lines where another line's endpoint lands mid-segment (T junction)
 // split lines where another line's endpoint lands mid-segment (T junction)
+/* Cut `lines` wherever they meet, so the graph actually knows they are connected.
+
+   WHY THIS IS NOT COSMETIC. buildGraph only ever joins lines at their ENDPOINTS, so a
+   spur whose tip lands in the middle of another trail is, topologically, two strangers
+   that happen to touch. world.js then grades every edge independently and pins its ends
+   to a consensus taken across the edges meeting AT A NODE -- and if there is no node,
+   there is no consensus, so the two treads arrive at whatever height their own smoothing
+   produced. That is the visible "two trails connect at different levels" step: on the
+   default map 93 trail ends sat within 4 m of a trail they were not joined to, 48 of
+   them more than half a terrace step out, the worst by three full steps.
+
+   WHY IT USED TO GIVE UP. The previous implementation restarted its entire scan after
+   every single split (`break outer`) and capped the restarts at 60. A real network needs
+   hundreds, so it silently stopped after 60 cuts and left the rest disconnected -- the
+   cap was reached exactly, on the default map, every load. Nothing logged, nothing threw;
+   the network was simply wrong past that point.
+
+   THE FIX IS A DIFFERENT SHAPE, not a bigger number. One pass collects every cut each
+   line needs, then applies them all at once, so the cost is one scan per round instead of
+   one scan per cut. A handful of rounds converges, because a cut point introduced this
+   round can itself land on a third line next round. Bounded either way.
+
+   Two kinds of meeting are handled, and they are genuinely different:
+     - a T: one line's ENDPOINT lands on another's interior. Cut the through-line.
+     - an X: two lines CROSS in the middle, neither ending there. Cut BOTH.
+   The X case was never handled at all, which is why crossings stayed at independent
+   heights even when everything else lined up. */
+function segCross(p,q,r,s){
+  // proper segment intersection, returning parameters along each; null when parallel or
+  // when the crossing falls outside either segment
+  const dx1=q[0]-p[0], dz1=q[1]-p[1], dx2=s[0]-r[0], dz2=s[1]-r[1];
+  const den=dx1*dz2-dz1*dx2;
+  if(Math.abs(den)<1e-12) return null;
+  const t=((r[0]-p[0])*dz2-(r[1]-p[1])*dx2)/den;
+  const u=((r[0]-p[0])*dz1-(r[1]-p[1])*dx1)/den;
+  if(t<=0||t>=1||u<=0||u>=1) return null;
+  return {t,u,q:[p[0]+dx1*t, p[1]+dz1*t]};
+}
+
+function lineBBox(pts){
+  let x0=1e15,x1=-1e15,z0=1e15,z1=-1e15;
+  for(const p of pts){ if(p[0]<x0)x0=p[0]; if(p[0]>x1)x1=p[0]; if(p[1]<z0)z0=p[1]; if(p[1]>z1)z1=p[1]; }
+  return {x0,x1,z0,z1};
+}
+
+/* Apply a set of {k, q} cuts to one line, in arc order, dropping any that would leave a
+   stub shorter than `tol` (including two cuts landing on top of each other, which is what
+   several spurs converging on the same spot produces). Mirrors what the old one-at-a-time
+   splice did, just for all cuts at once. */
+function applyCuts(L, cuts, tol){
+  const pts=L.pts;
+  const arc=[0];
+  for(let k=1;k<pts.length;k++) arc[k]=arc[k-1]+Math.hypot(pts[k][0]-pts[k-1][0],pts[k][1]-pts[k-1][1]);
+  const total=arc[pts.length-1];
+  const cs=cuts.map(c=>({k:c.k, q:c.q,
+                         s:arc[c.k]+Math.hypot(c.q[0]-pts[c.k][0], c.q[1]-pts[c.k][1])}))
+               .sort((a,b)=>a.s-b.s);
+  const keep=[];
+  let last=0;
+  for(const c of cs){
+    if(c.s-last<tol) continue;        // too close to the start, or to the cut before it
+    if(total-c.s<tol) continue;       // too close to the far end
+    keep.push(c); last=c.s;
+  }
+  if(!keep.length) return null;
+  const out=[];
+  let startK=0, startPt=pts[0];
+  for(const c of keep){
+    const piece=[startPt].concat(pts.slice(startK+1, c.k+1));
+    piece.push(c.q);
+    out.push({name:L.name, kind:L.kind, pts:piece});
+    startK=c.k; startPt=c.q;
+  }
+  out.push({name:L.name, kind:L.kind, pts:[startPt].concat(pts.slice(startK+1))});
+  return out;
+}
+
+const SPLIT_ROUNDS = 12;
 function splitT(lines,tol){
-  let guard=0,changed=true;
-  while(changed&&guard++<60){
-    changed=false;
+  const t2=tol*tol;
+  for(let round=0; round<SPLIT_ROUNDS; round++){
+    const boxes=lines.map(L=>lineBBox(L.pts));
+    const cuts=lines.map(()=>[]);
+
+    // --- T junctions: an endpoint landing on another line's interior ---
     const eps=[];
-    lines.forEach((L,i)=>{eps.push({p:L.pts[0],i});eps.push({p:L.pts[L.pts.length-1],i});});
-    outer:
+    lines.forEach((L,i)=>{ eps.push({p:L.pts[0],i}); eps.push({p:L.pts[L.pts.length-1],i}); });
     for(const ep of eps){
       for(let j=0;j<lines.length;j++){
-        if(j===ep.i)continue;
+        if(j===ep.i) continue;
+        const bb=boxes[j];
+        if(ep.p[0]<bb.x0-tol||ep.p[0]>bb.x1+tol||ep.p[1]<bb.z0-tol||ep.p[1]>bb.z1+tol) continue;
         const pts=lines[j].pts;
-        if(d2(ep.p,pts[0])<tol*tol||d2(ep.p,pts[pts.length-1])<tol*tol)continue;
+        // already meets this line at one of ITS ends -- buildGraph's endpoint snap has it
+        if(d2(ep.p,pts[0])<t2||d2(ep.p,pts[pts.length-1])<t2) continue;
+        let best=null;
         for(let k=0;k<pts.length-1;k++){
           const r=ptSeg(ep.p,pts[k],pts[k+1]);
-          if(r.d<tol){
-            const A=pts.slice(0,k+1);A.push(r.q);
-            const B=[r.q].concat(pts.slice(k+1));
-            if(polyLen(A)>tol&&polyLen(B)>tol){
-              const nm=lines[j].name,nk=lines[j].kind;
-              lines.splice(j,1,{name:nm,kind:nk,pts:A},{name:nm,kind:nk,pts:B});
-              changed=true;break outer;
-            }
+          if(r.d<tol&&(!best||r.d<best.d)) best={k, q:r.q, d:r.d};
+        }
+        if(best) cuts[j].push(best);
+      }
+    }
+
+    // --- X crossings: two lines crossing mid-span, neither ending there. Both get cut,
+    //     at the SAME point, so buildGraph's endpoint snap then fuses them into one node.
+    for(let i=0;i<lines.length;i++){
+      for(let j=i+1;j<lines.length;j++){
+        const A=boxes[i], B=boxes[j];
+        if(A.x1<B.x0-tol||A.x0>B.x1+tol||A.z1<B.z0-tol||A.z0>B.z1+tol) continue;
+        const pa=lines[i].pts, pb=lines[j].pts;
+        for(let k=0;k<pa.length-1;k++){
+          for(let m=0;m<pb.length-1;m++){
+            const c=segCross(pa[k],pa[k+1],pb[m],pb[m+1]);
+            if(!c) continue;
+            cuts[i].push({k, q:c.q.slice(), d:0});
+            cuts[j].push({k:m, q:c.q.slice(), d:0});
           }
         }
       }
     }
+
+    let changed=false;
+    const next=[];
+    for(let j=0;j<lines.length;j++){
+      if(!cuts[j].length){ next.push(lines[j]); continue; }
+      const pieces=applyCuts(lines[j], cuts[j], tol);
+      if(pieces){ changed=true; next.push(...pieces); }
+      else next.push(lines[j]);
+    }
+    lines=next;
+    if(!changed) break;
   }
   return lines;
 }
@@ -189,5 +295,5 @@ function buildGraph(rawLines,snapTol,simpTol){
   return{nodes,edges,nameColor};
 }
 
-export { pathKind, poiKind, areaKind, parseFeatures, d2, ptSeg, polyLen,
+export { pathKind, poiKind, areaKind, parseFeatures, d2, ptSeg, polyLen, segCross, lineBBox, applyCuts,
          splitT, simplifyDP, SPUR_NAMES, buildGraph };

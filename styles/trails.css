@@ -17,7 +17,7 @@ h1 small{display:block;font-size:11px;opacity:.6;font-weight:normal;}
 .btn.icon{width:40px;padding:6px 0;display:none;}
 main{flex:1;display:flex;min-height:0;position:relative;}
 #panel{width:280px;min-width:280px;background:var(--card);border-right:4px solid var(--ink);
-  overflow-y:auto;padding:14px;}
+  overflow-y:auto;padding:14px;transition:margin-left .35s ease;}
 body.play #panel{display:none;}
 #stage{flex:1;position:relative;}
 canvas#c{position:absolute;inset:0;width:100%;height:100%;display:block;}
@@ -33,7 +33,13 @@ body.play #playHud{display:block;}
 .ctl label{display:flex;justify-content:space-between;font-size:12.5px;font-weight:bold;margin-bottom:4px;}
 .ctl label .val{opacity:.6;font-weight:normal;}
 .ctl input[type=range]{width:100%;accent-color:var(--orange);}
-@media (max-width:760px){ .btn.icon{display:inline-block;} #panel{position:absolute;height:100%;z-index:5;} }
+@media (max-width:760px){
+  .btn.icon{display:inline-block;}
+  #panel{position:absolute;height:100%;z-index:5;}
+  /* panelBtn (🎒) toggles this so the live preview -- pup, terrain, minimap -- is
+     reachable on a phone without the options column permanently covering it. */
+  body.nopanel #panel{margin-left:-300px;}
+}
 
 /* --- drop zone (Trail map) --- */
 .dropzone{display:block;text-align:center;border:3px dashed var(--ink);border-radius:14px;
@@ -91,6 +97,11 @@ body.play #playHud{display:block;}
 
 /* --- pup roster grid --- */
 .pup-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;}
+/* main.js toggles the `hidden` attribute to switch between the Dogs and Wildlife grids,
+   but `.pup-grid{display:grid}` above beats the UA stylesheet's `[hidden]{display:none}`
+   on specificity, so both grids showed at once regardless of which tab was selected.
+   This override restores `hidden` as the deciding rule. */
+.pup-grid[hidden]{display:none;}
 .pupcard{display:flex;flex-direction:column;gap:3px;font-family:inherit;text-align:left;
   border:3px solid var(--ink);border-radius:12px;background:#fff;padding:8px 9px;cursor:pointer;}
 .pupcard.sel{outline:3px solid var(--orange);outline-offset:2px;}
@@ -121,9 +132,12 @@ body.play #playHud{display:block;}
    A disc rather than a rectangle: it reads as a spyglass onto the paper map
    instead of a second screen, and the circular clip in minimap.js means the
    corners never show a hard cut through the terrain image. */
-#miniWrap{position:absolute;top:10px;right:10px;display:none;flex-direction:column;
+/* Visible on the startup/selection screen too, not just body.play -- it's the pup's
+   live preview companion, showing where the currently selected trailhead sits, and the
+   🗺 button is how you reach the full map (with clickable trailheads) before you've
+   even hit Play. */
+#miniWrap{position:absolute;top:10px;right:10px;display:flex;flex-direction:column;
   align-items:center;gap:6px;}
-body.play #miniWrap{display:flex;}
 body.bigmap #miniWrap{display:none;}
 #minimap{width:172px;height:172px;border-radius:50%;border:4px solid var(--ink);
   background:#e9dcbe;box-shadow:0 3px 0 rgba(61,42,32,.25);display:block;}
@@ -133,8 +147,21 @@ body.bigmap #miniWrap{display:none;}
   padding:14px;box-sizing:border-box;}
 body.bigmap #bigmapWrap{display:block;}
 #bigmap{width:100%;height:100%;display:block;border:4px solid var(--ink);border-radius:16px;
-  background:#e9dcbe;box-sizing:border-box;}
+  background:#e9dcbe;box-sizing:border-box;cursor:grab;touch-action:none;}
+#bigmap:active{cursor:grabbing;}
 #bigmapClose{position:absolute;top:24px;left:24px;}
+#bigmapZoom{position:absolute;bottom:24px;right:24px;display:flex;flex-direction:column;gap:8px;}
+#bigmapZoom .btn{width:44px;height:44px;padding:0;font-size:20px;line-height:1;
+  display:flex;align-items:center;justify-content:center;}
+.bigmap-hint{position:absolute;left:24px;bottom:24px;max-width:230px;margin:0;
+  background:#fff8e6;border:3px solid var(--ink);border-radius:12px;padding:7px 11px;
+  font-size:11.5px;font-weight:bold;opacity:.9;}
+@media (max-width:760px){
+  #bigmapZoom{bottom:14px;right:14px;gap:6px;}
+  #bigmapZoom .btn{width:40px;height:40px;font-size:17px;}
+  .bigmap-hint{left:14px;bottom:14px;max-width:170px;font-size:10.5px;padding:6px 9px;}
+  #bigmapClose{top:14px;left:14px;}
+}
 
 @media (max-width:760px){
   #minimap{width:118px;height:118px;}
