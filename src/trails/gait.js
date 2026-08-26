@@ -112,4 +112,68 @@ function climbPose(amt, t, legCount){
   };
 }
 
-export { gaitStep, climbPose, STRIDE_MIN_RATIO, STRIDE_MAX_RATIO, TARGET_CADENCE };
+/* Leg phase offsets, per gait.
+
+   A TROT is diagonal: each leg is half a cycle from its neighbour and a quarter from the
+   pair behind, which is the pattern the drivers always used and the right one at walking
+   speed. A GALLOP is not a faster trot -- it is a different footfall order. The hind pair
+   lands together, then the fore pair together, with a small lead offset inside each pair
+   so one leg reaches slightly further than its partner (the "lead leg" every galloping
+   quadruped has). Blending between the two is what makes a sprint read as a sprint rather
+   than as a trot with the tape sped up.
+
+   Returned as a SIN VALUE rather than a phase so callers can cross-fade between gaits
+   without the wrap discontinuity that lerping two angles across +-PI would give. */
+function legSwingValue(i, phase, gallopAmt){
+  const trotPhase   = (i%2?Math.PI:0) + (i>1?Math.PI*0.5:0);
+  // i<2 are the forelegs (dog/build.js and animal-models.js both put them at +x)
+  const front = i<2;
+  const lead  = (i%2) ? 0.22 : 0;                       // one leg of each pair leads
+  const gallopPhase = (front ? Math.PI*0.62 : 0) + lead;
+  const trot   = Math.sin(phase + trotPhase);
+  const gallop = Math.sin(phase + gallopPhase);
+  const a = clamp(gallopAmt, 0, 1);
+  return trot + (gallop - trot)*a;
+}
+
+/* How much of a gallop the animal is in, from its own speed against its own walk and run
+   figures -- NOT from an absolute m/s, which would make a bobcat gallop while a moose
+   ambled at the same number. 0 at its comfortable pace, 1 flat out. */
+function gallopAmount(speed, walkTop, runTop){
+  const lo = Math.max(0.01, walkTop), hi = Math.max(lo*1.05, runTop);
+  return clamp((speed - lo)/(hi - lo), 0, 1);
+}
+
+/* Airborne. A jumping animal does NOT keep running in mid-air -- there is no ground to
+   push against, so the legs stop cycling and hold a spread: forelegs reaching ahead,
+   hind legs trailing behind, the shape every leaping animal makes and every cartoon
+   exaggerates. Freezing the walk cycle matters as much as the pose; a leg that keeps
+   swinging while the paw is nowhere near the ground is the airborne version of exactly
+   the slide we removed on the ground.
+
+   `rise` is the vertical velocity normalised to roughly -1..1. Going up, the animal is
+   still extending and the nose comes up; coming down it reaches for the landing and the
+   nose drops. Same sign convention as everything else here: +x is the nose, and a
+   positive Z rotation swings a paw forward. */
+function leapPose(amt, rise, legCount){
+  const a = clamp(amt, 0, 1);
+  const r = clamp(rise, -1, 1);
+  const legs = [];
+  for(let i=0;i<legCount;i++){
+    const front = i<2;
+    // splay the pairs slightly apart from each other so the silhouette reads as a spread
+    // rather than two legs hidden behind two others
+    const splay = (i%2 ? 0.90 : 1.10);
+    legs.push(front ? a*1.00*splay*(1 + 0.12*r)      // forelegs reach ahead, more so rising
+                    : a*-0.92*splay*(1 - 0.12*r));   // hind legs trail, extending on the way up
+  }
+  return {
+    legs,
+    pitch: a*0.30*r,        // nose up while climbing, down while dropping
+    // how much of the walk cycle to suppress: total, at full leap
+    freeze: a,
+  };
+}
+
+export { gaitStep, climbPose, leapPose, legSwingValue, gallopAmount,
+         STRIDE_MIN_RATIO, STRIDE_MAX_RATIO, TARGET_CADENCE };

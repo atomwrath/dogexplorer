@@ -9,10 +9,10 @@ import { clamp, lerp, mulberry32 } from '../core/math.js';
 import { scene, disposeGroup } from '../core/render.js';
 import { makeAnimalModel } from '../city/animal-models.js';
 import { SPECIES } from '../data/species.js';
-import { gaitStep, climbPose } from './gait.js';
+import { gaitStep, climbPose, leapPose, legSwingValue, gallopAmount } from './gait.js';
 
 let group = null, refs = null, speciesKey = null, S = null;
-let wildLegPhase = 0, wildBodyBaseY = 0, wildClimbAmt = 0;
+let wildLegPhase = 0, wildBodyBaseY = 0, wildClimbAmt = 0, wildLeapAmt = 0;
 let wildLegLen = 0.4;      // hip pivot height above ground, WORLD units (see dog-driver)
 const wildPos = new THREE.Vector3(0,0,0);
 let yaw = 0;
@@ -26,7 +26,7 @@ function spawnWild(key, seed){
   group.position.copy(wildPos);
   group.rotation.y = yaw;
   scene.add(group);
-  wildLegPhase = 0; wildClimbAmt = 0;
+  wildLegPhase = 0; wildClimbAmt = 0; wildLeapAmt = 0;
   wildBodyBaseY = refs.bodyG ? refs.bodyG.position.y : 0;
   wildLegLen = measureWildLegLen();
 }
@@ -57,7 +57,7 @@ function spookRadiusFor(key){
   return clamp(16 - s.brav*1.3, 4, 14) * (s.scale||1);
 }
 
-function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb){
+function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise){
   if(!group || !refs) return;
   group.position.set(wildPos.x, groundY + jumpY, wildPos.z);
   group.rotation.y = yaw;
@@ -68,16 +68,30 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb){
      It gets a longer stride ratio and a lower cadence rather than a free-running phase. */
   const g = gaitStep(wildLegLen, speed, dt,
     hop ? {maxRatio:2.6, cadence:1.7} : (sneaking ? {maxRatio:1.05, cadence:2.9} : null));
-  wildLegPhase += g.dPhase;
   const swing = hop ? Math.min(0.95, g.swing*1.25) : g.swing;
 
+  // see dog-driver: airborne freezes the cycle and holds a spread instead
+  wildLeapAmt  = lerp(wildLeapAmt,  clamp(leap||0, 0, 1),  1-Math.pow(0.000002,dt));
   wildClimbAmt = lerp(wildClimbAmt, clamp(climb||0, 0, 1), 1-Math.pow(0.0001,dt));
   const legs = refs.legs||[];
+  const lp = wildLeapAmt  > 0.002 ? leapPose(wildLeapAmt, rise||0, legs.length) : null;
   const cp = wildClimbAmt > 0.002 ? climbPose(wildClimbAmt, t, legs.length) : null;
+
+  wildLegPhase += g.dPhase*(1 - (lp ? lp.freeze : 0));
+
+  /* A hopper keeps its own pattern (both hind legs together, always) -- it has no trot
+     to leave and no gallop to enter. Everything else gallops at its own top end. */
+  const gal = hop ? 0 : gallopAmount(speed, topSpeedFor(speciesKey)*0.55, topSpeedFor(speciesKey));
   legs.forEach((leg,i)=>{
-    const phase = hop ? (i>1?Math.PI:0) : ((i%2?Math.PI:0)+(i>1?Math.PI*0.5:0));
-    const walkZ = Math.sin(wildLegPhase+phase)*swing;
-    leg.rotation.z = cp ? lerp(walkZ, cp.legs[i], wildClimbAmt) : walkZ;
+    let z;
+    if(hop){
+      z = Math.sin(wildLegPhase + (i>1?Math.PI:0))*swing;
+    }else{
+      z = legSwingValue(i, wildLegPhase, gal)*swing;
+    }
+    if(cp) z = lerp(z, cp.legs[i], wildClimbAmt);
+    if(lp) z = lerp(z, lp.legs[i], wildLeapAmt);
+    leg.rotation.z = z;
   });
   if(refs.tailG) refs.tailG.rotation.y = Math.sin(t*0.01)*0.4 + (barking?Math.sin(t*0.05)*0.7:0);
   if(refs.headG) refs.headG.rotation.z = barking?0.2:(sneaking?-0.1:Math.sin(t*0.0025)*0.05);
@@ -86,11 +100,14 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb){
     // or the bob would compound every frame instead of oscillating around one baseline
     // see dog-driver: the bound is what makes the airborne part of a gallop legible.
     // A hopper already bounds by nature, so it gets a bigger one.
-    const bound = g.bound*wildLegLen*(hop?0.75:0.42)*Math.max(0, Math.sin(wildLegPhase));
+    const bound = g.bound*wildLegLen*(hop?0.75:(0.42+0.5*gal))*Math.max(0, Math.sin(wildLegPhase))*(1-wildLeapAmt);
+    const flex  = gal*0.16*Math.sin(wildLegPhase - Math.PI*0.5)*(1-wildLeapAmt);
     refs.bodyG.position.y = wildBodyBaseY
-      + Math.abs(Math.sin(wildLegPhase))*clamp(speed*(hop?0.02:0.01),0,hop?0.3:0.12)
+      + Math.abs(Math.sin(wildLegPhase))*clamp(speed*(hop?0.02:0.01),0,hop?0.3:0.12)*(1-wildLeapAmt)
       + bound + (cp ? cp.rise*wildLegLen : 0);
-    refs.bodyG.rotation.z = cp ? cp.pitch : 0;
+    let pitch = (cp ? cp.pitch : 0) + flex;
+    if(lp) pitch = lerp(pitch, lp.pitch, wildLeapAmt);
+    refs.bodyG.rotation.z = pitch;
   }
 }
 

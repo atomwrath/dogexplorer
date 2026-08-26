@@ -22,6 +22,16 @@ import { scene } from '../core/render.js';
 
 let mesh = null, tex = null, baseOpacity = 0.34;
 
+/* How far above the surface the blob floats. This is NOT an arbitrary nudge: world.js
+   stacks the trail's six ribbon layers at fixed offsets above the graded profile --
+   outline 0.012, shoulder 0.02, tread 0.05, junction pad 0.06, inner 0.08, dashes 0.09 --
+   and standingY() returns the profile itself, so a shadow lifted by less than 0.09 is
+   embedded IN that stack and z-fights whichever layer it lands on. (0.06, the old value,
+   was exactly the junction-pad offset, which is why the flicker was worst at junctions.)
+   Clearing the tallest layer with a little margin puts it unambiguously on top. These
+   offsets are in world units and do not scale, so neither does this. */
+const SHADOW_LIFT = 0.115;
+
 /* Soft-edged radial blob. Wrapped because the 2D canvas is the one browser API this
    file needs and headless harnesses stub it loosely -- a hard-edged fallback disc is a
    perfectly acceptable degradation, an exception during world build is not. */
@@ -51,13 +61,15 @@ function ensureShadow(){
       color: tex ? 0xffffff : 0x000000,
       transparent: true,
       opacity: baseOpacity,
-      /* depthWrite off so the blob never occludes the terrain it lies on, and
-         polygonOffset so it wins the z-fight against a tread it is sitting flush with
-         instead of strobing along the trail. */
+      /* depthWrite off so the blob never occludes the terrain it lies on, and a firm
+         polygonOffset so it wins the depth comparison outright. -2 was not enough: the
+         far plane on a kilometres-wide map spreads the depth buffer thin, and at that
+         precision a quad a few centimetres above the ground is the SAME depth value as
+         the ground. Hence the strobing. See SHADOW_LIFT for the other half of the fix. */
       depthWrite: false,
       polygonOffset: true,
-      polygonOffsetFactor: -2,
-      polygonOffsetUnits: -2,
+      polygonOffsetFactor: -8,
+      polygonOffsetUnits: -8,
     });
     if(tex) mat.map = tex;
     mesh = new THREE.Mesh(new THREE.PlaneGeometry(1,1), mat);
@@ -85,12 +97,15 @@ function updateShadow(x, z, groundY, jumpY, radius, visible){
   // aim at rather than vanishing exactly when it is most useful
   const fade = clamp(1 - h/(r*7), 0.18, 1);
   const grow = clamp(1 + h/(r*9), 1, 1.5);
-  m.position.set(x, groundY + 0.06, z);
+  m.position.set(x, groundY + SHADOW_LIFT, z);
   m.scale.set(r*2*grow, r*2*grow, 1);
   m.material.opacity = baseOpacity*fade;
 }
 
+// test seam: `const` does not survive the smoke harness's eval boundary (see main.js's
+// climbSlowFactor for the same pattern)
+function shadowLift(){ return SHADOW_LIFT; }
 function setShadowVisible(v){ const m = ensureShadow(); if(m) m.visible = !!v; }
 function getShadow(){ return mesh; }
 
-export { updateShadow, setShadowVisible, getShadow };
+export { updateShadow, setShadowVisible, getShadow, shadowLift };

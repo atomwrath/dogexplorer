@@ -96,19 +96,28 @@ body.play #playHud{display:block;}
 .toggle.sel{background:var(--ink);color:#fff;}
 
 /* --- pup roster grid --- */
-.pup-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;}
+/* minmax(0,1fr), NOT 1fr. A grid track's implicit minimum is min-content, and .pc-nm is
+   white-space:nowrap, so a long name (the wildlife roster has "Mountain Lion" and
+   friends; the dog presets are all short, which is why only Wildlife overflowed) sets a
+   min-content floor WIDER than the 1fr share and pushes the whole grid past the panel's
+   right edge. minmax(0,...) removes that floor; the min-width:0 rules below do the same
+   job for the flex row inside each card, so the ellipsis can finally do its work. */
+.pup-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;}
 /* main.js toggles the `hidden` attribute to switch between the Dogs and Wildlife grids,
    but `.pup-grid{display:grid}` above beats the UA stylesheet's `[hidden]{display:none}`
    on specificity, so both grids showed at once regardless of which tab was selected.
    This override restores `hidden` as the deciding rule. */
 .pup-grid[hidden]{display:none;}
 .pupcard{display:flex;flex-direction:column;gap:3px;font-family:inherit;text-align:left;
+  min-width:0;
   border:3px solid var(--ink);border-radius:12px;background:#fff;padding:8px 9px;cursor:pointer;}
 .pupcard.sel{outline:3px solid var(--orange);outline-offset:2px;}
-.pupcard .pc-top{display:flex;align-items:center;gap:6px;}
+.pupcard .pc-top{display:flex;align-items:center;gap:6px;min-width:0;}
 .pupcard .pc-ic{font-size:17px;flex:none;}
-.pupcard .pc-nm{font-weight:bold;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.pupcard .pc-sub{font-size:10px;opacity:.6;margin-left:23px;}
+.pupcard .pc-nm{font-weight:bold;font-size:12px;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;min-width:0;flex:1 1 auto;}
+.pupcard .pc-sub{font-size:10px;opacity:.6;margin-left:23px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .pupcard .pc-bar{height:4px;border-radius:2px;background:#eee2cc;overflow:hidden;margin-top:1px;}
 .pupcard .pc-bar i{display:block;height:100%;border-radius:2px;}
 .pupcard .pc-bar.speed i{background:var(--blue);}
@@ -118,6 +127,13 @@ body.play #playHud{display:block;}
    Both live inside #playHud, so the existing `body.play` rule already handles
    showing and hiding them; nothing here needs its own visibility state. */
 #hudTally{display:flex;gap:6px;margin-top:8px;}
+/* Live readouts. Wraps because three chips plus a long distance overflow a phone's
+   width in landscape, and a HUD that pushes itself off screen is worse than no HUD. */
+#hudReadout{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;max-width:250px;}
+#hudReadout .tally{font-variant-numeric:tabular-nums;}
+/* Matches the ring on the ground, so the chip and the circle are obviously one thing. */
+#hudNoise.quiet{background:#e4f2e2;}
+#hudNoise.loud{background:#f7ded9;}
 .tally{background:var(--card);border:3px solid var(--ink);border-radius:11px;
   padding:4px 10px;font-size:13px;font-weight:bold;}
 #watchMeter{display:none;align-items:center;gap:8px;margin-top:8px;max-width:240px;

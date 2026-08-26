@@ -65,7 +65,7 @@ function orbitPoint(x, y, z, dist){
 /* Teleport the camera into position with no easing: trailhead placement, mode switches,
    and the lobby preview, where springing in from wherever the camera happened to be
    reads as a swoop nobody asked for. */
-function snapChaseCam(px, pz, groundY, vertScale, dist = 13){
+function snapChaseCam(px, pz, groundY, vertScale, dist = 10){
   const d = dist*zoom;
   rigY = groundY; rigVY = 0;
   lookY = groundY + 1.4; lookVY = 0;
@@ -83,7 +83,7 @@ function snapChaseCam(px, pz, groundY, vertScale, dist = 13){
      jumpY      hop offset, already included in the avatar's rendered height
      speed      current ground speed, m/s -- used only for the framing nudge below
      vertScale  world.js's exaggeration, needed to sample terrain under the rig itself */
-function updateChaseCam(dt, px, pz, groundY, jumpY, speed, vertScale, dist = 11){
+function updateChaseCam(dt, px, pz, groundY, jumpY, speed, vertScale, dist = 8.5){
   if(!primed){ snapChaseCam(px, pz, groundY, vertScale, dist); return; }
 
   /* Rig altitude. cameraGroundY is already the terrain smoothed over a few cells, so
@@ -124,6 +124,41 @@ function updateChaseCam(dt, px, pz, groundY, jumpY, speed, vertScale, dist = 11)
   const clearance = cameraGroundY(camera.position.x, camera.position.z, vertScale) + 1.6;
   if(camera.position.y < clearance){
     camera.position.y = lerp(camera.position.y, clearance, 1 - Math.pow(0.0005, dt));
+  }
+
+  /* LINE OF SIGHT to the avatar, which is a different problem from clearance above.
+
+     Clearance only asks whether the camera itself is buried. Walking DOWN a steep slope
+     the camera is perfectly clear -- it is standing on the hillside above, in open air --
+     and yet the brow of that same hill sits squarely between it and the pup, so you
+     descend the whole slope watching the back of a ridge. The rig was never told to care
+     about the ground BETWEEN the two points.
+
+     So sample the segment camera->look target and ask, at each step, how high the camera
+     would have to be for the sightline to pass over the ground there. Take the worst
+     answer. The algebra is just similar triangles: the line reaches y_cam + (y_look -
+     y_cam)*s at fraction s, and requiring that to clear g gives
+     y_cam >= (g - y_look*s)/(1 - s). Samples very near the target are skipped -- there
+     1-s tends to zero and the requirement explodes, and ground that close to the avatar
+     is the avatar's own bench, not an occluder.
+
+     Rises fast, settles slowly, same reasoning as clearance: popping up to see is
+     worth it, dropping back down the instant a bump passes is just jitter. */
+  {
+    const N = 6;
+    let needY = camera.position.y;
+    for(let i=1;i<N;i++){
+      const s = i/N;
+      if(s > 0.75) break;
+      const sx = lerp(camera.position.x, px, s);
+      const sz = lerp(camera.position.z, pz, s);
+      const gy = cameraGroundY(sx, sz, vertScale) + 0.8;   // a little headroom over the brow
+      const req = (gy - lookY*s)/(1 - s);
+      if(req > needY) needY = req;
+    }
+    if(needY > camera.position.y){
+      camera.position.y = lerp(camera.position.y, needY, 1 - Math.pow(0.0008, dt));
+    }
   }
 
   camLook.x = lerp(camLook.x, px, 1 - Math.pow(0.0005, dt));

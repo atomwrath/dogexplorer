@@ -27,6 +27,10 @@ import { ribbonGeom, trailMat, INK, buildSign, buildBlaze, buildGate, makeTree, 
          buildBackdrop } from './pieces.js';
 
 let GRAPH=null, TRAILHEADS=[], POIS=[], AREAS=[], WATER=[];
+/* Every floating area name currently in the scene. Collected at build time so the
+   per-frame size cap does not have to walk the whole graph looking for sprites.
+   Cleared IN PLACE on rebuild -- see the module header on shared mutable arrays. */
+const AREA_LABELS=[];
 let backdropG=null;             // horizon ring, re-centred on the camera by main.js
 let bboxW={minx:0,maxx:0,minz:0,maxz:0};
 let EXTRA=[];                   // raw GeoJSON FeatureCollections dropped in-session
@@ -291,6 +295,40 @@ function hasBundle(){ return !!BUNDLE; }
 function setContourStep(m){ STEP_M=clamp(Number(m)||3, 0.5, 20); rebuildWorld(); }
 function getContourStep(){ return STEP_M; }
 function getSignCount(){ return SIGN_COUNT; }
+function getAreaLabels(){ return AREA_LABELS; }
+
+/* Cap how big a floating area name may get on screen.
+
+   A three.js Sprite is sized in WORLD units, so its apparent size is proportional to
+   scale/distance -- which grows without limit as you walk up to a landmark, until the
+   name is wider than the viewport and its ends are cut off. That is the "gets so close
+   it clips off screen" problem, and it cannot be fixed by choosing a smaller base size:
+   any fixed world size is too big at SOME distance.
+
+   So hold apparent size constant instead, below a near threshold: keep the world scale
+   proportional to distance, which makes scale/distance -- the thing the eye actually
+   sees -- constant. Above the threshold the sprite behaves normally and recedes with
+   distance like the landmark it labels. */
+const LABEL_HOLD_DIST = 26;
+function updateAreaLabels(camX, camY, camZ){
+  for(const spr of AREA_LABELS){
+    const base = spr.userData.baseScale || 6;
+    // world position: the sprite sits at a local offset inside its area group
+    const px = spr.parent ? spr.parent.position.x + spr.position.x : spr.position.x;
+    const py = spr.parent ? spr.parent.position.y + spr.position.y : spr.position.y;
+    const pz = spr.parent ? spr.parent.position.z + spr.position.z : spr.position.z;
+    const dist = Math.hypot(px-camX, py-camY, pz-camZ);
+    /* No floor on k. A floor would re-break the very guarantee this exists for: below it
+       the world scale stops tracking distance and apparent size starts climbing again.
+       Letting it go to zero is correct -- the label shrinks out of the way as you walk
+       into the place it names -- and the opacity fade below finishes the job so it bows
+       out instead of lingering as a speck. */
+    const k = Math.min(1, dist/LABEL_HOLD_DIST);
+    const w = base*k;
+    spr.scale.set(w, w*0.25, 1);
+    if(spr.material) spr.material.opacity = clamp((dist - 2.5)/4, 0, 1);
+  }
+}
 
 /* Tread width in real metres per path kind, hoisted out of rebuildWorld's PATH_STYLE
    because the terrain-carving pass needs the widths BEFORE the ribbon loop runs (it has
@@ -490,7 +528,11 @@ function rebuildWorld(){
   const groundYAt=(x,z)=>terrainY(x,z,VERT_SCALE);
 
   // areas (ground cover) before trails, matching draw order in the original
-  AREAS.forEach((a,ai)=>{ try{ const ag=buildArea(a,rng,groundYAt,nearestTrail,VERT_SCALE); ag.name='area:'+ai; worldG.add(ag); }catch(err){ console.warn('area skipped',a.name,err); } });
+  AREA_LABELS.length=0;
+  AREAS.forEach((a,ai)=>{ try{
+    const ag=buildArea(a,rng,groundYAt,nearestTrail,VERT_SCALE); ag.name='area:'+ai; worldG.add(ag);
+    ag.traverse(o=>{ if(o.userData && o.userData.areaLabel) AREA_LABELS.push(o); });
+  }catch(err){ console.warn('area skipped',a.name,err); } });
 
   // Path colour/texture follows the source file's own highway/kind tag (pathKind, in
   // geo.js): a footpath stays themed dirt, a service road reads as a distinct paved grey
@@ -577,7 +619,11 @@ function rebuildWorld(){
     const armOf=o=>{
       let ax=0,az=0,acc=0,i=1;
       while(i<o.pts.length&&acc<6){ax=o.pts[i][0]-n.p[0];az=o.pts[i][1]-n.p[1];acc=Math.hypot(ax,az);i++;}
-      return{label:o.e.name,dist:Math.round(o.e.lenM)+' m',angle:Math.atan2(az,ax)};
+      /* lenM is measured on the COMPACTED network, so it is world units, not metres --
+         at 1:5 a real 500 m trail measures 100. Signposts were printing that raw as
+         "100 m". Divide by the map scale so a signpost states the trail's real length,
+         which is the only reading that makes sense on a map advertising real trails. */
+      return{label:o.e.name,dist:Math.round(o.e.lenM/Math.max(1e-6,MAP_SCALE))+' m',angle:Math.atan2(az,ax)};
     };
     if(n.deg>=3){
       const arms=[],seen=new Set();
@@ -724,6 +770,7 @@ function getBackdrop(){ return backdropG; }
 
 export { loadWorld, rebuildWorld, addLayers, clearLayers, hasBundle, setContourStep,
          standingY, getWorldRevision, pathWidth, getContourStep, getSignCount,
+         getAreaLabels, updateAreaLabels,
          setThemeById, getTheme, setMapScale, getMapScale, getExaggeration, getBackdrop,
          setFogMultiplier, getFogMultiplier,
          getGraph, getTrailheads, getPOIs, getAreas, getBBox,

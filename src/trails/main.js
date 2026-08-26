@@ -14,9 +14,11 @@ import { setWildVisible, setWildYaw, spawnWild, spookRadiusFor, topSpeedFor, upd
 
 import { dogRunMul, dogTopSpeed, setDogPos, setDogVisible, setYaw, spawnDog, updateDog, dogShadowRadius } from './dog-driver.js';
 import { updateShadow, setShadowVisible } from './shadow.js';
+import { updateNoiseRing, setNoiseRingVisible, noiseRingRadius } from './noise-ring.js';
+import { getWorld } from './terrain.js';
 
 import { addCamPitch, addCamYaw, addCamZoom, getCamPitch, getCamYaw, getCamZoom, setCamYaw, snapChaseCam, updateChaseCam } from './camera.js';
-import { getCritterStats, spawnCritters, resetCritters, updateCritters, WATCH_SECONDS } from './critters.js';
+import { getCritterStats, spawnCritters, resetCritters, updateCritters, WATCH_SECONDS, playerNoise, typicalSpookRadius } from './critters.js';
 import { initMinimap, isBigMapOpen, toggleBigMap, updateMinimap } from './minimap.js';
 import { comicBurst, updateFX } from '../core/fx.js';
 import { cheerBlip, initAudio } from '../core/audio.js';
@@ -65,6 +67,11 @@ const player = { x:0, z:0, y:0, vy:0, yaw:0, speed:0, dist:0, sneaking:false, ba
                  climbT:0, climbAmt:0 };
 const CLIMB_DUR = 0.42;    // seconds of scramble per step-up, refreshed on each new step
 const CLIMB_SLOW = 0.45;   // top-speed multiplier while scrambling
+/* Beyond this much turn, the auto-follow gives up rather than whipping the view round.
+   ~115 degrees: comfortably past a diagonal (45) and a hard strafe (90), so only a real
+   backpedal trips it. See the derivation at the call site. */
+const BACKPEDAL_ARC = 2.0;
+function backpedalArc(){ return BACKPEDAL_ARC; }   // test seam (const, see climbSlowFactor)
 /* Test seam. `const` bindings do not survive the smoke harness's eval boundary the way
    function declarations do (same reason getSignCount and getBigView exist), so the two
    climb tunables are readable through calls rather than asserted on directly. */
@@ -86,6 +93,13 @@ let avatarKey='';           // identity of whatever is currently built, for ensu
 
 function currentTopSpeed(){ return mode==='dog' ? dogTopSpeed() : topSpeedFor(wildKey); }
 function currentRunMul(){ return mode==='dog' ? dogRunMul() : 1.8; }
+/* The speed the noise model measures you against: the animal's FLAT-OUT speed, not its
+   walking speed. critters.js computes pace as speed/reference and clamps it to 1, so
+   passing the walking top speed meant pace hit 1.0 at a walk and a sprint could not be
+   any louder -- sneaking worked, but walking and running were identical to every animal
+   on the map. Invisible while the only feedback was whether a deer bolted; obvious the
+   moment the radius is drawn on the ground. */
+function noiseReference(){ return currentTopSpeed()*currentRunMul(); }
 
 /* ---------- avatar ----------
    ensureAvatar rebuilds geometry only when the *identity* changes; syncAvatar pushes
@@ -118,16 +132,24 @@ function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
   // eased 0..1: full while the scramble timer runs, decaying once it expires, so the
   // pose settles back into the walk instead of popping flat the instant the step is done
   const climb = player.climbT > 0 ? player.climbAmt : 0;
+  /* Airborne: 1 once the pup is clear of the ground, so the drivers can hold a leap
+     spread instead of running in mid-air. The threshold is a hair above zero because
+     `player.y` is exactly 0 while grounded (the gravity clamp guarantees it) -- anything
+     larger would miss the start of a hop, and anything smaller would flicker on the
+     frame it lands. `rise` is vertical velocity normalised, so the pose knows whether it
+     is still going up or already reaching for the landing. */
+  const leap = jumpY > 0.02 ? 1 : 0;
+  const rise = clamp(player.vy/7, -1, 1);
   let radius = 0.5;
   if(mode==='dog'){
     setDogPos(player.x, player.z);
     setYaw(player.yaw);
-    updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb);
+    updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise);
     radius = dogShadowRadius();
   }else{
     wildPos.set(player.x, 0, player.z);
     setWildYaw(player.yaw);
-    updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb);
+    updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise);
     radius = wildShadowRadius();
   }
   updateShadow(player.x, player.z, groundY, jumpY, radius, true);
@@ -210,6 +232,40 @@ function moveOffTrail(stepX, stepZ){
   if(tryMove(stepX, stepZ)) return;
   if(tryMove(stepX, 0)) return;
   tryMove(0, stepZ);
+}
+
+/* The one place that decides HOW a step is taken. Extracted from the loop so the rule
+   is testable on its own -- while it lived inline, a test could only reach moveOffTrail,
+   which is the branch, not the decision, and would have passed just as happily against
+   the bug this exists to prevent. */
+function movePlayer(stepX, stepZ){
+  const nt = nearestTrail(player.x, player.z);
+  /* `inCorridor` -- is the tread actually underfoot? This is the ONLY thing that may
+     bypass the step-up rule, and it uses the corridor's own half-width, the same measure
+     standingY uses to decide you are standing on the tread at all.
+
+     It used to be `nt.d < 1.5`, a soft "near a trail" band that also drives the walking
+     speed bonus. A narrow trail's half-width is 0.55 m, so everything from 0.55 to 1.5 m
+     counted as on-trail and skipped the step check -- including when the trail ran along
+     a clifftop and you stood at the bottom. One step in and standingY hauled you up the
+     whole cliff. On the default map there are over a thousand such approaches, the worst
+     a 9 m wall. Granting free vertical movement was never what proximity meant. */
+  const inCorridor = nt.d <= nt.hw;
+  if(inCorridor &&
+     Math.abs(standingY(player.x+stepX, player.z+stepZ) - standingY(player.x, player.z)) <= stepUpLimit()){
+    /* On the tread, movement stays frictionless: the graded corridor is a continuous,
+       walkable bench by construction (terrain.js's gradeProfile), so there is nothing to
+       climb, and preserving absolute height on the way down would turn every graded
+       descent ramp into a series of little falls.
+
+       The height guard covers the 0.15% of corridor where grading did not fully win (a
+       terrace riser surviving right at the lip): there, fall through to the physical path
+       rather than gliding up a wall just because a tread is nominally underfoot. */
+    player.x+=stepX; player.z+=stepZ;
+    return 'glide';
+  }
+  moveOffTrail(stepX, stepZ);
+  return 'physical';
 }
 
 /* ---------- input: trail-owned, not core/input.js (that module is wired directly to
@@ -298,6 +354,8 @@ function loop(t){
     // and cutting to a blank panel would throw that away. The minimap keeps drawing here
     // too, now that it's part of the startup/selection screen and not just the play HUD.
     if(avatarKey) syncAvatar(dt, t, 0, 0, player.sneaking, false, false);
+    setNoiseRingVisible(false);        // nothing to sneak up on until the walk starts
+    updateAreaLabels(camera.position.x, camera.position.y, camera.position.z);
     updateMinimap(player.x, player.z, player.yaw);
     renderer.render(scene,camera);
     return;
@@ -320,8 +378,25 @@ function loop(t){
   const moving=mag>0.03&&(wx||wz);
 
   const nt = nearestTrail(player.x,player.z);
-  const onTrail = nt.d<1.5;
-  const surf = onTrail ? 1 : 0.6;
+  /* TWO different questions, which used to share one answer and caused the cliff bug.
+
+     `inCorridor` -- is the tread actually underfoot? This is the ONLY thing that may
+     bypass the step-up rule, and it has to use the corridor's own half-width, which is
+     what standingY uses to decide you are standing on the tread at all.
+
+     `nearTrail` -- is walking easier here? A soft 1.5 m band, used only for the speed
+     bonus. It has no business granting free vertical movement.
+
+     Conflating them let you walk up a cliff. A narrow trail's half-width is 0.55 m, so
+     the band from 0.55 to 1.5 m counted as "on trail" and skipped the step check --
+     including when the trail was on the clifftop and you were on the beach below.
+     One step into the corridor and standingY lifted you the full height of the cliff.
+     Measured on the default map, treads sit more than one step-up above the local
+     terrain at 0.15% of corridor samples (max 1.70u, over two full terrace steps), which
+     is exactly the set of cliff-edge spots where this was reachable. */
+  const inCorridor = nt.d <= nt.hw;
+  const nearTrail = nt.d < 1.5;
+  const surf = nearTrail ? 1 : 0.6;
   if(player.climbT > 0) player.climbT = Math.max(0, player.climbT - dt);
   // scrambling drags the top speed down; it does NOT touch the jump, which is what makes
   // "jump the big steps" the faster line through broken ground
@@ -332,25 +407,31 @@ function loop(t){
     const L=Math.hypot(wx,wz);
     const stepX=wx/L*player.speed*dt, stepZ=wz/L*player.speed*dt;
     const before={x:player.x, z:player.z};
-    if(onTrail){
-      /* On the tread, movement stays exactly as it was: the graded corridor is a
-         continuous, walkable bench by construction (terrain.js's gradeProfile), so there
-         is nothing to climb and clamping against terrain here would only fight the
-         grading. Walking a trail should feel frictionless -- that IS the trail. */
-      player.x+=stepX; player.z+=stepZ;
-    }else{
-      moveOffTrail(stepX, stepZ);
-    }
+    movePlayer(stepX, stepZ);
     player.dist += Math.hypot(player.x-before.x, player.z-before.z);
     const targetYaw=Math.atan2(-wz/L,wx/L);
     let dy=targetYaw-player.yaw; while(dy>Math.PI)dy-=Math.PI*2; while(dy<-Math.PI)dy+=Math.PI*2;
     player.yaw+=dy*Math.min(1,dt*10);
-    // convenience auto-follow: swing the camera in behind the direction you're walking,
-    // but only when nobody's hand is on it -- otherwise every step yanks the view back
-    // out from under a manual look-drag, which is worse than not auto-following at all.
-    if(performance.now()-lastLookT>900){
-      const headYaw=Math.atan2(wx/L,wz/L);
-      let dc=headYaw-getCamYaw(); while(dc>Math.PI)dc-=Math.PI*2; while(dc<-Math.PI)dc+=Math.PI*2;
+    /* Convenience auto-follow: swing the camera in behind the direction you're walking,
+       but only when nobody's hand is on it -- otherwise every step yanks the view back
+       out from under a manual look-drag, which is worse than not auto-following at all.
+
+       WHY THIS USED TO SHAKE ON THE DOWN ARROW. The correction was measured in WORLD
+       space: turn the camera toward atan2(wx, wz). But wx/wz are themselves derived from
+       the camera yaw, so the camera was chasing a target that moved with it. Working the
+       algebra through, the world heading is exactly camYaw + atan2(-ix, -iz) -- meaning
+       the correction depends ONLY on which keys are down, and walking straight back gives
+       a constant PI no matter where the camera already points. The camera could never
+       converge: it span forever, and at the +-PI wrap the sign flipped frame to frame,
+       which is the shake. Measuring in input space instead removes the feedback loop and
+       the wrap in one go.
+
+       Backing up is then simply excluded. Pressing "back" means "walk toward the camera";
+       whipping the view around 180 degrees to get behind the pup would point it exactly
+       where the player just chose not to look, and it is the one input with no stable
+       answer anyway. Hold the view still and let the pup walk toward you. */
+    const dc = Math.atan2(-ix, -iz);      // input direction, relative to the camera
+    if(performance.now()-lastLookT>900 && Math.abs(dc) < BACKPEDAL_ARC){
       addCamYaw(dc*Math.min(1,dt*2.2));
     }
   }
@@ -362,10 +443,18 @@ function loop(t){
 
   const groundY = syncAvatar(dt,t,player.y,player.speed,player.sneaking,player.barkT>0,run);
 
-  updateChaseCam(dt, player.x, player.z, groundY, player.y, player.speed, getVertScale(), 11);
+  /* Boom length. Pulled in from 11 to 8.5: the pup is only about a metre nose to tail at
+     TRAIL_DOG_SCALE, and from 11 m back it was a small shape in a large landscape. */
+  updateChaseCam(dt, player.x, player.z, groundY, player.y, player.speed, getVertScale(), 8.5);
 
-  updateCritters(dt, t, player.x, player.z, player.speed, currentTopSpeed(),
+  updateCritters(dt, t, player.x, player.z, player.speed, noiseReference(),
                  player.sneaking, player.barkT>0);
+  /* Same call the critters just used, so the circle on the ground is the rule they are
+     actually being judged by rather than a second guess at it. */
+  updateNoiseRing(dt, player.x, player.z,
+                  playerNoise(player.speed, noiseReference(), player.sneaking, player.barkT>0),
+                  typicalSpookRadius(), standingY, true);
+  updateAreaLabels(camera.position.x, camera.position.y, camera.position.z);
   updateFX(dt, t);
   updateMinimap(player.x, player.z, player.yaw);
   updateTrailHud();
@@ -446,8 +535,9 @@ function showArrival(i){
   set('#arrTitle', 'You reached ' + th.name + '!');
   set('#arrSub', 'The ' + th.where + ' trailhead \u2014 rest here or head back out.');
   set('#arrScore', tripScore(st));
-  set('#arrDist', player.dist >= 1000
-      ? (player.dist/1000).toFixed(2)+' km' : Math.round(player.dist)+' m');
+  // same conversion as the HUD, or the summary would contradict the number the player
+  // watched tick up for the whole walk
+  set('#arrDist', formatTravelled(realMetres(player.dist)));
   set('#arrTime', Math.floor(secs/60)+':'+String(secs%60).padStart(2,'0'));
   set('#arrSeen', st.sightings);
   set('#arrSpooked', st.spooked);
@@ -494,11 +584,59 @@ function closeArrival(){
 /* Sightings / spooked tally plus the watch meter. Cheap enough to run every frame --
    it's four textContent writes and one style width -- and gating it behind a change
    check would cost more in bookkeeping than it saves. */
+/* World units -> real-world metres.
+
+   Positions are compacted by the world scale (World.setMapScale multiplies metres per
+   degree by it), so a world unit is `MAP_SCALE` real metres and every raw length in
+   src/trails is short by that factor. Elevations are NOT compacted -- they stay in true
+   metres -- which is exactly why this conversion has to be explicit rather than assumed.
+   At 1:5 a 500 m trail is 100 world units, so anything reporting a raw length as metres
+   is understating it fivefold. */
+function realMetres(u){ return u/Math.max(1e-6, getMapScale()); }
+
+/* Elevation is a real-world fact about the place, so it comes from the DEM in true
+   metres rather than from the terraced game surface -- the terracing quantises height to
+   the contour step, and reporting "you are on band 14" as an altitude would be inventing
+   precision the player can't use. World.heightAt already takes scaled world coordinates
+   and returns absolute metres above sea level. */
+function elevationFt(x, z){
+  const W = getWorld();
+  if(!W || typeof W.heightAt !== 'function') return null;
+  return W.heightAt(x, z)*3.28084;
+}
+
+function formatTravelled(m){
+  return m >= 1000 ? (m/1000).toFixed(2)+' km' : Math.round(m)+' m';
+}
+
 function updateTrailHud(){
   const st = getCritterStats();
   const seen = $('#hudSeen'), oops = $('#hudSpooked'), meter = $('#watchMeter'), fill = $('#watchFill'), name = $('#watchName');
   if(seen) seen.textContent = '\u2728 ' + st.sightings;
   if(oops) oops.textContent = '\ud83d\udca8 ' + st.spooked;
+
+  const elev = $('#hudElev');
+  if(elev){
+    const ft = elevationFt(player.x, player.z);
+    elev.textContent = ft==null ? '\u26f0 \u2014' : '\u26f0 ' + Math.round(ft).toLocaleString() + ' ft';
+  }
+  const dist = $('#hudDist');
+  if(dist) dist.textContent = '\ud83d\udc63 ' + formatTravelled(realMetres(player.dist));
+  const noise = $('#hudNoise');
+  if(noise){
+    /* NO realMetres() here, and that is not an oversight. Positions compact with world
+       scale, so travelled distance must be converted -- but a spook radius is the gap
+       between the pup and an animal, both of which stay true size at any scale, and
+       critters.js deliberately leaves those radii unscaled (see wanderTarget's note on
+       why the *S applies to positions and not to the radii). Converting here made the
+       chip read 800 m at 1:32 for a deer that can hear you from 25. The number IS the
+       ring's radius, so the chip and the circle can never disagree. */
+    const r = noiseRingRadius();
+    noise.textContent = '\ud83d\udd0a ' + (r>=1000 ? (r/1000).toFixed(1)+' km' : Math.round(r)+' m');
+    const n = playerNoise(player.speed, noiseReference(), player.sneaking, player.barkT>0);
+    noise.classList.toggle('quiet', n <= 0.4);
+    noise.classList.toggle('loud', n >= 1.2);
+  }
   if(meter){
     const w = st.watching;
     meter.classList.toggle('on', !!w);

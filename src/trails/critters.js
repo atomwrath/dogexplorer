@@ -158,6 +158,34 @@ function bolt(c, px, pz){
 /* Per frame. `topSpeed` is the player's own top speed, so "how fast am I moving" is
    normalised against the animal you happen to be playing as -- a sprinting moose and a
    sprinting rabbit should be equally alarming. */
+/* How loud you are right now. Sneaking is the whole point of the mechanic, so it gets
+   the biggest single multiplier; barking overrides everything, because a bark should
+   always cost you the animal you were creeping up on.
+
+   Exported because the on-screen noise ring draws THIS number. Two copies of a rule the
+   player is being shown a picture of would drift apart, and the picture would quietly
+   start lying -- which is worse than not drawing it. */
+function playerNoise(speed, topSpeed, sneaking, barking){
+  const pace = clamp(speed/Math.max(0.1, topSpeed), 0, 1);
+  return barking ? 2.4 : (sneaking ? 0.34 : 0.55 + pace*1.15);
+}
+
+/* A representative spook radius for the wildlife actually on this map, so the ring means
+   something concrete rather than being a bare multiplier. Mean over the live population,
+   falling back to the theme roster before anything has spawned. */
+function typicalSpookRadius(){
+  if(CRITTERS.length){
+    let sum = 0;
+    for(const c of CRITTERS) sum += spookRadiusFor(c.key);
+    return sum/CRITTERS.length;
+  }
+  const keys = (THEME.wildlife||[]);
+  if(!keys.length) return 9;
+  let sum = 0;
+  for(const k of keys) sum += spookRadiusFor(k);
+  return sum/keys.length;
+}
+
 function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
   const rnd = Math.random;
   const S = getMapScale();
@@ -169,11 +197,7 @@ function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
     const dx = c.x - px, dz = c.z - pz;
     const dist = Math.hypot(dx, dz);
 
-    /* How loud you are right now. Sneaking is the whole point of the mechanic, so it
-       gets the biggest single multiplier; barking overrides everything, because a bark
-       should always cost you the animal you were creeping up on. */
-    const pace = clamp(speed/Math.max(0.1, topSpeed), 0, 1);
-    const noise = barking ? 2.4 : (sneaking ? 0.34 : 0.55 + pace*1.15);
+    const noise = playerNoise(speed, topSpeed, sneaking, barking);
     const spookR = spookRadiusFor(c.key)*noise;
     const noticeR = spookRadiusFor(c.key)*2.4;
 
@@ -263,4 +287,4 @@ function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
 }
 
 export { CRITTERS, getCritters, getCritterStats, spawnCritters, resetCritters,
-         updateCritters, WATCH_SECONDS };
+         updateCritters, WATCH_SECONDS, playerNoise, typicalSpookRadius };

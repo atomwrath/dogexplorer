@@ -9,11 +9,12 @@
    be the wrong direction for the dependency arrow to point. */
 import { clamp, lerp } from '../core/math.js';
 import { P, dog, R, dogPos, dogYaw, STATS, setDog, setDogYaw } from '../dog/runtime.js';
-import { gaitStep, climbPose } from './gait.js';
+import { gaitStep, climbPose, leapPose, legSwingValue, gallopAmount } from './gait.js';
 
 let legPhase = 0;
 let crouchAmt = 0;
 let climbAmt = 0;
+let leapAmt = 0;
 let dogLegLen = 0.4;     // hip pivot height above ground, WORLD units -- see measureLegLen
 
 /* The shared rig sizes itself directly in world units via g.scale.setScalar(p.size)
@@ -50,7 +51,7 @@ function dogShadowRadius(){ return dogLegLen*1.25; }
 function spawnDog(params){
   setDog(params);
   dog.scale.multiplyScalar(TRAIL_DOG_SCALE);
-  legPhase = 0; crouchAmt = 0; climbAmt = 0;
+  legPhase = 0; crouchAmt = 0; climbAmt = 0; leapAmt = 0;
   dogLegLen = measureLegLen();
 }
 
@@ -79,7 +80,7 @@ function dogRunMul(){ return STATS.run / STATS.walk; }
 /* Called once per frame with the resolved ground height under the dog's feet (from
    terrain.js) and the current motion state. Everything below only touches `dog`/`R`,
    the live bindings runtime.js exports — never rebuilds geometry. */
-function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb){
+function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise){
   if(!dog || !R) return;
   const size = P ? P.size : 1;
   // dog.position is in SCENE space, unlike dog.scale -- shrinking the group above
@@ -95,18 +96,29 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb){
      picking those two independently is what made the old rig skate. A sneaking pup takes
      shorter, quicker steps: a lower stride ratio, not a slower phase, or it slides again. */
   const g = gaitStep(dogLegLen, speed, dt, sneaking ? {maxRatio:1.05, cadence:2.9} : null);
-  legPhase += g.dPhase;
   const swing = g.swing;
 
-  // climb blends OVER the walk cycle rather than replacing it, so a scramble that starts
-  // mid-stride doesn't snap the legs to a new pose
+  /* Leap wins over climb, and both blend OVER the walk cycle rather than replacing it,
+     so a jump that starts mid-stride doesn't snap the legs to a new pose. The leap also
+     FREEZES the cycle (see gait.js): with no ground to push against there is nothing for
+     a swinging leg to be locked to, so continuing to cycle is just the airborne form of
+     the paw-slide. Snappier easing than the climb -- a leap is a sudden commitment. */
+  leapAmt  = lerp(leapAmt,  clamp(leap||0, 0, 1),  1-Math.pow(0.000002,dt));
   climbAmt = lerp(climbAmt, clamp(climb||0, 0, 1), 1-Math.pow(0.0001,dt));
+  const lp = leapAmt  > 0.002 ? leapPose(leapAmt, rise||0, R.legs.length) : null;
   const cp = climbAmt > 0.002 ? climbPose(climbAmt, t, R.legs.length) : null;
 
+  legPhase += g.dPhase*(1 - (lp ? lp.freeze : 0));
+
+  /* Sprinting switches the FOOTFALL ORDER, not just the tempo: hind pair together, then
+     fore pair, with a lead leg in each. Measured against this pup's own walk and run
+     stats so a fast little dog and a slow big one both gallop at their own top end. */
+  const gal = gallopAmount(speed, dogTopSpeed(), dogTopSpeed()*dogRunMul());
   R.legs.forEach((leg,i)=>{
-    const phase=(i%2?Math.PI:0)+(i>1?Math.PI*0.5:0);
-    const walkZ = Math.sin(legPhase+phase)*swing;
-    leg.rotation.z = cp ? lerp(walkZ, cp.legs[i], climbAmt) : walkZ;
+    let z = legSwingValue(i, legPhase, gal)*swing;
+    if(cp) z = lerp(z, cp.legs[i], climbAmt);
+    if(lp) z = lerp(z, lp.legs[i], leapAmt);
+    leg.rotation.z = z;
   });
   if(R.tail){
     R.tail.rotation.y = Math.sin(t*(sneaking?0.004:0.012))*(sneaking?0.15:0.5)
@@ -125,9 +137,16 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb){
        covered with no paw down; without lifting the body for it, a gallop would read as
        a fast trot whose feet mysteriously outrun their own reach. One hump per stride,
        scaled by the leg so it stays proportionate on any pup. */
-    const bound = g.bound*dogLegLen*0.42*Math.max(0, Math.sin(legPhase));
-    R.bodyG.position.y = R.bodyBaseY + bob + bound + (cp ? cp.rise*dogLegLen : 0);
-    R.bodyG.rotation.z = cp ? cp.pitch : 0;
+    /* A gallop is a series of little leaps, so the bound grows with it, and the spine
+       flexes: the body pitches nose-up as the hind legs drive and nose-down as the
+       forelegs catch. Half a cycle out of phase with the bound, which is what makes the
+       two read as one motion rather than two overlaid wobbles. */
+    const bound = g.bound*dogLegLen*(0.42 + 0.5*gal)*Math.max(0, Math.sin(legPhase))*(1-leapAmt);
+    const flex  = gal*0.16*Math.sin(legPhase - Math.PI*0.5)*(1-leapAmt);
+    R.bodyG.position.y = R.bodyBaseY + bob*(1-leapAmt) + bound + (cp ? cp.rise*dogLegLen : 0);
+    let pitch = (cp ? cp.pitch : 0) + flex;
+    if(lp) pitch = lerp(pitch, lp.pitch, leapAmt);
+    R.bodyG.rotation.z = pitch;
   }
 }
 

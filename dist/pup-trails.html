@@ -126,19 +126,28 @@ body.play #playHud{display:block;}
 .toggle.sel{background:var(--ink);color:#fff;}
 
 /* --- pup roster grid --- */
-.pup-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;}
+/* minmax(0,1fr), NOT 1fr. A grid track's implicit minimum is min-content, and .pc-nm is
+   white-space:nowrap, so a long name (the wildlife roster has "Mountain Lion" and
+   friends; the dog presets are all short, which is why only Wildlife overflowed) sets a
+   min-content floor WIDER than the 1fr share and pushes the whole grid past the panel's
+   right edge. minmax(0,...) removes that floor; the min-width:0 rules below do the same
+   job for the flex row inside each card, so the ellipsis can finally do its work. */
+.pup-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;}
 /* main.js toggles the `hidden` attribute to switch between the Dogs and Wildlife grids,
    but `.pup-grid{display:grid}` above beats the UA stylesheet's `[hidden]{display:none}`
    on specificity, so both grids showed at once regardless of which tab was selected.
    This override restores `hidden` as the deciding rule. */
 .pup-grid[hidden]{display:none;}
 .pupcard{display:flex;flex-direction:column;gap:3px;font-family:inherit;text-align:left;
+  min-width:0;
   border:3px solid var(--ink);border-radius:12px;background:#fff;padding:8px 9px;cursor:pointer;}
 .pupcard.sel{outline:3px solid var(--orange);outline-offset:2px;}
-.pupcard .pc-top{display:flex;align-items:center;gap:6px;}
+.pupcard .pc-top{display:flex;align-items:center;gap:6px;min-width:0;}
 .pupcard .pc-ic{font-size:17px;flex:none;}
-.pupcard .pc-nm{font-weight:bold;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.pupcard .pc-sub{font-size:10px;opacity:.6;margin-left:23px;}
+.pupcard .pc-nm{font-weight:bold;font-size:12px;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;min-width:0;flex:1 1 auto;}
+.pupcard .pc-sub{font-size:10px;opacity:.6;margin-left:23px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .pupcard .pc-bar{height:4px;border-radius:2px;background:#eee2cc;overflow:hidden;margin-top:1px;}
 .pupcard .pc-bar i{display:block;height:100%;border-radius:2px;}
 .pupcard .pc-bar.speed i{background:var(--blue);}
@@ -148,6 +157,13 @@ body.play #playHud{display:block;}
    Both live inside #playHud, so the existing `body.play` rule already handles
    showing and hiding them; nothing here needs its own visibility state. */
 #hudTally{display:flex;gap:6px;margin-top:8px;}
+/* Live readouts. Wraps because three chips plus a long distance overflow a phone's
+   width in landscape, and a HUD that pushes itself off screen is worse than no HUD. */
+#hudReadout{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;max-width:250px;}
+#hudReadout .tally{font-variant-numeric:tabular-nums;}
+/* Matches the ring on the ground, so the chip and the circle are obviously one thing. */
+#hudNoise.quiet{background:#e4f2e2;}
+#hudNoise.loud{background:#f7ded9;}
 .tally{background:var(--card);border:3px solid var(--ink);border-radius:11px;
   padding:4px 10px;font-size:13px;font-weight:bold;}
 #watchMeter{display:none;align-items:center;gap:8px;margin-top:8px;max-width:240px;
@@ -333,6 +349,11 @@ body.arrived #arrivalWrap{display:flex;align-items:flex-start;justify-content:ce
         <div id="hudTally">
           <span class="tally" id="hudSeen" title="Wildlife watched">✨ 0</span>
           <span class="tally" id="hudSpooked" title="Wildlife you sent running">💨 0</span>
+        </div>
+        <div id="hudReadout">
+          <span class="tally" id="hudElev" title="Elevation above sea level">⛰ —</span>
+          <span class="tally" id="hudDist" title="Distance travelled">👣 —</span>
+          <span class="tally" id="hudNoise" title="How far wildlife can hear you right now">🔊 —</span>
         </div>
         <div id="watchMeter">
           <span id="watchName">Watching…</span>
@@ -1045,6 +1066,69 @@ function climbPose(amt, t, legCount){
   };
 }
 
+/* Leg phase offsets, per gait.
+
+   A TROT is diagonal: each leg is half a cycle from its neighbour and a quarter from the
+   pair behind, which is the pattern the drivers always used and the right one at walking
+   speed. A GALLOP is not a faster trot -- it is a different footfall order. The hind pair
+   lands together, then the fore pair together, with a small lead offset inside each pair
+   so one leg reaches slightly further than its partner (the "lead leg" every galloping
+   quadruped has). Blending between the two is what makes a sprint read as a sprint rather
+   than as a trot with the tape sped up.
+
+   Returned as a SIN VALUE rather than a phase so callers can cross-fade between gaits
+   without the wrap discontinuity that lerping two angles across +-PI would give. */
+function legSwingValue(i, phase, gallopAmt){
+  const trotPhase   = (i%2?Math.PI:0) + (i>1?Math.PI*0.5:0);
+  // i<2 are the forelegs (dog/build.js and animal-models.js both put them at +x)
+  const front = i<2;
+  const lead  = (i%2) ? 0.22 : 0;                       // one leg of each pair leads
+  const gallopPhase = (front ? Math.PI*0.62 : 0) + lead;
+  const trot   = Math.sin(phase + trotPhase);
+  const gallop = Math.sin(phase + gallopPhase);
+  const a = clamp(gallopAmt, 0, 1);
+  return trot + (gallop - trot)*a;
+}
+
+/* How much of a gallop the animal is in, from its own speed against its own walk and run
+   figures -- NOT from an absolute m/s, which would make a bobcat gallop while a moose
+   ambled at the same number. 0 at its comfortable pace, 1 flat out. */
+function gallopAmount(speed, walkTop, runTop){
+  const lo = Math.max(0.01, walkTop), hi = Math.max(lo*1.05, runTop);
+  return clamp((speed - lo)/(hi - lo), 0, 1);
+}
+
+/* Airborne. A jumping animal does NOT keep running in mid-air -- there is no ground to
+   push against, so the legs stop cycling and hold a spread: forelegs reaching ahead,
+   hind legs trailing behind, the shape every leaping animal makes and every cartoon
+   exaggerates. Freezing the walk cycle matters as much as the pose; a leg that keeps
+   swinging while the paw is nowhere near the ground is the airborne version of exactly
+   the slide we removed on the ground.
+
+   `rise` is the vertical velocity normalised to roughly -1..1. Going up, the animal is
+   still extending and the nose comes up; coming down it reaches for the landing and the
+   nose drops. Same sign convention as everything else here: +x is the nose, and a
+   positive Z rotation swings a paw forward. */
+function leapPose(amt, rise, legCount){
+  const a = clamp(amt, 0, 1);
+  const r = clamp(rise, -1, 1);
+  const legs = [];
+  for(let i=0;i<legCount;i++){
+    const front = i<2;
+    // splay the pairs slightly apart from each other so the silhouette reads as a spread
+    // rather than two legs hidden behind two others
+    const splay = (i%2 ? 0.90 : 1.10);
+    legs.push(front ? a*1.00*splay*(1 + 0.12*r)      // forelegs reach ahead, more so rising
+                    : a*-0.92*splay*(1 - 0.12*r));   // hind legs trail, extending on the way up
+  }
+  return {
+    legs,
+    pitch: a*0.30*r,        // nose up while climbing, down while dropping
+    // how much of the walk cycle to suppress: total, at full leap
+    freeze: a,
+  };
+}
+
 /* ==== src/trails/wild-driver.js ==== */
 /* Playing AS a wild animal, not just watching one, is new — neither Pup City (wildlife
    is AI-only) nor Backyard Pups (dogs only) has a player-controlled non-dog creature,
@@ -1060,7 +1144,7 @@ function climbPose(amt, t, legCount){
 
 
 let group = null, refs = null, speciesKey = null, S = null;
-let wildLegPhase = 0, wildBodyBaseY = 0, wildClimbAmt = 0;
+let wildLegPhase = 0, wildBodyBaseY = 0, wildClimbAmt = 0, wildLeapAmt = 0;
 let wildLegLen = 0.4;      // hip pivot height above ground, WORLD units (see dog-driver)
 const wildPos = new THREE.Vector3(0,0,0);
 let yaw = 0;
@@ -1074,7 +1158,7 @@ function spawnWild(key, seed){
   group.position.copy(wildPos);
   group.rotation.y = yaw;
   scene.add(group);
-  wildLegPhase = 0; wildClimbAmt = 0;
+  wildLegPhase = 0; wildClimbAmt = 0; wildLeapAmt = 0;
   wildBodyBaseY = refs.bodyG ? refs.bodyG.position.y : 0;
   wildLegLen = measureWildLegLen();
 }
@@ -1105,7 +1189,7 @@ function spookRadiusFor(key){
   return clamp(16 - s.brav*1.3, 4, 14) * (s.scale||1);
 }
 
-function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb){
+function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise){
   if(!group || !refs) return;
   group.position.set(wildPos.x, groundY + jumpY, wildPos.z);
   group.rotation.y = yaw;
@@ -1116,16 +1200,30 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb){
      It gets a longer stride ratio and a lower cadence rather than a free-running phase. */
   const g = gaitStep(wildLegLen, speed, dt,
     hop ? {maxRatio:2.6, cadence:1.7} : (sneaking ? {maxRatio:1.05, cadence:2.9} : null));
-  wildLegPhase += g.dPhase;
   const swing = hop ? Math.min(0.95, g.swing*1.25) : g.swing;
 
+  // see dog-driver: airborne freezes the cycle and holds a spread instead
+  wildLeapAmt  = lerp(wildLeapAmt,  clamp(leap||0, 0, 1),  1-Math.pow(0.000002,dt));
   wildClimbAmt = lerp(wildClimbAmt, clamp(climb||0, 0, 1), 1-Math.pow(0.0001,dt));
   const legs = refs.legs||[];
+  const lp = wildLeapAmt  > 0.002 ? leapPose(wildLeapAmt, rise||0, legs.length) : null;
   const cp = wildClimbAmt > 0.002 ? climbPose(wildClimbAmt, t, legs.length) : null;
+
+  wildLegPhase += g.dPhase*(1 - (lp ? lp.freeze : 0));
+
+  /* A hopper keeps its own pattern (both hind legs together, always) -- it has no trot
+     to leave and no gallop to enter. Everything else gallops at its own top end. */
+  const gal = hop ? 0 : gallopAmount(speed, topSpeedFor(speciesKey)*0.55, topSpeedFor(speciesKey));
   legs.forEach((leg,i)=>{
-    const phase = hop ? (i>1?Math.PI:0) : ((i%2?Math.PI:0)+(i>1?Math.PI*0.5:0));
-    const walkZ = Math.sin(wildLegPhase+phase)*swing;
-    leg.rotation.z = cp ? lerp(walkZ, cp.legs[i], wildClimbAmt) : walkZ;
+    let z;
+    if(hop){
+      z = Math.sin(wildLegPhase + (i>1?Math.PI:0))*swing;
+    }else{
+      z = legSwingValue(i, wildLegPhase, gal)*swing;
+    }
+    if(cp) z = lerp(z, cp.legs[i], wildClimbAmt);
+    if(lp) z = lerp(z, lp.legs[i], wildLeapAmt);
+    leg.rotation.z = z;
   });
   if(refs.tailG) refs.tailG.rotation.y = Math.sin(t*0.01)*0.4 + (barking?Math.sin(t*0.05)*0.7:0);
   if(refs.headG) refs.headG.rotation.z = barking?0.2:(sneaking?-0.1:Math.sin(t*0.0025)*0.05);
@@ -1134,11 +1232,14 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb){
     // or the bob would compound every frame instead of oscillating around one baseline
     // see dog-driver: the bound is what makes the airborne part of a gallop legible.
     // A hopper already bounds by nature, so it gets a bigger one.
-    const bound = g.bound*wildLegLen*(hop?0.75:0.42)*Math.max(0, Math.sin(wildLegPhase));
+    const bound = g.bound*wildLegLen*(hop?0.75:(0.42+0.5*gal))*Math.max(0, Math.sin(wildLegPhase))*(1-wildLeapAmt);
+    const flex  = gal*0.16*Math.sin(wildLegPhase - Math.PI*0.5)*(1-wildLeapAmt);
     refs.bodyG.position.y = wildBodyBaseY
-      + Math.abs(Math.sin(wildLegPhase))*clamp(speed*(hop?0.02:0.01),0,hop?0.3:0.12)
+      + Math.abs(Math.sin(wildLegPhase))*clamp(speed*(hop?0.02:0.01),0,hop?0.3:0.12)*(1-wildLeapAmt)
       + bound + (cp ? cp.rise*wildLegLen : 0);
-    refs.bodyG.rotation.z = cp ? cp.pitch : 0;
+    let pitch = (cp ? cp.pitch : 0) + flex;
+    if(lp) pitch = lerp(pitch, lp.pitch, wildLeapAmt);
+    refs.bodyG.rotation.z = pitch;
   }
 }
 
@@ -1648,6 +1749,7 @@ function setDog(params){
 let legPhase = 0;
 let crouchAmt = 0;
 let climbAmt = 0;
+let leapAmt = 0;
 let dogLegLen = 0.4;     // hip pivot height above ground, WORLD units -- see measureLegLen
 
 /* The shared rig sizes itself directly in world units via g.scale.setScalar(p.size)
@@ -1684,7 +1786,7 @@ function dogShadowRadius(){ return dogLegLen*1.25; }
 function spawnDog(params){
   setDog(params);
   dog.scale.multiplyScalar(TRAIL_DOG_SCALE);
-  legPhase = 0; crouchAmt = 0; climbAmt = 0;
+  legPhase = 0; crouchAmt = 0; climbAmt = 0; leapAmt = 0;
   dogLegLen = measureLegLen();
 }
 
@@ -1713,7 +1815,7 @@ function dogRunMul(){ return STATS.run / STATS.walk; }
 /* Called once per frame with the resolved ground height under the dog's feet (from
    terrain.js) and the current motion state. Everything below only touches `dog`/`R`,
    the live bindings runtime.js exports — never rebuilds geometry. */
-function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb){
+function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise){
   if(!dog || !R) return;
   const size = P ? P.size : 1;
   // dog.position is in SCENE space, unlike dog.scale -- shrinking the group above
@@ -1729,18 +1831,29 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb){
      picking those two independently is what made the old rig skate. A sneaking pup takes
      shorter, quicker steps: a lower stride ratio, not a slower phase, or it slides again. */
   const g = gaitStep(dogLegLen, speed, dt, sneaking ? {maxRatio:1.05, cadence:2.9} : null);
-  legPhase += g.dPhase;
   const swing = g.swing;
 
-  // climb blends OVER the walk cycle rather than replacing it, so a scramble that starts
-  // mid-stride doesn't snap the legs to a new pose
+  /* Leap wins over climb, and both blend OVER the walk cycle rather than replacing it,
+     so a jump that starts mid-stride doesn't snap the legs to a new pose. The leap also
+     FREEZES the cycle (see gait.js): with no ground to push against there is nothing for
+     a swinging leg to be locked to, so continuing to cycle is just the airborne form of
+     the paw-slide. Snappier easing than the climb -- a leap is a sudden commitment. */
+  leapAmt  = lerp(leapAmt,  clamp(leap||0, 0, 1),  1-Math.pow(0.000002,dt));
   climbAmt = lerp(climbAmt, clamp(climb||0, 0, 1), 1-Math.pow(0.0001,dt));
+  const lp = leapAmt  > 0.002 ? leapPose(leapAmt, rise||0, R.legs.length) : null;
   const cp = climbAmt > 0.002 ? climbPose(climbAmt, t, R.legs.length) : null;
 
+  legPhase += g.dPhase*(1 - (lp ? lp.freeze : 0));
+
+  /* Sprinting switches the FOOTFALL ORDER, not just the tempo: hind pair together, then
+     fore pair, with a lead leg in each. Measured against this pup's own walk and run
+     stats so a fast little dog and a slow big one both gallop at their own top end. */
+  const gal = gallopAmount(speed, dogTopSpeed(), dogTopSpeed()*dogRunMul());
   R.legs.forEach((leg,i)=>{
-    const phase=(i%2?Math.PI:0)+(i>1?Math.PI*0.5:0);
-    const walkZ = Math.sin(legPhase+phase)*swing;
-    leg.rotation.z = cp ? lerp(walkZ, cp.legs[i], climbAmt) : walkZ;
+    let z = legSwingValue(i, legPhase, gal)*swing;
+    if(cp) z = lerp(z, cp.legs[i], climbAmt);
+    if(lp) z = lerp(z, lp.legs[i], leapAmt);
+    leg.rotation.z = z;
   });
   if(R.tail){
     R.tail.rotation.y = Math.sin(t*(sneaking?0.004:0.012))*(sneaking?0.15:0.5)
@@ -1759,9 +1872,16 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb){
        covered with no paw down; without lifting the body for it, a gallop would read as
        a fast trot whose feet mysteriously outrun their own reach. One hump per stride,
        scaled by the leg so it stays proportionate on any pup. */
-    const bound = g.bound*dogLegLen*0.42*Math.max(0, Math.sin(legPhase));
-    R.bodyG.position.y = R.bodyBaseY + bob + bound + (cp ? cp.rise*dogLegLen : 0);
-    R.bodyG.rotation.z = cp ? cp.pitch : 0;
+    /* A gallop is a series of little leaps, so the bound grows with it, and the spine
+       flexes: the body pitches nose-up as the hind legs drive and nose-down as the
+       forelegs catch. Half a cycle out of phase with the bound, which is what makes the
+       two read as one motion rather than two overlaid wobbles. */
+    const bound = g.bound*dogLegLen*(0.42 + 0.5*gal)*Math.max(0, Math.sin(legPhase))*(1-leapAmt);
+    const flex  = gal*0.16*Math.sin(legPhase - Math.PI*0.5)*(1-leapAmt);
+    R.bodyG.position.y = R.bodyBaseY + bob*(1-leapAmt) + bound + (cp ? cp.rise*dogLegLen : 0);
+    let pitch = (cp ? cp.pitch : 0) + flex;
+    if(lp) pitch = lerp(pitch, lp.pitch, leapAmt);
+    R.bodyG.rotation.z = pitch;
   }
 }
 
@@ -1792,6 +1912,16 @@ function setYaw(v){ setDogYaw(v); }
 
 let mesh = null, tex = null, baseOpacity = 0.34;
 
+/* How far above the surface the blob floats. This is NOT an arbitrary nudge: world.js
+   stacks the trail's six ribbon layers at fixed offsets above the graded profile --
+   outline 0.012, shoulder 0.02, tread 0.05, junction pad 0.06, inner 0.08, dashes 0.09 --
+   and standingY() returns the profile itself, so a shadow lifted by less than 0.09 is
+   embedded IN that stack and z-fights whichever layer it lands on. (0.06, the old value,
+   was exactly the junction-pad offset, which is why the flicker was worst at junctions.)
+   Clearing the tallest layer with a little margin puts it unambiguously on top. These
+   offsets are in world units and do not scale, so neither does this. */
+const SHADOW_LIFT = 0.115;
+
 /* Soft-edged radial blob. Wrapped because the 2D canvas is the one browser API this
    file needs and headless harnesses stub it loosely -- a hard-edged fallback disc is a
    perfectly acceptable degradation, an exception during world build is not. */
@@ -1821,13 +1951,15 @@ function ensureShadow(){
       color: tex ? 0xffffff : 0x000000,
       transparent: true,
       opacity: baseOpacity,
-      /* depthWrite off so the blob never occludes the terrain it lies on, and
-         polygonOffset so it wins the z-fight against a tread it is sitting flush with
-         instead of strobing along the trail. */
+      /* depthWrite off so the blob never occludes the terrain it lies on, and a firm
+         polygonOffset so it wins the depth comparison outright. -2 was not enough: the
+         far plane on a kilometres-wide map spreads the depth buffer thin, and at that
+         precision a quad a few centimetres above the ground is the SAME depth value as
+         the ground. Hence the strobing. See SHADOW_LIFT for the other half of the fix. */
       depthWrite: false,
       polygonOffset: true,
-      polygonOffsetFactor: -2,
-      polygonOffsetUnits: -2,
+      polygonOffsetFactor: -8,
+      polygonOffsetUnits: -8,
     });
     if(tex) mat.map = tex;
     mesh = new THREE.Mesh(new THREE.PlaneGeometry(1,1), mat);
@@ -1855,13 +1987,132 @@ function updateShadow(x, z, groundY, jumpY, radius, visible){
   // aim at rather than vanishing exactly when it is most useful
   const fade = clamp(1 - h/(r*7), 0.18, 1);
   const grow = clamp(1 + h/(r*9), 1, 1.5);
-  m.position.set(x, groundY + 0.06, z);
+  m.position.set(x, groundY + SHADOW_LIFT, z);
   m.scale.set(r*2*grow, r*2*grow, 1);
   m.material.opacity = baseOpacity*fade;
 }
 
+// test seam: `const` does not survive the smoke harness's eval boundary (see main.js's
+// climbSlowFactor for the same pattern)
+function shadowLift(){ return SHADOW_LIFT; }
 function setShadowVisible(v){ const m = ensureShadow(); if(m) m.visible = !!v; }
 function getShadow(){ return mesh; }
+
+/* ==== src/trails/noise-ring.js ==== */
+/* The noise ring: how far away wildlife can hear you, drawn on the ground around you.
+
+   Sneaking already worked -- critters.js scales each animal's spook radius by a noise
+   factor (barking 2.4x, sneaking 0.34x, walking 0.55x rising to ~1.7x at a sprint) -- but
+   none of that was visible. You pressed sneak, something felt different, and the only
+   feedback was whether an animal bolted, which arrives exactly too late to act on. The
+   button was a guess with a delayed, binary answer.
+
+   Drawing the radius turns it into a decision you can make in advance: you can SEE the
+   ring pull in when you crouch and swell when you break into a run, and you can see
+   whether the deer ahead is inside it before you take another step.
+
+   It is deliberately the PLAYER's ring, not a particular animal's. Each species has its
+   own spook radius and drawing all of them would be a mess of overlapping circles; what
+   the player controls is the multiplier, so the ring shows that multiplier against a
+   representative radius. The number on the ground is honest for a typical animal and the
+   right shape for every one of them.
+
+   Drawn as a painted BAND -- a thin annulus of triangles, both edges sampled onto the
+   terrain -- and not as a line loop, which is what the first version did and why it read
+   as broken or absent. Two things were wrong with the line. WebGL ignores `linewidth`, so
+   a LineBasicMaterial is always exactly one pixel no matter what you ask for: at a 27 m
+   radius that is a hairline drawn over busy toon-shaded terrain. And with only 64 samples
+   the segments were 2.7 m long, long enough to tunnel straight through the terrace risers
+   they spanned -- measured on the default map, 17% of the loop was underground at any
+   moment. A one-pixel line that is also 17% missing is not an indicator.
+
+   A band fixes both: it has real width in metres so it scales with the view, and because
+   every vertex on BOTH edges is placed on the terrain it drapes over risers instead of
+   cutting through them. Rebuilt every frame -- a few hundred vertices is nothing, and it
+   means the ring needs no invalidation logic when the ground under it changes. */
+
+
+
+const SEGS = 192;           // ~0.9 m of arc at a 27 m radius; short enough to drape
+const LIFT = 0.13;          // clears the trail ribbon stack, same reasoning as shadow.js
+
+let ring = null, geom = null, mat = null;
+let shownR = 0;             // eased radius, so state changes glide rather than snap
+
+/* Colour by how loud you are, because that is the thing being communicated. Green when
+   you are quiet enough to approach, amber at a walk, red when you are broadcasting. */
+const QUIET = 0x4f9d4f, WALK = 0xd8922e, LOUD = 0xc4442e;
+
+function ensureRing(){
+  if(ring) return ring;
+  try{
+    geom = new THREE.BufferGeometry();
+    // two vertices per angular step: inner edge, outer edge
+    geom.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(SEGS*2*3), 3));
+    const idx = [];
+    for(let i=0;i<SEGS;i++){
+      const a = i*2, b = a+1, c = ((i+1)%SEGS)*2, d = c+1;
+      idx.push(a, b, d, a, d, c);
+    }
+    geom.setIndex(idx);
+    mat = new THREE.MeshBasicMaterial({
+      color: WALK, transparent:true, opacity:0.55,
+      depthWrite:false, side:THREE.DoubleSide,
+      // same reasoning as shadow.js: a surface lying on the ground needs a firm depth
+      // bias or it strobes against the ground it is lying on
+      polygonOffset:true, polygonOffsetFactor:-8, polygonOffsetUnits:-8,
+    });
+    ring = new THREE.Mesh(geom, mat);
+    ring.frustumCulled = false;
+    ring.renderOrder = 3;
+    ring.name = 'noiseRing';
+    scene.add(ring);
+  }catch(err){
+    ring = null;
+  }
+  return ring;
+}
+
+/* noise:  critters.js's own multiplier for the current state (see updateCritters)
+   baseR:  a representative spook radius for this map's wildlife
+   groundAt: standingY, passed in so this module needs no world.js import */
+function updateNoiseRing(dt, px, pz, noise, baseR, groundAt, visible){
+  const r = ensureRing();
+  if(!r) return;
+  r.visible = !!visible;
+  if(!visible) return;
+
+  const target = clamp(baseR*noise, 1.5, 400);
+  // ease, but converge fast enough that crouching feels like a response, not a delay
+  shownR = shownR > 0 ? lerp(shownR, target, 1-Math.pow(0.004, dt)) : target;
+
+  // band width grows with the circle so it stays readable at any radius, with a floor so
+  // a tight sneaking ring does not thin away to nothing
+  const half = clamp(shownR*0.045, 0.30, 1.6)*0.5;
+  const arr = geom.attributes.position.array;
+  for(let i=0;i<SEGS;i++){
+    const a = i/SEGS*Math.PI*2, ca = Math.cos(a), sa = Math.sin(a);
+    for(let e=0;e<2;e++){
+      const rr = shownR + (e ? half : -half);
+      const x = px + ca*rr, z = pz + sa*rr;
+      const o = (i*2+e)*3;
+      arr[o]   = x;
+      arr[o+1] = groundAt(x, z) + LIFT;
+      arr[o+2] = z;
+    }
+  }
+  geom.attributes.position.needsUpdate = true;
+  if(geom.computeBoundingSphere) geom.computeBoundingSphere();
+
+  // colour tracks the multiplier, not the absolute radius, so it means the same thing
+  // on a map full of jumpy deer as on one full of bold bears
+  mat.color.setHex(noise <= 0.4 ? QUIET : (noise >= 1.2 ? LOUD : WALK));
+  mat.opacity = noise <= 0.4 ? 0.7 : 0.5;
+}
+
+function setNoiseRingVisible(v){ const r = ensureRing(); if(r) r.visible = !!v; }
+function getNoiseRing(){ return ring; }
+function noiseRingRadius(){ return shownR; }
 
 /* ==== src/trails/terrain.js ==== */
 /* Terraced terrain, sourced from a real DEM via data/world_bundle.js — NOT from Z
@@ -2425,7 +2676,7 @@ function orbitPoint(x, y, z, dist){
 /* Teleport the camera into position with no easing: trailhead placement, mode switches,
    and the lobby preview, where springing in from wherever the camera happened to be
    reads as a swoop nobody asked for. */
-function snapChaseCam(px, pz, groundY, vertScale, dist = 13){
+function snapChaseCam(px, pz, groundY, vertScale, dist = 10){
   const d = dist*zoom;
   rigY = groundY; rigVY = 0;
   lookY = groundY + 1.4; lookVY = 0;
@@ -2443,7 +2694,7 @@ function snapChaseCam(px, pz, groundY, vertScale, dist = 13){
      jumpY      hop offset, already included in the avatar's rendered height
      speed      current ground speed, m/s -- used only for the framing nudge below
      vertScale  world.js's exaggeration, needed to sample terrain under the rig itself */
-function updateChaseCam(dt, px, pz, groundY, jumpY, speed, vertScale, dist = 11){
+function updateChaseCam(dt, px, pz, groundY, jumpY, speed, vertScale, dist = 8.5){
   if(!primed){ snapChaseCam(px, pz, groundY, vertScale, dist); return; }
 
   /* Rig altitude. cameraGroundY is already the terrain smoothed over a few cells, so
@@ -2484,6 +2735,41 @@ function updateChaseCam(dt, px, pz, groundY, jumpY, speed, vertScale, dist = 11)
   const clearance = cameraGroundY(camera.position.x, camera.position.z, vertScale) + 1.6;
   if(camera.position.y < clearance){
     camera.position.y = lerp(camera.position.y, clearance, 1 - Math.pow(0.0005, dt));
+  }
+
+  /* LINE OF SIGHT to the avatar, which is a different problem from clearance above.
+
+     Clearance only asks whether the camera itself is buried. Walking DOWN a steep slope
+     the camera is perfectly clear -- it is standing on the hillside above, in open air --
+     and yet the brow of that same hill sits squarely between it and the pup, so you
+     descend the whole slope watching the back of a ridge. The rig was never told to care
+     about the ground BETWEEN the two points.
+
+     So sample the segment camera->look target and ask, at each step, how high the camera
+     would have to be for the sightline to pass over the ground there. Take the worst
+     answer. The algebra is just similar triangles: the line reaches y_cam + (y_look -
+     y_cam)*s at fraction s, and requiring that to clear g gives
+     y_cam >= (g - y_look*s)/(1 - s). Samples very near the target are skipped -- there
+     1-s tends to zero and the requirement explodes, and ground that close to the avatar
+     is the avatar's own bench, not an occluder.
+
+     Rises fast, settles slowly, same reasoning as clearance: popping up to see is
+     worth it, dropping back down the instant a bump passes is just jitter. */
+  {
+    const N = 6;
+    let needY = camera.position.y;
+    for(let i=1;i<N;i++){
+      const s = i/N;
+      if(s > 0.75) break;
+      const sx = lerp(camera.position.x, px, s);
+      const sz = lerp(camera.position.z, pz, s);
+      const gy = cameraGroundY(sx, sz, vertScale) + 0.8;   // a little headroom over the brow
+      const req = (gy - lookY*s)/(1 - s);
+      if(req > needY) needY = req;
+    }
+    if(needY > camera.position.y){
+      camera.position.y = lerp(camera.position.y, needY, 1 - Math.pow(0.0008, dt));
+    }
   }
 
   camLook.x = lerp(camLook.x, px, 1 - Math.pow(0.0005, dt));
@@ -3278,17 +3564,30 @@ function floatingLabelTex(name,em){
   const t=new THREE.CanvasTexture(c);t.minFilter=THREE.LinearFilter;return t;
 }
 /* A camera-facing Sprite, not a flat ground plane — this is what makes it readable from
-   far away: it billboards automatically (three.js does this for free with Sprite) and
-   depthTest is off so trees, rocks, or terrain between you and the area never hide it,
-   the same way a landmark label works in most open-world games. */
+   far away: it billboards automatically (three.js does this for free with Sprite).
+
+   depthTest is ON, which it was not. With it off, every area name floated on top of the
+   whole scene, so a meadow two ridges away read as though it were in front of the hill
+   you were looking at -- the labels stopped being landmarks and became a HUD that
+   happened to move. Occluding them restores the depth cue: if you cannot see the place,
+   you cannot see its name, and cresting a rise reveals both together.
+
+   `label.baseScale` is stashed for world.js's per-frame pass, which caps how large the
+   sprite may get up close. A Sprite is sized in WORLD units, so its on-screen size grows
+   without bound as you approach -- walk up to a landmark and the name grows past the
+   viewport, which is the "clips off screen" problem. The base size here is also smaller
+   than it was (a 0.62 multiplier and a lower ceiling); it was competing with the terrain
+   for attention. */
 function buildFloatingLabel(name,em,width,topY){
   const tex=floatingLabelTex(name,em);
-  const mat=new THREE.SpriteMaterial({map:tex,transparent:true,depthTest:false,depthWrite:false});
+  const mat=new THREE.SpriteMaterial({map:tex,transparent:true,depthTest:true,depthWrite:false});
   const spr=new THREE.Sprite(mat);
-  const w=clamp(width,7,20);
+  const w=clamp(width*0.62,4.5,12);
   spr.scale.set(w,w*0.25,1);
   spr.position.set(0,topY,0);
   spr.renderOrder=999;
+  spr.userData.baseScale=w;      // read by world.js's updateAreaLabels
+  spr.userData.areaLabel=true;
   return spr;
 }
 function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
@@ -4068,6 +4367,10 @@ function nearestTrail(x,z){
 
 
 let GRAPH=null, TRAILHEADS=[], POIS=[], AREAS=[], WATER=[];
+/* Every floating area name currently in the scene. Collected at build time so the
+   per-frame size cap does not have to walk the whole graph looking for sprites.
+   Cleared IN PLACE on rebuild -- see the module header on shared mutable arrays. */
+const AREA_LABELS=[];
 let backdropG=null;             // horizon ring, re-centred on the camera by main.js
 let bboxW={minx:0,maxx:0,minz:0,maxz:0};
 let EXTRA=[];                   // raw GeoJSON FeatureCollections dropped in-session
@@ -4332,6 +4635,40 @@ function hasBundle(){ return !!BUNDLE; }
 function setContourStep(m){ STEP_M=clamp(Number(m)||3, 0.5, 20); rebuildWorld(); }
 function getContourStep(){ return STEP_M; }
 function getSignCount(){ return SIGN_COUNT; }
+function getAreaLabels(){ return AREA_LABELS; }
+
+/* Cap how big a floating area name may get on screen.
+
+   A three.js Sprite is sized in WORLD units, so its apparent size is proportional to
+   scale/distance -- which grows without limit as you walk up to a landmark, until the
+   name is wider than the viewport and its ends are cut off. That is the "gets so close
+   it clips off screen" problem, and it cannot be fixed by choosing a smaller base size:
+   any fixed world size is too big at SOME distance.
+
+   So hold apparent size constant instead, below a near threshold: keep the world scale
+   proportional to distance, which makes scale/distance -- the thing the eye actually
+   sees -- constant. Above the threshold the sprite behaves normally and recedes with
+   distance like the landmark it labels. */
+const LABEL_HOLD_DIST = 26;
+function updateAreaLabels(camX, camY, camZ){
+  for(const spr of AREA_LABELS){
+    const base = spr.userData.baseScale || 6;
+    // world position: the sprite sits at a local offset inside its area group
+    const px = spr.parent ? spr.parent.position.x + spr.position.x : spr.position.x;
+    const py = spr.parent ? spr.parent.position.y + spr.position.y : spr.position.y;
+    const pz = spr.parent ? spr.parent.position.z + spr.position.z : spr.position.z;
+    const dist = Math.hypot(px-camX, py-camY, pz-camZ);
+    /* No floor on k. A floor would re-break the very guarantee this exists for: below it
+       the world scale stops tracking distance and apparent size starts climbing again.
+       Letting it go to zero is correct -- the label shrinks out of the way as you walk
+       into the place it names -- and the opacity fade below finishes the job so it bows
+       out instead of lingering as a speck. */
+    const k = Math.min(1, dist/LABEL_HOLD_DIST);
+    const w = base*k;
+    spr.scale.set(w, w*0.25, 1);
+    if(spr.material) spr.material.opacity = clamp((dist - 2.5)/4, 0, 1);
+  }
+}
 
 /* Tread width in real metres per path kind, hoisted out of rebuildWorld's PATH_STYLE
    because the terrain-carving pass needs the widths BEFORE the ribbon loop runs (it has
@@ -4531,7 +4868,11 @@ function rebuildWorld(){
   const groundYAt=(x,z)=>terrainY(x,z,VERT_SCALE);
 
   // areas (ground cover) before trails, matching draw order in the original
-  AREAS.forEach((a,ai)=>{ try{ const ag=buildArea(a,rng,groundYAt,nearestTrail,VERT_SCALE); ag.name='area:'+ai; worldG.add(ag); }catch(err){ console.warn('area skipped',a.name,err); } });
+  AREA_LABELS.length=0;
+  AREAS.forEach((a,ai)=>{ try{
+    const ag=buildArea(a,rng,groundYAt,nearestTrail,VERT_SCALE); ag.name='area:'+ai; worldG.add(ag);
+    ag.traverse(o=>{ if(o.userData && o.userData.areaLabel) AREA_LABELS.push(o); });
+  }catch(err){ console.warn('area skipped',a.name,err); } });
 
   // Path colour/texture follows the source file's own highway/kind tag (pathKind, in
   // geo.js): a footpath stays themed dirt, a service road reads as a distinct paved grey
@@ -4618,7 +4959,11 @@ function rebuildWorld(){
     const armOf=o=>{
       let ax=0,az=0,acc=0,i=1;
       while(i<o.pts.length&&acc<6){ax=o.pts[i][0]-n.p[0];az=o.pts[i][1]-n.p[1];acc=Math.hypot(ax,az);i++;}
-      return{label:o.e.name,dist:Math.round(o.e.lenM)+' m',angle:Math.atan2(az,ax)};
+      /* lenM is measured on the COMPACTED network, so it is world units, not metres --
+         at 1:5 a real 500 m trail measures 100. Signposts were printing that raw as
+         "100 m". Divide by the map scale so a signpost states the trail's real length,
+         which is the only reading that makes sense on a map advertising real trails. */
+      return{label:o.e.name,dist:Math.round(o.e.lenM/Math.max(1e-6,MAP_SCALE))+' m',angle:Math.atan2(az,ax)};
     };
     if(n.deg>=3){
       const arms=[],seen=new Set();
@@ -4924,6 +5269,34 @@ function bolt(c, px, pz){
 /* Per frame. `topSpeed` is the player's own top speed, so "how fast am I moving" is
    normalised against the animal you happen to be playing as -- a sprinting moose and a
    sprinting rabbit should be equally alarming. */
+/* How loud you are right now. Sneaking is the whole point of the mechanic, so it gets
+   the biggest single multiplier; barking overrides everything, because a bark should
+   always cost you the animal you were creeping up on.
+
+   Exported because the on-screen noise ring draws THIS number. Two copies of a rule the
+   player is being shown a picture of would drift apart, and the picture would quietly
+   start lying -- which is worse than not drawing it. */
+function playerNoise(speed, topSpeed, sneaking, barking){
+  const pace = clamp(speed/Math.max(0.1, topSpeed), 0, 1);
+  return barking ? 2.4 : (sneaking ? 0.34 : 0.55 + pace*1.15);
+}
+
+/* A representative spook radius for the wildlife actually on this map, so the ring means
+   something concrete rather than being a bare multiplier. Mean over the live population,
+   falling back to the theme roster before anything has spawned. */
+function typicalSpookRadius(){
+  if(CRITTERS.length){
+    let sum = 0;
+    for(const c of CRITTERS) sum += spookRadiusFor(c.key);
+    return sum/CRITTERS.length;
+  }
+  const keys = (THEME.wildlife||[]);
+  if(!keys.length) return 9;
+  let sum = 0;
+  for(const k of keys) sum += spookRadiusFor(k);
+  return sum/keys.length;
+}
+
 function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
   const rnd = Math.random;
   const S = getMapScale();
@@ -4935,11 +5308,7 @@ function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
     const dx = c.x - px, dz = c.z - pz;
     const dist = Math.hypot(dx, dz);
 
-    /* How loud you are right now. Sneaking is the whole point of the mechanic, so it
-       gets the biggest single multiplier; barking overrides everything, because a bark
-       should always cost you the animal you were creeping up on. */
-    const pace = clamp(speed/Math.max(0.1, topSpeed), 0, 1);
-    const noise = barking ? 2.4 : (sneaking ? 0.34 : 0.55 + pace*1.15);
+    const noise = playerNoise(speed, topSpeed, sneaking, barking);
     const spookR = spookRadiusFor(c.key)*noise;
     const noticeR = spookRadiusFor(c.key)*2.4;
 
@@ -5577,6 +5946,8 @@ function parsePupFile(data){
 
 
 
+
+
 /* Trail networks run to real kilometres; Pup City's camera (far=300, tuned for one city
    block) would clip most of a trail map. Extend it rather than touch the shared file. */
 // far: trail networks run to real kilometres; Pup City's far=300 (tuned for one city
@@ -5610,6 +5981,11 @@ const player = { x:0, z:0, y:0, vy:0, yaw:0, speed:0, dist:0, sneaking:false, ba
                  climbT:0, climbAmt:0 };
 const CLIMB_DUR = 0.42;    // seconds of scramble per step-up, refreshed on each new step
 const CLIMB_SLOW = 0.45;   // top-speed multiplier while scrambling
+/* Beyond this much turn, the auto-follow gives up rather than whipping the view round.
+   ~115 degrees: comfortably past a diagonal (45) and a hard strafe (90), so only a real
+   backpedal trips it. See the derivation at the call site. */
+const BACKPEDAL_ARC = 2.0;
+function backpedalArc(){ return BACKPEDAL_ARC; }   // test seam (const, see climbSlowFactor)
 /* Test seam. `const` bindings do not survive the smoke harness's eval boundary the way
    function declarations do (same reason getSignCount and getBigView exist), so the two
    climb tunables are readable through calls rather than asserted on directly. */
@@ -5631,6 +6007,13 @@ let avatarKey='';           // identity of whatever is currently built, for ensu
 
 function currentTopSpeed(){ return mode==='dog' ? dogTopSpeed() : topSpeedFor(wildKey); }
 function currentRunMul(){ return mode==='dog' ? dogRunMul() : 1.8; }
+/* The speed the noise model measures you against: the animal's FLAT-OUT speed, not its
+   walking speed. critters.js computes pace as speed/reference and clamps it to 1, so
+   passing the walking top speed meant pace hit 1.0 at a walk and a sprint could not be
+   any louder -- sneaking worked, but walking and running were identical to every animal
+   on the map. Invisible while the only feedback was whether a deer bolted; obvious the
+   moment the radius is drawn on the ground. */
+function noiseReference(){ return currentTopSpeed()*currentRunMul(); }
 
 /* ---------- avatar ----------
    ensureAvatar rebuilds geometry only when the *identity* changes; syncAvatar pushes
@@ -5663,16 +6046,24 @@ function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
   // eased 0..1: full while the scramble timer runs, decaying once it expires, so the
   // pose settles back into the walk instead of popping flat the instant the step is done
   const climb = player.climbT > 0 ? player.climbAmt : 0;
+  /* Airborne: 1 once the pup is clear of the ground, so the drivers can hold a leap
+     spread instead of running in mid-air. The threshold is a hair above zero because
+     `player.y` is exactly 0 while grounded (the gravity clamp guarantees it) -- anything
+     larger would miss the start of a hop, and anything smaller would flicker on the
+     frame it lands. `rise` is vertical velocity normalised, so the pose knows whether it
+     is still going up or already reaching for the landing. */
+  const leap = jumpY > 0.02 ? 1 : 0;
+  const rise = clamp(player.vy/7, -1, 1);
   let radius = 0.5;
   if(mode==='dog'){
     setDogPos(player.x, player.z);
     setYaw(player.yaw);
-    updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb);
+    updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise);
     radius = dogShadowRadius();
   }else{
     wildPos.set(player.x, 0, player.z);
     setWildYaw(player.yaw);
-    updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb);
+    updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise);
     radius = wildShadowRadius();
   }
   updateShadow(player.x, player.z, groundY, jumpY, radius, true);
@@ -5755,6 +6146,40 @@ function moveOffTrail(stepX, stepZ){
   if(tryMove(stepX, stepZ)) return;
   if(tryMove(stepX, 0)) return;
   tryMove(0, stepZ);
+}
+
+/* The one place that decides HOW a step is taken. Extracted from the loop so the rule
+   is testable on its own -- while it lived inline, a test could only reach moveOffTrail,
+   which is the branch, not the decision, and would have passed just as happily against
+   the bug this exists to prevent. */
+function movePlayer(stepX, stepZ){
+  const nt = nearestTrail(player.x, player.z);
+  /* `inCorridor` -- is the tread actually underfoot? This is the ONLY thing that may
+     bypass the step-up rule, and it uses the corridor's own half-width, the same measure
+     standingY uses to decide you are standing on the tread at all.
+
+     It used to be `nt.d < 1.5`, a soft "near a trail" band that also drives the walking
+     speed bonus. A narrow trail's half-width is 0.55 m, so everything from 0.55 to 1.5 m
+     counted as on-trail and skipped the step check -- including when the trail ran along
+     a clifftop and you stood at the bottom. One step in and standingY hauled you up the
+     whole cliff. On the default map there are over a thousand such approaches, the worst
+     a 9 m wall. Granting free vertical movement was never what proximity meant. */
+  const inCorridor = nt.d <= nt.hw;
+  if(inCorridor &&
+     Math.abs(standingY(player.x+stepX, player.z+stepZ) - standingY(player.x, player.z)) <= stepUpLimit()){
+    /* On the tread, movement stays frictionless: the graded corridor is a continuous,
+       walkable bench by construction (terrain.js's gradeProfile), so there is nothing to
+       climb, and preserving absolute height on the way down would turn every graded
+       descent ramp into a series of little falls.
+
+       The height guard covers the 0.15% of corridor where grading did not fully win (a
+       terrace riser surviving right at the lip): there, fall through to the physical path
+       rather than gliding up a wall just because a tread is nominally underfoot. */
+    player.x+=stepX; player.z+=stepZ;
+    return 'glide';
+  }
+  moveOffTrail(stepX, stepZ);
+  return 'physical';
 }
 
 /* ---------- input: trail-owned, not core/input.js (that module is wired directly to
@@ -5843,6 +6268,8 @@ function loop(t){
     // and cutting to a blank panel would throw that away. The minimap keeps drawing here
     // too, now that it's part of the startup/selection screen and not just the play HUD.
     if(avatarKey) syncAvatar(dt, t, 0, 0, player.sneaking, false, false);
+    setNoiseRingVisible(false);        // nothing to sneak up on until the walk starts
+    updateAreaLabels(camera.position.x, camera.position.y, camera.position.z);
     updateMinimap(player.x, player.z, player.yaw);
     renderer.render(scene,camera);
     return;
@@ -5865,8 +6292,25 @@ function loop(t){
   const moving=mag>0.03&&(wx||wz);
 
   const nt = nearestTrail(player.x,player.z);
-  const onTrail = nt.d<1.5;
-  const surf = onTrail ? 1 : 0.6;
+  /* TWO different questions, which used to share one answer and caused the cliff bug.
+
+     `inCorridor` -- is the tread actually underfoot? This is the ONLY thing that may
+     bypass the step-up rule, and it has to use the corridor's own half-width, which is
+     what standingY uses to decide you are standing on the tread at all.
+
+     `nearTrail` -- is walking easier here? A soft 1.5 m band, used only for the speed
+     bonus. It has no business granting free vertical movement.
+
+     Conflating them let you walk up a cliff. A narrow trail's half-width is 0.55 m, so
+     the band from 0.55 to 1.5 m counted as "on trail" and skipped the step check --
+     including when the trail was on the clifftop and you were on the beach below.
+     One step into the corridor and standingY lifted you the full height of the cliff.
+     Measured on the default map, treads sit more than one step-up above the local
+     terrain at 0.15% of corridor samples (max 1.70u, over two full terrace steps), which
+     is exactly the set of cliff-edge spots where this was reachable. */
+  const inCorridor = nt.d <= nt.hw;
+  const nearTrail = nt.d < 1.5;
+  const surf = nearTrail ? 1 : 0.6;
   if(player.climbT > 0) player.climbT = Math.max(0, player.climbT - dt);
   // scrambling drags the top speed down; it does NOT touch the jump, which is what makes
   // "jump the big steps" the faster line through broken ground
@@ -5877,25 +6321,31 @@ function loop(t){
     const L=Math.hypot(wx,wz);
     const stepX=wx/L*player.speed*dt, stepZ=wz/L*player.speed*dt;
     const before={x:player.x, z:player.z};
-    if(onTrail){
-      /* On the tread, movement stays exactly as it was: the graded corridor is a
-         continuous, walkable bench by construction (terrain.js's gradeProfile), so there
-         is nothing to climb and clamping against terrain here would only fight the
-         grading. Walking a trail should feel frictionless -- that IS the trail. */
-      player.x+=stepX; player.z+=stepZ;
-    }else{
-      moveOffTrail(stepX, stepZ);
-    }
+    movePlayer(stepX, stepZ);
     player.dist += Math.hypot(player.x-before.x, player.z-before.z);
     const targetYaw=Math.atan2(-wz/L,wx/L);
     let dy=targetYaw-player.yaw; while(dy>Math.PI)dy-=Math.PI*2; while(dy<-Math.PI)dy+=Math.PI*2;
     player.yaw+=dy*Math.min(1,dt*10);
-    // convenience auto-follow: swing the camera in behind the direction you're walking,
-    // but only when nobody's hand is on it -- otherwise every step yanks the view back
-    // out from under a manual look-drag, which is worse than not auto-following at all.
-    if(performance.now()-lastLookT>900){
-      const headYaw=Math.atan2(wx/L,wz/L);
-      let dc=headYaw-getCamYaw(); while(dc>Math.PI)dc-=Math.PI*2; while(dc<-Math.PI)dc+=Math.PI*2;
+    /* Convenience auto-follow: swing the camera in behind the direction you're walking,
+       but only when nobody's hand is on it -- otherwise every step yanks the view back
+       out from under a manual look-drag, which is worse than not auto-following at all.
+
+       WHY THIS USED TO SHAKE ON THE DOWN ARROW. The correction was measured in WORLD
+       space: turn the camera toward atan2(wx, wz). But wx/wz are themselves derived from
+       the camera yaw, so the camera was chasing a target that moved with it. Working the
+       algebra through, the world heading is exactly camYaw + atan2(-ix, -iz) -- meaning
+       the correction depends ONLY on which keys are down, and walking straight back gives
+       a constant PI no matter where the camera already points. The camera could never
+       converge: it span forever, and at the +-PI wrap the sign flipped frame to frame,
+       which is the shake. Measuring in input space instead removes the feedback loop and
+       the wrap in one go.
+
+       Backing up is then simply excluded. Pressing "back" means "walk toward the camera";
+       whipping the view around 180 degrees to get behind the pup would point it exactly
+       where the player just chose not to look, and it is the one input with no stable
+       answer anyway. Hold the view still and let the pup walk toward you. */
+    const dc = Math.atan2(-ix, -iz);      // input direction, relative to the camera
+    if(performance.now()-lastLookT>900 && Math.abs(dc) < BACKPEDAL_ARC){
       addCamYaw(dc*Math.min(1,dt*2.2));
     }
   }
@@ -5907,10 +6357,18 @@ function loop(t){
 
   const groundY = syncAvatar(dt,t,player.y,player.speed,player.sneaking,player.barkT>0,run);
 
-  updateChaseCam(dt, player.x, player.z, groundY, player.y, player.speed, getVertScale(), 11);
+  /* Boom length. Pulled in from 11 to 8.5: the pup is only about a metre nose to tail at
+     TRAIL_DOG_SCALE, and from 11 m back it was a small shape in a large landscape. */
+  updateChaseCam(dt, player.x, player.z, groundY, player.y, player.speed, getVertScale(), 8.5);
 
-  updateCritters(dt, t, player.x, player.z, player.speed, currentTopSpeed(),
+  updateCritters(dt, t, player.x, player.z, player.speed, noiseReference(),
                  player.sneaking, player.barkT>0);
+  /* Same call the critters just used, so the circle on the ground is the rule they are
+     actually being judged by rather than a second guess at it. */
+  updateNoiseRing(dt, player.x, player.z,
+                  playerNoise(player.speed, noiseReference(), player.sneaking, player.barkT>0),
+                  typicalSpookRadius(), standingY, true);
+  updateAreaLabels(camera.position.x, camera.position.y, camera.position.z);
   updateFX(dt, t);
   updateMinimap(player.x, player.z, player.yaw);
   updateTrailHud();
@@ -5991,8 +6449,9 @@ function showArrival(i){
   set('#arrTitle', 'You reached ' + th.name + '!');
   set('#arrSub', 'The ' + th.where + ' trailhead \u2014 rest here or head back out.');
   set('#arrScore', tripScore(st));
-  set('#arrDist', player.dist >= 1000
-      ? (player.dist/1000).toFixed(2)+' km' : Math.round(player.dist)+' m');
+  // same conversion as the HUD, or the summary would contradict the number the player
+  // watched tick up for the whole walk
+  set('#arrDist', formatTravelled(realMetres(player.dist)));
   set('#arrTime', Math.floor(secs/60)+':'+String(secs%60).padStart(2,'0'));
   set('#arrSeen', st.sightings);
   set('#arrSpooked', st.spooked);
@@ -6039,11 +6498,59 @@ function closeArrival(){
 /* Sightings / spooked tally plus the watch meter. Cheap enough to run every frame --
    it's four textContent writes and one style width -- and gating it behind a change
    check would cost more in bookkeeping than it saves. */
+/* World units -> real-world metres.
+
+   Positions are compacted by the world scale (World.setMapScale multiplies metres per
+   degree by it), so a world unit is `MAP_SCALE` real metres and every raw length in
+   src/trails is short by that factor. Elevations are NOT compacted -- they stay in true
+   metres -- which is exactly why this conversion has to be explicit rather than assumed.
+   At 1:5 a 500 m trail is 100 world units, so anything reporting a raw length as metres
+   is understating it fivefold. */
+function realMetres(u){ return u/Math.max(1e-6, getMapScale()); }
+
+/* Elevation is a real-world fact about the place, so it comes from the DEM in true
+   metres rather than from the terraced game surface -- the terracing quantises height to
+   the contour step, and reporting "you are on band 14" as an altitude would be inventing
+   precision the player can't use. World.heightAt already takes scaled world coordinates
+   and returns absolute metres above sea level. */
+function elevationFt(x, z){
+  const W = getWorld();
+  if(!W || typeof W.heightAt !== 'function') return null;
+  return W.heightAt(x, z)*3.28084;
+}
+
+function formatTravelled(m){
+  return m >= 1000 ? (m/1000).toFixed(2)+' km' : Math.round(m)+' m';
+}
+
 function updateTrailHud(){
   const st = getCritterStats();
   const seen = $('#hudSeen'), oops = $('#hudSpooked'), meter = $('#watchMeter'), fill = $('#watchFill'), name = $('#watchName');
   if(seen) seen.textContent = '\u2728 ' + st.sightings;
   if(oops) oops.textContent = '\ud83d\udca8 ' + st.spooked;
+
+  const elev = $('#hudElev');
+  if(elev){
+    const ft = elevationFt(player.x, player.z);
+    elev.textContent = ft==null ? '\u26f0 \u2014' : '\u26f0 ' + Math.round(ft).toLocaleString() + ' ft';
+  }
+  const dist = $('#hudDist');
+  if(dist) dist.textContent = '\ud83d\udc63 ' + formatTravelled(realMetres(player.dist));
+  const noise = $('#hudNoise');
+  if(noise){
+    /* NO realMetres() here, and that is not an oversight. Positions compact with world
+       scale, so travelled distance must be converted -- but a spook radius is the gap
+       between the pup and an animal, both of which stay true size at any scale, and
+       critters.js deliberately leaves those radii unscaled (see wanderTarget's note on
+       why the *S applies to positions and not to the radii). Converting here made the
+       chip read 800 m at 1:32 for a deer that can hear you from 25. The number IS the
+       ring's radius, so the chip and the circle can never disagree. */
+    const r = noiseRingRadius();
+    noise.textContent = '\ud83d\udd0a ' + (r>=1000 ? (r/1000).toFixed(1)+' km' : Math.round(r)+' m');
+    const n = playerNoise(player.speed, noiseReference(), player.sneaking, player.barkT>0);
+    noise.classList.toggle('quiet', n <= 0.4);
+    noise.classList.toggle('loud', n >= 1.2);
+  }
   if(meter){
     const w = st.watching;
     meter.classList.toggle('on', !!w);

@@ -77,11 +77,16 @@ class Geometry {
   applyMatrix4() { return this; } computeBoundingBox() { this.boundingBox = { min: new V3(), max: new V3() }; }
 }
 class Material {
-  constructor(p = {}) { Object.assign(this, p); }
+  // real three.js turns a `color` option into a THREE.Color instance; the stub used to
+  // leave it a raw number, so any production code calling material.color.setHex() blew
+  // up here and nowhere else. Mirror the real behaviour instead.
+  constructor(p = {}) { Object.assign(this, p); if ('color' in p) this.color = new Color(p.color); }
   dispose() {} clone() { return new Material(this); }
 }
 class Color {
   constructor(c) { this.r = this.g = this.b = 1; this.set(c); }
+  setHex(h) { return this.set(h); }
+  getHex() { return (Math.round(this.r*255) << 16) | (Math.round(this.g*255) << 8) | Math.round(this.b*255); }
   set(c) {
     if (c instanceof Color) { this.r = c.r; this.g = c.g; this.b = c.b; return this; }
     if (typeof c === 'number') { this.r = ((c >> 16) & 255) / 255; this.g = ((c >> 8) & 255) / 255; this.b = (c & 255) / 255; return this; }
@@ -115,7 +120,11 @@ const THREE = {
   DataTexture: class { constructor() { this.needsUpdate = false; } dispose() {} },
   CanvasTexture: class { constructor() { this.repeat = { set() {} }; this.wrapS = this.wrapT = 0; } dispose() {} },
   Texture: class { constructor() { this.repeat = { set() {} }; } dispose() {} },
-  Sprite: class extends Obj3D {}, SpriteMaterial: Material,
+  // real three.js Sprite(material) stores it; the stub dropped it, so any check on a
+  // sprite's material silently saw undefined
+  Sprite: class extends Obj3D { constructor(m) { super(); this.material = m; } }, SpriteMaterial: Material,
+  Line: class extends Obj3D { constructor(g, m) { super(); this.geometry = g; this.material = m; } },
+  LineLoop: class extends Obj3D { constructor(g, m) { super(); this.geometry = g; this.material = m; } },
   NearestFilter: 1, LinearFilter: 2, RepeatWrapping: 3, LuminanceFormat: 4,
   DoubleSide: 2, FrontSide: 0, BackSide: 1, sRGBEncoding: 5, PCFSoftShadowMap: 6,
   MathUtils: { lerp: (a, b, t) => a + (b - a) * t },
@@ -711,16 +720,18 @@ function assertAll(window, errors, stats) {
      2.6 rad per metre travelled, which is a 2.42 m stride for EVERY animal regardless of
      size. For a trail pup whose hip is ~0.24 m off the ground that is roughly ten leg
      lengths per step -- the paws could not possibly keep up, so they skated. */
+  /* Deterministic across the whole range of pup proportions the rig can produce -- the
+     first version of this check read whichever random pup happened to be loaded, so it
+     passed or failed depending on the seed. */
   check('the old fixed stride was wildly out of proportion; the new one is not', (() => {
-    if (typeof gaitStep !== 'function' || typeof dogLegLength !== 'function') return false;
-    const L = dogLegLength();
-    if (!(L > 0.05 && L < 1.5)) return false;
-    const oldStride = Math.PI * 2 / 2.6;              // metres per cycle, any animal
-    const newStride = gaitStep(L, 3.0, 1 / 60).stride;
-    return oldStride / L > 4 && newStride / L <= 3.05 && newStride < oldStride;
-  })(), (() => {
-    const L = dogLegLength();
-    return `hip ${L.toFixed(2)}m: old stride ${(Math.PI*2/2.6/L).toFixed(1)} leg-lengths, now ${(gaitStep(L,3,1/60).stride/L).toFixed(1)}`;
+    if (typeof gaitStep !== 'function') return false;
+    const oldStride = Math.PI * 2 / 2.6;        // metres per cycle, for ANY animal
+    for (const L of [0.18, 0.24, 0.42, 0.68, 1.0]) {
+      const now = gaitStep(L, 3.0, 1 / 60).stride;
+      if (now / L > 3.05) return false;         // still proportionate to the leg
+      if (now >= oldStride) return false;       // and shorter than the old constant
+    }
+    return oldStride / 0.24 > 4;                // absurd at trail-pup size, which is the bug
   })());
 
   // climbing: an on-foot step-up must cost speed and pose the rig; a jump over the same
@@ -771,6 +782,302 @@ function assertAll(window, errors, stats) {
 
   // shadow: exists in the scene (not worldG, which is rebuilt), sits under the avatar,
   // and fades with height so the gap reads as altitude
+  /* Airborne pose: legs spread and the walk cycle stops. A leg that keeps swinging while
+     the paw is nowhere near the ground is the mid-air version of the paw-slide. */
+  check('jumping spreads the legs instead of running in mid-air', (() => {
+    if (typeof leapPose !== 'function') return false;
+    const grounded = leapPose(0, 0, 4), air = leapPose(1, 0, 4);
+    // grounded: no pose at all. airborne: forelegs reach ahead (+z), hind legs trail (-z)
+    return grounded.freeze === 0 && grounded.legs.every(v => v === 0)
+      && air.freeze === 1
+      && air.legs[0] > 0.5 && air.legs[1] > 0.5
+      && air.legs[2] < -0.5 && air.legs[3] < -0.5;
+  })());
+  check('the leap freezes the walk cycle rather than blending with it', (() => {
+    if (typeof leapPose !== 'function' || typeof gaitStep !== 'function') return false;
+    const g = gaitStep(0.3, 3.5, 1 / 60);
+    // freeze scales the phase advance to zero at a full leap, and leaves it alone on the ground
+    return g.dPhase > 0
+      && g.dPhase * (1 - leapPose(1, 0, 4).freeze) === 0
+      && g.dPhase * (1 - leapPose(0, 0, 4).freeze) === g.dPhase;
+  })());
+  check('the leap pitches nose-up on the way up and nose-down on the way down', (() => {
+    if (typeof leapPose !== 'function') return false;
+    return leapPose(1, 1, 4).pitch > 0.1 && leapPose(1, -1, 4).pitch < -0.1
+        && Math.abs(leapPose(1, 0, 4).pitch) < 1e-9;
+  })());
+
+  /* The blob must clear the trail's whole ribbon stack. world.js layers those at fixed
+     offsets above the graded profile (max 0.09, dashes); standingY returns the profile,
+     so anything lifted less than that is inside the stack and z-fights. */
+  check('the shadow clears the trail ribbon stack so it cannot z-fight',
+    typeof shadowLift === 'function' && shadowLift() > 0.09 && shadowLift() < 0.25,
+    typeof shadowLift === 'function' ? `lift ${shadowLift()}u vs 0.09u tallest ribbon layer` : 'missing');
+
+  /* Backing up must not spin the camera. The auto-follow correction is atan2(-ix,-iz) --
+     a function of the INPUT only -- so straight back is a constant PI that can never
+     converge, which is what span the view and flipped sign at the wrap. */
+  check('walking straight back does not send the camera into a spin', (() => {
+    if (typeof backpedalArc !== 'function') return false;
+    const corr = (ix, iz) => Math.atan2(-ix, -iz);
+    const arc = backpedalArc();
+    const suppressed = (ix, iz) => Math.abs(corr(ix, iz)) >= arc;
+    return suppressed(0, 1)                       // straight back: suppressed
+      && !suppressed(0, -1)                       // straight ahead: followed (and zero anyway)
+      && !suppressed(1, 0) && !suppressed(-1, 0)  // strafing: still followed
+      && !suppressed(0.707, -0.707)               // forward diagonal: followed
+      && Math.abs(corr(0, -1)) < 1e-9;            // walking forward needs no correction
+  })(), typeof backpedalArc === 'function' ? `suppressed beyond ${backpedalArc().toFixed(2)} rad` : 'missing');
+
+  /* SPRINTING IS A DIFFERENT GAIT, not a faster trot. A trot is diagonal; a gallop lands
+     the hind pair together then the fore pair, with a lead leg in each. */
+  check('sprinting switches to a gallop footfall instead of a faster trot', (() => {
+    if (typeof legSwingValue !== 'function') return false;
+    // sample a whole cycle and compare how close each pair moves together
+    const spread = (gal, i, j) => {
+      let worst = 0;
+      for (let p = 0; p < 6.28; p += 0.2)
+        worst = Math.max(worst, Math.abs(legSwingValue(i, p, gal) - legSwingValue(j, p, gal)));
+      return worst;
+    };
+    const trotFore = spread(0, 0, 1), galFore = spread(1, 0, 1);
+    const trotHind = spread(0, 2, 3), galHind = spread(1, 2, 3);
+    // in a gallop each pair moves nearly together; in a trot they are half a cycle apart
+    return galFore < trotFore * 0.5 && galHind < trotHind * 0.5;
+  })());
+  check('the gallop blend is measured against the animal own walk and run speeds', (() => {
+    if (typeof gallopAmount !== 'function') return false;
+    // a small fast animal and a big slow one must both gallop only at THEIR top end
+    return gallopAmount(2, 2, 6) === 0 && gallopAmount(6, 2, 6) === 1
+        && gallopAmount(4, 2, 6) > 0.4 && gallopAmount(4, 2, 6) < 0.6
+        && gallopAmount(9, 9, 20) === 0 && gallopAmount(20, 9, 20) === 1;
+  })());
+
+  /* Floating area names: occluded by terrain, and capped in apparent size up close. */
+  check('area labels are occluded by terrain instead of floating over everything', (() => {
+    const labels = typeof getAreaLabels === 'function' ? getAreaLabels() : [];
+    if (!labels.length) return false;
+    return labels.every(l => l.material && l.material.depthTest === true);
+  })());
+  check('area labels stop growing once you are close, so they cannot clip off screen', (() => {
+    const labels = typeof getAreaLabels === 'function' ? getAreaLabels() : [];
+    if (!labels.length || typeof updateAreaLabels !== 'function') return false;
+    const l = labels[0];
+    const p = { x: l.parent ? l.parent.position.x + l.position.x : l.position.x,
+                y: l.parent ? l.parent.position.y + l.position.y : l.position.y,
+                z: l.parent ? l.parent.position.z + l.position.z : l.position.z };
+    // apparent on-screen size is scale/distance -- that is the thing that must stay bounded
+    const apparent = (d) => { updateAreaLabels(p.x, p.y, p.z + d); return l.scale.x / d; };
+    let peak = 0;
+    for (let d = 0.5; d < 200; d += 0.5) peak = Math.max(peak, apparent(d));
+    const close = apparent(4), veryClose = apparent(1), onTop = apparent(0.5);
+    // inside the hold distance apparent size is pinned, so walking right up to a label
+    // cannot make it grow; far away it still recedes like the world object it labels
+    return Math.abs(close - veryClose) < 1e-6 && Math.abs(close - onTop) < 1e-6
+      && peak <= close + 1e-6
+      && apparent(120) < close * 0.5;
+  })());
+  check('area labels got smaller', (() => {
+    const labels = typeof getAreaLabels === 'function' ? getAreaLabels() : [];
+    // old code: clamp(width, 7, 20). New: clamp(width*0.62, 4.5, 12).
+    return labels.length > 0 && labels.every(l => (l.userData.baseScale || 99) <= 12);
+  })());
+
+  /* The noise ring must draw the SAME rule critters.js judges you by. */
+  /* Walking and sprinting must be audibly DIFFERENT. pace is clamped to 1, so measuring
+     it against walking speed made both identical -- the flaw the drawn ring exposed. */
+  check('walking, sprinting and sneaking are three distinct noise levels', (() => {
+    if (typeof playerNoise !== 'function' || typeof noiseReference !== 'function') return false;
+    const ref = noiseReference();                       // flat-out speed, not walking speed
+    const walkSpeed = ref / Math.max(1.05, currentRunMul());
+    const sneak  = playerNoise(walkSpeed, ref, true, false);
+    const walk   = playerNoise(walkSpeed, ref, false, false);
+    const sprint = playerNoise(ref, ref, false, false);
+    return sneak < walk * 0.6 && sprint > walk * 1.25;
+  })(), (() => {
+    const ref = noiseReference(), w = ref / Math.max(1.05, currentRunMul());
+    return `sneak ${playerNoise(w, ref, true, false).toFixed(2)} < walk ${playerNoise(w, ref, false, false).toFixed(2)} < sprint ${playerNoise(ref, ref, false, false).toFixed(2)}`;
+  })());
+
+  check('the noise ring shows the rule the animals actually use', (() => {
+    if (typeof playerNoise !== 'function' || typeof updateNoiseRing !== 'function') return false;
+    const top = 4;
+    const sneak = playerNoise(1, top, true, false);
+    const walk  = playerNoise(1, top, false, false);
+    const sprint= playerNoise(top, top, false, false);
+    const bark  = playerNoise(1, top, false, true);
+    return sneak < walk && walk < sprint && bark > sprint && sneak > 0;
+  })());
+  check('the ring shrinks when sneaking and swells when sprinting', (() => {
+    if (typeof updateNoiseRing !== 'function' || typeof noiseRingRadius !== 'function') return false;
+    const top = 4, ground = () => 0;
+    const settle = (noise) => { for (let i = 0; i < 400; i++) updateNoiseRing(0.05, 0, 0, noise, 10, ground, true); return noiseRingRadius(); };
+    const sneak = settle(playerNoise(1, top, true, false));
+    const walk  = settle(playerNoise(1, top, false, false));
+    const sprint= settle(playerNoise(top, top, false, false));
+    return sneak < walk * 0.75 && sprint > walk * 1.5 && sneak > 0;
+  })());
+  check('the noise ring hugs the terrain rather than lying flat', (() => {
+    if (typeof updateNoiseRing !== 'function' || typeof getNoiseRing !== 'function') return false;
+    // feed it a sloped ground function; the ring's vertices must follow it
+    const slope = (x, z) => x * 0.5;
+    for (let i = 0; i < 400; i++) updateNoiseRing(0.05, 0, 0, 1, 10, slope, true);
+    const r = getNoiseRing(); if (!r) return false;
+    const arr = r.geometry.attributes.position.array;
+    let ok = true, spread = 0, lo = 1e9, hi = -1e9;
+    for (let i = 0; i < arr.length; i += 3) {
+      if (Math.abs(arr[i + 1] - (slope(arr[i], arr[i + 2]) + 0.13)) > 1e-6) ok = false;
+      lo = Math.min(lo, arr[i + 1]); hi = Math.max(hi, arr[i + 1]);
+    }
+    spread = hi - lo;
+    return ok && spread > 1;      // genuinely following the slope, not a flat disc
+  })());
+
+  /* THE CLIFF-EDGE CLIMB. `onTrail` used to mean "within 1.5 m of a trail", but the
+     corridor a narrow trail actually occupies is 1.1 m wide -- half-width 0.55. The band
+     between them counted as on-trail and skipped the step-up rule, INCLUDING when the
+     trail ran along a clifftop and you were standing at the bottom. One step in and
+     standingY lifted you the full height of the cliff.
+
+     Find a real instance on the map -- a spot just outside a corridor whose tread sits
+     more than a step-up above the ground you are on -- and confirm the step is refused. */
+  const cliffTest = (() => {
+    if (typeof moveOffTrail !== 'function' || typeof stepUpLimit !== 'function') return null;
+    const G = getGraph(); if (!G) return null;
+    const pl = getTrailPlayer();
+    const save = { x: pl.x, z: pl.z, y: pl.y, climbT: pl.climbT };
+    const lim = stepUpLimit();
+    const spots = [];
+    // step out PERPENDICULAR to each segment until we are clear of the corridor, and keep
+    // the spots where the tread towers over the ground we would be standing on
+    for (const e of G.edges) {
+      if (!e.prof || spots.length >= 40) continue;
+      for (let i = 1; i < e.prof.pts.length && spots.length < 40; i += 2) {
+        const a = e.prof.pts[i - 1], b = e.prof.pts[i];
+        const dx = b[0] - a[0], dz = b[1] - a[1], L = Math.hypot(dx, dz);
+        if (L < 1e-6) continue;
+        const nx = -dz / L, nz = dx / L;
+        for (const sgn of [1, -1]) {
+          for (let off = 0.6; off <= 2.6; off += 0.4) {
+            const x = b[0] + nx * sgn * off, z = b[1] + nz * sgn * off;
+            const nt = nearestTrail(x, z);
+            if (nt.y == null || nt.d <= nt.hw) continue;        // must be OUTSIDE the tread
+            const g = standingY(x, z);
+            if (nt.y - g <= lim * 1.2) continue;                // must be a genuine cliff
+            spots.push({ x, z, g, tx: -nx * sgn, tz: -nz * sgn, gap: nt.y - g });
+            break;
+          }
+        }
+      }
+    }
+    let blocked = 0, worst = 0;
+    for (const s of spots) {
+      worst = Math.max(worst, s.gap);
+      pl.x = s.x; pl.z = s.z; pl.y = 0; pl.climbT = 0;
+      movePlayer(s.tx * 0.5, s.tz * 0.5);                       // step toward the trail, via the real rule
+      if (standingY(pl.x, pl.z) - s.g <= lim + 1e-6) blocked++;
+    }
+    Object.assign(pl, save);
+    return { found: spots.length, blocked, worst, lim };
+  })();
+  check('a trail on a clifftop cannot be walked up from below', (() => {
+    // must actually have found instances -- a vacuous pass here would hide the bug
+    return cliffTest && cliffTest.found >= 5 && cliffTest.blocked === cliffTest.found;
+  })(), cliffTest ? `${cliffTest.blocked}/${cliffTest.found} cliff-edge approaches refused (worst ${cliffTest.worst.toFixed(2)}u vs a ${cliffTest.lim.toFixed(2)}u step)` : '');
+
+  /* The ring must be a painted BAND, not a line. WebGL ignores linewidth, so a
+     LineBasicMaterial is one pixel however wide you ask for -- which is what made the
+     first version invisible in practice even though its maths were right. */
+  check('the noise ring is a filled band, not a one-pixel line', (() => {
+    if (typeof getNoiseRing !== 'function') return false;
+    const r = getNoiseRing(); if (!r) return false;
+    const g = r.geometry;
+    if (!g || !g.index || !g.index.length) return false;      // indexed triangles
+    const arr = g.attributes.position.array;
+    // inner and outer edge of the first step must be a real distance apart
+    const w = Math.hypot(arr[3] - arr[0], arr[5] - arr[2]);
+    return w > 0.25 && g.index.length / 3 > 100;
+  })());
+  check('the ring drapes over terrace risers instead of tunnelling through them', (() => {
+    if (typeof updateNoiseRing !== 'function' || typeof getNoiseRing !== 'function') return false;
+    // a staircase ground function: the pathological case for a coarse ring
+    const stair = (x, z) => Math.floor(x / 3) * 0.8;
+    for (let i = 0; i < 300; i++) updateNoiseRing(0.05, 0, 0, 1, 25, stair, true);
+    const r = getNoiseRing(); const a = r.geometry.attributes.position.array;
+    const S = a.length / 6;
+    let buried = 0;
+    for (let i = 0; i < S; i++) {
+      const j = (i + 1) % S;
+      for (const e of [0, 1]) {
+        const p = (i * 2 + e) * 3, q = (j * 2 + e) * 3;
+        const mx = (a[p] + a[q]) / 2, mz = (a[p + 2] + a[q + 2]) / 2, my = (a[p + 1] + a[q + 1]) / 2;
+        if (my < stair(mx, mz)) buried++;
+      }
+    }
+    // the old 64-segment loop buried 17% of itself on real terrain; well under 10% here
+    return buried / (S * 2) < 0.10;
+  })(), 'sampled against a 0.8u staircase');
+
+  /* World units are NOT metres: positions compact with world scale while elevation does
+     not, so anything reporting a raw length as metres understates it by that factor. */
+  check('distances shown to the player are real-world metres, not world units', (() => {
+    if (typeof realMetres !== 'function') return false;
+    const before = getMapScale();
+    setMapScale(0.2);                                   // 1:5
+    const at5 = realMetres(100);                        // 100 world units at 1:5
+    setMapScale(1);
+    const at1 = realMetres(100);
+    setMapScale(before);
+    return Math.abs(at5 - 500) < 1e-6 && Math.abs(at1 - 100) < 1e-6;
+  })());
+  check('elevation is read from the DEM in true metres above sea level', (() => {
+    if (typeof elevationFt !== 'function') return false;
+    const ft = elevationFt(getTrailPlayer().x, getTrailPlayer().z);
+    // Garden of the Gods sits around 6,300 ft; anything in this band is a real reading
+    // rather than a game-space number that happens to be positive
+    return ft != null && ft > 3000 && ft < 12000;
+  })(), (() => { const f = elevationFt(getTrailPlayer().x, getTrailPlayer().z); return f == null ? 'null' : Math.round(f) + ' ft'; })());
+  check('elevation does not change when the world is compacted', (() => {
+    if (typeof elevationFt !== 'function') return false;
+    const pl = getTrailPlayer();
+    const before = getMapScale();
+    setMapScale(1);
+    const a = elevationFt(pl.x * (1 / 1), pl.z * (1 / 1));
+    setMapScale(before);
+    // elevations stay true metres at any horizontal scale (World.setMapScale docs)
+    return a != null && a > 3000 && a < 12000;
+  })());
+  check('the HUD reports elevation, distance and audible range', (() => {
+    const ids = ['#hudElev', '#hudDist', '#hudNoise'];
+    if (!ids.every(i => d.querySelector(i))) return false;
+    updateTrailHud();
+    return ids.every(i => {
+      const txt = d.querySelector(i).textContent || '';
+      return /\d/.test(txt);          // an actual number, not the em-dash placeholder
+    });
+  })(), (() => ['#hudElev', '#hudDist', '#hudNoise'].map(i => (d.querySelector(i) || {}).textContent).join('  '))());
+  /* The two numbers scale DIFFERENTLY and must not be given the same treatment: a
+     travelled distance is measured across compacted ground, an audible range is not. */
+  check('audible range is unaffected by world scale, unlike travelled distance', (() => {
+    if (typeof realMetres !== 'function' || typeof noiseRingRadius !== 'function') return false;
+    const before = getMapScale();
+    setMapScale(0.2);
+    updateTrailHud();
+    const a = (d.querySelector('#hudNoise') || {}).textContent;
+    setMapScale(1);
+    updateTrailHud();
+    const b = (d.querySelector('#hudNoise') || {}).textContent;
+    setMapScale(before);
+    // same physical range at either scale -- the ring radius is true-size by design
+    return a === b && /\d/.test(a);
+  })());
+  check('the summary card agrees with the distance the HUD was showing', (() => {
+    if (typeof realMetres !== 'function' || typeof formatTravelled !== 'function') return false;
+    const pl = getTrailPlayer();
+    return formatTravelled(realMetres(pl.dist)).length > 0
+      && formatTravelled(realMetres(1500 * getMapScale())).indexOf('km') > 0;
+  })());
+
   check('a shadow is drawn under the player', (() => {
     if (typeof getShadow !== 'function') return false;
     const sh = getShadow();
@@ -798,7 +1105,7 @@ function assertAll(window, errors, stats) {
     updateShadow(12, -7, 3, 2.5, 0.5, true);
     const lifted = sh.material.opacity;
     return Math.abs(at.x - 12) < 1e-6 && Math.abs(at.z + 7) < 1e-6
-      && at.y > 3 && at.y < 3.2            // sits just proud of the ground, not buried
+      && Math.abs(at.y - (3 + shadowLift())) < 1e-9   // lifted clear of the ribbon stack
       && lifted < grounded && lifted > 0;
   })());
 

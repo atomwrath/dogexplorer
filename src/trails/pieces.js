@@ -407,17 +407,30 @@ function floatingLabelTex(name,em){
   const t=new THREE.CanvasTexture(c);t.minFilter=THREE.LinearFilter;return t;
 }
 /* A camera-facing Sprite, not a flat ground plane — this is what makes it readable from
-   far away: it billboards automatically (three.js does this for free with Sprite) and
-   depthTest is off so trees, rocks, or terrain between you and the area never hide it,
-   the same way a landmark label works in most open-world games. */
+   far away: it billboards automatically (three.js does this for free with Sprite).
+
+   depthTest is ON, which it was not. With it off, every area name floated on top of the
+   whole scene, so a meadow two ridges away read as though it were in front of the hill
+   you were looking at -- the labels stopped being landmarks and became a HUD that
+   happened to move. Occluding them restores the depth cue: if you cannot see the place,
+   you cannot see its name, and cresting a rise reveals both together.
+
+   `label.baseScale` is stashed for world.js's per-frame pass, which caps how large the
+   sprite may get up close. A Sprite is sized in WORLD units, so its on-screen size grows
+   without bound as you approach -- walk up to a landmark and the name grows past the
+   viewport, which is the "clips off screen" problem. The base size here is also smaller
+   than it was (a 0.62 multiplier and a lower ceiling); it was competing with the terrain
+   for attention. */
 function buildFloatingLabel(name,em,width,topY){
   const tex=floatingLabelTex(name,em);
-  const mat=new THREE.SpriteMaterial({map:tex,transparent:true,depthTest:false,depthWrite:false});
+  const mat=new THREE.SpriteMaterial({map:tex,transparent:true,depthTest:true,depthWrite:false});
   const spr=new THREE.Sprite(mat);
-  const w=clamp(width,7,20);
+  const w=clamp(width*0.62,4.5,12);
   spr.scale.set(w,w*0.25,1);
   spr.position.set(0,topY,0);
   spr.renderOrder=999;
+  spr.userData.baseScale=w;      // read by world.js's updateAreaLabels
+  spr.userData.areaLabel=true;
   return spr;
 }
 function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
