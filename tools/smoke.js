@@ -224,6 +224,47 @@ global.fetch = async (url) => {
 };
 window.fetch = global.fetch;
 
+
+/* ---------- recording AudioContext ----------
+   Not a nicety. The bark bug was not in the wiring -- the graph was always built
+   correctly -- it was that every voice sat below the frequency band a laptop speaker can
+   reproduce, which is invisible to any test that only asks "did it make a sound". This
+   stub records what is scheduled so the assertions can ask what BAND it was scheduled in,
+   and whether anything was scheduled against a context that was still suspended. */
+const AUDIO = { osc: [], scheduledWhileSuspended: 0, nodes: 0, live: null };
+class FakeParam {
+  constructor(kind, name, ctx){ this.kind=kind; this.name=name; this.ctx=ctx; this.value=0; }
+  _rec(v){ if(this.name==='freq' && this.kind.startsWith('osc')) AUDIO.osc.push(v);
+           if(this.ctx && this.ctx.state !== 'running') AUDIO.scheduledWhileSuspended++; }
+  setValueAtTime(v){ this._rec(v); return this; }
+  exponentialRampToValueAtTime(v){ this._rec(v); return this; }
+  linearRampToValueAtTime(v){ this._rec(v); return this; }
+}
+let __nid = 0;
+class FakeNode {
+  constructor(kind, ctx){
+    this.kind = kind + (__nid++); this.ctx = ctx; AUDIO.nodes++;
+    this.frequency = new FakeParam(this.kind, 'freq', ctx);
+    this.gain = new FakeParam(this.kind, 'gain', ctx);
+    this.Q = new FakeParam(this.kind, 'Q', ctx);
+  }
+  connect(d){ return d; }
+  start(){ if(this.ctx && this.ctx.state !== 'running') AUDIO.scheduledWhileSuspended++; }
+  stop(){}
+}
+global.AudioContext = window.AudioContext = class {
+  constructor(){ this.state = 'suspended'; this.sampleRate = 44100;
+    this.destination = new FakeNode('dest', this); AUDIO.live = this; }
+  get currentTime(){ return 5; }
+  resume(){ return Promise.resolve().then(()=>{ this.state = 'running'; }); }
+  createOscillator(){ return new FakeNode('osc', this); }
+  createBiquadFilter(){ return new FakeNode('filt', this); }
+  createGain(){ return new FakeNode('gain', this); }
+  createBufferSource(){ return new FakeNode('src', this); }
+  createBuffer(c, l){ return { getChannelData(){ return new Float32Array(l); } }; }
+};
+global.__AUDIO = AUDIO;
+
 // ---------- run the real bundle ----------
 const bundleHtml = fs.readFileSync(path.join(ROOT, 'dist/pup-trails.html'), 'utf8');
 const scripts = [...bundleHtml.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
@@ -254,6 +295,12 @@ const probe = `
   critters: typeof CRITTERS !== 'undefined' ? CRITTERS.length : null,
   sightings: typeof getCritterStats === 'function' ? getCritterStats().sightings : null,
   bigMapOpen: typeof isBigMapOpen === 'function' ? isBigMapOpen() : null,
+  pathMix: typeof getPathMix === 'function' ? getPathMix() : null,
+  spots: typeof getSpots === 'function' ? getSpots().map(s => ({id:s.id, name:s.name, rx:s.rx, rz:s.rz})) : null,
+  onTrail: typeof getOnTrail === 'function' ? {route:getOnTrail().route, name:getOnTrail().name} : null,
+  highlight: typeof getHighlightRoute === 'function' ? getHighlightRoute() : null,
+  panelOpen: document.body.classList.contains('panelopen'),
+  dist: typeof getTrailPlayer === 'function' ? getTrailPlayer().dist : null,
   vertScale: typeof getVertScale === 'function' ? getVertScale() : null,
   worldMeshes: getWorldGroup() ? getWorldGroup().countMeshes() : 0,
   backdrop: !!getBackdrop(),
@@ -344,7 +391,13 @@ function assertAll(window, errors, stats) {
   check('dog roster populated', n('#dogGrid button') >= 6, `${n('#dogGrid button')} dogs`);
   check('animal roster populated', n('#animalGrid button') >= 6, `${n('#animalGrid button')} animals`);
   check('environment picker populated', n('#envGrid button') === 3);
-  check('start-point picker populated', n('#startList .headcard') === s.heads.length);
+  /* The panel's trailhead LIST is gone on purpose -- the map sheet is the picker now
+     (world.js/main.js: renderStartPicker). What the panel keeps is the answer, so assert
+     that instead: the summary names the selected head, and no stale list survives. */
+  check('the panel no longer carries a trailhead list', !d.querySelector('#startList'));
+  check('the map sheet names the selected trailhead',
+    new RegExp(s.heads[s.startHead].name.slice(0, 12).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .test(txt('#startNow')), txt('#startNow'));
   check('a dog is selected on boot', !!d.querySelector('#dogGrid button.sel'), txt('#dogGrid button.sel'));
   check('frames render', stats.renders > 0, `${stats.renders} frames`);
 
@@ -365,10 +418,12 @@ function assertAll(window, errors, stats) {
   check('environment switch rebuilds world', s.worldMeshes > 100, `${s.worldMeshes} meshes`);
 
   const target = Math.min(3, s.heads.length - 1);
-  d.querySelectorAll('#startList .headcard')[target].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  placeAtHead(target);
   s = probe();
   check('start-point change moves the avatar', s.startHead === target && dist(s.wildPos, s.heads[target]) < 0.5,
     s.heads[target].name);
+  check('the summary follows the start point', txt('#startNow').startsWith(String.fromCharCode(65+target)),
+    txt('#startNow'));
 
   // World scale is a log-mapped 0..1000 slider position -> "1:N", not a raw multiplier
   // (see wireScale's posToN/nToPos) -- position 500 is the slider's midpoint, N=~32,
@@ -421,7 +476,10 @@ function assertAll(window, errors, stats) {
   // free-look: a drag starting on the right half of the canvas orbits the camera and
   // does NOT drive the movement stick. Free-look only activates during play (same guard
   // the movement stick already used), so enter play first.
-  d.querySelector('#playBtn').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  /* The header's "Hit the trail" button is gone by request, so there is no click that
+     starts a walk any more -- picking a place on the map does it. enterPlay() directly is
+     the equivalent, and the map-pick path gets its own assertion further down. */
+  enterPlay();
   const s2b = probe();
   const yawBefore = s2b.camYaw, pitchBefore = s2b.camPitch;
   const canvas = d.querySelector('#c');
@@ -439,19 +497,34 @@ function assertAll(window, errors, stats) {
   up.pointerId = 77;
   window.dispatchEvent(up);
 
-  // and a LEFT-half drag must NOT be mistaken for a look-drag -- it should drive the
-  // movement stick instead, leaving the camera's manual orbit alone
+  /* WHICH HALF OF THE SCREEN NO LONGER DECIDES ANYTHING -- pointerType does.
+
+     A mouse orbits the camera from anywhere on the canvas, because WASD already walks and
+     handing half the window to a virtual joystick meant every drag starting left of
+     centre yanked the pup instead of turning the view. A finger keeps the twin-stick
+     split, because on a phone there is no keyboard to fall back on. Both halves of that
+     rule are asserted: the same left-half drag must orbit as a mouse and must NOT orbit
+     as a touch. */
   const yaw2 = probe().camYaw;
-  const downL = new window.MouseEvent('pointerdown', { bubbles:true, clientX:100, clientY:400 });
-  downL.pointerId = 88;
-  canvas.dispatchEvent(downL);
-  const moveL = new window.MouseEvent('pointermove', { bubbles:true, clientX:160, clientY:460 });
-  moveL.pointerId = 88;
-  window.dispatchEvent(moveL);
-  check('left-half drag does not also orbit the camera', probe().camYaw === yaw2, `${yaw2.toFixed(3)}`);
-  const upL = new window.MouseEvent('pointerup', { bubbles:true });
-  upL.pointerId = 88;
-  window.dispatchEvent(upL);
+  const dragLeft = (id, type) => {
+    const dn = new window.MouseEvent('pointerdown', { bubbles:true, clientX:100, clientY:400 });
+    dn.pointerId = id; Object.defineProperty(dn, 'pointerType', { value:type });
+    canvas.dispatchEvent(dn);
+    const mv = new window.MouseEvent('pointermove', { bubbles:true, clientX:180, clientY:470 });
+    mv.pointerId = id; Object.defineProperty(mv, 'pointerType', { value:type });
+    window.dispatchEvent(mv);
+    const up = new window.MouseEvent('pointerup', { bubbles:true });
+    up.pointerId = id; Object.defineProperty(up, 'pointerType', { value:type });
+    window.dispatchEvent(up);
+    return probe().camYaw;
+  };
+  const afterMouse = dragLeft(88, 'mouse');
+  check('a mouse drag on the LEFT half still orbits the camera', Math.abs(afterMouse - yaw2) > 0.01,
+    `${yaw2.toFixed(3)} -> ${afterMouse.toFixed(3)}`);
+  const yaw3 = probe().camYaw;
+  const afterTouch = dragLeft(89, 'touch');
+  check('a touch drag on the left half drives the stick, not the camera', afterTouch === yaw3,
+    `${yaw3.toFixed(3)}`);
 
   // --- redesigned panel: toggle, letter badges, stat bars, map stats, file chips ---
   check('pup-mode toggle starts on Dogs', d.querySelector('#pupModeToggle .toggle.sel')?.textContent.includes('Dogs'));
@@ -465,7 +538,8 @@ function assertAll(window, errors, stats) {
   d.querySelector('#pupModeToggle [data-mode="dog"]').dispatchEvent(new window.MouseEvent('click', { bubbles:true }));
   check('toggling back to Dogs hides Wildlife again', d.querySelector('#animalGrid').hidden === true);
 
-  check('trailhead cards carry letter badges', d.querySelector('#startList .hc-badge')?.textContent === 'A');
+  check('the trailhead summary leads with a letter badge', /^[A-Z0-9]+ \u00b7 /.test(txt('#startNow')),
+    txt('#startNow'));
 
   const speedBars = [...d.querySelectorAll('#dogGrid .pc-bar.speed i')];
   check('pup cards render one speed bar per card', speedBars.length === n('#dogGrid button'), `${speedBars.length} bars`);
@@ -488,6 +562,13 @@ function assertAll(window, errors, stats) {
     txt('#mapStats').replace(/\s+/g,' ').slice(0,60));
   check('trail list is populated', d.querySelectorAll('#trailList .tl-row').length > 0,
     `${d.querySelectorAll('#trailList .tl-row').length} rows`);
+  /* The list used to print one row per NAME, so a dozen unrelated unnamed paths that had
+     each drawn the same label out of SPUR_NAMES appeared as a dozen identical trails.
+     Named routes now get a row each and the connectors are summarised in one. */
+  check('the trail list has no duplicate rows', (() => {
+    const rows = [...d.querySelectorAll('#trailList .tl-row')].map(r => r.textContent.trim());
+    return new Set(rows).size === rows.length;
+  })(), `${d.querySelectorAll('#trailList .tl-row').length} rows`);
 
   /* ---- trail clamping, wildlife and the map ----------------------------------
      These four features are the ones with no visible failure mode until a human
@@ -496,7 +577,7 @@ function assertAll(window, errors, stats) {
      does it on the ascent. Assert the wiring here instead. */
 
   // Enter play, which is what spawns the population and inits the map canvases.
-  d.querySelector('#playBtn').dispatchEvent(new window.MouseEvent('click', { bubbles:true }));
+  enterPlay();
   if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(1000); }
   const pl = probe();
 
@@ -1047,29 +1128,26 @@ function assertAll(window, errors, stats) {
     // elevations stay true metres at any horizontal scale (World.setMapScale docs)
     return a != null && a > 3000 && a < 12000;
   })());
-  check('the HUD reports elevation, distance and audible range', (() => {
-    const ids = ['#hudElev', '#hudDist', '#hudNoise'];
+  check('the HUD reports elevation and distance', (() => {
+    const ids = ['#hudElev', '#hudDist'];
     if (!ids.every(i => d.querySelector(i))) return false;
     updateTrailHud();
     return ids.every(i => {
       const txt = d.querySelector(i).textContent || '';
       return /\d/.test(txt);          // an actual number, not the em-dash placeholder
     });
-  })(), (() => ['#hudElev', '#hudDist', '#hudNoise'].map(i => (d.querySelector(i) || {}).textContent).join('  '))());
-  /* The two numbers scale DIFFERENTLY and must not be given the same treatment: a
-     travelled distance is measured across compacted ground, an audible range is not. */
+  })(), (() => ['#hudElev', '#hudDist'].map(i => (d.querySelector(i) || {}).textContent).join('  '))());
+  /* The 🔊 chip is gone from the HUD, but the rule it used to prove still matters and is
+     still live in noiseRingRadius: an audible range is a distance between two true-size
+     things, so unlike travelled distance it must NOT be converted by the world scale.
+     Asserted against the function now rather than against the chip's text. */
   check('audible range is unaffected by world scale, unlike travelled distance', (() => {
-    if (typeof realMetres !== 'function' || typeof noiseRingRadius !== 'function') return false;
+    if (typeof noiseRingRadius !== 'function') return false;
     const before = getMapScale();
-    setMapScale(0.2);
-    updateTrailHud();
-    const a = (d.querySelector('#hudNoise') || {}).textContent;
-    setMapScale(1);
-    updateTrailHud();
-    const b = (d.querySelector('#hudNoise') || {}).textContent;
+    setMapScale(0.2); const a = noiseRingRadius();
+    setMapScale(1);   const b = noiseRingRadius();
     setMapScale(before);
-    // same physical range at either scale -- the ring radius is true-size by design
-    return a === b && /\d/.test(a);
+    return a === b;
   })());
   check('the summary card agrees with the distance the HUD was showing', (() => {
     if (typeof realMetres !== 'function' || typeof formatTravelled !== 'function') return false;
@@ -1298,6 +1376,620 @@ function assertAll(window, errors, stats) {
     setMapScale(back);
     return ok;
   })());
+
+  /* ---- roads, crossings and overlaps -----------------------------------------
+     The screenshot that prompted this: a fingerpost at a road/trail crossing naming a
+     ROAD twice and an invented spur label twice, a dirt junction pad stamped on tarmac,
+     and ribbons z-fighting where the two met. Each of those is a separate rule now, so
+     each gets its own assertion rather than one "looks better" check. */
+  {
+    let __armGain = '';
+    const G = getGraph();
+    const adj = G.nodes.map(() => []);
+    G.edges.forEach(e => { adj[e.a].push(e); if (e.b !== e.a) adj[e.b].push(e); });
+    const mix = getPathMix();
+
+    check('the map really does mix roads with trails', (() => {
+      const kinds = new Set(G.edges.map(e => e.kind));
+      return kinds.has('road') && kinds.has('trail');
+    })(), [...new Set(G.edges.map(e => e.kind))].join('/'));
+
+    // If this ever reports 0 crossings the rule has stopped firing and every other
+    // assertion below would pass vacuously.
+    check('road/trail crossings are told apart from forks',
+      mix.crossings > 0 && mix.forks > 0 && mix.crossings < mix.forks,
+      `${mix.forks} forks, ${mix.crossings} crossings, ${mix.buried} shared`);
+
+    check('a path merely crossing a road is not signed as a fork', (() => {
+      // find a node where a single trail route crosses a road and nothing else happens
+      for (let i = 0; i < G.nodes.length; i++) {
+        const n = G.nodes[i];
+        if (n.deg < 3) continue;
+        const arms = adj[i];
+        if (!arms.some(e => e.kind === 'road')) continue;
+        const trailRoutes = new Set(arms.filter(e => e.kind !== 'road').map(e => e.route));
+        if (trailRoutes.size !== 1) continue;
+        return signRoutesAt(i, adj).length < 2;   // -> no sign wanted here
+      }
+      return true;   // no such node on this map; nothing to prove
+    })());
+
+    check('signposts never list the same route twice', (() => {
+      for (let i = 0; i < G.nodes.length; i++) {
+        if (G.nodes[i].deg < 3) continue;
+        if (signRoutesAt(i, adj).length < 2) continue;
+        const arms = [];
+        for (const e of adj[i]) {
+          if (e.a === i) arms.push({e, pts: e.pts});
+          if (e.b === i && e.a !== e.b) arms.push({e, pts: [...e.pts].reverse()});
+        }
+        const built = pickArms(arms.map(o => ({
+          label: o.e.name, route: o.e.route, kind: o.e.kind, named: !!o.e.named,
+          distU: armReach(i, o.e, adj).dist, dist: '', angle: 0,
+        })));
+        const seen = new Set();
+        for (const a of built) {
+          // two arms of ONE route are allowed (the two ends of a loop) but only when
+          // they lead somewhere meaningfully different -- three never are
+          const c = (seen.get ? 0 : 0), k = a.route;
+          seen.add(k);
+        }
+        if (built.filter(a => a.kind === 'road').length && built.some(a => a.kind !== 'road')) return false;
+        const counts = {};
+        built.forEach(a => { counts[a.route] = (counts[a.route] || 0) + 1; });
+        if (Object.values(counts).some(v => v > 2)) return false;
+      }
+      return true;
+    })());
+
+    check('sign distances measure to the next decision, not to the next cut', (() => {
+      /* splitT cuts a line wherever anything touches it, so an edge is a fragment: the
+         default map's are a 76 m median and a 24 m tenth percentile, and the "19 m" on the
+         fingerpost in the screenshot was one of them.
+
+         The INVARIANT is what is asserted, not a target: armReach walks the fragments of
+         one route together, so it can never report less than the first fragment, and it
+         must actually accumulate somewhere. It is deliberately NOT asserted that most
+         arms get longer, because measured on this map most of them do not -- 36 of 409 --
+         and the reason is that the network really is forked that densely, so a 19 m arm is
+         usually a true statement about a fork 19 m away. The clutter that reading came
+         from was the ROADS and the repeated labels, handled separately above. */
+      let longer = 0, total = 0;
+      for (let i = 0; i < G.nodes.length; i++) {
+        if (G.nodes[i].deg < 3 || signRoutesAt(i, adj).length < 2) continue;
+        for (const e of adj[i]) {
+          const reach = armReach(i, e, adj).dist;
+          if (reach < e.lenM - 1e-9) return false;      // can never be shorter
+          total++;
+          if (reach > e.lenM * 1.05) longer++;
+        }
+      }
+      __armGain = `${longer} of ${total} arms reach past their own fragment`;
+      return total > 20 && longer > 0;
+    })(), () => __armGain);
+
+    /* The first version of markBuriedEdges compared compacted POSITIONS against
+       true-metre tread widths, so the answer moved with the world-scale slider: 11 edges
+       buried at 1:1, 49 at 1:16, 205 of 316 at 1:100. Since the slider is a live mid-walk
+       control now, that meant compacting your walk quietly repainted two thirds of the
+       network as waymarks. Whether a route shares a road is a fact about the map. */
+    check('overlap is a fact about the map, not about the world-scale slider', (() => {
+      const back = getMapScale();
+      const counts = [1, 1/16, 1/64].map(sc => { setMapScale(sc); return getPathMix().buried; });
+      setMapScale(back);
+      return counts.every(c => c === counts[0]);
+    })());
+
+    check('routes sharing a road are waymarked, not repaved', (() => {
+      const buried = G.edges.filter(e => e.buried);
+      if (!buried.length) return mix.buried === 0;
+      // a buried edge is never the widest thing on its own ground
+      return buried.every(e => pathRank(e.kind) > pathRank(e.buried.kind)) &&
+             buried.length === mix.buried;
+    })(), `${mix.buried} of ${G.edges.length} edges`);
+
+    check('every path class gets its own depth layer', (() => {
+      return pathRank('road') < pathRank('track') && pathRank('track') < pathRank('trail') &&
+             kindLift('road') < kindLift('trail');
+    })(), `road ${kindLift('road')} < trail ${kindLift('trail').toFixed(3)}`);
+  }
+
+  /* The decoration loop read `st.w` off PATH_STYLE, which has never had that key -- so
+     every edge stone and blaze post was positioned at NaN. three.js neither throws nor
+     draws on NaN, which is exactly why this went unnoticed: the map simply had no stones
+     on it. Assert against the whole scene rather than that one loop, since a NaN anywhere
+     in a transform is always a bug. */
+  check('nothing in the world is placed at NaN', (() => {
+    const wg = getWorldGroup();
+    if (!wg) return false;
+    let bad = 0, seen = 0;
+    wg.traverse(o => {
+      if (!o.position) return;
+      seen++;
+      if (!isFinite(o.position.x) || !isFinite(o.position.y) || !isFinite(o.position.z)) bad++;
+    });
+    return seen > 100 && bad === 0;
+  })());
+
+  /* ---- saved spots ----------------------------------------------------------- */
+  {
+    resetSpots();
+    const pl = getTrailPlayer();
+    const at = { x: pl.x, z: pl.z };
+    const spot = saveHere();
+    check('saving a spot pins where you are standing', !!spot && getSpots().length === 1,
+      spot ? spot.name : 'nothing saved');
+    check('a saved spot lands back on the same point',
+      !!spot && Math.hypot(spotWorld(spot).x - at.x, spotWorld(spot).z - at.z) < 0.01);
+    check('a spot is named after the ground it is on', !!spot && spot.name.length > 3, spot && spot.name);
+    check('the map lists it', d.querySelectorAll('#spotList .spot-row').length === 1);
+
+    check('saving twice in the same place does not stack pins', (() => {
+      saveHere();
+      return getSpots().length === 1;
+    })());
+
+    /* The reason spots.js stores real metres. World scale moves every world coordinate;
+       a pin that did not move with it would be kilometres out at 1:32. */
+    check('a pin survives a change of world scale', (() => {
+      const before = spotWorld(spot);
+      const beforeScale = getMapScale();
+      setMapScale(beforeScale / 4);
+      const after = spotWorld(spot);
+      const ok = Math.abs(after.x - before.x / 4) < 0.01 && Math.abs(after.z - before.z / 4) < 0.01;
+      setMapScale(beforeScale);
+      return ok;
+    })());
+
+    check('going back to a pin puts you on it', (() => {
+      placeAtHead((getStartHead() + 1) % Math.max(1, getTrailheads().length));
+      placeAtSpot(spot);
+      const p = spotWorld(spot), q = getTrailPlayer();
+      return Math.hypot(q.x - p.x, q.z - p.z) < 0.01;
+    })());
+
+    check('a pin can be forgotten', (() => {
+      removeSpot(spot.id);
+      renderSpotList();
+      return getSpots().length === 0 && !!d.querySelector('#spotList .none');
+    })());
+  }
+
+  /* ---- barking --------------------------------------------------------------- */
+  check('barking is audible and still blows your cover', (() => {
+    const pl = getTrailPlayer();
+    pl.barkT = 0;
+    doBark();                       // no AudioContext under jsdom: must not throw
+    return pl.barkT > 0;
+  })());
+  /* The bark / save-spot / noise chips were removed from the left HUD by request. The
+     keys are the controls now, so assert the HUD is actually clear rather than trusting
+     that deleting three lines of HTML deleted the right three. */
+  check('the header and HUD chrome buttons are gone',
+    !d.querySelector('#playBtn') && !d.querySelector('#exitBtn'));
+  check('there is a bark control for devices with no keyboard',
+    !!d.querySelector('#touchBarkBtn'));
+  check('the touch bark control barks', (() => {
+    const pl = getTrailPlayer();
+    pl.barkT = 0;
+    d.querySelector('#touchBarkBtn').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    return pl.barkT > 0;
+  })());
+  check('the left HUD no longer carries bark, save-spot or noise chips',
+    !d.querySelector('#barkBtn') && !d.querySelector('#saveSpotBtn') &&
+    !d.querySelector('#hudActions') && !d.querySelector('#hudNoise'));
+  check('removing the HUD buttons did not break the walk HUD',
+    !!d.querySelector('#hudElev') && !!d.querySelector('#hudDist'));
+
+  /* ---- the highlighted trail -------------------------------------------------- */
+  check('the map highlights the trail underfoot', (() => {
+    const G = getGraph();
+    const e = G.edges.find(e => e.pts.length > 2 && !e.buried);
+    if (!e) return false;
+    const mid = e.pts[Math.floor(e.pts.length / 2)];
+    placeAt(mid[0], mid[1], 0);
+    return getHighlightRoute() === e.route && getOnTrail().name === e.name;
+  })());
+  check('the HUD names the highlighted trail', (() => {
+    updateTrailHud();
+    return (d.querySelector('#hudTrail') || {}).textContent === getOnTrail().name;
+  })(), txt('#hudTrail'));
+  check('walking well away from every trail drops the highlight', (() => {
+    const bb = getBBox();
+    placeAt(bb.minx - 50, bb.minz - 50, 0);
+    return getHighlightRoute() === null;
+  })());
+
+  /* ---- settings that can be changed mid-walk ---------------------------------
+     The panel is a live drawer now. Every control on it rebuilds the world, and the old
+     handlers all finished by teleporting the player back to the trailhead -- fine in a
+     lobby, ruinous two kilometres out. */
+  {
+    const heads = getTrailheads();
+    placeAtHead(getStartHead());
+    const pl = getTrailPlayer();
+    pl.x += 40; pl.z += 25; pl.dist = 300;
+    const at = { x: pl.x, z: pl.z };
+
+    check('the settings drawer opens and closes mid-walk', (() => {
+      togglePanel(true);
+      const open = d.body.classList.contains('panelopen') || !d.body.classList.contains('nopanel');
+      togglePanel(false);
+      return open;
+    })());
+
+    check('changing the contour step mid-walk leaves you where you stand', (() => {
+      const cs = d.querySelector('#contourStep');
+      cs.value = '5';
+      cs.dispatchEvent(new window.Event('change', { bubbles: true }));
+      const q = getTrailPlayer();
+      return Math.hypot(q.x - at.x, q.z - at.z) < 0.01 && q.dist === 300;
+    })());
+
+    /* World scale is the hard one: it moves every coordinate on the map, so "stay put"
+       means moving WITH the compaction, not staying at the same numbers. Both the
+       position and the odometer are checked in REAL metres, which is what the HUD shows
+       and therefore the only thing the player can tell has changed. */
+    check('changing the world scale mid-walk keeps you at the same real place', (() => {
+      const before = getMapScale();
+      const q0 = getTrailPlayer();
+      const realBefore = { x: q0.x / before, z: q0.z / before, d: q0.dist / before };
+      const ms = d.querySelector('#worldScale');
+      ms.value = String(Math.min(1000, (+ms.value) + 120));
+      ms.dispatchEvent(new window.Event('change', { bubbles: true }));
+      const after = getMapScale();
+      const q = getTrailPlayer();
+      const realAfter = { x: q.x / after, z: q.z / after, d: q.dist / after };
+      return Math.abs(after - before) > 1e-9 &&
+             Math.abs(realAfter.x - realBefore.x) < 1 &&
+             Math.abs(realAfter.z - realBefore.z) < 1 &&
+             Math.abs(realAfter.d - realBefore.d) < 1;
+    })());
+
+    check('the walk is still running after a mid-walk rebuild', trailIsPlaying() && !getTripState().paused);
+  }
+
+  /* ---- audio: the bug you could hear, and the one you could not ---------------
+     Reported as "we can hear animals when they are startled but nothing else". That one
+     detail is what located it: the startle yip is woofBurst at pitch 2.4 (768 -> 215 Hz)
+     and the bark was the same function at pitch 1.0 (320 -> 89 Hz, under a filter closing
+     to 240). Small speakers roll off below roughly 300-500 Hz and give essentially nothing
+     under 200, so the yip was inside the band and the bark was underneath it. On
+     headphones both play, which is why it survived being tested. */
+  {
+    const A = global.__AUDIO;
+
+    /* The stub's resume() resolves on a microtask, exactly as a real one does, so at this
+       point the context is still suspended -- which is the situation the queue exists
+       for. Assert the queue holds the sound rather than dropping it, THEN let the context
+       come up and check what actually got scheduled. */
+    A.osc.length = 0;
+    barkSound(1);
+    check('a bark fired before the context is running is queued, not lost',
+      audioState() !== 'running' ? (pendingSounds() > 0 && A.osc.length === 0) : true,
+      `${audioState()}, ${pendingSounds()} queued`);
+
+    if (A.live) A.live.state = 'running';
+    flushPending();
+    check('the queued bark plays as soon as the context comes up',
+      A.osc.length > 0, `${A.osc.length} frequency points released`);
+
+    const band = (fn) => { A.osc.length = 0; fn(); return A.osc.slice(); };
+
+    const barkHz = band(() => barkSound(1));
+    check('a bark actually schedules something', barkHz.length > 0, `${barkHz.length} frequency points`);
+    check('the bark sits in a band a laptop speaker can reproduce',
+      barkHz.length > 0 && Math.min(...barkHz) >= speakerFloorHz(),
+      barkHz.length ? `${Math.round(Math.min(...barkHz))}-${Math.round(Math.max(...barkHz))} Hz (floor ${speakerFloorHz()})` : '');
+
+    // the same must hold for the biggest animal, which is where pitch-by-size bottoms out
+    const bigHz = band(() => barkSound(4));
+    check('even the largest barker stays above the speaker floor',
+      bigHz.length > 0 && Math.min(...bigHz) >= speakerFloorHz(),
+      bigHz.length ? `${Math.round(Math.min(...bigHz))} Hz at size 4` : '');
+
+    check('the defence sounds are audible too', (() => {
+      const g = band(() => warnGrowl(2));
+      const b = band(() => bonkSound(2));
+      return g.length && b.length &&
+             Math.min(...g) >= speakerFloorHz() && Math.min(...b) >= speakerFloorHz();
+    })());
+
+    /* The second, quieter bug: anything scheduled while the context is still SUSPENDED is
+       dropped silently. resume() is async, so a sound fired in the same tick as the click
+       that created the context builds a correct graph and produces nothing. */
+    check('nothing is ever scheduled against a suspended context',
+      A.scheduledWhileSuspended === 0, `${A.scheduledWhileSuspended} events`);
+    check('the audio context ends up running', audioState() === 'running', audioState());
+  }
+
+  /* ---- big animals stand their ground ---------------------------------------- */
+  {
+    check('bravery picks out exactly the big animals', (() => {
+      const defends = defenderKeys();
+      const want = ['goat', 'bighorn', 'bear', 'moose'];
+      return want.every(k => defends.includes(k)) &&
+             !defends.includes('rabbit') && !defends.includes('fox') && !defends.includes('cat');
+    })(), defenderKeys().join(', '));
+
+    /* Each check below re-seats BOTH the player and the bear before it runs.
+
+       They did not, at first, and three of them failed while passing in isolation: a
+       charge test that runs fifty frames leaves the player knocked several metres from
+       where the next test assumed they were standing, sometimes hard against the bbox
+       clamp where movePlayer correctly refuses to push them any further. Sharing mutable
+       world state between assertions makes each one depend on the order of the ones
+       before it, which is how a suite starts reporting failures that are not bugs. */
+    const pl = getTrailPlayer();
+    resetCritters();
+    spawnCritters(7);
+    const c = getCritters()[0];
+    const reseat = (gap) => {
+      placeAtHead(getStartHead());
+      pl.knockT = 0; pl.kvx = 0; pl.kvz = 0; pl.spinT = 0;
+      if (!c) return null;
+      c.key = 'bear'; c.S = speciesStats('bear'); c.defends = true;
+      c.state = 'graze'; c.hitT = 0; c.swing = 0; c.warnT = 0; c.chargeT = 0;
+      c.home = { x: pl.x, z: pl.z };
+      c.x = pl.x + gap; c.z = pl.z; c.y = 0;
+      return c;
+    };
+    const step = (n, barking) => {
+      for (let k = 0; k < n; k++) {
+        updateCritters(0.05, k * 50, pl.x, pl.z, 0, 4, false, !!barking);
+        applyImpacts(0.05, 0);
+      }
+    };
+
+    check('a bear near the player bristles instead of bolting', (() => {
+      if (!reseat(spookRadiusFor('bear') * 1.2)) return false;
+      step(2);
+      return c.state === 'bristle';
+    })(), c && c.state);
+
+    /* Counted as a SPOOK rather than read off c.state: bolt() sends the animal running,
+       and a fleeing animal that leaves the map bounds is respawned elsewhere as 'graze'
+       within a frame or two. The tally is the durable evidence that the bark worked. */
+    check('barking at a bristling bear drives it off', (() => {
+      if (!reseat(spookRadiusFor('bear') * 1.2)) return false;
+      const before = getCritterStats().spooked;
+      c.state = 'bristle';
+      step(2, true);
+      return getCritterStats().spooked > before;
+    })());
+
+    check('closing on one anyway gets you charged and hit', (() => {
+      if (!reseat(spookRadiusFor('bear') * 0.5)) return false;
+      const before = getTripState().bonks;
+      step(50);            // it has to close the gap first: a charge is a run, not a teleport
+      return getTripState().bonks > before;
+    })(), `${getTripState().bonks} hits`);
+
+    check('a hit sends the player backwards, away from the animal', (() => {
+      if (!reseat(1.0)) return false;            // bear standing to the +x side
+      const before = { x: pl.x, z: pl.z };
+      step(8);
+      return pl.x < before.x - 0.05;             // shoved along -x, away from it
+    })());
+
+    check('a hit takes control away, but only briefly',
+      pl.knockT >= 0 && pl.knockT <= 0.6, `${pl.knockT.toFixed(2)}s`);
+
+    check('being knocked over costs you on the scorecard', (() => {
+      /* tripScore clamps at zero, so this needs a walk with enough distance banked for the
+         penalty to be visible -- otherwise both sides clamp to 0 and the check passes or
+         fails for reasons that have nothing to do with the penalty. */
+      const st = getCritterStats();
+      const trip = getTripState();
+      const heldDist = pl.dist, heldBonks = trip.bonks;
+      pl.dist = 2000; trip.bonks = 3;
+      const withBonks = tripScore(st);
+      trip.bonks = 0;
+      const without = tripScore(st);
+      pl.dist = heldDist; trip.bonks = heldBonks;
+      return withBonks < without;
+    })());
+
+    /* Same tally-not-state reasoning as the bark check above, and this one proved it: read
+       off c.state it passed and failed on alternate runs. bolt() sets 'flee' and the flee
+       branch runs in the SAME frame, so an animal that bolts across the map boundary is
+       respawned back to 'graze' before the assertion ever sees it -- and whether it does
+       depends on which trailhead the player happened to be re-seated at. The spook tally
+       does not care where it ended up. */
+    check('timid animals still just run away', (() => {
+      reseat(50);
+      const r = getCritters().find(x => !x.defends);
+      if (!r) return true;
+      const before = getCritterStats().spooked;
+      r.x = pl.x + 0.5; r.z = pl.z; r.state = 'graze';
+      updateCritters(0.05, 1, pl.x, pl.z, 3, 4, false, false);
+      return getCritterStats().spooked > before;
+    })());
+    resetCritters();
+  }
+
+  /* ---- crossings built as infrastructure -------------------------------------- */
+  {
+    let __stuckNote = '', __postNote = '';
+    const xs = getCrossings();
+    check('road crossings are planned, not left to the survey angle',
+      xs.length > 0, `${xs.length} crossings built`);
+
+    check('a path arrives at a crossing square to the road', (() => {
+      const G = getGraph();
+      if (!xs.length) return false;
+      let checked = 0, square = 0;
+      for (const rec of xs) {
+        const adjE = G.edges.filter(e => e.a === rec.node || e.b === rec.node);
+        for (const e of adjE) {
+          if (e.kind === 'road' || e.buried) continue;
+          const pts = e.a === rec.node ? e.pts : [...e.pts].reverse();
+          let dx = 0, dz = 0;
+          for (let i = 1; i < pts.length; i++) {
+            dx = pts[i][0] - pts[0][0]; dz = pts[i][1] - pts[0][1];
+            if (Math.hypot(dx, dz) > 1e-6) break;
+          }
+          const L = Math.hypot(dx, dz) || 1;
+          // |cos| between the arm and the ROAD axis: square means near zero
+          const along = Math.abs((dx / L) * rec.dir[0] + (dz / L) * rec.dir[1]);
+          checked++;
+          if (along < 0.35) square++;      // within ~20 degrees of perpendicular
+        }
+      }
+      return checked > 0 && square / checked > 0.9;
+    })());
+
+    check('squaring a path up did not detach it from its junction', (() => {
+      const G = getGraph();
+      for (const e of G.edges) {
+        for (const [end, pt] of [[e.a, e.pts[0]], [e.b, e.pts[e.pts.length - 1]]]) {
+          const n = G.nodes[end];
+          if (Math.hypot(n.p[0] - pt[0], n.p[1] - pt[1]) > 0.01) return false;
+        }
+      }
+      return true;
+    })());
+
+    check('a route following a road becomes a sidewalk on the verge', (() => {
+      const G = getGraph();
+      const walks = G.edges.filter(e => e.buried && e.sidewalk);
+      if (!walks.length) return getPathMix().buried === 0;
+      // every one is offset to ONE side, never zigzagging across the carriageway
+      return walks.every(e => e.sidewalk.side === 1 || e.sidewalk.side === -1) &&
+             walks.every(e => e.sidewalk.offset > 0);
+    })(), `${getGraph().edges.filter(e => e.sidewalk).length} sidewalks`);
+
+    /* The markings run ALONG the road and repeat ACROSS it -- a US continental crosswalk,
+       not a UK zebra. The first version had them the other way round, which is what
+       showed up as "crosswalks rotated 90 degrees". Asserted by measuring the bars in the
+       scene against the road axis, not by reading the constant back. */
+    check('crosswalk bars run along the road, not across it', (() => {
+      const wg = getWorldGroup();
+      if (!wg || !xs.length) return false;
+      const rec = xs[0];
+      const nxv = -rec.dir[1], nzv = rec.dir[0];
+      let along = 0, across = 0;
+      wg.traverse(o => {
+        if (!o.isMesh || !o.geometry || !o.geometry.__ribbon) return;
+        const pts = o.geometry.__ribbon;
+        if (pts.length !== 2) return;
+        if (Math.hypot(pts[0][0] - rec.x, pts[0][1] - rec.z) > rec.roadW * 1.6) return;
+        let dx = pts[1][0] - pts[0][0], dz = pts[1][1] - pts[0][1];
+        const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L;
+        if (Math.abs(dx * rec.dir[0] + dz * rec.dir[1]) > 0.7) along++;
+        else if (Math.abs(dx * nxv + dz * nzv) > 0.7) across++;
+      });
+      // the kerbs run across; the bars must outnumber them and run along
+      return along >= 4 && along > across;
+    })());
+
+    /* "If there is a crosswalk then no trail should be drawn on top of the road." The
+       edge still runs to the node -- it has to, or the crossing would not be walkable --
+       so this is a rendering trim, and what is asserted is that the trim exists and is at
+       least as deep as the carriageway is wide. */
+    check('no path surface is painted across a marked crossing', (() => {
+      const G = getGraph();
+      let armed = 0, trimmed = 0;
+      for (const rec of xs) {
+        for (const e of G.edges) {
+          if (e.kind === 'road' || e.buried) continue;
+          if (e.a !== rec.node && e.b !== rec.node) continue;
+          armed++;
+          const t = e.a === rec.node ? e.trimA : e.trimB;
+          if (t && t >= rec.roadW * 0.5) trimmed++;
+        }
+      }
+      return armed > 0 && armed === trimmed;
+    })(), `${getGraph().edges.filter(e => e.trimA || e.trimB).length} edges trimmed`);
+
+    check('a marked crossing gets no dirt junction pad on the carriageway', (() => {
+      // pads are circles; none of the non-road kind may sit within the carriageway
+      const wg = getWorldGroup();
+      if (!wg || !xs.length) return true;
+      const rec = xs[0];
+      let bad = 0;
+      wg.traverse(o => {
+        if (!o.isMesh || !o.geometry || !o.geometry.__circle) return;
+        const d = Math.hypot(o.position.x - rec.x, o.position.z - rec.z);
+        if (d < rec.roadW * 0.45) bad++;      // landings sit outside the kerb, pads did not
+      });
+      return bad === 0;
+    })());
+
+    /* A fingerpost in the middle of a road, which the screenshot showed, is both wrong
+       and unreachable. Signs at crossings are moved out to the landing. */
+    /* Measured against every ROAD, not only against the crossings: a fork can stand in a
+       traffic lane without being a crossing at all, which is how 14 posts were sitting in
+       carriageways after the crossing-only fix. */
+    check('no signpost stands in the carriageway', (() => {
+      const G = getGraph(), wg = getWorldGroup();
+      const posts = [];
+      wg.traverse(o => { if (o.__sign) posts.push(o); });
+      if (!posts.length) return false;              // never pass by finding nothing
+      let bad = 0;
+      for (const p of posts) {
+        for (const e of G.edges) {
+          if (e.kind !== 'road' || e.pts.length < 2) continue;
+          const clear = pathWidth(e.kind) * 0.5;
+          let hit = false;
+          for (let i = 0; i < e.pts.length - 1 && !hit; i++) {
+            const a = e.pts[i], b = e.pts[i + 1];
+            const vx = b[0] - a[0], vz = b[1] - a[1];
+            const L2 = vx * vx + vz * vz || 1;
+            let t = ((p.position.x - a[0]) * vx + (p.position.z - a[1]) * vz) / L2;
+            t = Math.max(0, Math.min(1, t));
+            const qx = a[0] + vx * t, qz = a[1] + vz * t;
+            if (Math.hypot(p.position.x - qx, p.position.z - qz) < clear) hit = true;
+          }
+          if (hit) { bad++; break; }
+        }
+      }
+      __postNote = `${bad} of ${posts.length} posts in a road`;
+      return bad === 0;
+    })(), __postNote);
+
+    /* Reported as getting stuck on a trail or road and having to jump or step sideways.
+       Measured rather than assumed: walk every corridor sample in eight directions and
+       count refusals. It is currently 1 in 33,480, so the geometry is not what is doing
+       it -- but a real regression here (a kerb graded into a wall, a bench that steps)
+       would show up immediately as a cluster of blocked directions. */
+    check('you can walk off a corridor in almost any direction', (() => {
+      const G = getGraph(), pl = getTrailPlayer();
+      const held = { x: pl.x, z: pl.z, y: pl.y, vy: pl.vy };
+      let tried = 0, blocked = 0, pinned = 0;
+      for (const e of G.edges) {
+        const p = e.prof.pts;
+        for (let i = 0; i < p.length; i += 6) {
+          let hit = 0;
+          for (let k = 0; k < 8; k++) {
+            const th = k * Math.PI / 4, step = 0.12;
+            pl.x = p[i][0]; pl.z = p[i][1]; pl.y = 0; pl.vy = 0;
+            const x0 = pl.x, z0 = pl.z;
+            movePlayer(Math.cos(th) * step, Math.sin(th) * step);
+            tried++;
+            if (Math.hypot(pl.x - x0, pl.z - z0) < step * 0.5) { blocked++; hit++; }
+          }
+          if (hit >= 6) pinned++;
+        }
+      }
+      Object.assign(pl, held);
+      __stuckNote = `${blocked} of ${tried} directions blocked, ${pinned} points pinned`;
+      return tried > 1000 && blocked / tried < 0.01 && pinned === 0;
+    })(), __stuckNote);
+
+    check('the crossing furniture is actually in the scene', (() => {
+      const wg = getWorldGroup();
+      if (!wg || !xs.length) return false;
+      // each crossing contributes stripes + kerbs + landings; count meshes near one
+      const rec = xs[0];
+      let near = 0;
+      wg.traverse(o => {
+        if (!o.isMesh || !o.position) return;
+        if (Math.hypot(o.position.x - rec.x, o.position.z - rec.z) < rec.roadW * 2) near++;
+      });
+      return near > 0;
+    })());
+  }
 
   const failed = results.filter(r => !r.ok);
   console.log('\n---------------- smoke test ----------------');

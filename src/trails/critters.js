@@ -21,7 +21,7 @@ import { clamp, lerp, mulberry32 } from '../core/math.js';
 import { scene, disposeGroup } from '../core/render.js';
 import { makeAnimalModel, makeAlert } from '../city/animal-models.js';
 import { comicBurst } from '../core/fx.js';
-import { cheerBlip, yipHigh } from '../core/audio.js';
+import { cheerBlip, yipHigh, warnGrowl, bonkSound } from '../core/audio.js';
 import { SPECIES } from '../data/species.js';
 import { spookRadiusFor } from './wild-driver.js';
 import { makeShadow } from './pieces.js';
@@ -38,6 +38,53 @@ let watchBest = null;             // {name, progress 0..1} for the HUD meter, pe
 
 const WATCH_SECONDS = 3.2;        // how long you must hold still to bank a sighting
 const POPULATION = 14;
+
+/* ---------- big animals stand their ground ----------
+
+   Every animal on the map used to answer proximity the same way: flee. That makes a bear
+   behave like a rabbit, which is both wrong and, worse, boring -- it removes the only
+   situation on a trail where being close to wildlife should feel like a decision rather
+   than a reward. So the brave ones defend instead.
+
+   DRIVEN BY THE STATS TABLE, not by a list of species names. SPECIES.brav already ranks
+   exactly the animals this is about: mountain goat 4.6, bighorn 5.6, bear 8.6, moose 9.6,
+   with the next one down being a housecat at 3.2. A threshold of 4 therefore names the
+   set without hardcoding it, and stays right if the roster changes.
+
+   THE SHAPE OF THE ENCOUNTER, and each stage exists to give the player a way out:
+     bristle  it has seen you and is not leaving. Head down, stamping, warning growl.
+              Back off now and nothing happens.
+     charge   you came closer anyway. It commits and runs you down.
+     hit      contact. A headbutt or a paw slap, and you go backwards.
+   Barking is the counter, and it is the reason the bark button matters out here: a bark
+   inside the warn window turns a defender around and sends it off like anything else.
+   Barking at a bear is a gamble that works -- which is a better rule than "never get
+   close", because it is a rule you can play with. */
+const DEFEND_BRAV = 4;
+const BRISTLE_MUL = 1.5;          // x spook radius: where it starts warning you off
+const CHARGE_MUL  = 0.85;         // x spook radius: where it commits
+const CHARGE_SECONDS = 2.6;       // it does not chase you across the county
+const HIT_COOLDOWN = 1.4;
+/* Contact reach, in true metres like every other animal-to-player distance in this file
+   (see wanderTarget's note on why positions scale and radii do not). Scaled by the
+   animal's own size, because a moose can reach you from further away than a goat. */
+function reachOf(c){ return 1.5 + c.S.scale*1.1; }
+function defenderKeys(){ return Object.keys(SPECIES).filter(isDefender); }
+function speciesStats(key){ return SPECIES[key]; }
+function isDefender(key){
+  const S = SPECIES[key];
+  return !!S && (S.brav || 0) >= DEFEND_BRAV;
+}
+
+/* Hits are QUEUED rather than applied, because critters.js has no business knowing what a
+   player is. main.js drains this each frame and turns each record into knockback on
+   whatever the player happens to be. Cleared in place, same rule as CRITTERS. */
+const IMPACTS = [];
+function takeImpacts(){
+  const out = IMPACTS.slice();
+  IMPACTS.length = 0;
+  return out;
+}
 
 function getCritters(){ return CRITTERS; }
 function getCritterStats(){
@@ -107,6 +154,8 @@ function placeCritter(key, rnd){
     target: {x: spot.x, z: spot.z},
     home: {x: spot.x, z: spot.z},
     watchT: 0, sighted: false, fledT: 0,
+    // defender state (see DEFEND_BRAV): unused by everything below the bravery threshold
+    defends: isDefender(key), warnT: 0, chargeT: 0, hitT: 0, swing: 0, lunge: 0,
   });
 }
 
@@ -141,6 +190,44 @@ function wanderTarget(c, rnd){
   // animal, both of which stay true size at any world scale.
   const ang = rnd()*Math.PI*2, r = (2 + rnd()*7)*S;
   return {x: c.home.x + Math.cos(ang)*r, z: c.home.z + Math.sin(ang)*r};
+}
+
+/* Stand and warn. Not a flee and not a watch: the animal squares up, drops its head and
+   growls, and the encounter is now on a timer the player controls by moving. */
+function bristle(c, px, pz){
+  if(c.state === 'bristle' || c.state === 'charge') return;
+  c.state = 'bristle';
+  c.warnT = 0;
+  c.alert.visible = true;
+  c.yaw = Math.atan2(c.z - pz, -(c.x - px));
+  warnGrowl(c.S.scale);
+}
+
+function charge(c, px, pz){
+  if(c.state === 'charge') return;
+  c.state = 'charge';
+  c.chargeT = 0;
+  c.alert.visible = true;
+  warnGrowl(c.S.scale*0.85);
+}
+
+/* Contact. The verb is the animal's own: a horned or antlered animal butts, a bear
+   slaps. Both send you backwards; they differ in how they look and sound, which is the
+   whole point of naming them separately. */
+function landHit(c, px, pz){
+  const away = Math.atan2(pz - c.z, px - c.x);
+  const verb = (c.key === 'bear') ? 'slap' : 'butt';
+  IMPACTS.push({
+    x: c.x, z: c.z, key: c.key, name: c.S.nm, verb,
+    // heavier animals hit harder; the exponent keeps a moose from being a catapult
+    force: 7.5 + Math.pow(c.S.scale, 1.4)*4.2,
+    dirX: Math.cos(away), dirZ: Math.sin(away),
+  });
+  c.hitT = HIT_COOLDOWN;
+  c.swing = 1;                       // drives the lunge pose below
+  bonkSound(c.S.scale);
+  comicBurst((verb === 'slap' ? '\ud83d\udc3e ' : '\ud83d\udca5 ') + c.S.nm + '!',
+             c.x, c.y + c.S.scale*1.8, c.z, '#e2453f');
 }
 
 function bolt(c, px, pz){
@@ -186,6 +273,61 @@ function typicalSpookRadius(){
   return sum/keys.length;
 }
 
+/* Everything that turns one critter's STATE into a pose, in one place.
+
+   Extracted because the defender branch needs it too and `continue`s past the rest of the
+   loop -- a bristling bear that skipped the posing code stood frozen mid-stride, which is
+   the least threatening thing an animal can do. Two callers, one body, no chance of the
+   two drifting into different-looking animals. */
+function poseCritter(c, dt, t, i, rnd){
+  const still = c.state === 'watchful' || c.state === 'bristle' ||
+                (c.state === 'graze' && c.timer > 0.6 && rnd() < 0);
+  const fleeing = c.state === 'flee';
+  const charging = c.state === 'charge';
+  const bristling = c.state === 'bristle';
+
+  /* The lunge. `swing` is set to 1 on contact and decays, and it drives a whole-body
+     shove forward along the animal's own heading plus a hard head snap -- so the hit is
+     something you SEE happen to you, from an animal that visibly threw its weight, rather
+     than a number applied to the player while a model stands still. Bristling gets a
+     smaller, rhythmic version of the same motion: the stamp. */
+  const stamp = bristling ? Math.sin(t*0.011)*0.5 + 0.5 : 0;
+  c.lunge = lerp(c.lunge || 0, charging ? 0.55 : (bristling ? stamp*0.16 : 0),
+                 1 - Math.pow(0.004, dt));
+  const push = c.lunge*0.32*c.S.scale + c.swing*0.85*c.S.scale;
+  const fx = Math.cos(c.yaw), fz = -Math.sin(c.yaw);
+
+  if(c.hopper){
+    c.hop += dt*(fleeing ? 11 : 2.4);
+    c.g.position.set(c.x, c.y + (still ? 0 : Math.abs(Math.sin(c.hop))*0.22*c.S.scale), c.z);
+  }else{
+    // a charging animal's legs run hard; a bristling one paws the ground rather than walks
+    if(!still || bristling) c.walkPh += dt*(fleeing ? 13 : (charging ? 15 : (bristling ? 6 : 4)));
+    const amp = charging ? 0.78 : (bristling ? 0.2 + stamp*0.22 : (still ? 0 : (fleeing ? 0.62 : 0.26)));
+    (c.refs.legs||[]).forEach((leg, li)=>{
+      leg.rotation.z = Math.sin(c.walkPh + ((li===0||li===3) ? 0 : Math.PI))*amp;
+    });
+    c.g.position.set(c.x + fx*push, c.y + c.swing*0.22*c.S.scale, c.z + fz*push);
+  }
+  c.g.rotation.y = c.yaw;
+  /* Head. Grazing is down and idle; watched is up and level; bristling is DOWN AND
+     FORWARD, which is the universal read for "I am about to use this" whether the animal
+     is carrying horns or not; the contact frame throws it through. */
+  if(c.refs.headG){
+    const want = c.swing > 0.02 ? -0.9*c.swing
+      : bristling ? 0.52 + stamp*0.16
+      : charging ? 0.34
+      : (c.state === 'graze' && !fleeing) ? 0.6 + Math.sin(t*0.0016 + i)*0.12
+      : 0;
+    const rate = c.swing > 0.02 ? 0.00001 : 0.02;    // snap on the hit, ease otherwise
+    c.refs.headG.rotation.z = lerp(c.refs.headG.rotation.z, want, 1 - Math.pow(rate, dt));
+  }
+  // a defender leans into it: roll the whole body forward on the swing
+  c.g.rotation.z = lerp(c.g.rotation.z || 0, -c.swing*0.3, 1 - Math.pow(0.01, dt));
+  if(c.refs.tailG) c.refs.tailG.rotation.x = Math.sin(t*0.005 + i)*(fleeing ? 0.4 : (charging ? 0.5 : 0.16));
+  if(c.alert.material) c.alert.material.opacity = c.sighted ? 0.35 : 1;
+}
+
 function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
   const rnd = Math.random;
   const S = getMapScale();
@@ -200,6 +342,50 @@ function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
     const noise = playerNoise(speed, topSpeed, sneaking, barking);
     const spookR = spookRadiusFor(c.key)*noise;
     const noticeR = spookRadiusFor(c.key)*2.4;
+
+    if(c.hitT > 0) c.hitT = Math.max(0, c.hitT - dt);
+    c.swing = Math.max(0, c.swing - dt*3.2);
+
+    /* THE DEFENDER BRANCH, taken before the ordinary spook check below.
+
+       A brave animal inside its own spook radius does NOT bolt -- that check is what made
+       a bear behave like a rabbit. It bristles, then charges, then hits. Two ways out,
+       and the player chooses which: back off past the bristle ring, or bark. Barking is
+       checked FIRST and at the wider radius, so it works as a warning shot rather than
+       only as a last resort -- which is what makes it worth pressing early. */
+    if(c.defends && c.state !== 'flee'){
+      const bristleR = spookRadiusFor(c.key)*BRISTLE_MUL;
+      const chargeR = spookRadiusFor(c.key)*CHARGE_MUL;
+      if(dist < bristleR*1.25 && barking){
+        // a bark drives even a bear off -- and costs you the sighting, like any spook
+        bolt(c, px, pz);
+      }else if(c.state === 'charge'){
+        c.chargeT += dt;
+        seek(c, px, pz, c.S.speed*2.1, dt);
+        if(dist < reachOf(c) && c.hitT <= 0) landHit(c, px, pz);
+        if(c.chargeT > CHARGE_SECONDS || dist > bristleR*2.2){
+          c.state = 'bristle'; c.warnT = 0; c.target = {x:c.home.x, z:c.home.z};
+        }
+      }else if(dist < chargeR){
+        charge(c, px, pz);
+      }else if(dist < bristleR){
+        bristle(c, px, pz);
+        c.warnT += dt;
+        c.yaw = Math.atan2(dz, -dx);
+        // a second growl if you loiter inside the warning ring without closing
+        if(c.warnT > 1.9){ c.warnT = 0; warnGrowl(c.S.scale); }
+      }else if(c.state === 'bristle'){
+        c.state = 'graze'; c.alert.visible = false; c.warnT = 0;
+        c.target = wanderTarget(c, rnd);
+      }
+      if(c.state === 'bristle' || c.state === 'charge'){
+        // it is standing its ground, so none of the ordinary flee/watch logic applies
+        const gy0 = standingY(c.x, c.z);
+        c.y = lerp(c.y, gy0, 1 - Math.pow(0.0008, dt));
+        poseCritter(c, dt, t, i, rnd);
+        continue;
+      }
+    }
 
     if(c.state !== 'flee'){
       if(dist < spookR){
@@ -261,30 +447,10 @@ function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
     const gy = standingY(c.x, c.z);
     c.y = lerp(c.y, gy, 1 - Math.pow(0.0008, dt));
 
-    const still = c.state === 'watchful' || (c.state === 'graze' && c.timer > 0.6 && rnd() < 0);
-    const fleeing = c.state === 'flee';
-    if(c.hopper){
-      c.hop += dt*(fleeing ? 11 : 2.4);
-      c.g.position.set(c.x, c.y + (still ? 0 : Math.abs(Math.sin(c.hop))*0.22*c.S.scale), c.z);
-    }else{
-      if(!still) c.walkPh += dt*(fleeing ? 13 : 4);
-      const amp = still ? 0 : (fleeing ? 0.62 : 0.26);
-      (c.refs.legs||[]).forEach((leg, li)=>{
-        leg.rotation.z = Math.sin(c.walkPh + ((li===0||li===3) ? 0 : Math.PI))*amp;
-      });
-      c.g.position.set(c.x, c.y, c.z);
-    }
-    c.g.rotation.y = c.yaw;
-    // head down to feed while grazing, up and alert while watched -- the read that tells
-    // you at a glance whether you've been noticed
-    if(c.refs.headG){
-      const want = (c.state === 'graze' && !fleeing) ? 0.6 + Math.sin(t*0.0016 + i)*0.12 : 0;
-      c.refs.headG.rotation.z = lerp(c.refs.headG.rotation.z, want, 1 - Math.pow(0.02, dt));
-    }
-    if(c.refs.tailG) c.refs.tailG.rotation.x = Math.sin(t*0.005 + i)*(fleeing ? 0.4 : 0.16);
-    if(c.alert.material) c.alert.material.opacity = c.sighted ? 0.35 : 1;
+    poseCritter(c, dt, t, i, rnd);
   }
 }
 
 export { CRITTERS, getCritters, getCritterStats, spawnCritters, resetCritters,
-         updateCritters, WATCH_SECONDS, playerNoise, typicalSpookRadius };
+         updateCritters, WATCH_SECONDS, playerNoise, typicalSpookRadius,
+         takeImpacts, isDefender, defenderKeys, speciesStats, reachOf, DEFEND_BRAV, BRISTLE_MUL, CHARGE_MUL };

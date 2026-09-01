@@ -62,13 +62,27 @@ function ribbonGeom(pts,w,y,elevArr){
   const geo=new THREE.BufferGeometry();
   geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(P),3));
   geo.setAttribute('normal',new THREE.BufferAttribute(new Float32Array(N),3));
-  geo.setIndex(idx);return geo;
+  geo.setIndex(idx);/* test seam (tools/smoke.js): the centreline this ribbon was built from, so an
+     assertion can measure which way a painted bar actually runs rather than trusting the
+     constant that was supposed to decide it. */
+  geo.__ribbon = pts.map(p=>[p[0],p[1]]);
+  return geo;
 }
-function trailMat(color){
+/* `layer` is the path's CLASS rank (0 road, 1 track, 2 trail) -- see world.js's
+   PATH_RANK. Every ribbon used to share one polygon offset, which is fine while nothing
+   overlaps but is exactly wrong where a footpath crosses a service road: the two ribbons
+   are near-coplanar, the depth test has no tie-break, and the crossing renders as a
+   flickering patchwork that changes with camera angle. Biasing by class makes the answer
+   deterministic and, more importantly, CORRECT -- the dirt path is painted on top of the
+   tarmac, because that is what a path crossing a road looks like. world.js also lifts
+   each class by a few centimetres (kindLift) so the ordering survives on hardware that
+   clamps polygon offset; neither is visible as float at that size. */
+function trailMat(color, layer){
   // DoubleSide is a safety net on top of the winding fix — cheap for a ribbon this size,
   // and guarantees the trail can never vanish again from a stray winding edge case.
+  const L = layer || 0;
   return new THREE.MeshToonMaterial({color:new THREE.Color(color),gradientMap:toonTex,side:THREE.DoubleSide,
-    polygonOffset:true,polygonOffsetFactor:-2,polygonOffsetUnits:-2});
+    polygonOffset:true,polygonOffsetFactor:-2-L*3,polygonOffsetUnits:-2-L*3});
 }
 const INK='#3a2517';
 function signText(label,dist,flip){
@@ -91,6 +105,9 @@ function signText(label,dist,flip){
 }
 function buildSign(node,arms){
   const g=new THREE.Group();g.position.set(node.p[0],0,node.p[1]);
+  /* test seam: lets tools/smoke.js find every fingerpost in the scene and check none of
+     them ended up planted in a carriageway. */
+  g.__sign = true;
   const post=M(new THREE.CylinderGeometry(0.14,0.17,3.4,8),toon('#7a4e28'));
   post.position.y=1.7;g.add(post);
   const cap=M(new THREE.SphereGeometry(0.19,10,8),toon('#5c3a1c'));
@@ -107,6 +124,64 @@ function buildSign(node,arms){
   });
   return g;
 }
+/* A road crossing, built as a piece of INFRASTRUCTURE rather than left to whatever the
+   survey data happened to record.
+
+   The source geometry crosses a service road at whatever angle the digitiser drew, which
+   on a real map is often a long oblique smear where two ribbons overlap for fifteen
+   metres and neither reads as passing over the other. Depth ordering makes that legible
+   but not GOOD: it is still a diagonal scrape across a road with no indication of where
+   a walker is meant to cross. Every real trail network solves this the same way, and it
+   is a solved visual language -- square the path up to the kerb, stripe the carriageway,
+   put a landing either side. So that is what gets built, and the exact survey angle is
+   given up to get it. That trade is the whole point: you can see where to cross.
+
+   `dir` is the road's axis (unit), `n` the walking direction across it. See below on why
+   the markings run along `dir` and repeat along `n` rather than the other way round. */
+function buildCrossing(rec, groundYAt){
+  const g = new THREE.Group();
+  const {x, z, dir, roadW, walkW, lift} = rec;
+  const nx = -dir[1], nz = dir[0];      // across the carriageway = the walking direction
+
+  /* CONTINENTAL ("ladder") MARKINGS, not a UK zebra -- the bars run ALONG the road and
+     repeat ACROSS it. The first version had them the other way round, which is what the
+     screenshot showed as a crosswalk rotated ninety degrees. Both patterns are real, but
+     they are not interchangeable: this is a US trail network (Garden of the Gods), and a
+     US crosswalk is a ladder. Getting it backwards makes the markings read as being for
+     traffic rather than for the walker, which is exactly the wrong signal at the one
+     place a walker has to decide whether to step out. */
+  const BARS = 5;
+  const acrossHalf = roadW*0.5;                 // markings stop at the carriageway edge
+  const barW = (roadW*0.86)/(BARS*2 - 1);       // bar + equal gap, inset from the kerbs
+  const bar = (offAcross) => {
+    const cx = x + nx*offAcross, cz = z + nz*offAcross;
+    const a = [cx - dir[0]*walkW*0.5, cz - dir[1]*walkW*0.5];
+    const b = [cx + dir[0]*walkW*0.5, cz + dir[1]*walkW*0.5];
+    const ys = [groundYAt(a[0], a[1]), groundYAt(b[0], b[1])];
+    return new THREE.Mesh(ribbonGeom([a, b], barW, lift + 0.10, ys), trailMat('#f2ead6', 2));
+  };
+  for(let i = 0; i < BARS; i++) g.add(bar((i - (BARS-1)/2)*barW*2));
+
+  /* Kerb + landing, one each side. The kerb gives the carriageway an edge for the
+     markings to end at and the path a place to arrive; the landing is the pad the trail
+     ribbon now stops on, since it no longer runs across the road. */
+  const kerbW = Math.max(0.28, roadW*0.09);
+  for(const sd of [-1, 1]){
+    const kx = x + nx*sd*(acrossHalf + kerbW*0.5), kz = z + nz*sd*(acrossHalf + kerbW*0.5);
+    const a = [kx - dir[0]*walkW*0.72, kz - dir[1]*walkW*0.72];
+    const b = [kx + dir[0]*walkW*0.72, kz + dir[1]*walkW*0.72];
+    const ys = [groundYAt(a[0], a[1]), groundYAt(b[0], b[1])];
+    g.add(new THREE.Mesh(ribbonGeom([a, b], kerbW, lift + 0.105, ys), trailMat('#cdc3ad', 2)));
+    const px = kx + nx*sd*(kerbW*0.5 + walkW*0.30), pz = kz + nz*sd*(kerbW*0.5 + walkW*0.30);
+    const padGeo = new THREE.CircleGeometry(walkW*0.44, 18); padGeo.__circle = 'landing';
+    const pad = new THREE.Mesh(padGeo, trailMat(THEME.tread, 2));
+    pad.rotation.x = -Math.PI/2;
+    pad.position.set(px, groundYAt(px, pz) + lift + 0.115, pz);
+    g.add(pad);
+  }
+  return g;
+}
+
 /* short blaze post: reads as "you are on THIS trail" from a distance */
 function buildBlaze(x,z,color){
   const g=new THREE.Group();g.position.set(x,0,z);
@@ -624,7 +699,7 @@ function buildBackdrop(theme, rng, mapScale=1){
 }
 
 
-export { ribbonGeom, trailMat, INK, buildSign, buildBlaze, buildGate, makeTree, makeRock,
+export { ribbonGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
          POI_STYLE, AREA_STYLE, nameplate, buildPOI, pavementTexture, buildLandform,
          buildFloatingLabel, buildArea, buildAreaSign, makeShadow, pickTree, shade,
          buildBackdrop };

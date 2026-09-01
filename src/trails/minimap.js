@@ -34,6 +34,7 @@
    just draws a bigger crop of the same offscreen image. */
 import { clamp } from '../core/math.js';
 import { getAreas, getBBox, getGraph, getMapScale, getPOIs, getStartHead, getTrailheads, getWorldRevision } from './world.js';
+import { getSpots, spotWorld } from './spots.js';
 import { reliefCanvas } from './terrain.js';
 import { getCritters } from './critters.js';
 import { THEME } from './themes.js';
@@ -50,7 +51,30 @@ let bigZoom = 1;               // 1 = whole atlas fit to the sheet, higher = zoo
 let bigFocus = null;           // world {x,z} centred on the sheet; null -> atlas centre
 let bigView = null;            // last-drawn transform, for pointer/wheel picking: {ox,oy,s,dpr,at,W,H}
 let onTrailheadPick = null;    // main.js's placeAtHead, wired through initMinimap
+let onSpotPick = null;         // main.js's placeAtSpot, same arrangement
 let bigWired = false;          // guards against double-binding listeners if init runs twice
+
+/* The route the walker is currently on, and the edges that belong to it.
+
+   Drawn LIVE rather than baked into the atlas, for the same reason the trailhead badges
+   are: the atlas is rebuilt only when the world is, and this changes every time you step
+   from one trail onto another. Held as a small cache keyed by (route, world revision)
+   because the edge list for a route is a filter over the whole graph -- cheap, but not
+   cheap enough to repeat twice a frame on both canvases forever. */
+let hiRoute = null;
+let hiCache = {route:null, rev:-1, edges:[]};
+
+function setHighlightRoute(route){ hiRoute = route || null; }
+function getHighlightRoute(){ return hiRoute; }
+
+function highlightEdges(){
+  const rev = getWorldRevision();
+  if(hiCache.route === hiRoute && hiCache.rev === rev) return hiCache.edges;
+  const G = getGraph();
+  const edges = (hiRoute && G) ? G.edges.filter(e => e.route === hiRoute) : [];
+  hiCache = {route:hiRoute, rev, edges};
+  return edges;
+}
 
 function isBigMapOpen(){ return bigOpen; }
 
@@ -100,6 +124,33 @@ function pickTrailheadAt(px, py){
   return true;
 }
 
+/* A saved pin is a pick target on the same sheet as the trailheads, and it wins ties.
+   It is drawn on top, it is the thing the walker deliberately put there, and there are
+   at most a couple of dozen of them against eight trailheads -- so a tap that could mean
+   either almost always means the pin. */
+function pickSpotAt(px, py){
+  if(!bigView || !onSpotPick) return false;
+  const {ox, oy, s, at, dpr} = bigView;
+  const k = at.ppm*s;
+  const spots = getSpots();
+  let best=null, bestD=Infinity;
+  for(const sp of spots){
+    const p = spotWorld(sp);
+    const d = Math.hypot(ox+(p.x-at.x0)*k-px, oy+(p.z-at.z0)*k-py);
+    if(d<bestD){ bestD=d; best=sp; }
+  }
+  const hitR = Math.max(22*(dpr||1), 30);
+  if(!best || bestD>hitR) return false;
+  onSpotPick(best);
+  toggleBigMap(false);
+  return true;
+}
+
+/* One tap, two kinds of target. Spots first (see above), trailheads second. */
+function pickOnSheet(px, py){
+  return pickSpotAt(px, py) || pickTrailheadAt(px, py);
+}
+
 /* Drag-to-pan + tap-to-pick, as one pointer sequence: a real drag pans, a pointer that
    never moved past a small threshold is a tap and tries to pick a trailhead instead.
    Wheel zooms toward the cursor. Buttons zoom in place (see zoomBigToward above). */
@@ -129,7 +180,7 @@ function wireBigMapControls(){
   });
   const endDrag = e=>{
     if(!drag || e.pointerId!==drag.id) return;
-    if(!drag.moved){ const p=toCanvasPt(e); pickTrailheadAt(p.x, p.y); }
+    if(!drag.moved){ const p=toCanvasPt(e); pickOnSheet(p.x, p.y); }
     drag = null;
   };
   bigCv.addEventListener('pointerup', endDrag);
@@ -146,8 +197,14 @@ function wireBigMapControls(){
 /* `onPick(i)` is main.js's placeAtHead -- called with a trailhead index when the sheet
    is tapped on one. Kept as a callback rather than an import so this module never needs
    to know about player state, avatars or cameras, only "which trailhead". */
+/* `onPick` may be a plain function (trailhead picked -- the original contract) or an
+   options object carrying both handlers. Kept polymorphic rather than versioned because
+   the trailhead callback is the one this module cannot work without and the spot one is
+   genuinely optional: a caller with no saved-spot feature should not have to pass null. */
 function initMinimap(onPick){
-  onTrailheadPick = onPick || null;
+  const opts = (typeof onPick === 'function') ? {onTrailhead:onPick} : (onPick || {});
+  onTrailheadPick = opts.onTrailhead || null;
+  onSpotPick = opts.onSpot || null;
   miniCv = document.getElementById('minimap');
   bigCv = document.getElementById('bigmap');
   if(miniCv) miniCtx = miniCv.getContext('2d');
@@ -287,6 +344,65 @@ function drawSighted(g, X, Z, scale){
   }
 }
 
+/* "Which of these is the one I'm on." A network of fifty named trails printed in one ink
+   colour answers that question no better than the ground does, which is the whole reason
+   a walker pulls the map out at a fork. So the route underfoot is over-stroked in a
+   bright casing: a wide pale halo first, then the route's OWN blaze colour on top -- the
+   same colour as the posts along it, so the map and the world agree without a legend.
+
+   Over-stroked rather than redrawn: the atlas underneath keeps the trail's casing and
+   fill, so a highlighted trail still reads as a trail rather than as a coloured line
+   that happens to lie on one. */
+function drawHighlight(g, X, Z, scale){
+  const edges = highlightEdges();
+  if(!edges.length) return;
+  g.save();
+  g.lineCap = 'round'; g.lineJoin = 'round';
+  const trace = () => {
+    g.beginPath();
+    for(const e of edges){
+      if(e.pts.length < 2) continue;
+      e.pts.forEach((p, i) => i ? g.lineTo(X(p[0]), Z(p[1])) : g.moveTo(X(p[0]), Z(p[1])));
+    }
+  };
+  trace();
+  g.globalAlpha = 0.55;
+  g.lineWidth = 7.5*scale; g.strokeStyle = '#fff8e6'; g.stroke();
+  g.globalAlpha = 1;
+  trace();
+  g.lineWidth = 3.2*scale; g.strokeStyle = edges[0].color || '#e8743a'; g.stroke();
+  g.restore();
+}
+
+/* Saved pins, numbered in the order they were dropped so the badge on the sheet matches
+   the row in the list beside it. Drawn as a teardrop rather than a disc so a pin can
+   never be mistaken for a trailhead badge or a sighted animal at a glance -- three kinds
+   of marker on one map is two too many to distinguish by colour alone. */
+function drawSpots(g, X, Z, scale, withLabels){
+  const spots = getSpots();
+  if(!spots.length) return;
+  spots.forEach((sp, i)=>{
+    const p = spotWorld(sp);
+    const x = X(p.x), y = Z(p.z);
+    const r = 6.4*scale;
+    g.save();
+    g.beginPath();
+    // circular head with a point at the bottom, meeting the ground at (x, y)
+    g.arc(x, y - r*1.35, r, Math.PI*0.82, Math.PI*0.18);
+    g.lineTo(x, y);
+    g.closePath();
+    g.fillStyle = '#4f8fd6'; g.fill();
+    g.lineWidth = Math.max(1.4, 1.8*scale); g.strokeStyle = INK_MAP; g.stroke();
+    if(withLabels){
+      g.font = `bold ${8.4*scale}px "Comic Sans MS","Chalkboard SE",sans-serif`;
+      g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillStyle = '#fff8e6';
+      g.fillText(String(i+1), x, y - r*1.35);
+    }
+    g.restore();
+  });
+}
+
 /* Lettered, tappable trailhead badges for the full sheet -- constant SCREEN size
    regardless of zoom (like a map pin), same lettering as the "Start here" list so the
    two always agree. The selected one gets a bright ring so "where am I starting" reads
@@ -345,7 +461,9 @@ function updateMinimap(px, pz, yaw){
     }
     const X = x => (x - px)*ppx + W/2, Z = z => (z - pz)*ppx + H/2;
     const dpr = W/miniCv.clientWidth;
+    drawHighlight(g, X, Z, dpr*0.85);
     drawSighted(g, X, Z, dpr);
+    drawSpots(g, X, Z, dpr*1.05, false);
     drawPup(g, W/2, H/2, yaw, dpr*1.15);
     g.restore();
   }
@@ -370,8 +488,10 @@ function updateMinimap(px, pz, yaw){
       g.drawImage(at.canvas, ox, oy, dw, dh);
       bigView = {ox, oy, s, baseS, at, W, H, dpr};
       const X = x => ox + (x - at.x0)*at.ppm*s, Z = z => oy + (z - at.z0)*at.ppm*s;
+      drawHighlight(g, X, Z, dpr*1.4);
       drawTrailheadLabels(g, X, Z, dpr*1.3, getStartHead());
       drawSighted(g, X, Z, dpr*1.6);
+      drawSpots(g, X, Z, dpr*1.9, true);
       drawPup(g, X(px), Z(pz), yaw, dpr*2.2);
     } else {
       bigView = null;
@@ -388,4 +508,5 @@ function updateMinimap(px, pz, yaw){
   }
 }
 
-export { initMinimap, updateMinimap, toggleBigMap, isBigMapOpen, getBigView };
+export { initMinimap, updateMinimap, toggleBigMap, isBigMapOpen, getBigView,
+         setHighlightRoute, getHighlightRoute, highlightEdges, pickSpotAt, pickOnSheet };

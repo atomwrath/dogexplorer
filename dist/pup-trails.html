@@ -28,6 +28,14 @@
 
 </style>
 <style>
+/* No scrollbars, ever. The stage is a fixed-height 3D canvas and the panel scrolls
+   internally, so any scrollbar on the document is an overflow bug showing through -- and
+   on a touch device it also means the whole page can be dragged around under the game,
+   which makes a drag-to-look control feel broken. Pinned here at the root rather than
+   patched per-element so a new overlay cannot reintroduce it. */
+html, body{overflow:hidden;height:100%;max-width:100%;overscroll-behavior:none;}
+#app{max-width:100vw;overflow:hidden;}
+
 /* Pup Trails: layout only — colors/tokens come from styles/base.css. */
 body{margin:0;font-family:"Comic Sans MS","Chalkboard SE",system-ui,sans-serif;background:var(--cream);color:var(--ink);}
 #app{display:flex;flex-direction:column;height:100dvh;}
@@ -48,7 +56,17 @@ h1 small{display:block;font-size:11px;opacity:.6;font-weight:normal;}
 main{flex:1;display:flex;min-height:0;position:relative;}
 #panel{width:280px;min-width:280px;background:var(--card);border-right:4px solid var(--ink);
   overflow-y:auto;padding:14px;transition:margin-left .35s ease;}
-body.play #panel{display:none;}
+/* The panel used to vanish outright the moment you hit play, which made every setting on
+   it a decision you had to get right before you had seen the map. It is now a drawer:
+   off-screen by default so the walk is full-bleed, slid in by the ⚙ button or Tab, and
+   over the scene rather than beside it so opening it never resizes the canvas mid-stride
+   (a resize costs a renderer reallocation and a visible hitch). */
+body.play #panel, body.done #panel{position:absolute;left:0;top:0;height:100%;z-index:9;
+  margin-left:-300px;box-shadow:6px 0 0 rgba(61,42,32,.18);}
+body.play.panelopen #panel{margin-left:0;}
+/* the ⚙ button is desktop-visible during play; the lobby keeps it phone-only */
+body.play .btn.icon{display:inline-block;}
+.panel-lede{margin:0 0 12px;line-height:1.5;}
 #stage{flex:1;position:relative;}
 canvas#c{position:absolute;inset:0;width:100%;height:100%;display:block;}
 .sect{border:3px solid var(--ink);border-radius:16px;background:#fff;padding:12px;margin-bottom:14px;}
@@ -56,6 +74,7 @@ canvas#c{position:absolute;inset:0;width:100%;height:100%;display:block;}
 .hint{font-size:11.5px;opacity:.65;}
 #playHud{position:absolute;top:10px;left:10px;display:none;}
 body.play #playHud{display:block;}
+
 .io-row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;}
 .io-row .btn{flex:1;text-align:center;}
 #mapNote{margin:8px 0 0;}
@@ -161,7 +180,8 @@ body.play #playHud{display:block;}
    width in landscape, and a HUD that pushes itself off screen is worse than no HUD. */
 #hudReadout{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;max-width:250px;}
 #hudReadout .tally{font-variant-numeric:tabular-nums;}
-/* Matches the ring on the ground, so the chip and the circle are obviously one thing. */
+/* The 🔊 chip was removed from the HUD -- the ring drawn on the ground is the readout.
+   These stay so a build that puts the chip back still gets the matching colours. */
 #hudNoise.quiet{background:#e4f2e2;}
 #hudNoise.loud{background:#f7ded9;}
 .tally{background:var(--card);border:3px solid var(--ink);border-radius:11px;
@@ -187,6 +207,11 @@ body.play #playHud{display:block;}
 body.bigmap #miniWrap{display:none;}
 #minimap{width:172px;height:172px;border-radius:50%;border:4px solid var(--ink);
   background:#e9dcbe;box-shadow:0 3px 0 rgba(61,42,32,.25);display:block;}
+/* Which trail is underfoot, in the same ink as the highlight drawn on the disc above it
+   -- the chip names what the bright line is. Hidden until there is an answer. */
+#hudTrail{display:none;max-width:172px;text-align:center;font-size:12px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+#hudTrail.on{display:block;}
 
 /* --- full-sheet map --- */
 #bigmapWrap{position:absolute;inset:0;display:none;z-index:8;background:rgba(45,32,22,.55);
@@ -196,12 +221,45 @@ body.bigmap #bigmapWrap{display:block;}
   background:#e9dcbe;box-sizing:border-box;cursor:grab;touch-action:none;}
 #bigmap:active{cursor:grabbing;}
 #bigmapClose{position:absolute;top:24px;left:24px;}
+/* The sheet is now a picker for two kinds of place -- trailheads and saved pins -- so it
+   carries its own side card rather than borrowing space in the left panel, which is
+   settings only. Scrolls independently: a walker with twenty pins should not lose the
+   “Surprise me” button off the bottom of the screen. */
+#bigmapSide{position:absolute;top:24px;right:24px;width:230px;max-height:calc(100% - 130px);
+  overflow-y:auto;display:flex;flex-direction:column;gap:10px;}
+.bm-card{background:var(--card);border:3px solid var(--ink);border-radius:14px;padding:10px 12px;}
+.bm-card h3{margin:0 0 6px;font-size:14px;}
+.bm-card .hint{margin:0 0 8px;}
+#startNow{font-weight:bold;opacity:.85;}
+.spot-list{display:flex;flex-direction:column;gap:5px;margin-bottom:8px;}
+.spot-list .none{font-size:11.5px;opacity:.6;}
+.spot-row{display:flex;align-items:center;gap:7px;border:3px solid var(--ink);border-radius:10px;
+  background:#fff;padding:5px 8px;font-size:11.5px;font-weight:bold;}
+.spot-row .sp-badge{flex:none;width:20px;height:20px;border-radius:50%;background:#4f8fd6;
+  color:#fff;border:2px solid var(--ink);display:flex;align-items:center;justify-content:center;
+  font-size:10px;}
+.spot-row .sp-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  text-align:left;background:none;border:none;font-family:inherit;font-weight:bold;
+  font-size:11.5px;cursor:pointer;padding:0;color:inherit;}
+.spot-row .sp-x{flex:none;border:none;background:none;font-family:inherit;font-weight:bold;
+  cursor:pointer;opacity:.5;font-size:13px;line-height:1;padding:0 2px;}
+.spot-row .sp-x:hover{opacity:1;}
 #bigmapZoom{position:absolute;bottom:24px;right:24px;display:flex;flex-direction:column;gap:8px;}
 #bigmapZoom .btn{width:44px;height:44px;padding:0;font-size:20px;line-height:1;
   display:flex;align-items:center;justify-content:center;}
 .bigmap-hint{position:absolute;left:24px;bottom:24px;max-width:230px;margin:0;
   background:#fff8e6;border:3px solid var(--ink);border-radius:12px;padding:7px 11px;
   font-size:11.5px;font-weight:bold;opacity:.9;}
+@media (max-width:900px){
+  /* the side card would eat half a phone's sheet -- lay it under the map instead */
+  #bigmapSide{position:static;width:auto;max-height:none;margin-bottom:10px;
+    flex-direction:row;overflow-x:auto;}
+  .bm-card{flex:1 0 200px;}
+  #bigmapWrap{display:none;overflow-y:auto;}
+  body.bigmap #bigmapWrap{display:flex;flex-direction:column;}
+  #bigmap{flex:1;min-height:60vh;}
+  #bigmapClose{position:static;align-self:flex-start;margin-bottom:8px;}
+}
 @media (max-width:760px){
   #bigmapZoom{bottom:14px;right:14px;gap:6px;}
   #bigmapZoom .btn{width:40px;height:40px;font-size:17px;}
@@ -248,6 +306,19 @@ body.arrived #arrivalWrap{display:flex;align-items:flex-start;justify-content:ce
   .arr-score b{font-size:32px;}
 }
 
+
+/* ---- controls that only exist without a keyboard ----
+   Bark is B on a desktop, and B is also the counter to a bear deciding to charge you --
+   so on a phone or tablet, where there is no B to press, it needs a button or the whole
+   defence mechanic has no answer. `pointer: coarse` is the right test rather than a width
+   query: a small window on a laptop still has a keyboard, and a large tablet still has
+   no keys. Hidden by default so the desktop HUD stays as clean as it was asked to be. */
+.touch-only{display:none;}
+@media (pointer: coarse){
+  .touch-only{display:inline-block;}
+  #miniWrap #touchBarkBtn{font-size:15px;padding:10px 14px;}
+}
+
 </style>
 </head>
 <body>
@@ -258,11 +329,13 @@ body.arrived #arrivalWrap{display:flex;align-items:flex-start;justify-content:ce
       <h1>PUP <span>TRAILS</span><small>real trails · real terrain</small></h1>
     </div>
     <div class="spacer"></div>
-    <button class="btn icon" id="panelBtn" title="Show / hide controls">🎒</button>
-    <button class="btn primary" id="playBtn">▶ Hit the trail</button>
+    <button class="btn icon" id="panelBtn" title="Settings (Tab) — adjust while you walk">⚙️</button>
   </header>
   <main>
     <aside id="panel">
+      <p class="hint panel-lede">Settings — every control here can be changed while
+        you walk, and you stay where you are standing. Pick where to <b>start</b> on the
+        map (🗺 above right).</p>
       <div class="sect">
         <h2>🗺️ Trail map</h2>
         <label class="dropzone" id="dropzone" for="worldFile">
@@ -318,13 +391,6 @@ body.arrived #arrivalWrap{display:flex;align-items:flex-start;justify-content:ce
         </div>
       </div>
       <div class="sect">
-        <h2>🚩 Start here</h2>
-        <div id="startList" class="start-list"></div>
-        <button class="btn small wide" id="surpriseBtn">🎲 Surprise me</button>
-        <p class="hint">Every dead-end on your map becomes a trailhead. Pick one and your
-          pup waits there in the preview.</p>
-      </div>
-      <div class="sect">
         <h2>🐾 Who's exploring</h2>
         <div class="toggle-row" id="pupModeToggle">
           <button class="toggle sel" data-mode="dog">🐕 Dogs</button>
@@ -345,7 +411,6 @@ body.arrived #arrivalWrap{display:flex;align-items:flex-start;justify-content:ce
     <div id="stage">
       <canvas id="c"></canvas>
       <div id="playHud">
-        <button class="btn small" id="exitBtn">← Trailhead</button>
         <div id="hudTally">
           <span class="tally" id="hudSeen" title="Wildlife watched">✨ 0</span>
           <span class="tally" id="hudSpooked" title="Wildlife you sent running">💨 0</span>
@@ -353,16 +418,18 @@ body.arrived #arrivalWrap{display:flex;align-items:flex-start;justify-content:ce
         <div id="hudReadout">
           <span class="tally" id="hudElev" title="Elevation above sea level">⛰ —</span>
           <span class="tally" id="hudDist" title="Distance travelled">👣 —</span>
-          <span class="tally" id="hudNoise" title="How far wildlife can hear you right now">🔊 —</span>
         </div>
         <div id="watchMeter">
           <span id="watchName">Watching…</span>
           <span class="wm-bar"><i id="watchFill"></i></span>
         </div>
+
       </div>
       <div id="miniWrap">
         <canvas id="minimap"></canvas>
-        <button class="btn small" id="mapBtn" title="Full map (M)">🗺</button>
+        <span class="tally" id="hudTrail" title="The trail you are on">—</span>
+        <button class="btn small" id="mapBtn" title="Full map (M)">🗺 Map</button>
+        <button class="btn touch-only" id="touchBarkBtn" title="Bark">🐕 Bark</button>
       </div>
       <div id="arrivalWrap">
         <div id="arrivalCard">
@@ -396,8 +463,22 @@ body.arrived #arrivalWrap{display:flex;align-items:flex-start;justify-content:ce
           <button class="btn small" id="bigZoomIn" title="Zoom in">➕</button>
           <button class="btn small" id="bigZoomOut" title="Zoom out">➖</button>
         </div>
-        <p class="hint bigmap-hint">Tap a lettered trailhead to start there. Drag to pan,
-          scroll or ➕/➖ to zoom.</p>
+        <div id="bigmapSide">
+          <div class="bm-card">
+            <h3>🚩 Start here</h3>
+            <p class="hint" id="startNow">—</p>
+            <p class="hint">Tap a lettered badge on the map to start there. Every
+              outer dead-end is a trailhead.</p>
+            <button class="btn small wide" id="surpriseBtn">🎲 Surprise me</button>
+          </div>
+          <div class="bm-card">
+            <h3>📍 Saved spots</h3>
+            <div id="spotList" class="spot-list"></div>
+            <button class="btn small wide" id="mapSaveSpotBtn">📍 Save where I am</button>
+            <p class="hint">Tap a pin on the map or a row here to go back to it.</p>
+          </div>
+        </div>
+        <p class="hint bigmap-hint">Drag to pan, scroll or ➕/➖ to zoom.</p>
       </div>
     </div>
   </main>
@@ -2929,15 +3010,123 @@ function updateFX(dt, t){
 
 /* ========================================================= AUDIO */
 let AC = null;
+/* Anything scheduled while the context is still SUSPENDED is silently dropped.
+
+   resume() returns a promise, and a context created inside a click handler is very often
+   still suspended for a few milliseconds afterwards. Every sound in this file schedules
+   against AC.currentTime and returns immediately, so a sound fired during that window
+   builds a perfectly correct audio graph, starts it, and produces nothing at all -- no
+   error, no warning, nothing to see in a debugger. That is exactly the failure mode where
+   the code reads fine and the speaker stays quiet.
+
+   So sounds fired before the context is running are queued and replayed the moment it
+   is. The queue is short-lived and bounded: a backlog of barks arriving half a second
+   late would be worse than the silence it replaced. */
+const PENDING = [];
+const PENDING_MAX = 4;
+function whenRunning(fn){
+  initAudio();
+  if(!AC) return;
+  if(AC.state === 'running'){ fn(); return; }
+  if(PENDING.length < PENDING_MAX) PENDING.push(fn);
+}
+function flushPending(){
+  if(!AC || AC.state !== 'running') return;
+  while(PENDING.length){ const fn = PENDING.shift(); try{ fn(); }catch(err){} }
+}
 function initAudio(){
   if(!AC){ try{ AC = new (window.AudioContext || window.webkitAudioContext)(); }catch(e){} }
-  if(AC && AC.state === 'suspended') AC.resume();
+  if(!AC) return;
+  if(AC.state === 'suspended'){
+    const r = AC.resume();
+    if(r && typeof r.then === 'function') r.then(flushPending, ()=>{ PENDING.length = 0; });
+    else flushPending();
+  }else{
+    flushPending();
+  }
 }
-function woofBurst(when, pitchMul, dur=0.14){
+/* Never schedule AT currentTime. A context that has only just started running can drop
+   an event timestamped exactly now, because "now" has already passed by the time the
+   audio thread sees it. 20 ms is inaudible as latency and reliable as a lead. */
+const LEAD = 0.02;
+function startAt(){ return (AC ? AC.currentTime : 0) + LEAD; }
+
+/* One master gain everything routes through, instead of every voice connecting straight
+   to destination. Two reasons: a single place to set overall level, and headroom -- three
+   barks and a growl all hitting destination at 0.5 each was clipping on the way out. */
+let MASTER = null;
+function out(){
+  if(!AC) return null;
+  if(!MASTER){ MASTER = AC.createGain(); MASTER.gain.value = 0.85; MASTER.connect(out()); }
+  return MASTER;
+}
+
+/* THE FLOOR A SMALL SPEAKER CAN ACTUALLY REPRODUCE.
+
+   This is the bug behind "we can hear animals when they are startled but nothing else",
+   and it was never in the wiring -- the audio graph was always built correctly. It was in
+   the VOICING. The startle yip is woofBurst at pitch 2.4: a fundamental sweeping 768 ->
+   215 Hz under a filter opening at 2160 Hz. The bark was the same function at pitch 1.0:
+   89 -> 320 Hz under a filter closing to 240 Hz. Laptop and phone speakers roll off hard
+   below roughly 300-500 Hz and have essentially no output under 200, so the yip was
+   entirely inside the band they reproduce and the bark was entirely underneath it. On
+   headphones both are audible, which is exactly why this survived being "tested".
+
+   So every voice that is meant to be heard on a laptop keeps its fundamental above this,
+   and carries a mid-band layer for the transient. Low end is treated as garnish that some
+   listeners get, never as the thing carrying the sound. tools/smoke.js asserts the floor. */
+const SPEAKER_FLOOR_HZ = 190;
+
+/* Unlock on the FIRST user gesture of any kind, not on whichever button a given page
+   happens to treat as "start".
+
+   Every browser requires a gesture before audio will run, and every page here has had
+   exactly one place that provided it. That is fragile in a way that is invisible when it
+   works: move the start button, add a second way in, and the context is created on a tick
+   that has no user activation behind it -- at which point resume() never settles, the
+   queue never flushes, and the game is silent with a perfectly correct audio graph. Pup
+   Trails just removed its start button, so this is no longer hypothetical. Listeners are
+   passive, fire once, and cover pointer, key and touch. */
+let unlockWired = false;
+function wireAudioUnlock(){
+  if(unlockWired || typeof window === 'undefined' || !window.addEventListener) return;
+  unlockWired = true;
+  const go = ()=>{ initAudio(); };
+  for(const ev of ['pointerdown','touchstart','keydown','click']){
+    window.addEventListener(ev, go, {passive:true});
+  }
+}
+if(typeof window !== 'undefined') wireAudioUnlock();
+
+/* A one-line answer to "why can I not hear anything", printed once, the first time a
+   sound is asked for. It reports the context state and the actual frequency band this
+   BUILD produces -- which is the fastest way to tell a genuine audio fault apart from an
+   old copy of this file still being on disk, since the two look identical from the
+   outside and only one of them is fixable from here. */
+let announced = false;
+function announceOnce(){
+  if(announced || typeof console === 'undefined') return;
+  announced = true;
+  const b = barkBand(1);
+  console.log('[pup-trails audio] context=' + audioState() +
+    '  bark=' + Math.round(b.lo) + '-' + Math.round(b.hi) + ' Hz' +
+    '  floor=' + SPEAKER_FLOOR_HZ + ' Hz' +
+    (b.lo < SPEAKER_FLOOR_HZ ? '  <-- BELOW SPEAKER FLOOR, this file is out of date' : ''));
+}
+/* The band a bark occupies at a given size, derived from the same constants wuf uses so
+   it cannot drift from what is actually played. */
+function barkBand(sizeMul){
+  const size = Math.max(0.25, Math.min(4, Number(sizeMul) || 1));
+  const base = Math.max(SPEAKER_FLOOR_HZ*1.15, 620/Math.pow(size, 0.42));
+  return {lo: base*0.72, hi: base*1.22, base};
+}
+function woofBurst(when, pitchMul, dur=0.14, peak=0.5){
   if(!AC) return;
   const o = AC.createOscillator(), f = AC.createBiquadFilter(), gn = AC.createGain();
   o.type = 'sawtooth';
-  const base = 320 * pitchMul;
+  // yipHigh (pitch 2.4) was the ONE sound anybody could hear -- it is the reference this
+  // floor was derived from. Clamping keeps a low-pitched call from repeating the bug.
+  const base = Math.max(SPEAKER_FLOOR_HZ*1.1, 320 * pitchMul);
   o.frequency.setValueAtTime(base, when);
   o.frequency.exponentialRampToValueAtTime(base*0.28, when+dur);
   f.type = 'lowpass';
@@ -2945,15 +3134,16 @@ function woofBurst(when, pitchMul, dur=0.14){
   f.frequency.exponentialRampToValueAtTime(240, when+dur);
   f.Q.value = 4;
   gn.gain.setValueAtTime(0.0001, when);
-  gn.gain.exponentialRampToValueAtTime(0.5, when+0.015);
+  gn.gain.exponentialRampToValueAtTime(peak, when+0.015);
   gn.gain.exponentialRampToValueAtTime(0.0001, when+dur);
-  o.connect(f).connect(gn).connect(AC.destination);
+  o.connect(f).connect(gn).connect(out());
   o.start(when); o.stop(when+dur+0.02);
 }
 function yip(pitch){
-  initAudio();
-  if(!AC || !P) return;
-  woofBurst(AC.currentTime, pitch/Math.sqrt(P.size), 0.09);
+  whenRunning(()=>{
+    if(!P) return;
+    woofBurst(startAt(), pitch/Math.sqrt(P.size), 0.09);
+  });
 }
 let noiseBuf = null;
 function getNoise(){
@@ -2966,108 +3156,261 @@ function getNoise(){
   return noiseBuf;
 }
 function huffSound(){
-  initAudio(); if(!AC) return;
-  const src = AC.createBufferSource(); src.buffer = getNoise();
-  const f = AC.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 320; f.Q.value = 1.2;
-  const gn = AC.createGain();
-  const tN = AC.currentTime;
-  gn.gain.setValueAtTime(0.5, tN);
-  gn.gain.exponentialRampToValueAtTime(0.0001, tN+0.35);
-  src.connect(f).connect(gn).connect(AC.destination);
-  src.start(tN); src.stop(tN+0.36);
+  whenRunning(()=>{
+    const src = AC.createBufferSource(); src.buffer = getNoise();
+    const f = AC.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 320; f.Q.value = 1.2;
+    const gn = AC.createGain();
+    const tN = startAt();
+    gn.gain.setValueAtTime(0.5, tN);
+    gn.gain.exponentialRampToValueAtTime(0.0001, tN+0.35);
+    src.connect(f).connect(gn).connect(out());
+    src.start(tN); src.stop(tN+0.36);
+  });
 }
 function thudSound(){
-  initAudio(); if(!AC) return;
-  const o = AC.createOscillator(), gn = AC.createGain();
-  const tN = AC.currentTime;
-  o.type = 'sine';
-  o.frequency.setValueAtTime(150, tN);
-  o.frequency.exponentialRampToValueAtTime(55, tN+0.16);
-  gn.gain.setValueAtTime(0.35, tN);
-  gn.gain.exponentialRampToValueAtTime(0.0001, tN+0.18);
-  o.connect(gn).connect(AC.destination);
-  o.start(tN); o.stop(tN+0.2);
+  whenRunning(()=>{
+    const o = AC.createOscillator(), gn = AC.createGain();
+    const tN = startAt();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(150, tN);
+    o.frequency.exponentialRampToValueAtTime(55, tN+0.16);
+    gn.gain.setValueAtTime(0.35, tN);
+    gn.gain.exponentialRampToValueAtTime(0.0001, tN+0.18);
+    o.connect(gn).connect(out());
+    o.start(tN); o.stop(tN+0.2);
+  });
 }
 function splashSound(){
-  initAudio(); if(!AC) return;
-  const src = AC.createBufferSource(); src.buffer = getNoise();
-  const f = AC.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 1400; f.Q.value = 0.8;
-  const gn = AC.createGain();
-  const tN = AC.currentTime;
-  f.frequency.exponentialRampToValueAtTime(500, tN+0.3);
-  gn.gain.setValueAtTime(0.45, tN);
-  gn.gain.exponentialRampToValueAtTime(0.0001, tN+0.35);
-  src.connect(f).connect(gn).connect(AC.destination);
-  src.start(tN); src.stop(tN+0.36);
+  whenRunning(()=>{
+    const src = AC.createBufferSource(); src.buffer = getNoise();
+    const f = AC.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 1400; f.Q.value = 0.8;
+    const gn = AC.createGain();
+    const tN = startAt();
+    f.frequency.exponentialRampToValueAtTime(500, tN+0.3);
+    gn.gain.setValueAtTime(0.45, tN);
+    gn.gain.exponentialRampToValueAtTime(0.0001, tN+0.35);
+    src.connect(f).connect(gn).connect(out());
+    src.start(tN); src.stop(tN+0.36);
+  });
 }
 function honkSound(){
-  initAudio(); if(!AC) return;
-  const tN = AC.currentTime;
-  [392, 494].forEach(fr=>{
-    const o = AC.createOscillator(), gn = AC.createGain();
-    o.type = 'square'; o.frequency.value = fr;
-    gn.gain.setValueAtTime(0.12, tN);
-    gn.gain.setValueAtTime(0.12, tN+0.14);
-    gn.gain.exponentialRampToValueAtTime(0.0001, tN+0.2);
-    o.connect(gn).connect(AC.destination);
-    o.start(tN); o.stop(tN+0.22);
+  whenRunning(()=>{
+    const tN = startAt();
+    [392, 494].forEach(fr=>{
+      const o = AC.createOscillator(), gn = AC.createGain();
+      o.type = 'square'; o.frequency.value = fr;
+      gn.gain.setValueAtTime(0.12, tN);
+      gn.gain.setValueAtTime(0.12, tN+0.14);
+      gn.gain.exponentialRampToValueAtTime(0.0001, tN+0.2);
+      o.connect(gn).connect(out());
+      o.start(tN); o.stop(tN+0.22);
+    });
   });
 }
 function chompSound(){
-  initAudio(); if(!AC) return;
-  const tN = AC.currentTime;
-  const o = AC.createOscillator(), gn = AC.createGain();
-  o.type = 'square';
-  o.frequency.setValueAtTime(210, tN);
-  o.frequency.exponentialRampToValueAtTime(70, tN+0.07);
-  gn.gain.setValueAtTime(0.3, tN);
-  gn.gain.exponentialRampToValueAtTime(0.0001, tN+0.09);
-  o.connect(gn).connect(AC.destination);
-  o.start(tN); o.stop(tN+0.1);
+  whenRunning(()=>{
+    const tN = startAt();
+    const o = AC.createOscillator(), gn = AC.createGain();
+    o.type = 'square';
+    o.frequency.setValueAtTime(210, tN);
+    o.frequency.exponentialRampToValueAtTime(70, tN+0.07);
+    gn.gain.setValueAtTime(0.3, tN);
+    gn.gain.exponentialRampToValueAtTime(0.0001, tN+0.09);
+    o.connect(gn).connect(out());
+    o.start(tN); o.stop(tN+0.1);
+  });
 }
 function grumbleSound(){
-  initAudio(); if(!AC) return;
-  const tN = AC.currentTime;
-  const o = AC.createOscillator(), gn = AC.createGain();
-  o.type = 'sawtooth';
-  o.frequency.setValueAtTime(180, tN);
-  o.frequency.linearRampToValueAtTime(120, tN+0.24);
-  gn.gain.setValueAtTime(0.14, tN);
-  gn.gain.exponentialRampToValueAtTime(0.0001, tN+0.26);
-  o.connect(gn).connect(AC.destination);
-  o.start(tN); o.stop(tN+0.28);
+  whenRunning(()=>{
+    const tN = startAt();
+    const o = AC.createOscillator(), gn = AC.createGain();
+    o.type = 'sawtooth';
+    o.frequency.setValueAtTime(180, tN);
+    o.frequency.linearRampToValueAtTime(120, tN+0.24);
+    gn.gain.setValueAtTime(0.14, tN);
+    gn.gain.exponentialRampToValueAtTime(0.0001, tN+0.26);
+    o.connect(gn).connect(out());
+    o.start(tN); o.stop(tN+0.28);
+  });
 }
 function yipHigh(){
-  initAudio(); if(!AC) return;
-  woofBurst(AC.currentTime, 2.4, 0.07);
+  whenRunning(()=>{
+    woofBurst(startAt(), 2.4, 0.07);
+  });
 }
 function cheerBlip(){
-  initAudio(); if(!AC) return;
-  const tN = AC.currentTime;
-  [659, 880].forEach((fr,i)=>{
-    const o = AC.createOscillator(), gn = AC.createGain();
-    o.type = 'triangle'; o.frequency.value = fr;
-    gn.gain.setValueAtTime(0.0001, tN+i*0.08);
-    gn.gain.exponentialRampToValueAtTime(0.2, tN+i*0.08+0.02);
-    gn.gain.exponentialRampToValueAtTime(0.0001, tN+i*0.08+0.22);
-    o.connect(gn).connect(AC.destination);
-    o.start(tN+i*0.08); o.stop(tN+i*0.08+0.24);
+  whenRunning(()=>{
+    const tN = startAt();
+    [659, 880].forEach((fr,i)=>{
+      const o = AC.createOscillator(), gn = AC.createGain();
+      o.type = 'triangle'; o.frequency.value = fr;
+      gn.gain.setValueAtTime(0.0001, tN+i*0.08);
+      gn.gain.exponentialRampToValueAtTime(0.2, tN+i*0.08+0.02);
+      gn.gain.exponentialRampToValueAtTime(0.0001, tN+i*0.08+0.22);
+      o.connect(gn).connect(out());
+      o.start(tN+i*0.08); o.stop(tN+i*0.08+0.24);
+    });
   });
 }
 function cheerSound(){
-  initAudio(); if(!AC) return;
-  const tN = AC.currentTime;
-  [523, 659, 784, 1047].forEach((fr, i)=>{
-    const o = AC.createOscillator(), gn = AC.createGain();
-    o.type = 'triangle';
-    o.frequency.value = fr;
-    gn.gain.setValueAtTime(0.0001, tN+i*0.09);
-    gn.gain.exponentialRampToValueAtTime(0.22, tN+i*0.09+0.02);
-    gn.gain.exponentialRampToValueAtTime(0.0001, tN+i*0.09+0.3);
-    o.connect(gn).connect(AC.destination);
-    o.start(tN+i*0.09); o.stop(tN+i*0.09+0.32);
+  whenRunning(()=>{
+    const tN = startAt();
+    [523, 659, 784, 1047].forEach((fr, i)=>{
+      const o = AC.createOscillator(), gn = AC.createGain();
+      o.type = 'triangle';
+      o.frequency.value = fr;
+      gn.gain.setValueAtTime(0.0001, tN+i*0.09);
+      gn.gain.exponentialRampToValueAtTime(0.22, tN+i*0.09+0.02);
+      gn.gain.exponentialRampToValueAtTime(0.0001, tN+i*0.09+0.3);
+      o.connect(gn).connect(out());
+      o.start(tN+i*0.09); o.stop(tN+i*0.09+0.32);
+    });
   });
 }
+
+/* A bark, for whoever is doing the barking.
+
+   yip() above is the city dog's, and it reads P -- dog/runtime.js's live rig params --
+   to pitch itself. Pup Trails cannot use that: you might be playing as a bighorn sheep,
+   and P is either stale or belongs to a dog nobody is currently controlling. So the
+   caller passes the size instead, which is the only thing the sound needs to know.
+
+   Two woofs, not one, and the second is quieter and a touch lower: a single burst reads
+   as a yelp, and the point of pressing B on a trail is to announce yourself to the
+   valley. A big animal gets a third, spaced wider -- the interval is what makes a moose
+   sound like a moose rather than a slowed-down terrier. */
+/* One "wuf": a voiced body plus a noise transient.
+
+   Deliberately not woofBurst with a different argument. The body is pitched well clear of
+   SPEAKER_FLOOR_HZ and its filter OPENS across the burst rather than closing, so the
+   sound brightens as it lands instead of sinking out of the band on the way. The noise
+   layer is the consonant -- the hard front edge that makes it read as a bark rather than
+   as a note -- and it lives around 1.5 kHz where every speaker is at its best. Size
+   pitches both down, but only within a range that stays reproducible: a moose sounds
+   bigger than a terrier by being lower AND rougher, not by being inaudible. */
+function wuf(t0, sizeMul, gainMul){
+  if(!AC) return;
+  const size = Math.max(0.25, Math.min(4, Number(sizeMul) || 1));
+  const dur = 0.12 + 0.05*Math.sqrt(size);
+  const base = Math.max(SPEAKER_FLOOR_HZ*1.15, 620/Math.pow(size, 0.42));
+  const g = gainMul == null ? 1 : gainMul;
+
+  const o = AC.createOscillator(), f = AC.createBiquadFilter(), gn = AC.createGain();
+  o.type = 'sawtooth';
+  o.frequency.setValueAtTime(base*1.22, t0);
+  o.frequency.exponentialRampToValueAtTime(base*0.72, t0 + dur);
+  f.type = 'bandpass';
+  f.frequency.setValueAtTime(base*1.6, t0);
+  f.frequency.exponentialRampToValueAtTime(base*2.9, t0 + dur*0.45);
+  f.frequency.exponentialRampToValueAtTime(base*1.3, t0 + dur);
+  f.Q.value = 1.1;
+  gn.gain.setValueAtTime(0.0001, t0);
+  gn.gain.exponentialRampToValueAtTime(0.62*g, t0 + 0.012);
+  gn.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  o.connect(f).connect(gn).connect(out());
+  o.start(t0); o.stop(t0 + dur + 0.02);
+
+  const src = AC.createBufferSource(); src.buffer = getNoise();
+  const nf = AC.createBiquadFilter(); nf.type = 'bandpass';
+  nf.frequency.value = 1500/Math.pow(size, 0.3); nf.Q.value = 0.9;
+  const ng = AC.createGain();
+  ng.gain.setValueAtTime(0.34*g, t0);
+  ng.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.07);
+  src.connect(nf).connect(ng).connect(out());
+  src.start(t0); src.stop(t0 + 0.08);
+}
+
+function barkSound(sizeMul){
+  announceOnce();
+  whenRunning(()=>{
+    const size = Math.max(0.25, Math.min(4, Number(sizeMul) || 1));
+    const t0 = startAt();
+    const gap = 0.15 + 0.05*size;
+    wuf(t0, size, 1);
+    wuf(t0 + gap, size*1.06, 0.82);
+    if(size > 1.4) wuf(t0 + gap*2.05, size*1.12, 0.66);
+  });
+}
+
+/* A big animal's warning: a low, rising huff-growl with a hard edge on it. Deliberately
+   NOT a scaled-down bark -- the player has to be able to tell "that one is about to have
+   a go at me" from "that one is barking back", by ear, with the camera pointed elsewhere. */
+function warnGrowl(sizeMul){
+  whenRunning(()=>{
+    const size = Math.max(0.5, Math.min(4, Number(sizeMul) || 1));
+    const t0 = startAt(), dur = 0.5;
+    /* A growl WANTS to be low, and low is exactly what a laptop cannot play. So the
+       menace comes from roughness and a rising pitch rather than from depth: a resonant
+       bandpass an octave above the fundamental gives it a snarl that survives a small
+       speaker, and the fundamental still sits clear of the floor. */
+    const o = AC.createOscillator(), f = AC.createBiquadFilter(), gn = AC.createGain();
+    o.type = 'sawtooth';
+    const base = Math.max(SPEAKER_FLOOR_HZ*1.1, 300/Math.pow(size, 0.35));
+    o.frequency.setValueAtTime(base, t0);
+    o.frequency.linearRampToValueAtTime(base*1.45, t0+dur);
+    f.type = 'bandpass'; f.frequency.value = base*2.1; f.Q.value = 3.2;
+    gn.gain.setValueAtTime(0.0001, t0);
+    gn.gain.exponentialRampToValueAtTime(0.5, t0+0.12);
+    gn.gain.exponentialRampToValueAtTime(0.0001, t0+dur);
+    o.connect(f).connect(gn).connect(out());
+    o.start(t0); o.stop(t0+dur+0.02);
+    // a slow noise rasp under it: this is what makes it read as an animal, not a synth
+    const src = AC.createBufferSource(); src.buffer = getNoise();
+    const nf = AC.createBiquadFilter(); nf.type='bandpass'; nf.frequency.value=700; nf.Q.value=0.8;
+    const ng = AC.createGain();
+    ng.gain.setValueAtTime(0.0001, t0);
+    ng.gain.exponentialRampToValueAtTime(0.26, t0+0.16);
+    ng.gain.exponentialRampToValueAtTime(0.0001, t0+dur);
+    src.connect(nf).connect(ng).connect(out());
+    src.start(t0); src.stop(t0+dur);
+  });
+}
+
+/* The moment of contact. A body-weight thud with a short noise slap on top -- the slap is
+   what reads as "that hit me" rather than "something fell over nearby". */
+function bonkSound(sizeMul){
+  whenRunning(()=>{
+    const size = Math.max(0.5, Math.min(4, Number(sizeMul) || 1));
+    const t0 = startAt();
+    /* The thump is the part a laptop will not play, so the SLAP carries the hit and the
+       thump is a bonus for anyone on headphones. Pitched to stay in band on the way down
+       rather than sliding under it. */
+    const o = AC.createOscillator(), gn = AC.createGain();
+    o.type = 'triangle';
+    o.frequency.setValueAtTime(520/Math.pow(size, 0.3), t0);
+    o.frequency.exponentialRampToValueAtTime(Math.max(SPEAKER_FLOOR_HZ, 240/Math.pow(size, 0.3)), t0+0.2);
+    gn.gain.setValueAtTime(0.62, t0);
+    gn.gain.exponentialRampToValueAtTime(0.0001, t0+0.26);
+    o.connect(gn).connect(out());
+    o.start(t0); o.stop(t0+0.28);
+    const src = AC.createBufferSource(); src.buffer = getNoise();
+    const nf = AC.createBiquadFilter(); nf.type = 'bandpass'; nf.frequency.value = 1300; nf.Q.value = 0.6;
+    const ng = AC.createGain();
+    ng.gain.setValueAtTime(0.55, t0);
+    ng.gain.exponentialRampToValueAtTime(0.0001, t0+0.18);
+    src.connect(nf).connect(ng).connect(out());
+    src.start(t0); src.stop(t0+0.2);
+  });
+}
+
+/* Test seam. tools/smoke.js asserts that nothing is ever scheduled against a suspended
+   context, which is the bug this file's queue exists to prevent and the one thing about
+   it that cannot be seen by listening to a headless browser. */
+function audioState(){ return AC ? AC.state : 'none'; }
+/* `const` bindings do not survive the smoke harness's eval boundary (same reason
+   getSignCount and getBigView exist), so the floor is readable through a call. */
+function speakerFloorHz(){ return SPEAKER_FLOOR_HZ; }
+/* Callable from the console: plays a bark and reports what the build is doing. */
+function soundCheck(){
+  initAudio();
+  const b = barkBand(1);
+  barkSound(1);
+  return {context: audioState(), queued: pendingSounds(),
+          barkHz: Math.round(b.lo) + '-' + Math.round(b.hi),
+          floorHz: SPEAKER_FLOOR_HZ, ok: b.lo >= SPEAKER_FLOOR_HZ};
+}
+if(typeof window !== 'undefined') window.pupSoundCheck = soundCheck;
+function pendingSounds(){ return PENDING.length; }
 
 /* ==== src/trails/geom2d.js ==== */
 /* Point-in-polygon and polygon-shape helpers. Pure — no THREE dependency except
@@ -3219,13 +3562,27 @@ function ribbonGeom(pts,w,y,elevArr){
   const geo=new THREE.BufferGeometry();
   geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(P),3));
   geo.setAttribute('normal',new THREE.BufferAttribute(new Float32Array(N),3));
-  geo.setIndex(idx);return geo;
+  geo.setIndex(idx);/* test seam (tools/smoke.js): the centreline this ribbon was built from, so an
+     assertion can measure which way a painted bar actually runs rather than trusting the
+     constant that was supposed to decide it. */
+  geo.__ribbon = pts.map(p=>[p[0],p[1]]);
+  return geo;
 }
-function trailMat(color){
+/* `layer` is the path's CLASS rank (0 road, 1 track, 2 trail) -- see world.js's
+   PATH_RANK. Every ribbon used to share one polygon offset, which is fine while nothing
+   overlaps but is exactly wrong where a footpath crosses a service road: the two ribbons
+   are near-coplanar, the depth test has no tie-break, and the crossing renders as a
+   flickering patchwork that changes with camera angle. Biasing by class makes the answer
+   deterministic and, more importantly, CORRECT -- the dirt path is painted on top of the
+   tarmac, because that is what a path crossing a road looks like. world.js also lifts
+   each class by a few centimetres (kindLift) so the ordering survives on hardware that
+   clamps polygon offset; neither is visible as float at that size. */
+function trailMat(color, layer){
   // DoubleSide is a safety net on top of the winding fix — cheap for a ribbon this size,
   // and guarantees the trail can never vanish again from a stray winding edge case.
+  const L = layer || 0;
   return new THREE.MeshToonMaterial({color:new THREE.Color(color),gradientMap:toonTex,side:THREE.DoubleSide,
-    polygonOffset:true,polygonOffsetFactor:-2,polygonOffsetUnits:-2});
+    polygonOffset:true,polygonOffsetFactor:-2-L*3,polygonOffsetUnits:-2-L*3});
 }
 const INK='#3a2517';
 function signText(label,dist,flip){
@@ -3248,6 +3605,9 @@ function signText(label,dist,flip){
 }
 function buildSign(node,arms){
   const g=new THREE.Group();g.position.set(node.p[0],0,node.p[1]);
+  /* test seam: lets tools/smoke.js find every fingerpost in the scene and check none of
+     them ended up planted in a carriageway. */
+  g.__sign = true;
   const post=M(new THREE.CylinderGeometry(0.14,0.17,3.4,8),toon('#7a4e28'));
   post.position.y=1.7;g.add(post);
   const cap=M(new THREE.SphereGeometry(0.19,10,8),toon('#5c3a1c'));
@@ -3264,6 +3624,64 @@ function buildSign(node,arms){
   });
   return g;
 }
+/* A road crossing, built as a piece of INFRASTRUCTURE rather than left to whatever the
+   survey data happened to record.
+
+   The source geometry crosses a service road at whatever angle the digitiser drew, which
+   on a real map is often a long oblique smear where two ribbons overlap for fifteen
+   metres and neither reads as passing over the other. Depth ordering makes that legible
+   but not GOOD: it is still a diagonal scrape across a road with no indication of where
+   a walker is meant to cross. Every real trail network solves this the same way, and it
+   is a solved visual language -- square the path up to the kerb, stripe the carriageway,
+   put a landing either side. So that is what gets built, and the exact survey angle is
+   given up to get it. That trade is the whole point: you can see where to cross.
+
+   `dir` is the road's axis (unit), `n` the walking direction across it. See below on why
+   the markings run along `dir` and repeat along `n` rather than the other way round. */
+function buildCrossing(rec, groundYAt){
+  const g = new THREE.Group();
+  const {x, z, dir, roadW, walkW, lift} = rec;
+  const nx = -dir[1], nz = dir[0];      // across the carriageway = the walking direction
+
+  /* CONTINENTAL ("ladder") MARKINGS, not a UK zebra -- the bars run ALONG the road and
+     repeat ACROSS it. The first version had them the other way round, which is what the
+     screenshot showed as a crosswalk rotated ninety degrees. Both patterns are real, but
+     they are not interchangeable: this is a US trail network (Garden of the Gods), and a
+     US crosswalk is a ladder. Getting it backwards makes the markings read as being for
+     traffic rather than for the walker, which is exactly the wrong signal at the one
+     place a walker has to decide whether to step out. */
+  const BARS = 5;
+  const acrossHalf = roadW*0.5;                 // markings stop at the carriageway edge
+  const barW = (roadW*0.86)/(BARS*2 - 1);       // bar + equal gap, inset from the kerbs
+  const bar = (offAcross) => {
+    const cx = x + nx*offAcross, cz = z + nz*offAcross;
+    const a = [cx - dir[0]*walkW*0.5, cz - dir[1]*walkW*0.5];
+    const b = [cx + dir[0]*walkW*0.5, cz + dir[1]*walkW*0.5];
+    const ys = [groundYAt(a[0], a[1]), groundYAt(b[0], b[1])];
+    return new THREE.Mesh(ribbonGeom([a, b], barW, lift + 0.10, ys), trailMat('#f2ead6', 2));
+  };
+  for(let i = 0; i < BARS; i++) g.add(bar((i - (BARS-1)/2)*barW*2));
+
+  /* Kerb + landing, one each side. The kerb gives the carriageway an edge for the
+     markings to end at and the path a place to arrive; the landing is the pad the trail
+     ribbon now stops on, since it no longer runs across the road. */
+  const kerbW = Math.max(0.28, roadW*0.09);
+  for(const sd of [-1, 1]){
+    const kx = x + nx*sd*(acrossHalf + kerbW*0.5), kz = z + nz*sd*(acrossHalf + kerbW*0.5);
+    const a = [kx - dir[0]*walkW*0.72, kz - dir[1]*walkW*0.72];
+    const b = [kx + dir[0]*walkW*0.72, kz + dir[1]*walkW*0.72];
+    const ys = [groundYAt(a[0], a[1]), groundYAt(b[0], b[1])];
+    g.add(new THREE.Mesh(ribbonGeom([a, b], kerbW, lift + 0.105, ys), trailMat('#cdc3ad', 2)));
+    const px = kx + nx*sd*(kerbW*0.5 + walkW*0.30), pz = kz + nz*sd*(kerbW*0.5 + walkW*0.30);
+    const padGeo = new THREE.CircleGeometry(walkW*0.44, 18); padGeo.__circle = 'landing';
+    const pad = new THREE.Mesh(padGeo, trailMat(THEME.tread, 2));
+    pad.rotation.x = -Math.PI/2;
+    pad.position.set(px, groundYAt(px, pz) + lift + 0.115, pz);
+    g.add(pad);
+  }
+  return g;
+}
+
 /* short blaze post: reads as "you are on THIS trail" from a distance */
 function buildBlaze(x,z,color){
   const g=new THREE.Group();g.position.set(x,0,z);
@@ -4172,10 +4590,11 @@ function applyCuts(L, cuts, tol){
   for(const c of keep){
     const piece=[startPt].concat(pts.slice(startK+1, c.k+1));
     piece.push(c.q);
-    out.push({name:L.name, kind:L.kind, pts:piece});
+    out.push({name:L.name, kind:L.kind, named:L.named, route:L.route, pts:piece});
     startK=c.k; startPt=c.q;
   }
-  out.push({name:L.name, kind:L.kind, pts:[startPt].concat(pts.slice(startK+1))});
+  out.push({name:L.name, kind:L.kind, named:L.named, route:L.route,
+            pts:[startPt].concat(pts.slice(startK+1))});
   return out;
 }
 
@@ -4259,7 +4678,26 @@ function buildGraph(rawLines,snapTol,simpTol){
   let lines=rawLines.map(L=>({name:L.name,kind:L.kind||'trail',pts:L.pts.map(p=>p.slice())}));
   lines.forEach(L=>{L.pts=L.pts.filter((p,i)=>i===0||d2(p,L.pts[i-1])>1e-6);});
   lines=lines.filter(L=>L.pts.length>=2&&polyLen(L.pts)>snapTol*0.5);
-  let spur=0;lines.forEach(L=>{if(!L.name)L.name=SPUR_NAMES[spur++%SPUR_NAMES.length];});
+  /* Two identities per line, and they are NOT the same thing.
+
+     `name` is what a signpost prints. Unnamed ways still get one, from SPUR_NAMES, so the
+     world reads as a signed trail network rather than a diagram -- but that list is short
+     and the default map has 91 unnamed ways, so a dozen different footpaths end up
+     sharing a dozen labels. Two of them meeting at a fork produced the screenshot's
+     "Juniper Link 19 m / Juniper Link 49 m": one label, two genuinely different paths.
+     `named` records whether the source file actually gave a name, so signage can prefer
+     real ones and the panel can stop listing invented ones as if they were trails.
+     `route` is the identity everything downstream groups BY -- the real name when there
+     is one, otherwise a per-line key. Deduplicating sign arms, colouring the map and
+     highlighting "the trail you are on" all key off route, so two paths that happen to
+     share an invented label are never mistaken for one. Assigned BEFORE splitT so every
+     piece a line is cut into inherits the same route. */
+  let spur=0;
+  lines.forEach((L,i)=>{
+    L.named=!!L.name;
+    L.route=L.name||('spur:'+i);
+    if(!L.name)L.name=SPUR_NAMES[spur++%SPUR_NAMES.length];
+  });
   lines=splitT(lines,snapTol);
   lines.forEach(L=>{L.pts=simplifyDP(L.pts,simpTol);});
   const eps=[];lines.forEach((L,i)=>{eps.push({p:L.pts[0],i,end:0});eps.push({p:L.pts[L.pts.length-1],i,end:1});});
@@ -4277,6 +4715,8 @@ function buildGraph(rawLines,snapTol,simpTol){
   }
   const edges=[];
   const palette=['#e8743d','#5aa7de','#67b26f','#c65fa3','#d9a02c','#7a6ed6','#3fb6a8','#b5651d'];
+  // keyed by ROUTE, not by name: two unnamed paths that drew the same label out of
+  // SPUR_NAMES are different paths and must not share a blaze colour
   const nameColor=new Map();
   lines.forEach((L,i)=>{
     const a=epNode.get(i+'_0'),b=epNode.get(i+'_1');
@@ -4284,10 +4724,28 @@ function buildGraph(rawLines,snapTol,simpTol){
     pts[0]=nodes[a].p.slice();pts[pts.length-1]=nodes[b].p.slice();
     const lenM=polyLen(pts);
     if(a===b&&lenM<snapTol*2)return;
-    const name=L.name;
-    if(!nameColor.has(name))nameColor.set(name,palette[nameColor.size%palette.length]);
+    const name=L.name, route=L.route||name;
+    if(!nameColor.has(route))nameColor.set(route,palette[nameColor.size%palette.length]);
     nodes[a].deg++;if(b!==a)nodes[b].deg++;
-    edges.push({a,b,pts,name,lenM,color:nameColor.get(name),kind:L.kind||'trail'});
+    edges.push({a,b,pts,name,route,named:!!L.named,lenM,
+                color:nameColor.get(route),kind:L.kind||'trail'});
+  });
+  /* Per-node census of what actually meets here. Computed once, in the module that owns
+     the topology, because every consumer downstream needs the same answer: world.js has
+     to tell a trail FORK (two dirt paths, sign it) from a trail/road CROSSING (a path
+     over tarmac, don't sign it, and pave the pad grey), and doing that by re-walking the
+     edge array at each of 162 junctions is both slower and easier to get subtly
+     different in two places. `routes` counts distinct paths, not arms: a trail running
+     straight through a node contributes two arms but one route, which is precisely the
+     distinction that stops a plain continuation being signed as a junction. */
+  nodes.forEach(n=>{ n.kinds=[]; n.routes=[]; n.named=0; });
+  edges.forEach(e=>{
+    const ends = e.a===e.b ? [e.a] : [e.a, e.b];
+    for(const id of ends){
+      const n=nodes[id];
+      if(!n.kinds.includes(e.kind)) n.kinds.push(e.kind);
+      if(!n.routes.includes(e.route)){ n.routes.push(e.route); if(e.named) n.named++; }
+    }
   });
   return{nodes,edges,nameColor};
 }
@@ -4376,6 +4834,11 @@ let bboxW={minx:0,maxx:0,minz:0,maxz:0};
 let EXTRA=[];                   // raw GeoJSON FeatureCollections dropped in-session
 let STEP_M=3;                   // contour step in metres, remembered across rebuilds
 let SIGN_COUNT={wanted:0,built:0,minGap:0};   // last rebuild's signpost thinning tally
+/* Last rebuild's road/trail interaction tally: how many nodes are genuine forks, how many
+   are a path merely crossing a different class of path, and how many paths were found
+   sharing another's ground. Surfaced in the panel and asserted in tools/smoke.js, so a
+   regression in the crossing rules shows up as a number rather than as a screenshot. */
+let PATH_MIX={forks:0, crossings:0, buried:0};
 
 /* Local equirectangular projection used ONLY when no DEM bundle is loaded, so a plain
    pair of .geojson files (trails + areas) is playable on flat ground. It deliberately
@@ -4406,6 +4869,15 @@ function fallbackProjector(layers){
 let worldG=null;               // THREE.Group holding everything rebuildWorld() creates
 let BUNDLE=null;                // the loaded World instance
 let startHead=0;
+/* A stable identity for "which map is this", so anything persisted between sessions --
+   saved spots, today -- can be filed against the right one. Derived from the bundle's
+   own projection origin rather than from the bounding box, because the box is expressed
+   in world units and therefore moves every time the world-scale slider does, which would
+   silently orphan a walker's pins the first time they compacted the map. Layers dropped
+   without a bundle have no such anchor, so they share one key; that is a real limitation
+   and an honest one. */
+let MAP_ID='none';
+function getMapId(){ return MAP_ID; }
 
 /* Two independent knobs, one derived value.
 
@@ -4635,6 +5107,7 @@ function hasBundle(){ return !!BUNDLE; }
 function setContourStep(m){ STEP_M=clamp(Number(m)||3, 0.5, 20); rebuildWorld(); }
 function getContourStep(){ return STEP_M; }
 function getSignCount(){ return SIGN_COUNT; }
+function getPathMix(){ return PATH_MIX; }
 function getAreaLabels(){ return AREA_LABELS; }
 
 /* Cap how big a floating area name may get on screen.
@@ -4689,6 +5162,501 @@ function pathWidth(kind){ return PATH_W[kind]||PATH_W.trail; }
 function pathOutlineWidth(kind){ return pathWidth(kind)*OUTLINE_MUL; }
 const OUTLINE_MUL = 1.5, SHOULDER_MUL = 1.24;
 
+/* Which surface wins where two paths occupy the same ground.
+
+   The rule is the real-world one: the bigger, more built surface is the ground, and the
+   smaller one is painted on top of it. A footpath crosses a service road; a service road
+   does not cross a footpath. Rank 0 is "most built", so a lower rank is further down the
+   stack -- which is also the order the bench and the ribbons are drawn in.
+
+   Two mechanisms enforce it, because one is not enough. pieces.js's trailMat biases the
+   depth test by rank, which is what actually stops the flicker; kindLift adds a few real
+   centimetres on top so the ordering still holds if a driver clamps polygon offset, and
+   so the ink outline of the upper path visibly overlaps the lower surface rather than
+   fighting it. 4.5 cm is under a twentieth of a tread width -- invisible as float, plenty
+   for a depth buffer. */
+const PATH_RANK = {road:0, track:1, trail:2};
+function pathRank(kind){ return PATH_RANK[kind] == null ? PATH_RANK.trail : PATH_RANK[kind]; }
+const KIND_LIFT_M = 0.045;
+function kindLift(kind){ return pathRank(kind)*KIND_LIFT_M; }
+
+/* Paths that run ALONG another path rather than across it.
+
+   Crossing and overlapping are different problems with different answers, and only the
+   first one is solved by depth ordering. A signed route that follows a service road for
+   200 m is TWO pieces of geometry describing ONE piece of ground: draw both ribbon stacks
+   and you get a dirt strip painted down the middle of the tarmac, complete with its own
+   ink outline, shoulder and edge stones -- which is not what that place looks like, and
+   which no amount of z-ordering improves. On the default map 13 edges (0.9 km of 52.8)
+   are like this; measured, not guessed.
+
+   So: find them, and render the upper one as a ROUTE MARKER instead of a surface -- a
+   slim coloured line in the trail's own blaze colour, laid on the road. The topology is
+   untouched, so it still walks, still routes, still shows on the map and still gets its
+   name on a signpost. Only the second helping of tarmac goes away.
+
+   `buried` holds the HOST edge (not just a flag) so the renderer can lift the marker to
+   the host's surface, and so the panel can say what a route shares its ground with. */
+const BURY_FRAC = 0.6;          // share of a path's vertices that must sit inside a host
+function markBuriedEdges(){
+  if(!GRAPH) return 0;
+  /* *MAP_SCALE, and this is the whole correctness of the pass.
+
+     "Does this route share that road's ground" is a question about the REAL WORLD, and it
+     has one answer for a given map. Positions here are compacted by the world scale;
+     tread widths deliberately are NOT (a path stays a path-width whatever the slider
+     says, same rule as the pup and the trees). Comparing the two directly therefore asks
+     a different question at every slider position, and measured on the default map the
+     answer runs away with it: 11 edges buried at 1:1, 49 at 1:16, 205 of 316 at 1:100 --
+     two thirds of the network silently demoted to waymarks because somebody shortened
+     their walk. Scaling the corridor to match the coordinates it is tested against pins
+     the answer at 11 edges (0.68 km) at every scale, which is what the source data
+     actually says. That matters more now than it would have last month: the world-scale
+     slider is a live mid-walk control, so a scale-dependent answer here would change how
+     the map is DRAWN under a walker's feet. */
+  const corridor = kind => (pathOutlineWidth(kind)/2)*MAP_SCALE;
+  const cell = Math.max(12*MAP_SCALE, 1e-3);
+  // hash only the paths that can HOST one: a footpath is never the ground another
+  // footpath is painted on, so trails are excluded from the index entirely
+  const H = new Map();
+  for(const e of GRAPH.edges){
+    if(pathRank(e.kind) >= PATH_RANK.trail) continue;
+    const r = corridor(e.kind);
+    for(let i=0;i<e.pts.length-1;i++){
+      const a=e.pts[i], b=e.pts[i+1], s={a,b,e,r};
+      const x0=Math.min(a[0],b[0])-r, x1=Math.max(a[0],b[0])+r;
+      const z0=Math.min(a[1],b[1])-r, z1=Math.max(a[1],b[1])+r;
+      for(let cx=Math.floor(x0/cell);cx<=Math.floor(x1/cell);cx++)
+        for(let cz=Math.floor(z0/cell);cz<=Math.floor(z1/cell);cz++){
+          const k=cx+'_'+cz; let arr=H.get(k); if(!arr){arr=[];H.set(k,arr);} arr.push(s);
+        }
+    }
+  }
+  let n=0;
+  for(const e of GRAPH.edges){
+    e.buried = null;
+    if(!H.size || pathRank(e.kind)===0 || e.pts.length<2) continue;
+    let hit=0, host=null;
+    for(const p of e.pts){
+      const cand=H.get(Math.floor(p[0]/cell)+'_'+Math.floor(p[1]/cell));
+      if(!cand) continue;
+      let best=Infinity, bestE=null;
+      for(const s of cand){
+        if(pathRank(s.e.kind) >= pathRank(e.kind)) continue;
+        const d=ptSeg(p, s.a, s.b).d;
+        if(d < s.r && d < best){ best=d; bestE=s.e; }
+      }
+      if(bestE){ hit++; if(!host) host=bestE; }
+    }
+    if(hit/e.pts.length >= BURY_FRAC){ e.buried = host; n++; }
+  }
+  return n;
+}
+
+/* ---------- crossings, as designed infrastructure ----------
+
+   Depth ordering (see PATH_RANK) made a road/trail crossing legible. It did not make it
+   GOOD. The survey geometry crosses at whatever angle the digitiser drew, so a footpath
+   meets a service road at 20 degrees and the two ribbons share fifteen metres of ground
+   at a slant -- correct to the metre, and unreadable as a place to cross. Real networks
+   solve this with a small, universally understood vocabulary: square the path up to the
+   kerb, stripe the carriageway, land it on a pad either side. This builds that, and
+   spends the survey angle to buy it.
+
+   TWO REWRITES, and they are separate problems with separate answers:
+
+     squareApproach()  turns the last few metres of each path arm at a crossing to meet
+                       the road at ninety degrees, blending back to the recorded line so
+                       there is no kink where the correction ends.
+     asSidewalk()      takes a path that runs ALONG a road (markBuriedEdges found 11 of
+                       them) and moves it off the centreline onto the verge, where a
+                       footway beside a road actually is. The previous version drew it as
+                       a stripe down the middle of the carriageway, which is where the
+                       data says it is and nowhere a person would walk.
+
+   Both mutate e.pts before anything is graded, hashed or drawn, so the bench, the
+   spatial hash, the ribbons and the minimap all agree by construction -- there is no
+   second copy of the geometry to keep in step. */
+const CROSSINGS = [];        // cleared in place; drawn during rebuild, asserted in smoke
+
+/* Arc length along a polyline, and the unit direction leaving vertex 0. */
+function armDir(pts){
+  for(let i=1;i<pts.length;i++){
+    const dx=pts[i][0]-pts[0][0], dz=pts[i][1]-pts[0][1];
+    const L=Math.hypot(dx,dz);
+    if(L>1e-6) return [dx/L, dz/L];
+  }
+  return [1,0];
+}
+
+/* Rewrite the start of `pts` (which begins AT the node) so the path leaves along
+   [ux,uz] -- square to the road -- and eases back onto the recorded line.
+
+   RESAMPLES rather than nudging the existing vertices, and that is the whole correctness
+   of it. The first version moved each vertex inside the apron toward where a square
+   approach would put it, weighted by how far along it was. It did nothing at all, and the
+   measurement said so: the angles at crossings stayed spread from 0 to 90 degrees instead
+   of clustering at 90. The reason is upstream -- buildGraph runs Douglas-Peucker over
+   every line, so a path's vertices are metres apart and its FIRST segment is routinely
+   longer than the whole apron. There were no vertices inside the apron to nudge; the loop
+   hit its bound on the first iteration and returned having touched nothing.
+
+   So the apron gets its own vertices. The path holds a true perpendicular for the first
+   45% -- long enough to actually read as arriving square, and to give the kerb something
+   to meet at a right angle -- then smoothsteps onto the recorded geometry, which reaches
+   it with matching position and near-matching direction. Everything past the apron is the
+   survey line untouched.
+
+   Returns a NEW array; the caller assigns it. pts[0] is copied by value and never moved,
+   because an endpoint is the edge's claim on a graph node and shifting it detaches the
+   edge from the junction it belongs to (see asSidewalk's note -- same bug, caught by the
+   same assertion). */
+const APRON_SAMPLES = 8, APRON_HOLD = 0.45;
+function squareApproach(pts, ux, uz, apron){
+  if(pts.length < 2 || !(apron > 0)) return pts;
+  const arc = [0];
+  for(let i=1;i<pts.length;i++)
+    arc[i] = arc[i-1] + Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1]);
+  const total = arc[arc.length-1];
+  /* An edge with a crossing at BOTH ends is squared twice, from opposite directions.
+     Capping each correction at 40% of the edge leaves recorded line in the middle, so the
+     two never fight over the same stretch and a short connector between two road
+     crossings does not become an S-bend. */
+  apron = Math.min(apron, total*0.4);
+  if(!(apron > 0)) return pts;
+
+  const at = s => {
+    for(let i=1;i<pts.length;i++){
+      if(arc[i] >= s){
+        const t = (s-arc[i-1])/Math.max(1e-9, arc[i]-arc[i-1]);
+        return [pts[i-1][0]+(pts[i][0]-pts[i-1][0])*t, pts[i-1][1]+(pts[i][1]-pts[i-1][1])*t];
+      }
+    }
+    return pts[pts.length-1].slice();
+  };
+
+  const out = [pts[0].slice()];
+  for(let k=1;k<=APRON_SAMPLES;k++){
+    const f = k/APRON_SAMPLES, s = apron*f;
+    const ideal = [pts[0][0]+ux*s, pts[0][1]+uz*s];
+    const orig = at(s);
+    // 1 while holding square, falling to 0 at the apron edge; smoothstepped so there is
+    // no corner where the blend starts or ends
+    const w = f <= APRON_HOLD ? 1 : 1 - (f-APRON_HOLD)/(1-APRON_HOLD);
+    const e = w*w*(3-2*w);
+    out.push([ideal[0]+(orig[0]-ideal[0])*(1-e), ideal[1]+(orig[1]-ideal[1])*(1-e)]);
+  }
+  for(let i=1;i<pts.length;i++) if(arc[i] > apron) out.push(pts[i].slice());
+  return out;
+}
+
+/* Nearest point on a polyline, with the local direction there. */
+function projectOnPolyline(pts, x, z){
+  let best={d:Infinity, px:x, pz:z, dir:[1,0]};
+  for(let i=0;i<pts.length-1;i++){
+    const r=ptSeg([x,z], pts[i], pts[i+1]);
+    if(r.d<best.d){
+      let dx=pts[i+1][0]-pts[i][0], dz=pts[i+1][1]-pts[i][1];
+      const L=Math.hypot(dx,dz)||1;
+      best={d:r.d, px:r.q[0], pz:r.q[1], dir:[dx/L, dz/L]};
+    }
+  }
+  return best;
+}
+
+/* Move a buried path onto the verge of its host: a divided sidewalk rather than a stripe
+   down the middle of the road. The side is decided ONCE, from the average signed offset
+   of the whole path, rather than per vertex -- per-vertex would let a footway that wanders
+   across the centreline flip sides mid-block and zigzag through the traffic. */
+function asSidewalk(e, offset){
+  const host=e.buried;
+  if(!host || host.pts.length<2) return false;
+  let sum=0, n=0;
+  const proj=[];
+  for(const p of e.pts){
+    const pr=projectOnPolyline(host.pts, p[0], p[1]);
+    const nx=-pr.dir[1], nz=pr.dir[0];
+    const side=(p[0]-pr.px)*nx + (p[1]-pr.pz)*nz;
+    sum+=side; n++;
+    proj.push({pr, nx, nz});
+  }
+  if(!n) return false;
+  const sd = sum>=0 ? 1 : -1;
+
+  /* TAPER THE OFFSET IN AND OUT AT THE ENDS, and this is not cosmetic.
+
+     Moving every vertex onto the verge moves the two ENDPOINTS as well -- and an
+     endpoint is not just a point, it is the edge's claim on a graph node. world.js grades
+     each edge with its ends pinned to the average height every edge meeting at that node
+     asked for; shift an endpoint a couple of metres sideways and it is no longer at the
+     node, so the consensus it contributes to is taken at one place and applied at
+     another. The smoke suite caught it immediately as junctions whose ribbons arrived at
+     different heights -- the exact class of bug the grading pass exists to prevent.
+
+     Tapering also happens to be right on its own terms: a footway beside a road does
+     rejoin the carriageway at the junction at either end. So the offset ramps up over a
+     short run, holds along the block, and ramps back down. */
+  const arc=[0];
+  for(let i=1;i<e.pts.length;i++)
+    arc[i]=arc[i-1]+Math.hypot(e.pts[i][0]-e.pts[i-1][0], e.pts[i][1]-e.pts[i-1][1]);
+  const total=arc[arc.length-1];
+  if(!(total>0)) return false;
+  const taper=Math.min(offset*2.5, total*0.35);
+  for(let i=0;i<e.pts.length;i++){
+    const {pr, nx, nz}=proj[i];
+    const s=arc[i];
+    const w = taper>0 ? clamp(Math.min(s, total-s)/taper, 0, 1) : 1;
+    // lerp between the recorded line and the verge, so w=0 leaves the endpoint exactly
+    // where the graph put it
+    const tx = pr.px + nx*sd*offset, tz = pr.pz + nz*sd*offset;
+    e.pts[i][0] += (tx - e.pts[i][0])*w;
+    e.pts[i][1] += (tz - e.pts[i][1])*w;
+  }
+  e.sidewalk = {side:sd, offset};
+  return true;
+}
+
+/* Plan every road crossing on the map, and rewrite the geometry that meets it. Runs after
+   markBuriedEdges (a path that FOLLOWS the road is a sidewalk, not a crossing, and must
+   not be squared up to it) and before grading. */
+function planCrossings(adj){
+  CROSSINGS.length=0;
+  if(!GRAPH) return 0;
+  const roadHalf = kind => pathOutlineWidth(kind)/2;
+
+  // sidewalks first: a buried path moved onto the verge changes where it meets the road
+  for(const e of GRAPH.edges){
+    if(!e.buried) continue;
+    asSidewalk(e, roadHalf(e.buried.kind) + pathWidth(e.kind)*0.75);
+  }
+
+  for(let ni=0; ni<GRAPH.nodes.length; ni++){
+    const here=adj[ni]||[];
+    const roads=here.filter(x=>x.kind==='road');
+    const walks=here.filter(x=>x.kind!=='road' && !x.buried);
+    if(!roads.length || !walks.length) continue;
+    const n=GRAPH.nodes[ni];
+
+    /* The road's axis. Averaged over the road arms as an UNDIRECTED line (arms leaving in
+       opposite directions must not cancel to zero), which is why each arm's direction is
+       flipped into a common half-plane before it is summed. */
+    let ax=0, az=0, ref=null;
+    for(const r of roads){
+      const pts = r.a===ni ? r.pts : [...r.pts].reverse();
+      let d = armDir(pts);
+      if(!ref) ref=d;
+      if(d[0]*ref[0]+d[1]*ref[1] < 0) d=[-d[0],-d[1]];
+      ax+=d[0]; az+=d[1];
+    }
+    const L=Math.hypot(ax,az);
+    if(L<1e-6) continue;
+    const dir=[ax/L, az/L], nx=-dir[1], nz=dir[0];
+
+    const roadW = Math.max(...roads.map(r=>pathWidth(r.kind)));
+    const walkW = Math.max(...walks.map(w=>pathWidth(w.kind)))*2.1;
+    const apron = Math.max(roadW*1.8, walkW*1.6);
+
+    /* Where the trail's SURFACE has to stop. The path still runs to the node -- the graph
+       edge is what makes the crossing walkable and routable -- but its ribbon ends at the
+       kerb, and the crosswalk carries it across. Drawing both was what put a dirt track
+       over the tarmac in the screenshot: two surfaces claiming the same carriageway, one
+       of which is the marked crossing that exists precisely to say who has it. */
+    const kerbW = Math.max(0.28, roadW*0.09);
+    const trim = roadW*0.5 + kerbW + walkW*0.06;
+
+    for(const w of walks){
+      // orient the arm so pts[0] is this node, square it up, then write it back the way
+      // round it came. squareApproach returns a new array (it inserts vertices), so the
+      // assignment is not optional the way an in-place nudge would have been.
+      const flip = w.b===ni && w.a!==ni;
+      const pts = flip ? [...w.pts].reverse() : w.pts;
+      const d = armDir(pts);
+      const side = (d[0]*nx + d[1]*nz) >= 0 ? 1 : -1;
+      const squared = squareApproach(pts, nx*side, nz*side, apron);
+      w.pts = flip ? squared.reverse() : squared;
+      if(flip) w.trimB = Math.max(w.trimB||0, trim);
+      else     w.trimA = Math.max(w.trimA||0, trim);
+    }
+
+    CROSSINGS.push({x:n.p[0], z:n.p[1], dir, roadW, walkW, trim,
+                    lift:kindLift('road'), node:ni});
+  }
+  return CROSSINGS.length;
+}
+function getCrossings(){ return CROSSINGS; }
+/* Shove a point out of any road it is standing in.
+
+   Signs were being moved off the carriageway only at nodes the crossing planner had
+   flagged, which handled the case in the screenshot and missed the general one: a trail
+   fork can sit a metre from a road without being a crossing at all, and its post lands in
+   the traffic lane just the same. 14 posts on the default map, found by asserting it
+   rather than by looking at another screenshot.
+
+   Pushes perpendicular to the offending road, to whichever side it is already nearer, far
+   enough to clear the painted surface plus a margin. Iterating every road edge is fine at
+   this scale -- a couple of dozen posts against a few dozen roads, once per rebuild. */
+function pushOffRoad(x, z, margin){
+  if(!GRAPH) return [x, z];
+  let px=x, pz=z;
+  for(let pass=0; pass<3; pass++){
+    let worst=null, worstOver=0;
+    for(const e of GRAPH.edges){
+      if(e.kind!=='road' || e.pts.length<2) continue;
+      const clear = pathOutlineWidth(e.kind)/2 + (margin||0);
+      for(let i=0;i<e.pts.length-1;i++){
+        const a=e.pts[i], b=e.pts[i+1];
+        if(Math.min(a[0],b[0])-clear > px || Math.max(a[0],b[0])+clear < px) continue;
+        if(Math.min(a[1],b[1])-clear > pz || Math.max(a[1],b[1])+clear < pz) continue;
+        const r=ptSeg([px,pz], a, b);
+        const over = clear - r.d;
+        if(over > worstOver){ worstOver=over; worst={r, a, b, clear}; }
+      }
+    }
+    if(!worst) break;
+    let dx=worst.b[0]-worst.a[0], dz=worst.b[1]-worst.a[1];
+    const L=Math.hypot(dx,dz)||1;
+    let nx=-dz/L, nz=dx/L;
+    // away from the centreline on the side it is already on; a post exactly on the line
+    // has no preferred side, so pick one rather than dividing by zero
+    let sx=px-worst.r.q[0], sz=pz-worst.r.q[1];
+    const side = (sx*nx + sz*nz) >= 0 ? 1 : -1;
+    px = worst.r.q[0] + nx*side*worst.clear*1.06;
+    pz = worst.r.q[1] + nz*side*worst.clear*1.06;
+  }
+  return [px, pz];
+}
+
+function crossingAt(ni){
+  for(const c of CROSSINGS) if(c.node===ni) return c;
+  return null;
+}
+
+/* Drop the first `a` and last `b` units of a profile, so a ribbon can stop short of its
+   own endpoint without the edge being shortened for anything else. The graph keeps its
+   full geometry -- routing, the walkable bench and the spatial hash all still run to the
+   node -- and only the painted surface is cut back. Returns null when there is nothing
+   left worth drawing, which is the right answer for a connector shorter than the road it
+   crosses: that stub IS the crossing, and the crosswalk already draws it. */
+function trimProfile(prof, a, b){
+  const pts=prof.pts, ys=prof.ys;
+  if(!pts || pts.length<2) return null;
+  const arc=[0];
+  for(let i=1;i<pts.length;i++)
+    arc[i]=arc[i-1]+Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1]);
+  const total=arc[arc.length-1];
+  const lo=Math.max(0, a||0), hi=total-Math.max(0, b||0);
+  if(!(hi-lo > 0.35)) return null;
+  const outP=[], outY=[];
+  const at=(s)=>{
+    for(let i=1;i<pts.length;i++){
+      if(arc[i]>=s){
+        const t=(s-arc[i-1])/Math.max(1e-9, arc[i]-arc[i-1]);
+        return [[pts[i-1][0]+(pts[i][0]-pts[i-1][0])*t, pts[i-1][1]+(pts[i][1]-pts[i-1][1])*t],
+                ys ? ys[i-1]+(ys[i]-ys[i-1])*t : 0];
+      }
+    }
+    return [pts[pts.length-1].slice(), ys ? ys[ys.length-1] : 0];
+  };
+  let e0=at(lo); outP.push(e0[0]); outY.push(e0[1]);
+  for(let i=0;i<pts.length;i++) if(arc[i]>lo && arc[i]<hi){ outP.push(pts[i]); outY.push(ys?ys[i]:0); }
+  let e1=at(hi); outP.push(e1[0]); outY.push(e1[1]);
+  return {pts:outP, ys:ys?outY:null};
+}
+
+/* Distinct SIGNABLE routes meeting at a node -- what a walker actually has to choose
+   between. Roads are excluded, because a fingerpost is trail signage: a path crossing a
+   service road offers no choice, it just crosses, and listing the road turns a crossing
+   into a four-armed junction that isn't one. When a node has nothing BUT roads it is a
+   road junction on its own terms and the roads are all it can name, so they come back.
+   Buried routes count -- following a route down a road is still a choice. */
+function signRoutesAt(ni, adj){
+  const arms = adj[ni] || [];
+  const walk = arms.filter(e => e.kind !== 'road');
+  const src = walk.length ? walk : arms;
+  const out = [];
+  for(const e of src) if(!out.includes(e.route)) out.push(e.route);
+  return out;
+}
+
+/* How far along this arm before the walker has to choose again.
+
+   Follows one route through the fragments splitT cut it into, hopping node to node for as
+   long as (a) the node offers no real choice and (b) exactly one edge carries the same
+   route onward. Stops at a fork, at a dead end, and at any ambiguity. Bounded three ways
+   -- an edge-visited set, a hop cap, and the single-continuation requirement -- because a
+   loop trail closing on itself would otherwise walk forever. */
+function armReach(ni, e0, adj){
+  let cur=ni, e=e0, acc=0, hops=0;
+  const seen=new Set([e0]);
+  while(e && hops++ < 500){
+    acc += e.lenM;
+    const nxt = (e.a===cur) ? e.b : e.a;
+    if(signRoutesAt(nxt, adj).length >= 2) return {node:nxt, dist:acc};
+    const cont = (adj[nxt]||[]).filter(o => o!==e && o.route===e.route && !seen.has(o));
+    if(cont.length !== 1) return {node:nxt, dist:acc};
+    seen.add(cont[0]); cur=nxt; e=cont[0];
+  }
+  return {node:cur, dist:acc};
+}
+
+/* World units -> a real-world distance a signpost can print.
+
+   lenM is measured on the COMPACTED network, so at 1:5 a real 500 m trail measures 100
+   units. Dividing by the map scale is what makes a signpost state the trail's real
+   length, which is the only reading that makes sense on a map advertising real trails. */
+function distLabel(u){
+  const m = u/Math.max(1e-6, MAP_SCALE);
+  return m>=1000 ? (m/1000).toFixed(1)+' km' : Math.round(m)+' m';
+}
+
+/* Which arms actually go on the post, out of everything that meets here.
+
+   THREE FILTERS, in order, each removing a specific kind of clutter seen on the default
+   map. Roads first: a fingerpost is trail signage, so unless there is nothing but roads
+   here, the road arms come off -- that alone is what stops a trail crossing a service
+   road being signed as a four-way junction. Then routes: 153 of the 162 junctions had
+   arms repeating a label, because a route running straight through contributes two arms,
+   so at most two arms survive per route (the two directions) and the shorter is dropped
+   when the two lead somewhere similar, which is the difference between "left 900 m,
+   right 1.4 km round the loop" and "Juniper Way Loop, twice". Finally rank: a post holds
+   five arms and named trails earn the slots before invented spur labels do. */
+function pickArms(arms){
+  const nonRoad=arms.filter(a=>a.kind!=='road');
+  const src=nonRoad.length>=2 ? nonRoad : arms;
+  const byRoute=new Map();
+  for(const a of src){
+    const g=byRoute.get(a.route)||[]; g.push(a); byRoute.set(a.route, g);
+  }
+  const kept=[];
+  for(const g of byRoute.values()){
+    g.sort((x,y)=>y.distU-x.distU);
+    kept.push(g[0]);
+    // a second arm on the same route is worth printing only when it leads somewhere
+    // meaningfully different -- otherwise it is the same trail named twice
+    if(g[1] && g[1].distU < g[0].distU*0.75) kept.push(g[1]);
+  }
+  kept.sort((a,b)=> (b.named-a.named) || (b.distU-a.distU));
+  const post=kept.slice(0,4);
+
+  /* Last pass, and the one that fixes what the screenshot actually showed.
+
+     Everything above dedupes by ROUTE, which is right -- two unnamed paths meeting here
+     are two choices and both belong on the post. But they may still PRINT the same thing,
+     because SPUR_NAMES has twelve labels for the map's 91 unnamed ways, and a post
+     reading "Juniper Link 19 m" above "Juniper Link 49 m" is worse than useless: it looks
+     like one trail contradicting itself. A real name never collides this way (two ways
+     called Palmer Trail ARE Palmer Trail, and share a route). So where an invented label
+     repeats across different routes on one post, the weaker one drops the pretence and
+     says what it is. Honest beats charming on a sign. */
+  const seen=new Map();
+  for(const a of post){
+    const prev=seen.get(a.label);
+    if(prev!=null && prev!==a.route && !a.named) a.label='Unmarked path';
+    else seen.set(a.label, a.route);
+  }
+  return post;
+}
+
 /* Bumped on every rebuildWorld so cached derived data (minimap.js's relief image, the
    critter roster) can tell "same world, new frame" from "whole world replaced" without
    world.js needing to know those consumers exist. */
@@ -4722,6 +5690,9 @@ function rebuildWorld(){
   resetSpatialHash();
 
   const layers=[...(BUNDLE ? (BUNDLE.layers||[]) : []), ...EXTRA];
+  MAP_ID = BUNDLE
+    ? 'dem:'+(+BUNDLE.originLon).toFixed(4)+','+(+BUNDLE.originLat).toFixed(4)
+    : (layers.length ? 'geojson:'+layers.length : 'none');
   if(!layers.length){ applyThemeLighting(); return; }
   // A bundle's own projection is authoritative whenever one is loaded; the fallback only
   // covers the no-DEM case, where there's no heightfield to stay aligned with anyway.
@@ -4753,6 +5724,18 @@ function rebuildWorld(){
   // Scaling both keeps the topology (what merges into what) a function of real distance,
   // not of how compacted the display happens to be.
   GRAPH=buildGraph(lines,16*MAP_SCALE,6*MAP_SCALE);
+  /* Adjacency, built once and used by everything below -- the crossing planner, the
+     junction pads, the sign arms and the destination walk all need "what meets here".
+     It has to exist BEFORE the geometry passes, not after, because those passes rewrite
+     the very points the bench, the spatial hash and the ribbons are all built from: the
+     one way to guarantee they agree is that there is only ever one copy of the geometry
+     and it is finished being edited before any of them reads it. */
+  const adj=GRAPH.nodes.map(()=>[]);
+  GRAPH.edges.forEach(e=>{ adj[e.a].push(e); if(e.b!==e.a) adj[e.b].push(e); });
+  // decide which paths share another's ground, THEN square the rest up to the kerb --
+  // a path that follows a road is a sidewalk, not a crossing, and must not be squared
+  PATH_MIX={forks:0, crossings:0, buried:markBuriedEdges(), crossingsBuilt:0};
+  PATH_MIX.crossingsBuilt = planCrossings(adj);
   POIS=points.map(p=>({name:p.name,kind:p.kind,props:p.props,x:p.p.x,z:p.p.z,found:false}));
   AREAS=areasProjected;
   WATER=AREAS.filter(a=>a.kind==='water');
@@ -4882,40 +5865,88 @@ function rebuildWorld(){
     track:{deco:true, ruts:true, tread:shade(THEME.tread,0.86), inner:shade(THEME.tread,0.6), shoulder:THEME.shoulder},
     road:{deco:false, dashes:true, tread:'#716d64', inner:'#8a867a', shoulder:'#4a473f'},
   };
-  const mOutline=trailMat(INK);
-  GRAPH.edges.forEach(e=>{
+  // one ink material per class rank, so the outline of a path sitting on top of another
+  // carries the same depth bias as the surface it belongs to
+  const inkMats=[0,1,2].map(L=>trailMat(INK,L));
+  /* Draw the most-built surface first and the least-built last. Depth bias already
+     decides who wins, but painter's order costs nothing and makes the result stable even
+     where two surfaces are exactly coplanar and the bias ties. */
+  const drawOrder=GRAPH.edges.slice().sort((a,b)=>pathRank(a.kind)-pathRank(b.kind));
+  drawOrder.forEach(e=>{
     const st=PATH_STYLE[e.kind]||PATH_STYLE.trail;
     /* Layer widths are MULTIPLES of the tread, not the tread plus a constant. The old
        +2.3 m outline was invisible on a 4.6 m road and overwhelming on a footpath, and it
        is why narrowing the tread alone wouldn't have fixed the pancakes. */
     const W=pathWidth(e.kind);
+    const rank=pathRank(e.kind), lift=kindLift(e.kind);
     // e.prof is the graded profile the ground beneath was benched to, shared by every
     // layer below plus the spatial hash. Sharing one profile is load-bearing: when each
     // layer sampled terrain at its own slightly-offset vertex positions they disagreed by
     // a whole terrace at any step and z-fought along the entire trail.
-    const rpts=e.prof.pts, hs=e.prof.ys;
-    worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*OUTLINE_MUL,0.012,hs),mOutline));
-    worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*SHOULDER_MUL,0.02,hs),trailMat(st.shoulder)));
-    worldG.add(new THREE.Mesh(ribbonGeom(rpts,W,0.05,hs),trailMat(st.tread)));
+    /* Cut the ribbon back to the kerb at any crossing this edge runs into. The bench,
+       the spatial hash and the graph are all untouched -- you still walk straight over --
+       but the marked crossing is the only surface drawn on the carriageway. */
+    let prof=e.prof;
+    if(e.trimA || e.trimB){
+      prof = trimProfile(e.prof, e.trimA, e.trimB);
+      if(!prof) return;          // the whole edge was crossing; the crosswalk covers it
+    }
+    const rpts=prof.pts, hs=prof.ys;
+
+    /* Sharing another path's ground: a marker, not a surface. Two thin ribbons -- an ink
+       casing and the route's own blaze colour -- laid on top of the host, the way a route
+       is waymarked down a road in the real world. Everything else about the edge is
+       unchanged: it walks, it routes, it appears on the map and on signs. */
+    /* A route that follows a road is now a SIDEWALK: planCrossings has already moved its
+       centreline onto the verge, so what gets drawn here is a real (narrow) footway --
+       kerb, casing, tread -- rather than the coloured stripe down the carriageway the
+       first version painted. Narrower than a trail because a footway beside a road is,
+       and because the space between kerb and verge is genuinely tight. */
+    if(e.buried){
+      const fw=W*0.72, kerb=Math.max(0.22,fw*0.28);
+      const sd=e.sidewalk ? e.sidewalk.side : 1;
+      // kerb strip on the road side, so the footway has an edge rather than fading into dirt
+      const kerbPts=rpts.map((p,i)=>{
+        const q=rpts[Math.min(rpts.length-1,i+1)], pr=rpts[Math.max(0,i-1)];
+        let dx=q[0]-pr[0], dz=q[1]-pr[1]; const L=Math.hypot(dx,dz)||1;
+        return [p[0]+dz/L*sd*(fw*0.5+kerb*0.5), p[1]-dx/L*sd*(fw*0.5+kerb*0.5)];
+      });
+      worldG.add(new THREE.Mesh(ribbonGeom(kerbPts,kerb,lift+0.03,hs),trailMat('#cdc3ad',rank)));
+      worldG.add(new THREE.Mesh(ribbonGeom(rpts,fw*1.35,lift+0.012,hs),inkMats[rank]));
+      worldG.add(new THREE.Mesh(ribbonGeom(rpts,fw,lift+0.05,hs),trailMat(st.tread,rank)));
+      return;
+    }
+
+    worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*OUTLINE_MUL,lift+0.012,hs),inkMats[rank]));
+    worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*SHOULDER_MUL,lift+0.02,hs),trailMat(st.shoulder,rank)));
+    worldG.add(new THREE.Mesh(ribbonGeom(rpts,W,lift+0.05,hs),trailMat(st.tread,rank)));
     if(st.ruts){
-      const rutMat=trailMat(shade(st.tread,0.55));
+      const rutMat=trailMat(shade(st.tread,0.55),rank);
       [-1,1].forEach(sd=>{
         const off=rpts.map((p,i)=>{
           const q=rpts[Math.min(rpts.length-1,i+1)],pr=rpts[Math.max(0,i-1)];
           let dx=q[0]-pr[0],dz=q[1]-pr[1];const L=Math.hypot(dx,dz)||1;
           return[p[0]-dz/L*W*0.27*sd,p[1]+dx/L*W*0.27*sd];
         });
-        worldG.add(new THREE.Mesh(ribbonGeom(off,0.5,0.075,hs),rutMat));
+        worldG.add(new THREE.Mesh(ribbonGeom(off,0.5,lift+0.075,hs),rutMat));
       });
     }else{
-      worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*0.44,0.08,hs),trailMat(st.inner)));
+      worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*0.44,lift+0.08,hs),trailMat(st.inner,rank)));
     }
     if(st.dashes){
-      const dashMat=trailMat('#e8dcae');
+      const dashMat=trailMat('#e8dcae',rank);
       for(let i=1;i<rpts.length;i+=2){
-        worldG.add(new THREE.Mesh(ribbonGeom([rpts[i-1],rpts[i]],0.22,0.09,hs?[hs[i-1],hs[i]]:null),dashMat));
+        worldG.add(new THREE.Mesh(ribbonGeom([rpts[i-1],rpts[i]],0.22,lift+0.09,hs?[hs[i-1],hs[i]]:null),dashMat));
       }
     }
+  });
+
+  /* Crossings go on AFTER every ribbon, because they are markings painted on a finished
+     road: standingY (not terrainY) so the stripes sit on the tread the road actually
+     rendered at rather than on the terrace underneath it. */
+  CROSSINGS.forEach(rec=>{
+    try{ worldG.add(buildCrossing(rec, standingY)); }
+    catch(err){ console.warn('crossing skipped', err); }
   });
 
   AREAS.forEach(a=>{ if(a.name) worldG.add(buildAreaSign(a,groundYAt,nearestTrail)); });
@@ -4938,40 +5969,95 @@ function rebuildWorld(){
      which a real network has hundreds. Their ribbons already meet flush, so the pad was
      covering a seam that wasn't there. On a compacted map the discs merge into a
      continuous brown field over the whole network. Only real junctions get one now. */
+  /* Junction pads, ONE PER SURFACE rather than one per node.
+
+     A pad exists to hide the seam where several ribbons butt together, and a seam belongs
+     to a surface. At a node where a footpath crosses a service road there are two seams
+     at two different heights, and the old single dirt-coloured disc covered the wrong one
+     -- a brown circle stamped on the middle of the tarmac, which is the disc visible in
+     the screenshot that started this. Drawing one pad per class present, each at its own
+     class lift, in its own tread colour, sized to its own widest ribbon, gets both.
+
+     Buried edges are excluded from the census: they have no ribbon to seam, only a marker
+     line, so a node where the only trail arms are buried gets a road pad and nothing
+     else -- which is what "the route follows the road through here" should look like. */
   const signWanted=[];      // collected here, thinned and built after the loop (see below)
   GRAPH.nodes.forEach((n,ni)=>{
     if(n.deg<1) return;
     const y=standingY(n.p[0],n.p[1]);
+    const here=adj[ni];
     if(n.deg>=3){
-      let hw=0;
-      GRAPH.edges.forEach(e=>{ if(e.a===ni||e.b===ni) hw=Math.max(hw,pathOutlineWidth(e.kind)/2); });
-      const r=Math.max(hw*1.2,0.4);
-      const oDisc=new THREE.Mesh(new THREE.CircleGeometry(r,20),mOutline);
-      oDisc.rotation.x=-Math.PI/2; oDisc.position.set(n.p[0],y+0.045,n.p[1]); worldG.add(oDisc);
-      const disc=new THREE.Mesh(new THREE.CircleGeometry(r*0.84,20),trailMat(THEME.tread));
-      disc.rotation.x=-Math.PI/2; disc.position.set(n.p[0],y+0.06,n.p[1]); worldG.add(disc);
+      const xing=crossingAt(ni);
+      const byKind=new Map();
+      for(const e of here){
+        if(e.buried) continue;
+        /* At a marked crossing the walking surfaces stop at the kerb, so a pad for them
+           would be a dirt disc floating in the middle of the road with nothing to join --
+           the crosswalk and its two landings are the junction here. The ROAD still gets
+           its pad: its own ribbons really do meet at this node. */
+        if(xing && e.kind!=='road') continue;
+        byKind.set(e.kind, Math.max(byKind.get(e.kind)||0, pathOutlineWidth(e.kind)/2));
+      }
+      for(const [kind, hw] of byKind){
+        const rank=pathRank(kind), lift=kindLift(kind);
+        const st=PATH_STYLE[kind]||PATH_STYLE.trail;
+        const r=Math.max(hw*1.2,0.4);
+        const oDisc=new THREE.Mesh(new THREE.CircleGeometry(r,20),inkMats[rank]);
+        oDisc.rotation.x=-Math.PI/2; oDisc.position.set(n.p[0],y+lift+0.045,n.p[1]); worldG.add(oDisc);
+        const disc=new THREE.Mesh(new THREE.CircleGeometry(r*0.84,20),trailMat(st.tread,rank));
+        disc.rotation.x=-Math.PI/2; disc.position.set(n.p[0],y+lift+0.06,n.p[1]); worldG.add(disc);
+      }
     }
+
+    const routes=signRoutesAt(ni,adj);
+    const isFork = routes.length>=2;
+    if(n.deg>=3){
+      if(isFork) PATH_MIX.forks++;
+      else if(n.kinds && n.kinds.length>1) PATH_MIX.crossings++;
+    }
+
     const out=[];
-    GRAPH.edges.forEach(e=>{
+    for(const e of here){
       if(e.a===ni) out.push({e,pts:e.pts});
       if(e.b===ni&&e.a!==e.b) out.push({e,pts:[...e.pts].reverse()});
-    });
+    }
     const armOf=o=>{
       let ax=0,az=0,acc=0,i=1;
       while(i<o.pts.length&&acc<6){ax=o.pts[i][0]-n.p[0];az=o.pts[i][1]-n.p[1];acc=Math.hypot(ax,az);i++;}
-      /* lenM is measured on the COMPACTED network, so it is world units, not metres --
-         at 1:5 a real 500 m trail measures 100. Signposts were printing that raw as
-         "100 m". Divide by the map scale so a signpost states the trail's real length,
-         which is the only reading that makes sense on a map advertising real trails. */
-      return{label:o.e.name,dist:Math.round(o.e.lenM/Math.max(1e-6,MAP_SCALE))+' m',angle:Math.atan2(az,ax)};
+      /* Distance is now to the NEXT DECISION, not the length of this one graph edge.
+         splitT cuts every line wherever anything touches it, so an edge is a fragment
+         between two cuts -- on the default map the median fragment is 76 m and the tenth
+         percentile is 24 m. Printing that raw is what put "Juniper Way Loop 19 m" on a
+         signpost: not a wrong number, but an answer to a question nobody asked. armReach
+         walks the fragments of one route together until the walker actually has to choose
+         again, which is the distance a fingerpost is for. */
+      const reach=armReach(ni,o.e,adj);
+      return{label:o.e.name, route:o.e.route, kind:o.e.kind, named:!!o.e.named,
+             distU:reach.dist, dist:distLabel(reach.dist), angle:Math.atan2(az,ax)};
     };
-    if(n.deg>=3){
-      const arms=[],seen=new Set();
-      out.forEach(o=>{const a=armOf(o);const k=a.label+'|'+Math.round(a.angle*4);
-        if(seen.has(k))return;seen.add(k);arms.push(a);});
-      signWanted.push({n, y, arms, deg:n.deg});
+    /* WHERE THE POST GOES, worked out once for both kinds of sign.
+
+       A fingerpost belongs on the verge, not in the road. At a crossing there is a right
+       answer -- the landing beside the markings -- and everywhere else there is a catch
+       all: shove it clear of any carriageway it happens to be standing in. Applied to
+       trailhead posts too, which is the bit that was missed first time round: a trailhead
+       at a roadside car park is exactly the sign most likely to be planted in tarmac, and
+       four of them were. */
+    let sx=n.p[0], sz=n.p[1];
+    const xing=crossingAt(ni);
+    if(xing){
+      const nxr=-xing.dir[1], nzr=xing.dir[0];
+      const off=xing.trim + xing.walkW*0.5;
+      sx=n.p[0]+nxr*off; sz=n.p[1]+nzr*off;
+    }
+    const clearPt=pushOffRoad(sx, sz, 0.8);
+    sx=clearPt[0]; sz=clearPt[1];
+    const sy=standingY(sx, sz);
+
+    if(n.deg>=3 && isFork){
+      signWanted.push({n, y:sy, sx, sz, arms:pickArms(out.map(armOf)), deg:n.deg, routes:routes.length});
     }else if(n.deg===1&&out.length){
-      signWanted.push({n, y, arms:[armOf(out[0])], deg:1});
+      signWanted.push({n, y:sy, sx, sz, arms:[armOf(out[0])], deg:1, routes:1});
     }
   });
 
@@ -5003,9 +6089,12 @@ function rebuildWorld(){
     const SIGN_MIN_M = 70, SIGN_MIN_U = 9;
     const minGap = Math.max(SIGN_MIN_M*MAP_SCALE, SIGN_MIN_U);
     const isHead = (n)=>TRAILHEADS.some(h=>Math.hypot(h.x-n.p[0], h.z-n.p[1]) < 0.5);
+    /* Ranked by ROUTE count, not label count: two unnamed paths sharing a SPUR_NAMES
+       label are two choices, and a route running straight through and appearing twice is
+       one. Counting labels got both backwards. */
     const score = s => {
-      const names = new Set(s.arms.map(a=>a.label)).size;
-      return names*1000 + s.deg*10 + Math.min(9, s.arms.length);
+      const routes = new Set(s.arms.map(a=>a.route||a.label)).size;
+      return routes*1000 + s.deg*10 + Math.min(9, s.arms.length);
     };
     const ranked = signWanted.map(s=>({s, head:isHead(s.n), sc:score(s)}))
       // trailheads first, then the most informative junctions
@@ -5015,9 +6104,17 @@ function rebuildWorld(){
       const p=c.s.n.p;
       // a trailhead post is always placed; everything else must clear the kept ones
       if(!c.head && kept.some(k=>Math.hypot(k.s.n.p[0]-p[0], k.s.n.p[1]-p[1]) < minGap)) continue;
+
       kept.push(c);
     }
-    kept.forEach(c=>{ const sg=buildSign(c.s.n, c.s.arms); sg.position.y=c.s.y; worldG.add(sg); });
+    kept.forEach(c=>{
+      /* buildSign positions itself from the node it is handed, so a post that has been
+         moved off the carriageway is given a stand-in carrying the moved point. The real
+         node is left alone -- it is the graph's, and the arm ANGLES were measured from it. */
+      const at = (c.s.sx==null || (c.s.sx===c.s.n.p[0] && c.s.sz===c.s.n.p[1]))
+        ? c.s.n : {p:[c.s.sx, c.s.sz], deg:c.s.n.deg};
+      const sg=buildSign(at, c.s.arms); sg.position.y=c.s.y; worldG.add(sg);
+    });
     SIGN_COUNT = {wanted:signWanted.length, built:kept.length, minGap};
   }
 
@@ -5026,6 +6123,14 @@ function rebuildWorld(){
   GRAPH.edges.forEach(e=>{
     const st=PATH_STYLE[e.kind]||PATH_STYLE.trail;
     if(!st.deco) return;
+    // A route sharing a road's ground has no verge to line with stones and no post to
+    // plant a blaze beside -- it is paint on tarmac. Its marker line carries the colour.
+    if(e.buried) return;
+    /* PATH_STYLE has never had a `w` key. `st.w` was therefore undefined, every offset
+       below evaluated to NaN, and every edge stone and blaze post on the map has been
+       placed at NaN -- silently, because three.js neither throws nor draws. The width
+       these want is the tread's, which pathWidth() already owns. */
+    const halfW=pathWidth(e.kind)/2, lift=kindLift(e.kind);
     let acc=0,blazeAcc=999;
     for(let i=1;i<e.pts.length;i++){
       const a=e.pts[i-1],b=e.pts[i];
@@ -5038,14 +6143,16 @@ function rebuildWorld(){
         for(const sd of[-1,1]){
           if(rng()<0.45) continue;
           const s=new THREE.Mesh(new THREE.DodecahedronGeometry(0.16+rng()*0.2,0),stoneMat);
-          s.position.set(sx+nx*sd*(st.w*0.62+rng()*0.4),sy+0.08,sz+nz*sd*(st.w*0.62+rng()*0.4));
+          const off=halfW+0.25+rng()*0.4;
+          s.position.set(sx+nx*sd*off,sy+lift+0.08,sz+nz*sd*off);
           s.scale.y=0.6; worldG.add(s);
         }
       }
       if(blazeAcc>42){
         blazeAcc=0;
         const nx=-(b[1]-a[1])/L, nz=(b[0]-a[0])/L;
-        const bx=a[0]+nx*(st.w*0.85), bz=a[1]+nz*(st.w*0.85);
+        const bo=halfW+0.45;
+        const bx=a[0]+nx*bo, bz=a[1]+nz*bo;
         const bz3=buildBlaze(bx,bz,e.color); bz3.position.y=terrainY(bx,bz,VERT_SCALE); worldG.add(bz3);
       }
     }
@@ -5150,6 +6257,53 @@ let watchBest = null;             // {name, progress 0..1} for the HUD meter, pe
 const WATCH_SECONDS = 3.2;        // how long you must hold still to bank a sighting
 const POPULATION = 14;
 
+/* ---------- big animals stand their ground ----------
+
+   Every animal on the map used to answer proximity the same way: flee. That makes a bear
+   behave like a rabbit, which is both wrong and, worse, boring -- it removes the only
+   situation on a trail where being close to wildlife should feel like a decision rather
+   than a reward. So the brave ones defend instead.
+
+   DRIVEN BY THE STATS TABLE, not by a list of species names. SPECIES.brav already ranks
+   exactly the animals this is about: mountain goat 4.6, bighorn 5.6, bear 8.6, moose 9.6,
+   with the next one down being a housecat at 3.2. A threshold of 4 therefore names the
+   set without hardcoding it, and stays right if the roster changes.
+
+   THE SHAPE OF THE ENCOUNTER, and each stage exists to give the player a way out:
+     bristle  it has seen you and is not leaving. Head down, stamping, warning growl.
+              Back off now and nothing happens.
+     charge   you came closer anyway. It commits and runs you down.
+     hit      contact. A headbutt or a paw slap, and you go backwards.
+   Barking is the counter, and it is the reason the bark button matters out here: a bark
+   inside the warn window turns a defender around and sends it off like anything else.
+   Barking at a bear is a gamble that works -- which is a better rule than "never get
+   close", because it is a rule you can play with. */
+const DEFEND_BRAV = 4;
+const BRISTLE_MUL = 1.5;          // x spook radius: where it starts warning you off
+const CHARGE_MUL  = 0.85;         // x spook radius: where it commits
+const CHARGE_SECONDS = 2.6;       // it does not chase you across the county
+const HIT_COOLDOWN = 1.4;
+/* Contact reach, in true metres like every other animal-to-player distance in this file
+   (see wanderTarget's note on why positions scale and radii do not). Scaled by the
+   animal's own size, because a moose can reach you from further away than a goat. */
+function reachOf(c){ return 1.5 + c.S.scale*1.1; }
+function defenderKeys(){ return Object.keys(SPECIES).filter(isDefender); }
+function speciesStats(key){ return SPECIES[key]; }
+function isDefender(key){
+  const S = SPECIES[key];
+  return !!S && (S.brav || 0) >= DEFEND_BRAV;
+}
+
+/* Hits are QUEUED rather than applied, because critters.js has no business knowing what a
+   player is. main.js drains this each frame and turns each record into knockback on
+   whatever the player happens to be. Cleared in place, same rule as CRITTERS. */
+const IMPACTS = [];
+function takeImpacts(){
+  const out = IMPACTS.slice();
+  IMPACTS.length = 0;
+  return out;
+}
+
 function getCritters(){ return CRITTERS; }
 function getCritterStats(){
   const log = [...SIGHTED.entries()]
@@ -5218,6 +6372,8 @@ function placeCritter(key, rnd){
     target: {x: spot.x, z: spot.z},
     home: {x: spot.x, z: spot.z},
     watchT: 0, sighted: false, fledT: 0,
+    // defender state (see DEFEND_BRAV): unused by everything below the bravery threshold
+    defends: isDefender(key), warnT: 0, chargeT: 0, hitT: 0, swing: 0, lunge: 0,
   });
 }
 
@@ -5252,6 +6408,44 @@ function wanderTarget(c, rnd){
   // animal, both of which stay true size at any world scale.
   const ang = rnd()*Math.PI*2, r = (2 + rnd()*7)*S;
   return {x: c.home.x + Math.cos(ang)*r, z: c.home.z + Math.sin(ang)*r};
+}
+
+/* Stand and warn. Not a flee and not a watch: the animal squares up, drops its head and
+   growls, and the encounter is now on a timer the player controls by moving. */
+function bristle(c, px, pz){
+  if(c.state === 'bristle' || c.state === 'charge') return;
+  c.state = 'bristle';
+  c.warnT = 0;
+  c.alert.visible = true;
+  c.yaw = Math.atan2(c.z - pz, -(c.x - px));
+  warnGrowl(c.S.scale);
+}
+
+function charge(c, px, pz){
+  if(c.state === 'charge') return;
+  c.state = 'charge';
+  c.chargeT = 0;
+  c.alert.visible = true;
+  warnGrowl(c.S.scale*0.85);
+}
+
+/* Contact. The verb is the animal's own: a horned or antlered animal butts, a bear
+   slaps. Both send you backwards; they differ in how they look and sound, which is the
+   whole point of naming them separately. */
+function landHit(c, px, pz){
+  const away = Math.atan2(pz - c.z, px - c.x);
+  const verb = (c.key === 'bear') ? 'slap' : 'butt';
+  IMPACTS.push({
+    x: c.x, z: c.z, key: c.key, name: c.S.nm, verb,
+    // heavier animals hit harder; the exponent keeps a moose from being a catapult
+    force: 7.5 + Math.pow(c.S.scale, 1.4)*4.2,
+    dirX: Math.cos(away), dirZ: Math.sin(away),
+  });
+  c.hitT = HIT_COOLDOWN;
+  c.swing = 1;                       // drives the lunge pose below
+  bonkSound(c.S.scale);
+  comicBurst((verb === 'slap' ? '\ud83d\udc3e ' : '\ud83d\udca5 ') + c.S.nm + '!',
+             c.x, c.y + c.S.scale*1.8, c.z, '#e2453f');
 }
 
 function bolt(c, px, pz){
@@ -5297,6 +6491,61 @@ function typicalSpookRadius(){
   return sum/keys.length;
 }
 
+/* Everything that turns one critter's STATE into a pose, in one place.
+
+   Extracted because the defender branch needs it too and `continue`s past the rest of the
+   loop -- a bristling bear that skipped the posing code stood frozen mid-stride, which is
+   the least threatening thing an animal can do. Two callers, one body, no chance of the
+   two drifting into different-looking animals. */
+function poseCritter(c, dt, t, i, rnd){
+  const still = c.state === 'watchful' || c.state === 'bristle' ||
+                (c.state === 'graze' && c.timer > 0.6 && rnd() < 0);
+  const fleeing = c.state === 'flee';
+  const charging = c.state === 'charge';
+  const bristling = c.state === 'bristle';
+
+  /* The lunge. `swing` is set to 1 on contact and decays, and it drives a whole-body
+     shove forward along the animal's own heading plus a hard head snap -- so the hit is
+     something you SEE happen to you, from an animal that visibly threw its weight, rather
+     than a number applied to the player while a model stands still. Bristling gets a
+     smaller, rhythmic version of the same motion: the stamp. */
+  const stamp = bristling ? Math.sin(t*0.011)*0.5 + 0.5 : 0;
+  c.lunge = lerp(c.lunge || 0, charging ? 0.55 : (bristling ? stamp*0.16 : 0),
+                 1 - Math.pow(0.004, dt));
+  const push = c.lunge*0.32*c.S.scale + c.swing*0.85*c.S.scale;
+  const fx = Math.cos(c.yaw), fz = -Math.sin(c.yaw);
+
+  if(c.hopper){
+    c.hop += dt*(fleeing ? 11 : 2.4);
+    c.g.position.set(c.x, c.y + (still ? 0 : Math.abs(Math.sin(c.hop))*0.22*c.S.scale), c.z);
+  }else{
+    // a charging animal's legs run hard; a bristling one paws the ground rather than walks
+    if(!still || bristling) c.walkPh += dt*(fleeing ? 13 : (charging ? 15 : (bristling ? 6 : 4)));
+    const amp = charging ? 0.78 : (bristling ? 0.2 + stamp*0.22 : (still ? 0 : (fleeing ? 0.62 : 0.26)));
+    (c.refs.legs||[]).forEach((leg, li)=>{
+      leg.rotation.z = Math.sin(c.walkPh + ((li===0||li===3) ? 0 : Math.PI))*amp;
+    });
+    c.g.position.set(c.x + fx*push, c.y + c.swing*0.22*c.S.scale, c.z + fz*push);
+  }
+  c.g.rotation.y = c.yaw;
+  /* Head. Grazing is down and idle; watched is up and level; bristling is DOWN AND
+     FORWARD, which is the universal read for "I am about to use this" whether the animal
+     is carrying horns or not; the contact frame throws it through. */
+  if(c.refs.headG){
+    const want = c.swing > 0.02 ? -0.9*c.swing
+      : bristling ? 0.52 + stamp*0.16
+      : charging ? 0.34
+      : (c.state === 'graze' && !fleeing) ? 0.6 + Math.sin(t*0.0016 + i)*0.12
+      : 0;
+    const rate = c.swing > 0.02 ? 0.00001 : 0.02;    // snap on the hit, ease otherwise
+    c.refs.headG.rotation.z = lerp(c.refs.headG.rotation.z, want, 1 - Math.pow(rate, dt));
+  }
+  // a defender leans into it: roll the whole body forward on the swing
+  c.g.rotation.z = lerp(c.g.rotation.z || 0, -c.swing*0.3, 1 - Math.pow(0.01, dt));
+  if(c.refs.tailG) c.refs.tailG.rotation.x = Math.sin(t*0.005 + i)*(fleeing ? 0.4 : (charging ? 0.5 : 0.16));
+  if(c.alert.material) c.alert.material.opacity = c.sighted ? 0.35 : 1;
+}
+
 function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
   const rnd = Math.random;
   const S = getMapScale();
@@ -5311,6 +6560,50 @@ function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
     const noise = playerNoise(speed, topSpeed, sneaking, barking);
     const spookR = spookRadiusFor(c.key)*noise;
     const noticeR = spookRadiusFor(c.key)*2.4;
+
+    if(c.hitT > 0) c.hitT = Math.max(0, c.hitT - dt);
+    c.swing = Math.max(0, c.swing - dt*3.2);
+
+    /* THE DEFENDER BRANCH, taken before the ordinary spook check below.
+
+       A brave animal inside its own spook radius does NOT bolt -- that check is what made
+       a bear behave like a rabbit. It bristles, then charges, then hits. Two ways out,
+       and the player chooses which: back off past the bristle ring, or bark. Barking is
+       checked FIRST and at the wider radius, so it works as a warning shot rather than
+       only as a last resort -- which is what makes it worth pressing early. */
+    if(c.defends && c.state !== 'flee'){
+      const bristleR = spookRadiusFor(c.key)*BRISTLE_MUL;
+      const chargeR = spookRadiusFor(c.key)*CHARGE_MUL;
+      if(dist < bristleR*1.25 && barking){
+        // a bark drives even a bear off -- and costs you the sighting, like any spook
+        bolt(c, px, pz);
+      }else if(c.state === 'charge'){
+        c.chargeT += dt;
+        seek(c, px, pz, c.S.speed*2.1, dt);
+        if(dist < reachOf(c) && c.hitT <= 0) landHit(c, px, pz);
+        if(c.chargeT > CHARGE_SECONDS || dist > bristleR*2.2){
+          c.state = 'bristle'; c.warnT = 0; c.target = {x:c.home.x, z:c.home.z};
+        }
+      }else if(dist < chargeR){
+        charge(c, px, pz);
+      }else if(dist < bristleR){
+        bristle(c, px, pz);
+        c.warnT += dt;
+        c.yaw = Math.atan2(dz, -dx);
+        // a second growl if you loiter inside the warning ring without closing
+        if(c.warnT > 1.9){ c.warnT = 0; warnGrowl(c.S.scale); }
+      }else if(c.state === 'bristle'){
+        c.state = 'graze'; c.alert.visible = false; c.warnT = 0;
+        c.target = wanderTarget(c, rnd);
+      }
+      if(c.state === 'bristle' || c.state === 'charge'){
+        // it is standing its ground, so none of the ordinary flee/watch logic applies
+        const gy0 = standingY(c.x, c.z);
+        c.y = lerp(c.y, gy0, 1 - Math.pow(0.0008, dt));
+        poseCritter(c, dt, t, i, rnd);
+        continue;
+      }
+    }
 
     if(c.state !== 'flee'){
       if(dist < spookR){
@@ -5372,29 +6665,144 @@ function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
     const gy = standingY(c.x, c.z);
     c.y = lerp(c.y, gy, 1 - Math.pow(0.0008, dt));
 
-    const still = c.state === 'watchful' || (c.state === 'graze' && c.timer > 0.6 && rnd() < 0);
-    const fleeing = c.state === 'flee';
-    if(c.hopper){
-      c.hop += dt*(fleeing ? 11 : 2.4);
-      c.g.position.set(c.x, c.y + (still ? 0 : Math.abs(Math.sin(c.hop))*0.22*c.S.scale), c.z);
-    }else{
-      if(!still) c.walkPh += dt*(fleeing ? 13 : 4);
-      const amp = still ? 0 : (fleeing ? 0.62 : 0.26);
-      (c.refs.legs||[]).forEach((leg, li)=>{
-        leg.rotation.z = Math.sin(c.walkPh + ((li===0||li===3) ? 0 : Math.PI))*amp;
-      });
-      c.g.position.set(c.x, c.y, c.z);
-    }
-    c.g.rotation.y = c.yaw;
-    // head down to feed while grazing, up and alert while watched -- the read that tells
-    // you at a glance whether you've been noticed
-    if(c.refs.headG){
-      const want = (c.state === 'graze' && !fleeing) ? 0.6 + Math.sin(t*0.0016 + i)*0.12 : 0;
-      c.refs.headG.rotation.z = lerp(c.refs.headG.rotation.z, want, 1 - Math.pow(0.02, dt));
-    }
-    if(c.refs.tailG) c.refs.tailG.rotation.x = Math.sin(t*0.005 + i)*(fleeing ? 0.4 : 0.16);
-    if(c.alert.material) c.alert.material.opacity = c.sighted ? 0.35 : 1;
+    poseCritter(c, dt, t, i, rnd);
   }
+}
+
+/* ==== src/trails/spots.js ==== */
+/* Saved spots: places on the map the walker asked to remember.
+
+   WHY A MODULE AND NOT A FIELD ON `trip`. Two very different consumers need the same
+   list -- main.js writes it while you walk, minimap.js draws it on both map canvases --
+   and neither should own the other. This is the same shape as world.js's relationship
+   with the rest of src/trails: one module owns the array, everybody else goes through
+   the named functions, and the array is cleared IN PLACE (see resetSpots) because other
+   modules hold the reference.
+
+   COORDINATES ARE STORED IN REAL METRES, NOT WORLD UNITS, and that is the whole reason
+   this file is more than a wrapper around an array. World scale compacts positions -- a
+   point at world x=100 is 500 real metres out at 1:5 and 3200 at 1:32 -- so a spot saved
+   at 1:5 and read back at 1:32 would sit six kilometres from where the walker stood.
+   Storing the real-world position and converting on the way out means the pin stays on
+   the same rock whatever the slider is doing. Elevation is already true metres
+   everywhere in this codebase, so it needs no conversion and gets none.
+
+   Spots are keyed by map, because a pin dropped at Garden of the Gods means nothing on a
+   map of somewhere else, and localStorage does not know which one you have open.
+
+   Persistence is best-effort. A browser with storage disabled, a private window, or a
+   full quota all throw on read or write; every one of those is a reason for the pins not
+   to survive a reload, and none of them is a reason for the walk to stop. So every
+   access is wrapped and a failure degrades to an in-memory list for the session. */
+
+
+const SPOTS_KEY = 'pup-trails/spots/v1';
+const MAX_SPOTS = 24;      // a map full of pins is a map you can't read
+
+/* Cleared in place, never reassigned -- see the module header. */
+const SPOTS = [];
+let mapId = 'default';
+let nextId = 1;
+
+function setSpotMap(id){
+  const next = String(id || 'default');
+  if(next === mapId) return;
+  mapId = next;
+  readSpots();
+}
+function getSpotMap(){ return mapId; }
+
+function storage(){
+  try{ return window.localStorage || null; }catch(err){ return null; }
+}
+
+function readSpots(){
+  SPOTS.length = 0;
+  nextId = 1;
+  const st = storage();
+  if(!st) return SPOTS;
+  let all = null;
+  try{ all = JSON.parse(st.getItem(SPOTS_KEY) || '{}'); }
+  catch(err){ all = null; }
+  const mine = (all && all[mapId]) || [];
+  for(const s of mine){
+    if(!s || typeof s.rx !== 'number' || typeof s.rz !== 'number') continue;
+    SPOTS.push({id:nextId++, name:String(s.name||'Spot'), rx:s.rx, rz:s.rz,
+                yaw:+s.yaw||0, elevFt:(s.elevFt==null?null:+s.elevFt), at:+s.at||0});
+  }
+  return SPOTS;
+}
+
+function writeSpots(){
+  const st = storage();
+  if(!st) return false;
+  try{
+    let all = {};
+    try{ all = JSON.parse(st.getItem(SPOTS_KEY) || '{}') || {}; }catch(err){ all = {}; }
+    all[mapId] = SPOTS.map(s=>({name:s.name, rx:s.rx, rz:s.rz, yaw:s.yaw,
+                                elevFt:s.elevFt, at:s.at}));
+    st.setItem(SPOTS_KEY, JSON.stringify(all));
+    return true;
+  }catch(err){
+    // quota, private mode, storage disabled -- the session keeps its pins regardless
+    return false;
+  }
+}
+
+/* World units in, real metres stored. `name` is optional: an unnamed spot is numbered,
+   which is what the badge on the map shows anyway. */
+function addSpot(x, z, yaw, name, elevFt){
+  const s = getMapScale() || 1;
+  const spot = {id:nextId++, name:String(name||'').trim() || ('Spot ' + (SPOTS.length+1)),
+                rx:x/s, rz:z/s, yaw:+yaw||0,
+                elevFt:(elevFt==null?null:+elevFt), at:Date.now()};
+  SPOTS.push(spot);
+  // oldest out first: the cap exists to keep the sheet legible, and the pin you dropped
+  // ten minutes ago is likelier to matter than the one from last week
+  while(SPOTS.length > MAX_SPOTS) SPOTS.shift();
+  writeSpots();
+  return spot;
+}
+
+function removeSpot(id){
+  const i = SPOTS.findIndex(s=>s.id===id);
+  if(i < 0) return false;
+  SPOTS.splice(i, 1);
+  writeSpots();
+  return true;
+}
+
+function renameSpot(id, name){
+  const s = SPOTS.find(s=>s.id===id);
+  if(!s) return false;
+  s.name = String(name||'').trim() || s.name;
+  writeSpots();
+  return true;
+}
+
+function resetSpots(){
+  SPOTS.length = 0;
+  writeSpots();
+}
+
+function getSpots(){ return SPOTS; }
+
+/* Real metres back to the world units everything in src/trails draws in. Derived on
+   every read rather than cached, so a spot is correct the instant the world scale
+   changes -- there is no invalidation step to forget. */
+function spotWorld(s){
+  const k = getMapScale() || 1;
+  return {x:s.rx*k, z:s.rz*k};
+}
+
+/* Is there already a pin within `radius` world units? Used to stop a held key or a
+   double tap stacking three pins on one rock. */
+function spotNear(x, z, radius){
+  for(const s of SPOTS){
+    const p = spotWorld(s);
+    if(Math.hypot(p.x-x, p.z-z) <= radius) return s;
+  }
+  return null;
 }
 
 /* ==== src/trails/minimap.js ==== */
@@ -5438,6 +6846,7 @@ function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
 
 
 
+
 const INK_MAP = '#3a2517';
 const TRAIL_INK = {trail:'#9c6a35', track:'#8a6a45', road:'#6f6b62'};
 const BIG_ZOOM_MIN = 1, BIG_ZOOM_MAX = 10;
@@ -5450,7 +6859,30 @@ let bigZoom = 1;               // 1 = whole atlas fit to the sheet, higher = zoo
 let bigFocus = null;           // world {x,z} centred on the sheet; null -> atlas centre
 let bigView = null;            // last-drawn transform, for pointer/wheel picking: {ox,oy,s,dpr,at,W,H}
 let onTrailheadPick = null;    // main.js's placeAtHead, wired through initMinimap
+let onSpotPick = null;         // main.js's placeAtSpot, same arrangement
 let bigWired = false;          // guards against double-binding listeners if init runs twice
+
+/* The route the walker is currently on, and the edges that belong to it.
+
+   Drawn LIVE rather than baked into the atlas, for the same reason the trailhead badges
+   are: the atlas is rebuilt only when the world is, and this changes every time you step
+   from one trail onto another. Held as a small cache keyed by (route, world revision)
+   because the edge list for a route is a filter over the whole graph -- cheap, but not
+   cheap enough to repeat twice a frame on both canvases forever. */
+let hiRoute = null;
+let hiCache = {route:null, rev:-1, edges:[]};
+
+function setHighlightRoute(route){ hiRoute = route || null; }
+function getHighlightRoute(){ return hiRoute; }
+
+function highlightEdges(){
+  const rev = getWorldRevision();
+  if(hiCache.route === hiRoute && hiCache.rev === rev) return hiCache.edges;
+  const G = getGraph();
+  const edges = (hiRoute && G) ? G.edges.filter(e => e.route === hiRoute) : [];
+  hiCache = {route:hiRoute, rev, edges};
+  return edges;
+}
 
 function isBigMapOpen(){ return bigOpen; }
 
@@ -5500,6 +6932,33 @@ function pickTrailheadAt(px, py){
   return true;
 }
 
+/* A saved pin is a pick target on the same sheet as the trailheads, and it wins ties.
+   It is drawn on top, it is the thing the walker deliberately put there, and there are
+   at most a couple of dozen of them against eight trailheads -- so a tap that could mean
+   either almost always means the pin. */
+function pickSpotAt(px, py){
+  if(!bigView || !onSpotPick) return false;
+  const {ox, oy, s, at, dpr} = bigView;
+  const k = at.ppm*s;
+  const spots = getSpots();
+  let best=null, bestD=Infinity;
+  for(const sp of spots){
+    const p = spotWorld(sp);
+    const d = Math.hypot(ox+(p.x-at.x0)*k-px, oy+(p.z-at.z0)*k-py);
+    if(d<bestD){ bestD=d; best=sp; }
+  }
+  const hitR = Math.max(22*(dpr||1), 30);
+  if(!best || bestD>hitR) return false;
+  onSpotPick(best);
+  toggleBigMap(false);
+  return true;
+}
+
+/* One tap, two kinds of target. Spots first (see above), trailheads second. */
+function pickOnSheet(px, py){
+  return pickSpotAt(px, py) || pickTrailheadAt(px, py);
+}
+
 /* Drag-to-pan + tap-to-pick, as one pointer sequence: a real drag pans, a pointer that
    never moved past a small threshold is a tap and tries to pick a trailhead instead.
    Wheel zooms toward the cursor. Buttons zoom in place (see zoomBigToward above). */
@@ -5529,7 +6988,7 @@ function wireBigMapControls(){
   });
   const endDrag = e=>{
     if(!drag || e.pointerId!==drag.id) return;
-    if(!drag.moved){ const p=toCanvasPt(e); pickTrailheadAt(p.x, p.y); }
+    if(!drag.moved){ const p=toCanvasPt(e); pickOnSheet(p.x, p.y); }
     drag = null;
   };
   bigCv.addEventListener('pointerup', endDrag);
@@ -5546,8 +7005,14 @@ function wireBigMapControls(){
 /* `onPick(i)` is main.js's placeAtHead -- called with a trailhead index when the sheet
    is tapped on one. Kept as a callback rather than an import so this module never needs
    to know about player state, avatars or cameras, only "which trailhead". */
+/* `onPick` may be a plain function (trailhead picked -- the original contract) or an
+   options object carrying both handlers. Kept polymorphic rather than versioned because
+   the trailhead callback is the one this module cannot work without and the spot one is
+   genuinely optional: a caller with no saved-spot feature should not have to pass null. */
 function initMinimap(onPick){
-  onTrailheadPick = onPick || null;
+  const opts = (typeof onPick === 'function') ? {onTrailhead:onPick} : (onPick || {});
+  onTrailheadPick = opts.onTrailhead || null;
+  onSpotPick = opts.onSpot || null;
   miniCv = document.getElementById('minimap');
   bigCv = document.getElementById('bigmap');
   if(miniCv) miniCtx = miniCv.getContext('2d');
@@ -5687,6 +7152,65 @@ function drawSighted(g, X, Z, scale){
   }
 }
 
+/* "Which of these is the one I'm on." A network of fifty named trails printed in one ink
+   colour answers that question no better than the ground does, which is the whole reason
+   a walker pulls the map out at a fork. So the route underfoot is over-stroked in a
+   bright casing: a wide pale halo first, then the route's OWN blaze colour on top -- the
+   same colour as the posts along it, so the map and the world agree without a legend.
+
+   Over-stroked rather than redrawn: the atlas underneath keeps the trail's casing and
+   fill, so a highlighted trail still reads as a trail rather than as a coloured line
+   that happens to lie on one. */
+function drawHighlight(g, X, Z, scale){
+  const edges = highlightEdges();
+  if(!edges.length) return;
+  g.save();
+  g.lineCap = 'round'; g.lineJoin = 'round';
+  const trace = () => {
+    g.beginPath();
+    for(const e of edges){
+      if(e.pts.length < 2) continue;
+      e.pts.forEach((p, i) => i ? g.lineTo(X(p[0]), Z(p[1])) : g.moveTo(X(p[0]), Z(p[1])));
+    }
+  };
+  trace();
+  g.globalAlpha = 0.55;
+  g.lineWidth = 7.5*scale; g.strokeStyle = '#fff8e6'; g.stroke();
+  g.globalAlpha = 1;
+  trace();
+  g.lineWidth = 3.2*scale; g.strokeStyle = edges[0].color || '#e8743a'; g.stroke();
+  g.restore();
+}
+
+/* Saved pins, numbered in the order they were dropped so the badge on the sheet matches
+   the row in the list beside it. Drawn as a teardrop rather than a disc so a pin can
+   never be mistaken for a trailhead badge or a sighted animal at a glance -- three kinds
+   of marker on one map is two too many to distinguish by colour alone. */
+function drawSpots(g, X, Z, scale, withLabels){
+  const spots = getSpots();
+  if(!spots.length) return;
+  spots.forEach((sp, i)=>{
+    const p = spotWorld(sp);
+    const x = X(p.x), y = Z(p.z);
+    const r = 6.4*scale;
+    g.save();
+    g.beginPath();
+    // circular head with a point at the bottom, meeting the ground at (x, y)
+    g.arc(x, y - r*1.35, r, Math.PI*0.82, Math.PI*0.18);
+    g.lineTo(x, y);
+    g.closePath();
+    g.fillStyle = '#4f8fd6'; g.fill();
+    g.lineWidth = Math.max(1.4, 1.8*scale); g.strokeStyle = INK_MAP; g.stroke();
+    if(withLabels){
+      g.font = `bold ${8.4*scale}px "Comic Sans MS","Chalkboard SE",sans-serif`;
+      g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillStyle = '#fff8e6';
+      g.fillText(String(i+1), x, y - r*1.35);
+    }
+    g.restore();
+  });
+}
+
 /* Lettered, tappable trailhead badges for the full sheet -- constant SCREEN size
    regardless of zoom (like a map pin), same lettering as the "Start here" list so the
    two always agree. The selected one gets a bright ring so "where am I starting" reads
@@ -5745,7 +7269,9 @@ function updateMinimap(px, pz, yaw){
     }
     const X = x => (x - px)*ppx + W/2, Z = z => (z - pz)*ppx + H/2;
     const dpr = W/miniCv.clientWidth;
+    drawHighlight(g, X, Z, dpr*0.85);
     drawSighted(g, X, Z, dpr);
+    drawSpots(g, X, Z, dpr*1.05, false);
     drawPup(g, W/2, H/2, yaw, dpr*1.15);
     g.restore();
   }
@@ -5770,8 +7296,10 @@ function updateMinimap(px, pz, yaw){
       g.drawImage(at.canvas, ox, oy, dw, dh);
       bigView = {ox, oy, s, baseS, at, W, H, dpr};
       const X = x => ox + (x - at.x0)*at.ppm*s, Z = z => oy + (z - at.z0)*at.ppm*s;
+      drawHighlight(g, X, Z, dpr*1.4);
       drawTrailheadLabels(g, X, Z, dpr*1.3, getStartHead());
       drawSighted(g, X, Z, dpr*1.6);
+      drawSpots(g, X, Z, dpr*1.9, true);
       drawPup(g, X(px), Z(pz), yaw, dpr*2.2);
     } else {
       bigView = null;
@@ -5787,6 +7315,12 @@ function updateMinimap(px, pz, yaw){
     g.restore();
   }
 }
+
+/* ==== src/core/shake.js ==== */
+/* Camera shake, owned in one place so any system can kick it. */
+let shakeT = 0;
+function setShake(v){ shakeT = Math.max(shakeT, v); }
+function decayShake(dt){ shakeT = Math.max(0, shakeT - dt); }
 
 /* ==== src/creator/presets.js ==== */
 /* The six starter pups on the creator's preset row. */
@@ -5948,6 +7482,8 @@ function parsePupFile(data){
 
 
 
+
+
 /* Trail networks run to real kilometres; Pup City's camera (far=300, tuned for one city
    block) would clip most of a trail map. Extend it rather than touch the shared file. */
 // far: trail networks run to real kilometres; Pup City's far=300 (tuned for one city
@@ -5978,7 +7514,14 @@ const player = { x:0, z:0, y:0, vy:0, yaw:0, speed:0, dist:0, sneaking:false, ba
                     only by an on-foot step-up (see moveOffTrail) -- never by a jump,
                     which is the whole point: jumping a ledge is the fast way over it and
                     costs nothing, walking up one costs you speed. */
-                 climbT:0, climbAmt:0 };
+                 climbT:0, climbAmt:0,
+                 /* Knockback, from a big animal deciding it has had enough of you.
+                    `knockT` counts down and is the ONLY thing that suppresses input --
+                    which is deliberate and short: a hit you cannot respond to for a full
+                    second stops being funny the second time it happens. */
+                 knockT:0, kvx:0, kvz:0, spinT:0, spin:0 };
+const KNOCK_DUR = 0.55;      // seconds of lost control per hit
+const KNOCK_DRAG = 0.06;     // per-second velocity retention; a shove, not a slide
 const CLIMB_DUR = 0.42;    // seconds of scramble per step-up, refreshed on each new step
 const CLIMB_SLOW = 0.45;   // top-speed multiplier while scrambling
 /* Beyond this much turn, the auto-follow gives up rather than whipping the view round.
@@ -5997,13 +7540,53 @@ function climbDuration(){ return CLIMB_DUR; }
    and is cleared once you walk away, so coming BACK to the same trailhead counts again.
    `paused` freezes input and movement while the card is up but keeps rendering, because
    "Keep exploring" has to drop you exactly where you were rather than at the start. */
-const trip = { startT:0, parked:-1, paused:false, landmarks:[] };
+const trip = { startT:0, parked:-1, paused:false, landmarks:[], bonks:0 };
 let playing=false;
 /* Timestamp of the last manual look-drag (performance.now(), not the loop's own `t` --
    pointer events fire outside the loop). While recent, the auto-follow below backs off
    so it doesn't fight a hand that's actively orbiting the camera. */
 let lastLookT=-Infinity;
 let avatarKey='';           // identity of whatever is currently built, for ensureAvatar
+/* The trail underfoot, as a route identity plus what to call it. Two consumers want the
+   same answer and would otherwise each ask nearestTrail their own way: the map, which
+   over-strokes it bright, and the HUD chip, which names it. Held rather than recomputed
+   so that stepping OFF a trail does not immediately blank both -- the map you are reading
+   at a fork should still show the trail you just left, right up until you are properly
+   away from it. */
+const onTrail = {route:null, name:'', color:'', d:Infinity};
+const TRAIL_FORGET_U = 25;   // world units off-trail before the highlight is dropped
+
+/* Recompute the trail underfoot from wherever the player currently is, and push the
+   answer to the map. Called after every teleport (trailhead, saved spot, world rebuild)
+   as well as each frame of a walk, so the highlight is right in the lobby preview too --
+   not only once you are moving. */
+function refreshOnTrail(known){
+  const nt = known || nearestTrail(player.x, player.z);
+  if(nt.edge && nt.d <= Math.max(nt.hw, 2.5)){
+    onTrail.route = nt.edge.route; onTrail.name = nt.edge.name;
+    onTrail.color = nt.edge.color; onTrail.d = nt.d;
+  }else if(!nt.edge || nt.d > TRAIL_FORGET_U){
+    onTrail.route = null; onTrail.name = ''; onTrail.color = ''; onTrail.d = Infinity;
+  }else{
+    onTrail.d = nt.d;
+  }
+  setHighlightRoute(onTrail.route);
+}
+
+/* Bark. The sound is pitched by the barker's SIZE rather than read off the dog rig, so a
+   moose does not yip like a terrier -- see core/audio.js's barkSound on why it cannot
+   just use the city dog's yip(). `barkT` is unchanged and still does the gameplay half:
+   critters.js reads it as a noise spike, so a bark is also how you deliberately blow your
+   own cover. */
+function barkerSize(){
+  if(mode==='dog') return dogParams().size ?? 1;
+  return (SPECIES[wildKey] && SPECIES[wildKey].scale) || 1;
+}
+function doBark(){
+  if(!playing || trip.paused) return;
+  player.barkT=1;
+  barkSound(barkerSize());
+}
 
 function currentTopSpeed(){ return mode==='dog' ? dogTopSpeed() : topSpeedFor(wildKey); }
 function currentRunMul(){ return mode==='dog' ? dogRunMul() : 1.8; }
@@ -6090,6 +7673,88 @@ function placeAtHead(i){
   // snap, never ease: placing at a trailhead is a teleport, and springing the camera
   // across a kilometre of map to catch up reads as a cutscene nobody asked for
   snapChaseCam(player.x, player.z, groundY, getVertScale(), 13);
+  refreshOnTrail();
+  renderStartPicker();
+}
+
+/* Put the player at an arbitrary spot on the map, facing `yaw`.
+
+   Deliberately NOT placeAtHead with different numbers: a trailhead is the START of a walk
+   and resets the odometer, whereas returning to a saved pin mid-walk is travel WITHIN one
+   -- zeroing the distance there would quietly delete the walk you are auditing when you
+   go back to check something. `parked` is cleared either way, or arriving back at a
+   trailhead you pinned would not re-open the summary. */
+function placeAt(x, z, yaw){
+  player.x=x; player.z=z; player.yaw=yaw||0;
+  player.y=0; player.vy=0; player.speed=0;
+  setCamYaw(Math.atan2(Math.cos(player.yaw), -Math.sin(player.yaw)));
+  ensureAvatar();
+  const groundY = syncAvatar(0,0,0,0,false,false,false);
+  snapChaseCam(player.x, player.z, groundY, getVertScale(), 13);
+  refreshOnTrail();
+  trip.parked = -1;
+}
+
+function placeAtSpot(spot){
+  if(!spot) return;
+  const p = spotWorld(spot);
+  placeAt(p.x, p.z, spot.yaw);
+  toggleBigMap(false);
+}
+
+/* Drop a pin where the player is standing.
+
+   Stored through spots.js in REAL metres (see that file on why), named after the trail
+   underfoot when there is one -- "On Palmer Trail" tells you more at a glance than
+   "Spot 3", and the number is on the badge anyway. Refuses to stack: a held key or a
+   double-tap would otherwise leave three pins on one rock, and a map of duplicates is
+   worse than no map. */
+const SPOT_MIN_GAP_U = 4;
+function saveHere(){
+  if(!getGraph()) return null;
+  const dup = spotNear(player.x, player.z, SPOT_MIN_GAP_U);
+  if(dup){ flashSpotNote('Already pinned here'); return null; }
+  const where = onTrail.name ? ('On ' + onTrail.name) : (compass(player.x, player.z) + ' country');
+  const spot = addSpot(player.x, player.z, player.yaw, where, elevationFt(player.x, player.z));
+  renderSpotList();
+  comicBurst('\ud83d\udccd ' + spot.name, player.x, standingY(player.x, player.z)+2.2,
+             player.z, '#4f8fd6');
+  cheerBlip();
+  return spot;
+}
+/* With the HUD button gone there is nowhere in the corner to say "already pinned here",
+   so it is said in the world instead, where the player is already looking. */
+function flashSpotNote(msg){
+  comicBurst(msg, player.x, standingY(player.x, player.z)+2.0, player.z, '#8d7a66');
+}
+
+/* Re-seat the player after the world has been rebuilt underneath them.
+
+   The panel is a live settings drawer now, so contour step, hill exaggeration, landscape
+   and world scale can all be moved MID-WALK -- and every one of them throws the scene
+   away and builds a new one. The old handlers all ended with placeAtHead(), which was
+   right in a lobby and completely wrong while walking: change the fog-free contour step
+   two kilometres out and you were teleported back to the car park with your odometer
+   zeroed.
+
+   World scale is the one that needs real arithmetic rather than "stay put". It compacts
+   POSITIONS, so the same rock is at a different world coordinate before and after -- the
+   player has to move with it or they end up somewhere else entirely on the map. `ratio`
+   is newScale/oldScale; multiplying position and odometer by it holds both the place and
+   the distance walked constant in REAL terms, which is what the HUD is reporting. */
+function afterWorldChange(ratio){
+  if(!playing){ placeAtHead(getStartHead()); return; }
+  const k = (ratio && isFinite(ratio) && ratio > 0) ? ratio : 1;
+  player.x *= k; player.z *= k; player.dist *= k;
+  const bb=getBBox(), F=55;
+  player.x=clamp(player.x, bb.minx-F, bb.maxx+F);
+  player.z=clamp(player.z, bb.minz-F, bb.maxz+F);
+  player.y=0; player.vy=0; player.speed=0;
+  ensureAvatar();
+  const groundY = syncAvatar(0,0,0,0,player.sneaking,false,false);
+  snapChaseCam(player.x, player.z, groundY, getVertScale(), 13);
+  refreshOnTrail();
+  trip.parked = -1;
   renderStartPicker();
 }
 
@@ -6187,6 +7852,9 @@ function movePlayer(stepX, stepZ){
 const trailKeys = {};
 addEventListener('keydown', e=>{
   trailKeys[e.code]=true;
+  // Tab is the settings drawer in BOTH states, so it is handled before the play gate --
+  // and preventDefault always, or the browser moves focus into the panel behind it
+  if(e.code==='Tab'){ e.preventDefault(); togglePanel(); return; }
   if(!playing) return;
   // while the arrival card is up only Escape does anything -- barking or jumping through
   // a summary screen you can't see the effect of is just confusing
@@ -6196,7 +7864,8 @@ addEventListener('keydown', e=>{
   }
   if(e.code==='Space'){ e.preventDefault(); if(player.y===0) player.vy=9.5; }
   if(e.code==='KeyC') player.sneaking=!player.sneaking;
-  if(e.code==='KeyB'){ initAudio(); player.barkT=1; }
+  if(e.code==='KeyB') doBark();
+  if(e.code==='KeyP') saveHere();
   if(e.code==='KeyM') toggleBigMap();
   // Esc closes the map first if it's open -- quitting the whole walk because you wanted
   // to put the map away is the kind of thing you only forgive once
@@ -6204,17 +7873,38 @@ addEventListener('keydown', e=>{
 });
 addEventListener('keyup', e=> trailKeys[e.code]=false);
 
-/* Two independent pointer zones, split by which half of the canvas a drag STARTS in --
-   the standard twin-stick split (move on one side, look on the other), which needs no
-   touch/mouse detection and works the same for a mouse drag as for two thumbs. Each zone
-   tracks its own pointer id, so one finger on each half works simultaneously; a mouse
-   only ever occupies one at a time, which is fine since WASD covers movement for it. */
+/* Pointer input, and it is NOT the same deal for a mouse as for a thumb.
+
+   The twin-stick split -- drag the left half to walk, the right half to look -- is the
+   right answer on a phone, where there is no keyboard and both jobs need a finger. On a
+   desktop it is actively wrong: WASD already walks, so the only thing the mouse is needed
+   for is the camera, and dedicating half the window to a virtual joystick means every
+   drag that happens to start left of centre yanks the pup somewhere instead of turning
+   the view. Which half of the screen the cursor happens to be over is not a decision the
+   player made.
+
+   So the split is decided by pointerType, not by geometry. A mouse looks, wherever it is
+   pressed. Touch and pen keep the two zones, because there the keyboard is not an option.
+   `stick` is left untouched by mouse input entirely rather than merely ignored, so a
+   device with both (a laptop with a touchscreen) gets the right behaviour from each. */
 const stick = {active:false,id:null,dx:0,dy:0};
 const look  = {active:false,id:null,lastX:0,lastY:0};
 const YAW_SENS=0.0055, PITCH_SENS=0.0042;
+/* Anything that is not explicitly a finger or a stylus is treated as a mouse, including
+   an empty pointerType -- an unknown device on a desktop-shaped page is far likelier to
+   be a mouse than a thumb, and guessing wrong that way costs a look-drag rather than an
+   unwanted sprint into a canyon. */
+function isTouchPointer(e){ return e.pointerType === 'touch' || e.pointerType === 'pen'; }
 
 renderer.domElement.addEventListener('pointerdown', e=>{
   if(!playing) return;
+  if(!isTouchPointer(e)){
+    // mouse: camera only, from anywhere on the canvas
+    if(!look.active){
+      look.active=true; look.id=e.pointerId; look.lastX=e.clientX; look.lastY=e.clientY;
+    }
+    return;
+  }
   const rect=renderer.domElement.getBoundingClientRect();
   const rightHalf = (e.clientX-rect.left) > rect.width*0.5;
   if(rightHalf && !look.active){
@@ -6289,7 +7979,11 @@ function loop(t){
   }
   const fS=Math.sin(getCamYaw()), fC=Math.cos(getCamYaw());
   const wx=-fC*ix-fS*iz, wz=fS*ix-fC*iz;
-  const moving=mag>0.03&&(wx||wz);
+  /* Knocked: the stick and the keys do nothing until you land. Checked here rather than
+     inside movePlayer so the pup still gets carried by its own momentum -- input is what
+     is suspended, not physics. */
+  const knocked = player.knockT > 0;
+  const moving=!knocked && mag>0.03&&(wx||wz);
 
   const nt = nearestTrail(player.x,player.z);
   /* TWO different questions, which used to share one answer and caused the cliff bug.
@@ -6311,6 +8005,7 @@ function loop(t){
   const inCorridor = nt.d <= nt.hw;
   const nearTrail = nt.d < 1.5;
   const surf = nearTrail ? 1 : 0.6;
+  refreshOnTrail(nt);          // reuse the lookup above rather than hashing twice a frame
   if(player.climbT > 0) player.climbT = Math.max(0, player.climbT - dt);
   // scrambling drags the top speed down; it does NOT touch the jump, which is what makes
   // "jump the big steps" the faster line through broken ground
@@ -6360,9 +8055,21 @@ function loop(t){
   /* Boom length. Pulled in from 11 to 8.5: the pup is only about a metre nose to tail at
      TRAIL_DOG_SCALE, and from 11 m back it was a small shape in a large landscape. */
   updateChaseCam(dt, player.x, player.z, groundY, player.y, player.speed, getVertScale(), 8.5);
+  /* shake.js owns the NUMBER; somebody has to move a camera with it, and in trails that
+     is here -- after the follow camera has settled, so the jolt is added to the framing
+     rather than fought by the spring trying to undo it. Offsets are metres and tiny; the
+     tell is that the horizon kicks, not that the view lurches. */
+  if(shakeT > 0){
+    const k = Math.min(1, shakeT)*0.34;
+    camera.position.x += (Math.random()*2-1)*k;
+    camera.position.y += (Math.random()*2-1)*k*0.7;
+    camera.position.z += (Math.random()*2-1)*k;
+    decayShake(dt*1.6);
+  }
 
   updateCritters(dt, t, player.x, player.z, player.speed, noiseReference(),
                  player.sneaking, player.barkT>0);
+  applyImpacts(dt, groundY);
   /* Same call the critters just used, so the circle on the ground is the rule they are
      actually being judged by rather than a second guess at it. */
   updateNoiseRing(dt, player.x, player.z,
@@ -6413,8 +8120,12 @@ function enterPlay(){
   trip.parked = getStartHead();     // don't fire the card at the head you started from
   trip.paused = false;
   trip.landmarks.length = 0;
+  trip.bonks = 0;
   playing=true;
   document.body.classList.add('play');
+  document.body.classList.remove('panelopen');   // walk full-bleed; the drawer is opt-in
+  refreshOnTrail();
+  renderSpotList();
   updateTrailHud();
 }
 function exitPlay(){
@@ -6423,8 +8134,53 @@ function exitPlay(){
   toggleBigMap(false);
   closeArrival();
   resetCritters();
-  document.body.classList.remove('play');
+  document.body.classList.remove('play','panelopen');
   placeAtHead(getStartHead());
+}
+
+/* ---------- being sent backwards by something with horns ----------
+
+   critters.js queues a hit and knows nothing about players; this turns each one into
+   motion. Three separate effects, and they are separate on purpose:
+
+     the shove    a velocity along the hit direction, spent through movePlayer so you are
+                  pushed ALONG the ground and stopped by the same walls that stop you
+                  walking -- never shoved through a hillside or off a terrace you could
+                  not have walked off.
+     the tumble   yaw spin plus a vertical pop. This is the whole animation, and it reuses
+                  the rig's existing leap pose rather than adding a "stagger" the two
+                  drivers would both have to learn: airborne + spinning already reads
+                  exactly like being knocked head over heels.
+     the jolt     a camera shake, so the hit is felt by the view and not only watched.
+
+   Distance travelled is NOT credited while you are being thrown. Being launched forty
+   metres by a moose is many things, but it is not a walk. */
+function applyImpacts(dt, groundY){
+  for(const hit of takeImpacts()){
+    player.knockT = KNOCK_DUR;
+    player.kvx = hit.dirX*hit.force;
+    player.kvz = hit.dirZ*hit.force;
+    player.vy = Math.max(player.vy, 4.2 + hit.force*0.16);
+    // spin the way you were pushed, so the tumble agrees with the shove
+    player.spin = (hit.dirX*Math.sin(player.yaw) + hit.dirZ*Math.cos(player.yaw)) >= 0 ? 1 : -1;
+    player.spinT = KNOCK_DUR*1.5;
+    player.speed = 0;
+    player.sneaking = false;         // you are not sneaking any more, whatever you think
+    setShake(0.55 + hit.force*0.02);
+    trip.bonks = (trip.bonks||0) + 1;
+  }
+  if(player.knockT > 0){
+    player.knockT = Math.max(0, player.knockT - dt);
+    const k = Math.pow(KNOCK_DRAG, dt);
+    const stepX = player.kvx*dt, stepZ = player.kvz*dt;
+    movePlayer(stepX, stepZ);        // same collision rules as walking
+    player.kvx *= k; player.kvz *= k;
+  }
+  if(player.spinT > 0){
+    player.spinT = Math.max(0, player.spinT - dt);
+    // eases out, so the pup rights itself rather than stopping mid-rotation
+    player.yaw += player.spin*dt*9.5*(player.spinT/(KNOCK_DUR*1.5));
+  }
 }
 
 /* ---------- trailhead arrival ---------- */
@@ -6433,8 +8189,11 @@ function exitPlay(){
    worth about 300 m of walking, a landmark about 200, and spooking something costs a
    little. The point is that a slow, quiet walk out-scores a fast noisy one. */
 function tripScore(st){
+  // getting butted costs more than spooking something: one is bad luck, the other is
+  // walking into a bear that spent three seconds telling you not to
   return Math.max(0, Math.round(
-    player.dist*0.2 + st.sightings*60 + trip.landmarks.length*40 - st.spooked*10));
+    player.dist*0.2 + st.sightings*60 + trip.landmarks.length*40
+    - st.spooked*10 - (trip.bonks||0)*35));
 }
 
 function showArrival(i){
@@ -6447,7 +8206,8 @@ function showArrival(i){
   const secs = Math.max(0, Math.round((Date.now()-trip.startT)/1000));
   const set = (id, v)=>{ const el=$(id); if(el) el.textContent=v; };
   set('#arrTitle', 'You reached ' + th.name + '!');
-  set('#arrSub', 'The ' + th.where + ' trailhead \u2014 rest here or head back out.');
+  set('#arrSub', 'The ' + th.where + ' trailhead \u2014 rest here or head back out.' +
+    (trip.bonks ? '  You got knocked over ' + trip.bonks + (trip.bonks===1?' time.':' times.') : ''));
   set('#arrScore', tripScore(st));
   // same conversion as the HUD, or the summary would contradict the number the player
   // watched tick up for the whole walk
@@ -6536,6 +8296,20 @@ function updateTrailHud(){
   }
   const dist = $('#hudDist');
   if(dist) dist.textContent = '\ud83d\udc63 ' + formatTravelled(realMetres(player.dist));
+  const trail = $('#hudTrail');
+  if(trail){
+    trail.classList.toggle('on', !!onTrail.name);
+    if(onTrail.name){
+      trail.textContent = onTrail.name;
+      // same ink as the highlight stroked on the disc above it, so the chip names the
+      // bright line rather than sitting beside it as a separate fact
+      trail.style.borderColor = onTrail.color || '';
+    }
+  }
+  /* The 🔊 chip is gone. It restated, in a number, what the ring drawn on the ground was
+     already showing as a picture -- and the picture is the better readout, because it is
+     in the world with the animals it is about rather than in the corner of the screen.
+     The lookup stays guarded rather than deleted: a themed build could put it back. */
   const noise = $('#hudNoise');
   if(noise){
     /* NO realMetres() here, and that is not an oversight. Positions compact with world
@@ -6612,7 +8386,8 @@ function pupCard(grid, key, icon, name, sub, bars, onClick){
     (sub ? `<span class="pc-sub">${sub}</span>` : '') +
     `<span class="pc-bar speed"><i style="width:${bars.speedPct}%"></i></span>` +
     `<span class="pc-bar spook"><i style="width:${bars.spookPct}%"></i></span>`;
-  b.addEventListener('click', ()=>{ onClick(); renderRoster(); placeAtHead(getStartHead()); });
+  // swapping who you are mid-walk should not also swap WHERE you are
+  b.addEventListener('click', ()=>{ onClick(); renderRoster(); afterWorldChange(1); });
   grid.appendChild(b);
   return b;
 }
@@ -6667,7 +8442,7 @@ document.querySelectorAll('#pupModeToggle .toggle').forEach(b=>{
 $('#randomPupBtn')?.addEventListener('click', ()=>{
   const params = randomPupParams();
   mode='dog'; browseMode='dog'; dogChoice={label:'random:'+params.name, params};
-  renderPupToggle(); renderRoster(); placeAtHead(getStartHead());
+  renderPupToggle(); renderRoster(); afterWorldChange(1);
 });
 
 /* --- environment --- */
@@ -6684,7 +8459,7 @@ function renderThemePicker(){
       if(!setThemeById(t.id)) return;
       renderThemePicker();
       renderRoster();
-      placeAtHead(getStartHead());     // rebuild dropped the old scene; re-seat the player
+      afterWorldChange(1);     // rebuild dropped the old scene; re-seat where we stand
     });
     grid.appendChild(b);
   });
@@ -6714,9 +8489,12 @@ function wireScale(){
     show(posToN(map.value));
     map.addEventListener('input', e=> show(posToN(+e.target.value)));
     map.addEventListener('change', e=>{
+      // capture the OLD scale first: afterWorldChange needs the ratio to carry the
+      // player to the same real-world place in the recompacted coordinate system
+      const before=getMapScale();
       setMapScale(1/posToN(+e.target.value));
       show(Math.round(1/getMapScale()));
-      placeAtHead(getStartHead());
+      afterWorldChange(getMapScale()/before);
     });
   }
   /* Hill exaggeration: 0..2 as asked, but on a SQUARED handle rather than a linear one.
@@ -6748,7 +8526,7 @@ function wireScale(){
     ex.addEventListener('change', e=>{
       setVertScale(posToEx(+e.target.value));
       show(getExaggeration());
-      placeAtHead(getStartHead());
+      afterWorldChange(1);       // heights only -- x/z are untouched
     });
     // world scale changes the ratio too, so the readout has to follow it
     $('#worldScale')?.addEventListener('change', ()=> show(getExaggeration()));
@@ -6767,7 +8545,7 @@ function wireScale(){
     cs.addEventListener('change', e=>{
       setContourStep(+e.target.value);
       showC(getContourStep());
-      placeAtHead(getStartHead());
+      afterWorldChange(1);
     });
   }
 
@@ -6787,31 +8565,77 @@ function wireScale(){
 /* --- starting point --- */
 function headLetter(i){ return i<26 ? String.fromCharCode(65+i) : String(i+1); }
 
+/* The trailhead list is GONE from the panel, and this is what replaced it.
+
+   A list of eight cards named "Palmer Trail, north end" was the worst possible interface
+   for a spatial question. Which of them is near the rocks? Which two are ten minutes
+   apart? The map already knew, and already drew a lettered, tappable badge on every one
+   of them -- the list was a second, worse copy of a control that existed. So the sheet is
+   now the picker outright, and the panel is settings only. All that is left here is the
+   answer: which one is currently selected, shown on the sheet beside the badges so the
+   letter you are reading has something to match against. */
 function renderStartPicker(){
-  const list=$('#startList'); if(!list) return;
-  const heads=getTrailheads();
-  list.innerHTML='';
+  const now=$('#startNow');
   const surprise=$('#surpriseBtn');
+  const heads=getTrailheads();
   if(!heads.length){
-    list.innerHTML='<p class="hint">— load a map first —</p>';
+    if(now) now.textContent='— load a map first —';
     if(surprise) surprise.disabled=true;
     return;
   }
   if(surprise) surprise.disabled=false;
-  const current=getStartHead();
-  heads.forEach((h,i)=>{
-    const b=document.createElement('button');
-    b.className='headcard'+(i===current?' sel':'');
-    b.innerHTML=`<span class="hc-badge">${headLetter(i)}</span>` +
-      `<span class="hc-text"><span class="hc-name">${h.name}</span>` +
-      `<span class="hc-sub">${h.where} end${h.lenM?` · ${Math.round(h.lenM)} m to the next fork`:''}</span></span>`;
-    b.addEventListener('click', ()=> placeAtHead(i));
-    list.appendChild(b);
+  const i=getStartHead(), h=heads[i];
+  if(now && h) now.textContent = headLetter(i)+' · '+h.name+' ('+h.where+' end)';
+}
+
+/* Saved pins, as rows that mirror the badges on the sheet: same order, same numbers. The
+   row is a button because a pin's whole purpose is to be gone back to, and the ✕ removes
+   it -- both live here on the map rather than in the panel, since a pin is a place and
+   places belong on the map. */
+function renderSpotList(){
+  const list=$('#spotList'); if(!list) return;
+  const spots=getSpots();
+  list.innerHTML='';
+  if(!spots.length){
+    const n=document.createElement('div'); n.className='none';
+    n.textContent='No pins yet — press P, or “Save where I am”, to remember a place.';
+    list.appendChild(n);
+    return;
+  }
+  spots.forEach((sp,i)=>{
+    const row=document.createElement('div');
+    row.className='spot-row';
+    row.innerHTML=`<span class="sp-badge">${i+1}</span>` +
+      `<button class="sp-name"></button><button class="sp-x" title="Forget this spot">✕</button>`;
+    const nameBtn=row.querySelector('.sp-name');
+    nameBtn.textContent = sp.name + (sp.elevFt==null ? '' : ' · '+Math.round(sp.elevFt).toLocaleString()+' ft');
+    nameBtn.addEventListener('click', ()=> placeAtSpot(sp));
+    row.querySelector('.sp-x').addEventListener('click', ()=>{ removeSpot(sp.id); renderSpotList(); });
+    list.appendChild(row);
   });
+}
+
+/* The settings drawer. Two different resting states, which is why this is not one class
+   toggle: in the lobby the panel is open by default (and `nopanel` hides it on a phone,
+   as it always has), while during a walk it is closed by default and `panelopen` slides
+   it in. Same button, same Tab key, opposite defaults -- because "settings are showing"
+   is the sensible default when you are setting up and the wrong one when you are walking. */
+function togglePanel(force){
+  const body=document.body;
+  if(playing){
+    const open = force===undefined ? !body.classList.contains('panelopen') : !!force;
+    body.classList.toggle('panelopen', open);
+  }else{
+    const open = force===undefined ? body.classList.contains('nopanel') : !!force;
+    body.classList.toggle('nopanel', !open);
+  }
+  setTimeout(resize, 380);
 }
 $('#surpriseBtn')?.addEventListener('click', ()=>{
   const n=getTrailheads().length; if(!n) return;
   placeAtHead(Math.floor(Math.random()*n));
+  toggleBigMap(false);      // it is a pick like any other; show the walker what they got
+  if(!playing) enterPlay();
 });
 
 /* --- map stats + trail list (Trail map card) ---
@@ -6822,23 +8646,52 @@ function renderMapStats(){
   const g=getGraph();
   if(!box) return;
   if(!g || !g.edges.length){ box.innerHTML=''; if(list) list.innerHTML=''; return; }
-  const names=new Set(g.edges.map(e=>e.name));
-  const km=g.edges.reduce((s,e)=>s+(e.lenM||0),0)/1000;
-  const junctions=g.nodes.filter(n=>n.deg>=3).length;   // matches world.js's own sign condition
-  box.innerHTML = `${names.size} named trail${names.size===1?'':'s'} · ${g.edges.length} segment${g.edges.length===1?'':'s'}<br>` +
-    `${junctions} signed junction${junctions===1?'':'s'} · ${getTrailheads().length} trailhead${getTrailheads().length===1?'':'s'}<br>` +
+  /* Counted by ROUTE, not by name and not by edge. An edge is a fragment between two of
+     splitT's cuts, so "316 segments" tells a walker nothing; a name can be an invented
+     SPUR_NAMES label shared by a dozen unrelated paths, so counting names both overstates
+     the unnamed ones and understates them at the same time. A route is one path. */
+  const routes=new Map();
+  g.edges.forEach(e=>{ if(!routes.has(e.route)) routes.set(e.route, e); });
+  const named=[...routes.values()].filter(e=>e.named);
+  const unnamed=routes.size-named.length;
+  const km=g.edges.reduce((s,e)=>s+(e.lenM||0),0)/1000/Math.max(1e-6,getMapScale());
+  const mix=getPathMix();
+  box.innerHTML = `${named.length} named trail${named.length===1?'':'s'}` +
+    (unnamed?` · ${unnamed} unnamed connector${unnamed===1?'':'s'}`:'') + `<br>` +
+    `${mix.forks} fork${mix.forks===1?'':'s'} · ${mix.crossings} crossing${mix.crossings===1?'':'s'} · ` +
+    `${getTrailheads().length} trailhead${getTrailheads().length===1?'':'s'}<br>` +
     `${km.toFixed(1)} km of real trail` +
+    (mix.buried?`<span class="flat">${mix.buried} stretch${mix.buried===1?'':'es'} share a road — waymarked, not repaved</span>`:'') +
     `<span class="flat">${hasBundle()?'elevation from DEM bundle':'flat — no elevation (Z) in this file'}</span>`;
   if(list){
     list.innerHTML='';
-    [...names].sort().forEach(name=>{
-      const e=g.edges.find(e=>e.name===name);
+    named.sort((a,b)=>a.name.localeCompare(b.name)).forEach(e=>{
       const row=document.createElement('div');
       row.className='tl-row';
-      row.innerHTML=`<span class="tl-dot" style="background:${e?e.color:'#999'}"></span>${name}`;
+      row.innerHTML=`<span class="tl-dot" style="background:${e.color}"></span>`;
+      row.appendChild(document.createTextNode(e.name));
       list.appendChild(row);
     });
+    if(unnamed){
+      const row=document.createElement('div');
+      row.className='tl-row';
+      // deliberately NOT twelve rows of invented names: they are connectors, and listing
+      // them as trails is what made the signage confusing in the first place
+      row.innerHTML=`<span class="tl-dot" style="background:#b9ae97"></span>`;
+      row.appendChild(document.createTextNode(`${unnamed} unnamed connector${unnamed===1?'':'s'}`));
+      list.appendChild(row);
+    }
   }
+}
+
+/* Everything that has to change when the MAP changes, in one call. Saved pins are filed
+   per map (see spots.js), so loading a different bundle has to re-read them before any of
+   the three renderers below draws a stale list. */
+function refreshMapUI(){
+  setSpotMap(getMapId());
+  renderStartPicker();
+  renderMapStats();
+  renderSpotList();
 }
 
 /* --- loaded GeoJSON file chips ---
@@ -6863,7 +8716,7 @@ function renderFileChips(){
       loadedFiles.splice(i,1);
       clearLayers();
       if(loadedFiles.length) addLayers(loadedFiles.map(f=>f.layer));
-      renderFileChips(); renderStartPicker(); renderMapStats();
+      renderFileChips(); refreshMapUI();
       if(getGraph()) placeAtHead(0);
     });
     wrap.appendChild(chip);
@@ -6891,11 +8744,21 @@ async function boot(bundleUrl){
   wireScale();
   // the callback lets the full-sheet map hand back "which trailhead got tapped" without
   // minimap.js needing to know anything about players, avatars or cameras
-  initMinimap(i => placeAtHead(i));
+  // the sheet hands back BOTH kinds of pick without knowing anything about players,
+  // avatars or cameras -- a trailhead index, or a saved spot
+  /* Picking a place on the map IS starting the walk now.
+
+     The header's "Hit the trail" button and the HUD's "back to trailhead" button are both
+     gone by request, which leaves the map as the only way in -- so a pick has to do the
+     starting as well as the choosing. That is the arrangement the map-as-picker change
+     was heading towards anyway: you point at where you want to be and you are there. */
+  initMinimap({
+    onTrailhead: i => { placeAtHead(i); if(!playing) enterPlay(); },
+    onSpot: sp => { placeAtSpot(sp); if(!playing) enterPlay(); },
+  });
   await loadMap(bundleUrl || DEFAULT_WORLD, !bundleUrl);
   renderRoster();
-  renderStartPicker();
-  renderMapStats();
+  refreshMapUI();
   // seat an avatar unconditionally. With a map that means the chosen trailhead; without
   // one, the middle of an empty world -- either way you can see who you picked, which is
   // what tells you the roster works when the map does not.
@@ -6928,17 +8791,21 @@ $('#defaultMapBtn')?.addEventListener('click', async ()=>{
   // the file-chip list, and replaces whatever chips/EXTRA layers were there
   loadedFiles=[];
   renderFileChips();
-  if(await loadMap(DEFAULT_WORLD, true)){ renderStartPicker(); renderMapStats(); placeAtHead(0); }
+  if(await loadMap(DEFAULT_WORLD, true)){ refreshMapUI(); placeAtHead(0); }
 });
 $('#mapBtn')?.addEventListener('click', ()=> toggleBigMap());
+$('#touchBarkBtn')?.addEventListener('click', doBark);
+/* Bark and save-spot have no HUD buttons any more -- B and P, plus "Save where I am" on
+   the map sheet. The optional-chaining is what makes removing them from the HTML a
+   one-file change rather than a two-file one. */
+$('#barkBtn')?.addEventListener('click', doBark);
+$('#saveSpotBtn')?.addEventListener('click', saveHere);
+$('#mapSaveSpotBtn')?.addEventListener('click', ()=>{ saveHere(); });
 $('#bigmapClose')?.addEventListener('click', ()=> toggleBigMap(false));
 // mobile only (see trails.css's body.nopanel rule): slides the options panel off-screen
 // so the live pup/minimap preview underneath is reachable without leaving the setup
 // screen. Desktop never shows this button (icon.btn is display:none above 760px).
-$('#panelBtn')?.addEventListener('click', ()=>{
-  document.body.classList.toggle('nopanel');
-  setTimeout(resize, 380);
-});
+$('#panelBtn')?.addEventListener('click', ()=> togglePanel());
 
 $('#playBtn')?.addEventListener('click', enterPlay);
 $('#exitBtn')?.addEventListener('click', exitPlay);
@@ -6947,7 +8814,7 @@ $('#arrFinish')?.addEventListener('click', exitPlay);
 $('#clearLayersBtn')?.addEventListener('click', ()=>{
   loadedFiles=[];
   clearLayers();
-  renderFileChips(); renderStartPicker(); renderMapStats();
+  renderFileChips(); refreshMapUI();
 });
 
 $('#worldFile')?.addEventListener('change', async e=>{
@@ -7009,8 +8876,7 @@ async function loadFiles(files){
   if(layers.length){ addLayers(layers); renderFileChips(); }
   if(gotPups) renderRoster();
   if(!getGraph()) return;
-  renderStartPicker();
-  renderMapStats();
+  refreshMapUI();
   placeAtHead(0);
 }
 
@@ -7022,6 +8888,8 @@ async function loadFiles(files){
 function trailIsPlaying(){ return playing; }
 function getTrailPlayer(){ return player; }
 function getTripState(){ return trip; }
+
+function getOnTrail(){ return onTrail; }
 
 // auto-boot from a `?world=` query param, or wait for the panel's own load button
 {

@@ -175,10 +175,11 @@ function applyCuts(L, cuts, tol){
   for(const c of keep){
     const piece=[startPt].concat(pts.slice(startK+1, c.k+1));
     piece.push(c.q);
-    out.push({name:L.name, kind:L.kind, pts:piece});
+    out.push({name:L.name, kind:L.kind, named:L.named, route:L.route, pts:piece});
     startK=c.k; startPt=c.q;
   }
-  out.push({name:L.name, kind:L.kind, pts:[startPt].concat(pts.slice(startK+1))});
+  out.push({name:L.name, kind:L.kind, named:L.named, route:L.route,
+            pts:[startPt].concat(pts.slice(startK+1))});
   return out;
 }
 
@@ -262,7 +263,26 @@ function buildGraph(rawLines,snapTol,simpTol){
   let lines=rawLines.map(L=>({name:L.name,kind:L.kind||'trail',pts:L.pts.map(p=>p.slice())}));
   lines.forEach(L=>{L.pts=L.pts.filter((p,i)=>i===0||d2(p,L.pts[i-1])>1e-6);});
   lines=lines.filter(L=>L.pts.length>=2&&polyLen(L.pts)>snapTol*0.5);
-  let spur=0;lines.forEach(L=>{if(!L.name)L.name=SPUR_NAMES[spur++%SPUR_NAMES.length];});
+  /* Two identities per line, and they are NOT the same thing.
+
+     `name` is what a signpost prints. Unnamed ways still get one, from SPUR_NAMES, so the
+     world reads as a signed trail network rather than a diagram -- but that list is short
+     and the default map has 91 unnamed ways, so a dozen different footpaths end up
+     sharing a dozen labels. Two of them meeting at a fork produced the screenshot's
+     "Juniper Link 19 m / Juniper Link 49 m": one label, two genuinely different paths.
+     `named` records whether the source file actually gave a name, so signage can prefer
+     real ones and the panel can stop listing invented ones as if they were trails.
+     `route` is the identity everything downstream groups BY -- the real name when there
+     is one, otherwise a per-line key. Deduplicating sign arms, colouring the map and
+     highlighting "the trail you are on" all key off route, so two paths that happen to
+     share an invented label are never mistaken for one. Assigned BEFORE splitT so every
+     piece a line is cut into inherits the same route. */
+  let spur=0;
+  lines.forEach((L,i)=>{
+    L.named=!!L.name;
+    L.route=L.name||('spur:'+i);
+    if(!L.name)L.name=SPUR_NAMES[spur++%SPUR_NAMES.length];
+  });
   lines=splitT(lines,snapTol);
   lines.forEach(L=>{L.pts=simplifyDP(L.pts,simpTol);});
   const eps=[];lines.forEach((L,i)=>{eps.push({p:L.pts[0],i,end:0});eps.push({p:L.pts[L.pts.length-1],i,end:1});});
@@ -280,6 +300,8 @@ function buildGraph(rawLines,snapTol,simpTol){
   }
   const edges=[];
   const palette=['#e8743d','#5aa7de','#67b26f','#c65fa3','#d9a02c','#7a6ed6','#3fb6a8','#b5651d'];
+  // keyed by ROUTE, not by name: two unnamed paths that drew the same label out of
+  // SPUR_NAMES are different paths and must not share a blaze colour
   const nameColor=new Map();
   lines.forEach((L,i)=>{
     const a=epNode.get(i+'_0'),b=epNode.get(i+'_1');
@@ -287,10 +309,28 @@ function buildGraph(rawLines,snapTol,simpTol){
     pts[0]=nodes[a].p.slice();pts[pts.length-1]=nodes[b].p.slice();
     const lenM=polyLen(pts);
     if(a===b&&lenM<snapTol*2)return;
-    const name=L.name;
-    if(!nameColor.has(name))nameColor.set(name,palette[nameColor.size%palette.length]);
+    const name=L.name, route=L.route||name;
+    if(!nameColor.has(route))nameColor.set(route,palette[nameColor.size%palette.length]);
     nodes[a].deg++;if(b!==a)nodes[b].deg++;
-    edges.push({a,b,pts,name,lenM,color:nameColor.get(name),kind:L.kind||'trail'});
+    edges.push({a,b,pts,name,route,named:!!L.named,lenM,
+                color:nameColor.get(route),kind:L.kind||'trail'});
+  });
+  /* Per-node census of what actually meets here. Computed once, in the module that owns
+     the topology, because every consumer downstream needs the same answer: world.js has
+     to tell a trail FORK (two dirt paths, sign it) from a trail/road CROSSING (a path
+     over tarmac, don't sign it, and pave the pad grey), and doing that by re-walking the
+     edge array at each of 162 junctions is both slower and easier to get subtly
+     different in two places. `routes` counts distinct paths, not arms: a trail running
+     straight through a node contributes two arms but one route, which is precisely the
+     distinction that stops a plain continuation being signed as a junction. */
+  nodes.forEach(n=>{ n.kinds=[]; n.routes=[]; n.named=0; });
+  edges.forEach(e=>{
+    const ends = e.a===e.b ? [e.a] : [e.a, e.b];
+    for(const id of ends){
+      const n=nodes[id];
+      if(!n.kinds.includes(e.kind)) n.kinds.push(e.kind);
+      if(!n.routes.includes(e.route)){ n.routes.push(e.route); if(e.named) n.named++; }
+    }
   });
   return{nodes,edges,nameColor};
 }

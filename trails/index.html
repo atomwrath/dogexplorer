@@ -23,11 +23,13 @@
       <h1>PUP <span>TRAILS</span><small>real trails · real terrain</small></h1>
     </div>
     <div class="spacer"></div>
-    <button class="btn icon" id="panelBtn" title="Show / hide controls">🎒</button>
-    <button class="btn primary" id="playBtn">▶ Hit the trail</button>
+    <button class="btn icon" id="panelBtn" title="Settings (Tab) — adjust while you walk">⚙️</button>
   </header>
   <main>
     <aside id="panel">
+      <p class="hint panel-lede">Settings — every control here can be changed while
+        you walk, and you stay where you are standing. Pick where to <b>start</b> on the
+        map (🗺 above right).</p>
       <div class="sect">
         <h2>🗺️ Trail map</h2>
         <label class="dropzone" id="dropzone" for="worldFile">
@@ -83,13 +85,6 @@
         </div>
       </div>
       <div class="sect">
-        <h2>🚩 Start here</h2>
-        <div id="startList" class="start-list"></div>
-        <button class="btn small wide" id="surpriseBtn">🎲 Surprise me</button>
-        <p class="hint">Every dead-end on your map becomes a trailhead. Pick one and your
-          pup waits there in the preview.</p>
-      </div>
-      <div class="sect">
         <h2>🐾 Who's exploring</h2>
         <div class="toggle-row" id="pupModeToggle">
           <button class="toggle sel" data-mode="dog">🐕 Dogs</button>
@@ -110,7 +105,6 @@
     <div id="stage">
       <canvas id="c"></canvas>
       <div id="playHud">
-        <button class="btn small" id="exitBtn">← Trailhead</button>
         <div id="hudTally">
           <span class="tally" id="hudSeen" title="Wildlife watched">✨ 0</span>
           <span class="tally" id="hudSpooked" title="Wildlife you sent running">💨 0</span>
@@ -118,16 +112,18 @@
         <div id="hudReadout">
           <span class="tally" id="hudElev" title="Elevation above sea level">⛰ —</span>
           <span class="tally" id="hudDist" title="Distance travelled">👣 —</span>
-          <span class="tally" id="hudNoise" title="How far wildlife can hear you right now">🔊 —</span>
         </div>
         <div id="watchMeter">
           <span id="watchName">Watching…</span>
           <span class="wm-bar"><i id="watchFill"></i></span>
         </div>
+
       </div>
       <div id="miniWrap">
         <canvas id="minimap"></canvas>
-        <button class="btn small" id="mapBtn" title="Full map (M)">🗺</button>
+        <span class="tally" id="hudTrail" title="The trail you are on">—</span>
+        <button class="btn small" id="mapBtn" title="Full map (M)">🗺 Map</button>
+        <button class="btn touch-only" id="touchBarkBtn" title="Bark">🐕 Bark</button>
       </div>
       <div id="arrivalWrap">
         <div id="arrivalCard">
@@ -161,8 +157,22 @@
           <button class="btn small" id="bigZoomIn" title="Zoom in">➕</button>
           <button class="btn small" id="bigZoomOut" title="Zoom out">➖</button>
         </div>
-        <p class="hint bigmap-hint">Tap a lettered trailhead to start there. Drag to pan,
-          scroll or ➕/➖ to zoom.</p>
+        <div id="bigmapSide">
+          <div class="bm-card">
+            <h3>🚩 Start here</h3>
+            <p class="hint" id="startNow">—</p>
+            <p class="hint">Tap a lettered badge on the map to start there. Every
+              outer dead-end is a trailhead.</p>
+            <button class="btn small wide" id="surpriseBtn">🎲 Surprise me</button>
+          </div>
+          <div class="bm-card">
+            <h3>📍 Saved spots</h3>
+            <div id="spotList" class="spot-list"></div>
+            <button class="btn small wide" id="mapSaveSpotBtn">📍 Save where I am</button>
+            <p class="hint">Tap a pin on the map or a row here to go back to it.</p>
+          </div>
+        </div>
+        <p class="hint bigmap-hint">Drag to pan, scroll or ➕/➖ to zoom.</p>
       </div>
     </div>
   </main>
