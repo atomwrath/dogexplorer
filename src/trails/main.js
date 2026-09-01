@@ -414,8 +414,8 @@ addEventListener('keydown', e=>{
     if(e.code==='Escape') closeArrival();
     return;
   }
-  if(e.code==='Space'){ e.preventDefault(); if(player.y===0) player.vy=9.5; }
-  if(e.code==='KeyC') player.sneaking=!player.sneaking;
+  if(e.code==='Space'){ e.preventDefault(); trailJump(); }
+  if(e.code==='KeyC') toggleSneak();
   if(e.code==='KeyB') doBark();
   if(e.code==='KeyP') saveHere();
   if(e.code==='KeyM') toggleBigMap();
@@ -439,16 +439,61 @@ addEventListener('keyup', e=> trailKeys[e.code]=false);
    pressed. Touch and pen keep the two zones, because there the keyboard is not an option.
    `stick` is left untouched by mouse input entirely rather than merely ignored, so a
    device with both (a laptop with a touchscreen) gets the right behaviour from each. */
-const stick = {active:false,id:null,dx:0,dy:0};
+const stick = {active:false,id:null,dx:0,dy:0,ox:0,oy:0};
 const look  = {active:false,id:null,lastX:0,lastY:0};
 const YAW_SENS=0.0055, PITCH_SENS=0.0042;
+const STICK_MAX=52;                     // px of thumb travel that means "full speed"
+
+/* THE TOUCH LAYER, and why it is a body class rather than a media query.
+
+   `pointer: coarse` alone is answered at page load and never revisited, which gets a
+   laptop-with-a-touchscreen wrong in both directions: it hides the stick from someone
+   using the screen, or shows it to someone using the trackpad. So the class is set for a
+   coarse-pointer device up front (every iPhone, iPad and Android tablet) AND on the first
+   touch that actually arrives. Nothing removes it: a device that has been touched once
+   keeps the controls, because the alternative is a joystick that blinks out mid-walk.
+
+   The controls it reveals are not new inputs -- the left-half drag-stick has always been
+   there. What was missing is that nothing on screen said so, and that jump (space) and
+   sneak (C) had no touch equivalent at all, so on an iPad two of the four verbs were
+   simply unreachable. */
+function markTouchDevice(){
+  if(document.body && !document.body.classList.contains('touch')) document.body.classList.add('touch');
+}
+if(typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches) markTouchDevice();
 /* Anything that is not explicitly a finger or a stylus is treated as a mouse, including
    an empty pointerType -- an unknown device on a desktop-shaped page is far likelier to
    be a mouse than a thumb, and guessing wrong that way costs a look-drag rather than an
    unwanted sprint into a canyon. */
 function isTouchPointer(e){ return e.pointerType === 'touch' || e.pointerType === 'pen'; }
 
+/* The visible stick is a READOUT of `stick`, not a second source of truth -- it is
+   painted from the same numbers movement reads, so it can never show one thing while the
+   pup does another. It is also pointer-events:none in CSS, so drawing it under the thumb
+   cannot swallow the very drag it is drawing. */
+const stickBase=$('#stickBase'), stickKnob=$('#stickKnob');
+function paintStick(){
+  if(!stickBase) return;
+  if(stick.active){
+    const rect=renderer.domElement.getBoundingClientRect();
+    stickBase.style.left=(stick.ox-rect.left)+'px';
+    stickBase.style.top=(stick.oy-rect.top)+'px';
+    stickBase.style.bottom='auto';
+  }else{
+    // back to the resting corner: clear the inline overrides and let the CSS place it
+    stickBase.style.left=''; stickBase.style.top=''; stickBase.style.bottom='';
+  }
+  const mag = stick.active ? Math.hypot(stick.dx, stick.dy) : 0;
+  stickBase.classList.toggle('on', stick.active);
+  stickBase.classList.toggle('run', mag>0.92 && !player.sneaking);
+  stickBase.classList.toggle('sneak', !!player.sneaking);
+  if(stickKnob) stickKnob.style.transform = stick.active
+    ? `translate(${(stick.dx*STICK_MAX).toFixed(1)}px, ${(stick.dy*STICK_MAX).toFixed(1)}px)`
+    : 'translate(0px, 0px)';
+}
+
 renderer.domElement.addEventListener('pointerdown', e=>{
+  if(isTouchPointer(e)) markTouchDevice();
   if(!playing) return;
   if(!isTouchPointer(e)){
     // mouse: camera only, from anywhere on the canvas
@@ -463,14 +508,16 @@ renderer.domElement.addEventListener('pointerdown', e=>{
     look.active=true; look.id=e.pointerId; look.lastX=e.clientX; look.lastY=e.clientY;
   }else if(!rightHalf && !stick.active){
     stick.active=true; stick.id=e.pointerId; stick.ox=e.clientX; stick.oy=e.clientY; stick.dx=stick.dy=0;
+    paintStick();
   }
 });
 addEventListener('pointermove', e=>{
   if(stick.active && e.pointerId===stick.id){
     let dx=e.clientX-stick.ox, dy=e.clientY-stick.oy;
-    const L=Math.hypot(dx,dy), max=52;
+    const L=Math.hypot(dx,dy), max=STICK_MAX;
     if(L>max){dx*=max/L;dy*=max/L;}
     stick.dx=dx/max; stick.dy=dy/max;
+    paintStick();
   }else if(look.active && e.pointerId===look.id){
     const dx=e.clientX-look.lastX, dy=e.clientY-look.lastY;
     look.lastX=e.clientX; look.lastY=e.clientY;
@@ -480,10 +527,45 @@ addEventListener('pointermove', e=>{
   }
 });
 const endPointer=e=>{
-  if(stick.active&&e.pointerId===stick.id){ stick.active=false; stick.dx=stick.dy=0; }
+  if(stick.active&&e.pointerId===stick.id){ stick.active=false; stick.dx=stick.dy=0; paintStick(); }
   if(look.active&&e.pointerId===look.id){ look.active=false; }
 };
 addEventListener('pointerup', endPointer); addEventListener('pointercancel', endPointer);
+
+/* ---------- the two verbs a touchscreen had no way to reach ----------
+   Both go through the same functions the keys do rather than poking `player` from the
+   button handler, so space and JUMP can never drift apart -- and both are gated on the
+   walk being live, since jumping through the arrival summary does nothing visible and
+   leaves you airborne when it closes. */
+function trailJump(){
+  if(!playing || trip.paused || player.knockT > 0) return;
+  if(player.y === 0) player.vy = 9.5;
+}
+function toggleSneak(){
+  if(!playing || trip.paused) return;
+  player.sneaking = !player.sneaking;
+  syncTouchButtons();
+}
+/* Sneak is a TOGGLE, and it is also cleared out from under the player by being knocked
+   over -- so the button's lit state has to be pushed from the flag rather than flipped by
+   the tap. Called from the frame loop, which is the only place that sees every way the
+   flag can change. */
+function syncTouchButtons(){
+  const s=$('#tSneak');
+  if(s) s.classList.toggle('on', !!player.sneaking);
+  if(stickBase) stickBase.classList.toggle('sneak', !!player.sneaking);
+}
+
+/* pointerdown, not click: a jump that lands 100 ms after the thumb is a jump you missed,
+   and on a phone `click` is the tail end of a whole gesture. The click listener stays as
+   the fallback for anything that synthesises one (a mouse, an assistive device, the smoke
+   harness) and is suppressed when the pointerdown already fired for the same tap. */
+function tapBtn(el, fn){
+  if(!el) return;
+  let lastTap = -1e9;
+  el.addEventListener('pointerdown', e=>{ e.preventDefault(); lastTap = performance.now(); fn(); });
+  el.addEventListener('click', ()=>{ if(performance.now() - lastTap > 500) fn(); });
+}
 
 /* Scroll to zoom. camera.js owns the factor and applies it to the boom length in both
    the snap and the follow path, so this is the only place zoom needs to be taught about. */
@@ -657,6 +739,7 @@ function loop(t){
     }
   }
 
+  syncTouchButtons();
   renderer.render(scene,camera);
 }
 
@@ -1128,14 +1211,11 @@ function headLetter(i){ return i<26 ? String.fromCharCode(65+i) : String(i+1); }
    letter you are reading has something to match against. */
 function renderStartPicker(){
   const now=$('#startNow');
-  const surprise=$('#surpriseBtn');
   const heads=getTrailheads();
   if(!heads.length){
     if(now) now.textContent='— load a map first —';
-    if(surprise) surprise.disabled=true;
     return;
   }
-  if(surprise) surprise.disabled=false;
   const i=getStartHead(), h=heads[i];
   if(now && h) now.textContent = headLetter(i)+' · '+h.name+' ('+h.where+' end)';
 }
@@ -1183,12 +1263,32 @@ function togglePanel(force){
   }
   setTimeout(resize, 380);
 }
-$('#surpriseBtn')?.addEventListener('click', ()=>{
-  const n=getTrailheads().length; if(!n) return;
-  placeAtHead(Math.floor(Math.random()*n));
-  toggleBigMap(false);      // it is a pick like any other; show the walker what they got
-  if(!playing) enterPlay();
-});
+/* WHERE A WALK STARTS WHEN NOBODY HAS PICKED YET.
+
+   "Surprise me" is gone: it was a button that answered a spatial question with a dice
+   roll, on a sheet whose whole point is that you can see where everything is. What it was
+   really covering for is that the game used to open with no walk at all, so SOMETHING had
+   to get you moving. Starting a walk automatically removes the need, and the map goes
+   back to being a map.
+
+   Not head 0, and not random. Head 0 is whichever dead-end the survey file happened to
+   list first, which on the default map is as likely to be a stub in a corner as anything
+   else; random makes every reload a different game and gives the walker no idea where
+   they are. The trailhead nearest the middle of the network is the one with trail leading
+   away from it in the most directions -- the best first thirty seconds, and the same
+   thirty seconds every time, which is also what makes it testable. */
+function pickDefaultHead(){
+  const heads=getTrailheads();
+  if(!heads.length) return 0;
+  const bb=getBBox();
+  const cx=(bb.minx+bb.maxx)/2, cz=(bb.minz+bb.maxz)/2;
+  let best=0, bd=Infinity;
+  heads.forEach((h,i)=>{
+    const d=Math.hypot(h.x-cx, h.z-cz);
+    if(d<bd){ bd=d; best=i; }
+  });
+  return best;
+}
 
 /* --- map stats + trail list (Trail map card) ---
    Computed straight from the graph rebuildWorld() already built -- no separate tally
@@ -1269,7 +1369,7 @@ function renderFileChips(){
       clearLayers();
       if(loadedFiles.length) addLayers(loadedFiles.map(f=>f.layer));
       renderFileChips(); refreshMapUI();
-      if(getGraph()) placeAtHead(0);
+      if(getGraph()) placeAtHead(pickDefaultHead());
     });
     wrap.appendChild(chip);
   });
@@ -1314,8 +1414,17 @@ async function boot(bundleUrl){
   // seat an avatar unconditionally. With a map that means the chosen trailhead; without
   // one, the middle of an empty world -- either way you can see who you picked, which is
   // what tells you the roster works when the map does not.
-  placeAtHead(getStartHead());
+  placeAtHead(pickDefaultHead());
   resize();
+  /* Then just start walking. Opening on a static lobby meant the first thing every new
+     player had to do was find the 🗺 button and understand that tapping a lettered badge
+     was how a game begins -- a tutorial step in front of a game with no other tutorial
+     steps. You now land on a trail, facing down it, and the map is where you go when you
+     want to be SOMEWHERE ELSE, which is what a map is for.
+
+     Guarded on the graph: with no map loaded there is nothing to walk on, and the lobby
+     is the right place to be told the map failed rather than standing in an empty void. */
+  if(getGraph()) enterPlay();
   requestAnimationFrame(loop);
 }
 
@@ -1343,10 +1452,12 @@ $('#defaultMapBtn')?.addEventListener('click', async ()=>{
   // the file-chip list, and replaces whatever chips/EXTRA layers were there
   loadedFiles=[];
   renderFileChips();
-  if(await loadMap(DEFAULT_WORLD, true)){ refreshMapUI(); placeAtHead(0); }
+  if(await loadMap(DEFAULT_WORLD, true)){ refreshMapUI(); placeAtHead(pickDefaultHead()); }
 });
 $('#mapBtn')?.addEventListener('click', ()=> toggleBigMap());
-$('#touchBarkBtn')?.addEventListener('click', doBark);
+tapBtn($('#touchBarkBtn'), doBark);
+tapBtn($('#tJump'), trailJump);
+tapBtn($('#tSneak'), toggleSneak);
 /* Bark and save-spot have no HUD buttons any more -- B and P, plus "Save where I am" on
    the map sheet. The optional-chaining is what makes removing them from the HTML a
    one-file change rather than a two-file one. */
@@ -1429,7 +1540,7 @@ async function loadFiles(files){
   if(gotPups) renderRoster();
   if(!getGraph()) return;
   refreshMapUI();
-  placeAtHead(0);
+  placeAtHead(pickDefaultHead());
 }
 
 /* Test seams. build.py flattens every module into one classic script, where top-level

@@ -27,14 +27,13 @@
   </header>
   <main>
     <aside id="panel">
-      <p class="hint panel-lede">Settings — every control here can be changed while
-        you walk, and you stay where you are standing. Pick where to <b>start</b> on the
-        map (🗺 above right).</p>
+      <p class="hint panel-lede">Change anything while you walk — you stay where you
+        are standing. 🗺 Map to move somewhere else.</p>
       <div class="sect">
         <h2>🗺️ Trail map</h2>
         <label class="dropzone" id="dropzone" for="worldFile">
           <span class="dz-main">Drop your <code>.geojson</code> layers here<br>or tap to browse</span>
-          <span class="dz-sub">trails, points &amp; areas — several files at once</span>
+          <span class="dz-sub">trails, points &amp; areas</span>
         </label>
         <input type="file" id="worldFile" accept=".geojson,.json,application/geo+json,application/json" multiple hidden>
         <div id="fileChips" class="file-chips"></div>
@@ -54,31 +53,23 @@
           <label>Contour step <span class="val" id="contourVal">3.0 m</span></label>
           <input type="range" id="contourStep" min="0.5" max="12" step="0.5" value="3">
         </div>
-        <p class="hint"><b>World scale 1 : N</b> — 1:1 is true size (a 953 m sign means 953
-          real metres); a bigger N packs the whole network into a smaller, quicker walk.
-          Your pup's own size never changes, only the ground around it does.
-          <b>Hill exaggeration</b> only stretches height — 0 flattens the map completely.
-          It is independent of world scale, which means compacting the map really does
-          steepen it: at 1:16 the same hills are 16× steeper, so drop exaggeration to
-          about 1/16 to keep slopes looking real. The readout tells you where you are.
-          <b>Contour step</b> is how many metres of real elevation each terrace is worth:
-          smaller means finer, more numerous steps.</p>
+        <p class="hint">1:1 is true size; a bigger N packs the map into a shorter walk
+          (and steepens it — drop exaggeration to match). Contour step is metres of
+          real elevation per terrace.</p>
         <div class="statbox" id="mapStats"></div>
         <div id="trailList" class="trail-list"></div>
         <p class="hint" id="mapNote">Loading map…</p>
         <div class="io-row">
           <button class="btn small" id="defaultMapBtn">🏜️ Default map</button>
         </div>
-        <p class="hint">Garden of the Gods loads by default. Drop a <code>pup-world/1</code>
-          bundle from <code>tools/fetch_dem.py</code> here for real elevation, or pass
-          <code>?world=path/to/world.json</code> in the URL. Without a DEM bundle the map
-          is playable but flat.</p>
+        <p class="hint">Garden of the Gods loads by default. Drop a
+          <code>pup-world/1</code> bundle for real elevation, or pass
+          <code>?world=…</code> in the URL.</p>
       </div>
       <div class="sect">
         <h2>🏞️ Landscape</h2>
         <div id="envGrid" class="env-grid"></div>
-        <p class="hint">Same trails, different country. The ground, trees, rocks, sky and
-          wildlife all change.</p>
+        <p class="hint">Same trails, different country.</p>
         <div class="ctl">
           <label>Fog <span class="val" id="fogAmtVal">1.00×</span></label>
           <input type="range" id="fogAmt" min="0.15" max="3" step="0.05" value="1">
@@ -98,8 +89,7 @@
         </div>
         <input type="file" id="pupFile" accept=".json,application/json" multiple hidden>
         <p class="hint" id="pupNote"></p>
-        <p class="hint">Blue bar is trail speed, pink is how far off you spook the
-          locals. Big animals lumber slow but clear the whole meadow.</p>
+        <p class="hint">Blue bar is speed, pink is how far off you spook the locals.</p>
       </div>
     </aside>
     <div id="stage">
@@ -123,7 +113,18 @@
         <canvas id="minimap"></canvas>
         <span class="tally" id="hudTrail" title="The trail you are on">—</span>
         <button class="btn small" id="mapBtn" title="Full map (M)">🗺 Map</button>
-        <button class="btn touch-only" id="touchBarkBtn" title="Bark">🐕 Bark</button>
+      </div>
+
+      <!-- On-screen controls for phones and tablets. Hidden until <body> is marked
+           `touch` (see main.js): a finger has no WASD, no space bar and no B key, so
+           without these the whole movement, jump and bark vocabulary is unreachable. -->
+      <div id="touchCtl">
+        <div id="stickBase"><div id="stickKnob">🐾</div></div>
+        <div id="tbtns">
+          <button class="tbtn" id="tSneak" title="Sneak (C)"><span class="ic">🤫</span><span class="lb">SNEAK</span></button>
+          <button class="tbtn" id="touchBarkBtn" title="Bark (B)"><span class="ic">🐕</span><span class="lb">BARK</span></button>
+          <button class="tbtn" id="tJump" title="Jump (Space)"><span class="ic">🦘</span><span class="lb">JUMP</span></button>
+        </div>
       </div>
       <div id="arrivalWrap">
         <div id="arrivalCard">
@@ -161,9 +162,8 @@
           <div class="bm-card">
             <h3>🚩 Start here</h3>
             <p class="hint" id="startNow">—</p>
-            <p class="hint">Tap a lettered badge on the map to start there. Every
-              outer dead-end is a trailhead.</p>
-            <button class="btn small wide" id="surpriseBtn">🎲 Surprise me</button>
+            <p class="hint">Tap a lettered badge on the map to start walking from there.
+              Every outer dead-end is a trailhead.</p>
           </div>
           <div class="bm-card">
             <h3>📍 Saved spots</h3>

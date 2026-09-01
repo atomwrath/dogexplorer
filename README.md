@@ -1,4 +1,5 @@
 # Pup Games
+https://atomwrath.github.io/dogexplorer/
 
 Two cartoon 3D dog games that run in any browser — no install, no build step required to play.?
 

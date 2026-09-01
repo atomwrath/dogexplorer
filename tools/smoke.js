@@ -401,6 +401,15 @@ function assertAll(window, errors, stats) {
   check('a dog is selected on boot', !!d.querySelector('#dogGrid button.sel'), txt('#dogGrid button.sel'));
   check('frames render', stats.renders > 0, `${stats.renders} frames`);
 
+  /* THE GAME OPENS ON A WALK, not on a lobby. Finding the 🗺 button and working out that
+     tapping a lettered badge is how a game begins was a tutorial step in front of a game
+     with no other tutorial steps. Asserted at both levels because they are separately
+     breakable: `playing` is what the input handlers gate on, and body.play is what the
+     HUD, the settings drawer and the touch controls key off. */
+  check('boot starts a walk without anyone opening the map', trailIsPlaying());
+  check('boot puts the page into play mode', d.body.classList.contains('play'));
+  check('boot does not open the map sheet over the walk', !d.body.classList.contains('bigmap'));
+
   // the bug that shipped: rig built, never positioned
   let head = s.heads[s.startHead];
   check('dog rig stands on the trailhead', s.dogWorld && dist(s.dogWorld, head) < 0.5,
@@ -526,6 +535,67 @@ function assertAll(window, errors, stats) {
   check('a touch drag on the left half drives the stick, not the camera', afterTouch === yaw3,
     `${yaw3.toFixed(3)}`);
 
+  /* ---- the on-screen controls a phone or tablet has instead of a keyboard ----------
+     The drag-stick was always there; NOTHING ON SCREEN SAID SO, and jump (space) and
+     sneak (C) had no touch equivalent at all -- so on an iPad two of the four verbs were
+     unreachable and a third was undiscoverable. These assert the visible half, which is
+     the part that was missing, not the pointer maths above.
+
+     Note the `touch` class is already on <body> by this point: the dragLeft(89,'touch')
+     above is a real touch pointerdown, which is exactly what is supposed to mark a hybrid
+     device mid-session. jsdom's matchMedia always reports false, so this is the ONLY path
+     that sets it here -- which makes the assertion meaningful rather than tautological. */
+  check('a touch marks the device, revealing the on-screen controls',
+    d.body.classList.contains('touch'));
+  check('the touch control layer exists', !!d.querySelector('#stickBase') &&
+    !!d.querySelector('#stickKnob') && !!d.querySelector('#tJump') && !!d.querySelector('#tSneak'));
+
+  /* The visible stick is a READOUT of the same object movement reads. Asserting it
+     follows the thumb is asserting it cannot show one thing while the pup does another --
+     a stick frozen at centre while the pup sprints is the failure this catches. */
+  check('the stick follows the thumb and springs back on release', (() => {
+    const base = d.querySelector('#stickBase'), knob = d.querySelector('#stickKnob');
+    const dn = new window.MouseEvent('pointerdown', { bubbles:true, clientX:200, clientY:500 });
+    dn.pointerId = 91; Object.defineProperty(dn, 'pointerType', { value:'touch' });
+    canvas.dispatchEvent(dn);
+    const held = base.classList.contains('on');
+    const mv = new window.MouseEvent('pointermove', { bubbles:true, clientX:240, clientY:530 });
+    mv.pointerId = 91; Object.defineProperty(mv, 'pointerType', { value:'touch' });
+    window.dispatchEvent(mv);
+    // knob offset must be real, and must be pinned inside the base's travel radius
+    const m = /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/.exec(knob.style.transform || '');
+    const moved = !!m && Math.hypot(+m[1], +m[2]) > 1 && Math.hypot(+m[1], +m[2]) <= 52.5;
+    const up = new window.MouseEvent('pointerup', { bubbles:true });
+    up.pointerId = 91; Object.defineProperty(up, 'pointerType', { value:'touch' });
+    window.dispatchEvent(up);
+    const rested = !base.classList.contains('on') && !base.style.left &&
+      /translate\(0px,\s*0px\)/.test(knob.style.transform || '');
+    return held && moved && rested;
+  })());
+
+  check('the JUMP button gets the pup off the ground', (() => {
+    const pl = getTrailPlayer();
+    pl.y = 0; pl.vy = 0; pl.knockT = 0;
+    d.querySelector('#tJump').dispatchEvent(new window.MouseEvent('click', { bubbles:true }));
+    return pl.vy > 0;
+  })());
+
+  /* Sneak is a toggle AND is cleared out from under the player by being knocked over, so
+     the lit state has to be pushed from the flag by the frame loop rather than flipped by
+     the tap -- otherwise the button claims you are sneaking after a moose says otherwise. */
+  check('the SNEAK button toggles sneaking and lights up', (() => {
+    const pl = getTrailPlayer();
+    pl.sneaking = false;
+    d.querySelector('#tSneak').dispatchEvent(new window.MouseEvent('click', { bubbles:true }));
+    return pl.sneaking === true && d.querySelector('#tSneak').classList.contains('on');
+  })());
+  check('the lit state follows the flag, not the tap', (() => {
+    const pl = getTrailPlayer();
+    pl.sneaking = false;                       // as a knock-back would clear it
+    syncTouchButtons();
+    return !d.querySelector('#tSneak').classList.contains('on');
+  })());
+
   // --- redesigned panel: toggle, letter badges, stat bars, map stats, file chips ---
   check('pup-mode toggle starts on Dogs', d.querySelector('#pupModeToggle .toggle.sel')?.textContent.includes('Dogs'));
   check('wildlife grid hidden until toggled', d.querySelector('#animalGrid').hidden === true);
@@ -545,14 +615,28 @@ function assertAll(window, errors, stats) {
   check('pup cards render one speed bar per card', speedBars.length === n('#dogGrid button'), `${speedBars.length} bars`);
   check('speed bars have a real, non-zero width', speedBars.every(el => /width:\s*[1-9]/.test(el.getAttribute('style')||'')));
 
-  const beforeHead = probe().startHead;
-  d.querySelector('#surpriseBtn').dispatchEvent(new window.MouseEvent('click', { bubbles:true }));
-  const sp = probe();
+  /* "Surprise me" is gone: a dice roll was the wrong answer to a spatial question on a
+     sheet built for seeing where things are, and the only reason it existed was that the
+     game used to open with no walk at all. What replaced it is asserted instead --
+     pickDefaultHead lands on the trailhead nearest the middle of the network, so the
+     first thirty seconds have trail leading away in several directions and are the SAME
+     thirty seconds on every reload. */
+  check('the surprise-me button is gone from the map sheet', !d.querySelector('#surpriseBtn'));
+  check('the default start is the trailhead nearest the middle of the network', (() => {
+    const heads = getTrailheads(); if (!heads.length) return false;
+    const bb = getBBox();
+    const cx = (bb.minx + bb.maxx) / 2, cz = (bb.minz + bb.maxz) / 2;
+    let best = 0, bd = Infinity;
+    heads.forEach((h, i) => { const dd = Math.hypot(h.x - cx, h.z - cz); if (dd < bd) { bd = dd; best = i; } });
+    return pickDefaultHead() === best;
+  })(), `head ${pickDefaultHead()} of ${getTrailheads().length}`);
   // mode is 'dog' at this point in the sequence (the "switching back to a dog" test
   // above already clicked one) -- checking wildPos here would compare against a stale
   // position nothing has updated since the earlier fox pick.
-  check('surprise-me seats the avatar at the trailhead it picked', dist(sp.dogWorld, sp.heads[sp.startHead]) < 0.5,
-    `head ${beforeHead} -> ${sp.startHead}`);
+  placeAtHead(pickDefaultHead());
+  const sp = probe();
+  check('the default start seats the avatar at that trailhead', dist(sp.dogWorld, sp.heads[sp.startHead]) < 0.5,
+    `head ${sp.startHead}`);
 
   d.querySelector('#randomPupBtn').dispatchEvent(new window.MouseEvent('click', { bubbles:true }));
   const rp = probe();
