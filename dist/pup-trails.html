@@ -5497,6 +5497,67 @@ function asSidewalk(e, offset){
 /* Plan every road crossing on the map, and rewrite the geometry that meets it. Runs after
    markBuriedEdges (a path that FOLLOWS the road is a sidewalk, not a crossing, and must
    not be squared up to it) and before grading. */
+/* Is this node a place where a path goes ACROSS the road, or merely a place where a path
+   TOUCHES it? The two want opposite furniture, and the old rule -- "a road arm and a walk
+   arm meet here" -- could not tell them apart. Measured on the default map it built 43
+   crossings of which 11 were real: the other 32 were trails ending on the verge, trails
+   whose endpoint splitT welded to a road it merely passed within 16 m of, and paths
+   running ALONG the carriageway whose arm direction voted an arbitrary side.
+
+   A crossing needs both halves of the word:
+     - the road must CONTINUE past the node (>= 2 road arms). One road arm means the road
+       stops here; there is nothing on the far side to cross to.
+     - a walk arm must leave on EACH side of the road axis. That is the whole definition,
+       and it is what the caller asked for: stripe the tarmac only when there is a trail
+       on both sides of it.
+   Arms running along the road within ALONG_MAX of its axis are excluded from the side
+   census before it is taken. Their normal component is nearly zero, so which side they
+   "leave on" is decided by digitiser noise -- and a path following a road is a sidewalk
+   (asSidewalk, above), never a crossing.
+
+   Returns null for a non-crossing, with the road axis still filled in, because the caller
+   needs it either way: a path stopping at the verge still has to have its ribbon trimmed
+   back to the kerb. */
+const ALONG_MAX = 0.8;
+function roadContact(ni, adj){
+  const here=adj[ni]||[];
+  const roads=here.filter(x=>x.kind==='road');
+  const walks=here.filter(x=>x.kind!=='road' && !x.buried);
+  if(!roads.length || !walks.length) return null;
+
+  /* The road's axis. Averaged over the road arms as an UNDIRECTED line (arms leaving in
+     opposite directions must not cancel to zero), which is why each arm's direction is
+     flipped into a common half-plane before it is summed. */
+  let ax=0, az=0, ref=null;
+  for(const r of roads){
+    const pts = r.a===ni ? r.pts : [...r.pts].reverse();
+    let d = armDir(pts);
+    if(!ref) ref=d;
+    if(d[0]*ref[0]+d[1]*ref[1] < 0) d=[-d[0],-d[1]];
+    ax+=d[0]; az+=d[1];
+  }
+  const L=Math.hypot(ax,az);
+  if(L<1e-6) return null;
+  const dir=[ax/L, az/L], nx=-dir[1], nz=dir[0];
+
+  const arms=[];
+  let pos=0, neg=0;
+  for(const w of walks){
+    const flip = w.b===ni && w.a!==ni;
+    const pts = flip ? [...w.pts].reverse() : w.pts;
+    const d = armDir(pts);
+    const along = Math.abs(d[0]*dir[0] + d[1]*dir[1]);
+    const side = (d[0]*nx + d[1]*nz) >= 0 ? 1 : -1;
+    arms.push({w, flip, side, along});
+    if(along > ALONG_MAX) continue;
+    if(side > 0) pos++; else neg++;
+  }
+  const roadW = Math.max(...roads.map(r=>pathWidth(r.kind)));
+  const walkW = Math.max(...walks.map(w=>pathWidth(w.kind)))*2.1;
+  return {dir, nx, nz, roads, walks, arms, roadW, walkW,
+          crossing: roads.length>=2 && pos>0 && neg>0};
+}
+
 function planCrossings(adj){
   CROSSINGS.length=0;
   if(!GRAPH) return 0;
@@ -5509,59 +5570,229 @@ function planCrossings(adj){
   }
 
   for(let ni=0; ni<GRAPH.nodes.length; ni++){
-    const here=adj[ni]||[];
-    const roads=here.filter(x=>x.kind==='road');
-    const walks=here.filter(x=>x.kind!=='road' && !x.buried);
-    if(!roads.length || !walks.length) continue;
+    const c = roadContact(ni, adj);
+    if(!c) continue;
     const n=GRAPH.nodes[ni];
-
-    /* The road's axis. Averaged over the road arms as an UNDIRECTED line (arms leaving in
-       opposite directions must not cancel to zero), which is why each arm's direction is
-       flipped into a common half-plane before it is summed. */
-    let ax=0, az=0, ref=null;
-    for(const r of roads){
-      const pts = r.a===ni ? r.pts : [...r.pts].reverse();
-      let d = armDir(pts);
-      if(!ref) ref=d;
-      if(d[0]*ref[0]+d[1]*ref[1] < 0) d=[-d[0],-d[1]];
-      ax+=d[0]; az+=d[1];
-    }
-    const L=Math.hypot(ax,az);
-    if(L<1e-6) continue;
-    const dir=[ax/L, az/L], nx=-dir[1], nz=dir[0];
-
-    const roadW = Math.max(...roads.map(r=>pathWidth(r.kind)));
-    const walkW = Math.max(...walks.map(w=>pathWidth(w.kind)))*2.1;
-    const apron = Math.max(roadW*1.8, walkW*1.6);
+    const apron = Math.max(c.roadW*1.8, c.walkW*1.6);
 
     /* Where the trail's SURFACE has to stop. The path still runs to the node -- the graph
        edge is what makes the crossing walkable and routable -- but its ribbon ends at the
        kerb, and the crosswalk carries it across. Drawing both was what put a dirt track
        over the tarmac in the screenshot: two surfaces claiming the same carriageway, one
-       of which is the marked crossing that exists precisely to say who has it. */
-    const kerbW = Math.max(0.28, roadW*0.09);
-    const trim = roadW*0.5 + kerbW + walkW*0.06;
+       of which is the marked crossing that exists precisely to say who has it.
 
-    for(const w of walks){
+       TRIMMING IS NOT CONDITIONAL ON THE CROSSING. Separating the two decisions is the
+       point of roadContact: a trail that merely ends on the verge paints over the
+       carriageway just as badly as one crossing it, and it was only ever trimmed by
+       accident, because the old rule called it a crossing too. Tightening that rule
+       without splitting the trim out would have fixed 32 spurious crosswalks by putting
+       32 dirt ribbons back on the tarmac. */
+    const kerbW = Math.max(0.28, c.roadW*0.09);
+    const trim = c.roadW*0.5 + kerbW + c.walkW*0.06;
+
+    for(const a of c.arms){
+      const w = a.w;
+      if(a.flip) w.trimB = Math.max(w.trimB||0, trim);
+      else       w.trimA = Math.max(w.trimA||0, trim);
+      /* Squaring up is crossing-only. A path CROSSING a road wants to meet it at ninety
+         degrees, because that is what the stripes and the two landings are drawn square
+         to. A path that merely ends at the verge has no far side to line up with, and
+         turning its last few metres to face the traffic would invent a geometry the
+         survey never recorded and no walker would follow. */
+      if(!c.crossing || a.along > ALONG_MAX) continue;
       // orient the arm so pts[0] is this node, square it up, then write it back the way
       // round it came. squareApproach returns a new array (it inserts vertices), so the
       // assignment is not optional the way an in-place nudge would have been.
-      const flip = w.b===ni && w.a!==ni;
-      const pts = flip ? [...w.pts].reverse() : w.pts;
-      const d = armDir(pts);
-      const side = (d[0]*nx + d[1]*nz) >= 0 ? 1 : -1;
-      const squared = squareApproach(pts, nx*side, nz*side, apron);
-      w.pts = flip ? squared.reverse() : squared;
-      if(flip) w.trimB = Math.max(w.trimB||0, trim);
-      else     w.trimA = Math.max(w.trimA||0, trim);
+      const pts = a.flip ? [...w.pts].reverse() : w.pts;
+      const squared = squareApproach(pts, c.nx*a.side, c.nz*a.side, apron);
+      w.pts = a.flip ? squared.reverse() : squared;
     }
 
-    CROSSINGS.push({x:n.p[0], z:n.p[1], dir, roadW, walkW, trim,
+    if(!c.crossing) continue;
+    CROSSINGS.push({x:n.p[0], z:n.p[1], dir:c.dir, roadW:c.roadW, walkW:c.walkW, trim,
                     lift:kindLift('road'), node:ni});
   }
   return CROSSINGS.length;
 }
+
 function getCrossings(){ return CROSSINGS; }
+
+/* ---------- displacement: keep painted surfaces off each other ----------
+
+   Widths are true metres and never compact (PATH_W's note); positions do. So the
+   clearance a ribbon needs, measured in the coordinates it is actually drawn in, GROWS as
+   the world scale shrinks: two centrelines have to be 3.08 units apart for a trail not to
+   paint over a road, which is 15.4 real metres at 1:5 and 30.8 at 1:10. A footpath on a
+   road verge is three to ten real metres off the centreline. The survey cannot satisfy
+   that and was never asked to.
+
+   Measured on the default map: 331 real metres of path overlap another path's painted
+   surface at 1:1, 929 at 1:5, 4735 at 1:10. So this is not purely a compaction artifact
+   -- the survey really does run some paths within a tread's width of each other -- but
+   compaction is what turns a handful of touches into the pile-up in the screenshot.
+
+   THE TRADE, STATED PLAINLY. Geographic accuracy is spent to buy spatial legibility: a
+   trail beside a road is drawn beside the road rather than at its recorded offset. That
+   is the ordinary cartographic answer to symbols outgrowing their scale, and it is the
+   right one here, because what this map is FOR is walking a network -- a claim about what
+   runs next to what, not about coordinates.
+
+   WIDER PATHS ARE ANCHORS. An edge is pushed off anything of lower pathRank than itself
+   and never off its equals, so roads move for nothing, tracks move only for roads, and
+   trails move for both. That makes each conflict one-sided -- a single movable body --
+   which is why this converges in three short passes instead of needing a two-body
+   relaxation. It also keeps roads registered to the area polygons (parking lots,
+   buildings) that flattenAreaCells benches the terrain for, and it reuses the ranking the
+   burial pass and the depth ordering already agree on rather than inventing a second one.
+
+   SIDEDNESS IS PRESERVED BY CONSTRUCTION. Every vertex is pushed out along the sign of the
+   offset it ALREADY has, so a trail can never be shoved through a carriageway to the far
+   side. That invariant is the whole of "keep the spatial relation, not the coordinate",
+   and it is what tools/smoke.js asserts -- not the displacement distance, which is a
+   consequence, but the sidedness, which is the promise.
+
+   Runs after planCrossings -- which rewrites approach geometry and decides which paths are
+   sidewalks -- and before grading, for the reason the adjacency comment gives: there is
+   one copy of the geometry and it must be finished being edited before the bench, the
+   spatial hash and the ribbons are all built from it. */
+const CLEAR_MARGIN = 0.2;     // breathing room on top of the two painted half-widths
+const CLEAR_ROUNDS = 3;       // push/smooth cycles
+
+function clearOfWiderPaths(){
+  if(!GRAPH) return 0;
+  let moved = 0;
+
+  /* WIDEST FIRST. An anchor has to be in its final position before anything is pushed off
+     it, and a track is both an anchor (for trails) and movable (for roads). Walking the
+     edge array in its own order cleared trails against a track that then moved out from
+     under them -- measured, that left a 1.6u conflict standing between a track and a trail
+     that had each been correctly displaced, just in the wrong order. Ranking the walk
+     makes each edge final before anything reads it. */
+  const order = GRAPH.edges.slice().sort((a,b)=>pathRank(a.kind)-pathRank(b.kind));
+
+  for(const e of order){
+    /* Buried paths are not drawn as surfaces at all -- they are route markers laid on
+       their host (markBuriedEdges) -- and asSidewalk has already placed them exactly
+       where they belong on the verge. Pushing one again would shove a sidewalk off the
+       road it is meant to follow. */
+    if(e.buried || e.pts.length < 2) continue;
+    const anchors = GRAPH.edges.filter(o =>
+      o !== e && o.pts.length >= 2 && pathRank(o.kind) < pathRank(e.kind));
+    if(!anchors.length) continue;
+    const half = pathOutlineWidth(e.kind)/2 + CLEAR_MARGIN;
+
+    /* RESAMPLE FIRST, and this is the whole reason the pass does anything at all.
+
+       buildGraph runs Douglas-Peucker over every line, so a straight fragment keeps only
+       its two endpoints -- 85 of the 208 drawable non-road edges on the default map are
+       exactly two points long. Both of those are graph nodes and neither may move (see
+       below), so a push that only nudges existing vertices has nothing to touch on 40% of
+       the network and silently returns having done nothing. That is not a new hazard:
+       squareApproach's comment records the same bug being found the same way, which is
+       why it inserts its own apron vertices instead of nudging.
+
+       Station spacing matches rebuildWorld's minStep -- 60% of the painted width -- so the
+       displaced line is sampled at least as finely as the ribbon that will be drawn from
+       it, and no conflict can hide between two stations. */
+    e.pts = resample(e.pts, pathOutlineWidth(e.kind)*0.6);
+    if(e.pts.length < 3) continue;   // too short to have an interior; leave it alone
+    const recorded = e.pts.map(p=>p.slice());
+
+    /* Endpoints never move. An endpoint is the edge's claim on a graph node -- shift it
+       and the edge is no longer at the junction it belongs to, which is the bug
+       asSidewalk's taper note documents and the smoke suite catches as junctions whose
+       ribbons arrive at different heights. The push therefore tapers to zero at both
+       ends, which is also right on its own terms: a trail that MEETS a road should touch
+       it, and planCrossings has already trimmed its ribbon back to the kerb. */
+    const arc=[0];
+    for(let i=1;i<e.pts.length;i++)
+      arc[i]=arc[i-1]+Math.hypot(e.pts[i][0]-e.pts[i-1][0], e.pts[i][1]-e.pts[i-1][1]);
+    const total=arc[arc.length-1];
+    if(!(total>0)) continue;
+
+    /* WHICH SIDE OF WHAT: frozen here, from the RECORDED geometry, before anything moves.
+
+       This is the invariant the whole pass exists to keep, so it must not be re-derived
+       from geometry the pass is itself editing. Recomputing the sign each round let a
+       vertex that had been nudged across a centreline adopt its new, wrong side and keep
+       going -- measured, five of 127 near-anchor stretches ended up on the opposite side
+       of the thing they were displaced from. Freezing the signs makes "the trail stays on
+       the side of the road it was surveyed on" true by construction rather than by luck.
+
+       Per vertex, not per edge, because a path that genuinely CROSSES an anchor has to be
+       allowed to have a different sign either side of the crossing. A vertex sitting
+       almost exactly on the centreline has no reliable opinion of its own, so it borrows
+       the edge's majority instead of voting with rounding noise -- the same reasoning
+       asSidewalk applies to a footway wandering over a road's centreline. */
+    const sideOf = new Array(e.pts.length).fill(0);
+    {
+      let sum = 0;
+      for(let i=0;i<e.pts.length;i++){
+        const p=e.pts[i];
+        let near=null, nd=Infinity;
+        for(const o of anchors){
+          const pr=projectOnPolyline(o.pts, p[0], p[1]);
+          if(pr.d < nd){ nd=pr.d; near=pr; }
+        }
+        if(!near) continue;
+        const off=(p[0]-near.px)*(-near.dir[1]) + (p[1]-near.pz)*near.dir[0];
+        sum += off;
+        sideOf[i] = Math.abs(off) > 1e-3 ? (off>0?1:-1) : 0;
+      }
+      const majority = sum>=0 ? 1 : -1;
+      for(let i=0;i<sideOf.length;i++) if(!sideOf[i]) sideOf[i]=majority;
+    }
+
+    let touched=false;
+    /* Push, smooth, push again. Smoothing is what keeps the corrected stretch from
+       kinking where it rejoins the recorded line, but it also drags the vertices it
+       smooths back toward the anchor it just cleared -- measured, that left four
+       conflicts standing at up to 1.3u after a single pass. Re-projecting after each
+       smooth settles it: the last round pushes without smoothing, so the clearance the
+       ribbon is finally drawn at is the one that was actually enforced. */
+    for(let round=0; round<CLEAR_ROUNDS; round++){
+      const pushed=new Array(e.pts.length).fill(false);
+      for(let i=0;i<e.pts.length;i++){
+        const p=e.pts[i];
+        let worst=null, worstOver=0;
+        for(const o of anchors){
+          const clear = half + pathOutlineWidth(o.kind)/2;
+          const pr = projectOnPolyline(o.pts, p[0], p[1]);
+          const over = clear - pr.d;
+          if(over > worstOver){ worstOver=over; worst={pr, clear}; }
+        }
+        if(!worst) continue;
+        const {pr, clear}=worst;
+        const nx=-pr.dir[1], nz=pr.dir[0];
+        const sd = sideOf[i];
+        // taper scaled to the size of the correction, so a small nudge unwinds quickly
+        // and a large one is spread over enough of the edge to stay smooth
+        const taper=Math.min(Math.max(worstOver*3, 2), total*0.4);
+        const w = clamp(Math.min(arc[i], total-arc[i])/taper, 0, 1);
+        if(w<=0) continue;
+        const tx=pr.px + nx*sd*clear, tz=pr.pz + nz*sd*clear;
+        e.pts[i][0] += (tx-e.pts[i][0])*w;
+        e.pts[i][1] += (tz-e.pts[i][1])*w;
+        pushed[i]=true; touched=true;
+      }
+      if(round === CLEAR_ROUNDS-1) break;      // never smooth after the final push
+      const src=e.pts.map(p=>p.slice());
+      for(let i=1;i<e.pts.length-1;i++){
+        if(!pushed[i]) continue;
+        e.pts[i][0]=src[i][0]*0.5 + (src[i-1][0]+src[i+1][0])*0.25;
+        e.pts[i][1]=src[i][1]*0.5 + (src[i-1][1]+src[i+1][1])*0.25;
+      }
+    }
+    /* Keep the recorded line. It costs one array per moved edge and it is the only way
+       the sidedness invariant can be CHECKED rather than asserted by the code that
+       enforces it -- tools/smoke.js reads it to confirm no vertex ended up on the far
+       side of the anchor from where the survey put it. */
+    if(touched){ moved++; e.displaced=true; e.recorded=recorded; }
+  }
+  return moved;
+}
+
+
 /* Shove a point out of any road it is standing in.
 
    Signs were being moved off the carriageway only at nodes the crossing planner had
@@ -5812,8 +6043,16 @@ function rebuildWorld(){
   GRAPH.edges.forEach(e=>{ adj[e.a].push(e); if(e.b!==e.a) adj[e.b].push(e); });
   // decide which paths share another's ground, THEN square the rest up to the kerb --
   // a path that follows a road is a sidewalk, not a crossing, and must not be squared
-  PATH_MIX={forks:0, crossings:0, buried:markBuriedEdges(), crossingsBuilt:0};
+  PATH_MIX={forks:0, crossings:0, buried:markBuriedEdges(), crossingsBuilt:0, displaced:0};
   PATH_MIX.crossingsBuilt = planCrossings(adj);
+  /* Displacement LAST of the three geometry passes, and the order is load-bearing in both
+     directions. It must follow markBuriedEdges (a path that shares a road is a marker on
+     that road, not a surface to be pushed off it) and planCrossings (which decides where
+     approaches meet the kerb, and whose squared-up geometry is what should then be
+     cleared). It must precede everything below, for the reason the adjacency comment
+     gives: there is one copy of the geometry and it has to be finished being edited
+     before the bench, the spatial hash, the ribbons and the minimap all read it. */
+  PATH_MIX.displaced = clearOfWiderPaths();
   POIS=points.map(p=>({name:p.name,kind:p.kind,props:p.props,x:p.p.x,z:p.p.z,found:false}));
   AREAS=areasProjected;
   WATER=AREAS.filter(a=>a.kind==='water');

@@ -1896,6 +1896,200 @@ function assertAll(window, errors, stats) {
   {
     let __stuckNote = '', __postNote = '';
     const xs = getCrossings();
+
+  /* A crosswalk is not "a road and a trail touch here". It is "a trail continues on the
+      far side of a road". The old rule could not tell the two apart and built 43 crossings
+      on the default map of which 11 were real -- the rest were trails ending on the verge,
+      trails whose endpoint splitT welded to a road they merely passed within 16 m of, and
+      paths running ALONG the carriageway. Re-derived here from the geometry rather than
+      read back off the record, so a regression in roadContact cannot pass by agreeing
+      with itself. */
+    check('a crosswalk is only built where a path continues on the far side', (() => {
+      const G = getGraph();
+      if (!xs.length) return false;
+      for (const rec of xs) {
+        const arms = (G.edges.filter(e => e.a === rec.node || e.b === rec.node));
+        if (arms.filter(e => e.kind === 'road').length < 2) return false;   // road stops here
+        const nxv = -rec.dir[1], nzv = rec.dir[0];
+        let pos = 0, neg = 0;
+        for (const e of arms) {
+          if (e.kind === 'road' || e.buried) continue;
+          const pts = e.a === rec.node ? e.pts : [...e.pts].reverse();
+          let dx = 0, dz = 0;
+          for (let i = 1; i < pts.length; i++) {
+            dx = pts[i][0] - pts[0][0]; dz = pts[i][1] - pts[0][1];
+            if (Math.hypot(dx, dz) > 1e-6) break;
+          }
+          const L = Math.hypot(dx, dz) || 1;
+          if (Math.abs((dx / L) * rec.dir[0] + (dz / L) * rec.dir[1]) > 0.8) continue;  // runs along
+          if ((dx / L) * nxv + (dz / L) * nzv >= 0) pos++; else neg++;
+        }
+        if (!pos || !neg) return false;
+      }
+      return true;
+    })(), `${xs.length} crossings, all with arms on both sides`);
+
+    /* Tightening the crossing rule would have been a regression on its own: the ribbon trim
+      that keeps a dirt surface off the tarmac used to ride along on the crossing decision,
+      so 32 nodes that stopped being crossings would have had 32 trail ribbons painted back
+      onto the carriageway. planCrossings now trims at EVERY road contact and only builds
+      furniture at the crossings, which is what this asserts. */
+    check('every path meeting a road has its ribbon trimmed, crossing or not', (() => {
+      const G = getGraph();
+      let contacts = 0, trimmed = 0;
+      for (let ni = 0; ni < G.nodes.length; ni++) {
+        const arms = G.edges.filter(e => e.a === ni || e.b === ni);
+        if (!arms.some(e => e.kind === 'road')) continue;
+        for (const e of arms) {
+          if (e.kind === 'road' || e.buried) continue;
+          contacts++;
+          const t = (e.a === ni) ? e.trimA : e.trimB;
+          if (t > 0) trimmed++;
+        }
+      }
+      return contacts > 0 && contacts === trimmed;
+    })());
+
+    /* THE displacement invariant. Not "how far did it move" -- that is a consequence and it
+      changes with the world scale -- but "did it stay on the side it was surveyed on",
+      which is the promise the pass makes and the only thing that would make a displaced
+      map lie about the network. Measured against the anchors themselves: no drawable path
+      may sit on the far side of a wider path from where its own recorded geometry put it.
+      A path that genuinely CROSSES an anchor is allowed a different sign either side of
+      the crossing, so this is asserted per vertex, not per edge. */
+    check('displacement never moves a path to the wrong side of a wider one', (() => {
+      const G = getGraph();
+      let checked = 0, flipped = 0;
+      for (const e of G.edges) {
+        if (!e.displaced || !e.recorded) continue;
+        const anchors = G.edges.filter(o => o !== e && pathRank(o.kind) < pathRank(e.kind));
+        for (const p of e.pts) {
+          // the recorded point this vertex came from
+          let bq = null, bd = Infinity;
+          for (let k = 0; k < e.recorded.length - 1; k++) {
+            const r = ptSegSmoke(p, e.recorded[k], e.recorded[k + 1]);
+            if (r.d < bd) { bd = r.d; bq = r.q; }
+          }
+          if (!bq) continue;
+          let near = null, nd = Infinity;
+          for (const o of anchors) {
+            const pr = projOnLine(o.pts, bq[0], bq[1]);
+            if (pr.d < nd) { nd = pr.d; near = { pr, o }; }
+          }
+          if (!near || nd > 12) continue;
+          const sB = (bq[0] - near.pr.px) * (-near.pr.dir[1]) + (bq[1] - near.pr.pz) * near.pr.dir[0];
+          if (Math.abs(sB) < 0.3) continue;            // no opinion of its own
+          const pa = projOnLine(near.o.pts, p[0], p[1]);
+          const sA = (p[0] - pa.px) * (-pa.dir[1]) + (p[1] - pa.pz) * pa.dir[0];
+          checked++;
+          if (Math.sign(sB) !== Math.sign(sA)) flipped++;
+        }
+      }
+      return checked > 100 && flipped === 0;
+    })());
+
+    /* What the whole pass is for, stated as a number. Sampled every real metre so the
+      answer means the same thing at any world scale, and with the stations near a shared
+      node exempted -- edges meeting at a junction are SUPPOSED to converge there, and the
+      junction pad is what covers that seam.
+
+      Held at 1:5 (the default) rather than 1:1, because compaction is what makes this
+      bite: before the pass the default map painted 929 real metres of path over another
+      path's surface at 1:5, and 331 even at 1:1. */
+    check('painted surfaces do not overlap each other', (() => {
+      const back = getMapScale();
+      setMapScale(0.2);
+      const G = getGraph();
+      const half = k => pathOutlineWidth(k) / 2;
+      const drawn = G.edges.filter(e => !e.buried);
+      const shares = (e, f) => e.a === f.a || e.a === f.b || e.b === f.a || e.b === f.b;
+      let bad = 0;
+      for (let i = 0; i < drawn.length; i++) {
+        const e = drawn[i], need0 = half(e.kind);
+        for (let j = i + 1; j < drawn.length; j++) {
+          const f = drawn[j], need = need0 + half(f.kind);
+          const ex = shares(e, f) ? Math.max(need * 1.6, 4) : 0;
+          for (let k = 0; k < e.pts.length - 1; k++) {
+            const a = e.pts[k], b = e.pts[k + 1];
+            const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+            const n = Math.max(1, Math.ceil(L / 0.2));      // one real metre at 1:5
+            for (let m = 0; m < n; m++) {
+              const p = [a[0] + (b[0] - a[0]) * m / n, a[1] + (b[1] - a[1]) * m / n];
+              if (ex) {
+                let nearNode = false;
+                for (const id of [e.a, e.b, f.a, f.b]) {
+                  const nd = G.nodes[id];
+                  if (Math.hypot(p[0] - nd.p[0], p[1] - nd.p[1]) < ex) { nearNode = true; break; }
+                }
+                if (nearNode) continue;
+              }
+              let best = Infinity;
+              for (let q = 0; q < f.pts.length - 1; q++) {
+                const r = ptSegSmoke(p, f.pts[q], f.pts[q + 1]);
+                if (r.d < best) best = r.d;
+              }
+              if (best < need) bad++;
+            }
+          }
+        }
+      }
+      __overlapNote = `${bad} real metres of path on another path's surface at 1:5`;
+      setMapScale(back);
+      return bad < 200;
+    })(), () => __overlapNote);
+
+    /* splitT drops any cut within `tol` of a line's end (applyCuts), which is usually
+      harmless -- buildGraph's endpoint snap fuses those anyway -- but on the default map it
+      left three real X crossings with no node at all: a road and a trail that geometrically
+      intersect and, topologically, have never met. Those cannot be displaced apart (they
+      genuinely cross) and cannot be crosswalked (there is no node to hang one on), so they
+      paint straight over each other. Asserted separately from the displacement work because
+      it is a topology bug, not a rendering one. */
+    check('no two paths cross without a node where they meet', (() => {
+      const G = getGraph();
+      const shares = (e, f) => e.a === f.a || e.a === f.b || e.b === f.a || e.b === f.b;
+      let uncut = 0;
+      for (let i = 0; i < G.edges.length; i++) {
+        for (let j = i + 1; j < G.edges.length; j++) {
+          const e = G.edges[i], f = G.edges[j];
+          if (shares(e, f)) continue;
+          let hit = false;
+          for (let a = 0; a < e.pts.length - 1 && !hit; a++)
+            for (let b = 0; b < f.pts.length - 1 && !hit; b++)
+              if (segCross(e.pts[a], e.pts[a + 1], f.pts[b], f.pts[b + 1])) hit = true;
+          if (hit) uncut++;
+        }
+      }
+      __uncutNote = `${uncut} pairs cross with no shared node`;
+      return uncut === 0;
+    })(), () => __uncutNote);
+
+  /* Helpers -- add near the other local helpers at the top of smoke.js if not already there.
+
+  function ptSegSmoke(p, a, b){
+    const dx=b[0]-a[0], dz=b[1]-a[1], L2=dx*dx+dz*dz;
+    let t = L2===0 ? 0 : ((p[0]-a[0])*dx + (p[1]-a[1])*dz)/L2;
+    t = t<0?0:(t>1?1:t);
+    const q=[a[0]+t*dx, a[1]+t*dz];
+    return {t, q, d: Math.hypot(p[0]-q[0], p[1]-q[1])};
+  }
+  function projOnLine(pts, x, z){
+    let best={d:Infinity, px:x, pz:z, dir:[1,0]};
+    for(let i=0;i<pts.length-1;i++){
+      const r=ptSegSmoke([x,z], pts[i], pts[i+1]);
+      if(r.d<best.d){
+        let dx=pts[i+1][0]-pts[i][0], dz=pts[i+1][1]-pts[i][1];
+        const L=Math.hypot(dx,dz)||1;
+        best={d:r.d, px:r.q[0], pz:r.q[1], dir:[dx/L, dz/L]};
+      }
+    }
+    return best;
+  }
+  and declare `let __overlapNote='', __uncutNote='';` beside the other __note variables.
+  `segCross` is already exported from geo.js; add it to the names pulled off the bundle.
+  */
+
+
     check('road crossings are planned, not left to the survey angle',
       xs.length > 0, `${xs.length} crossings built`);
 
