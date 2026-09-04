@@ -189,6 +189,12 @@ body.play #playHud{display:block;}
 #hudNoise.loud{background:#f7ded9;}
 .tally{background:var(--card);border:3px solid var(--ink);border-radius:11px;
   padding:4px 10px;font-size:13px;font-weight:bold;}
+/* Carry chip. Hidden unless something is riding along -- it is a state readout, and a
+   chip that says "nothing" every second of a walk in which you never catch anything is
+   just clutter. Green rather than the default card colour so it reads as the same "you
+   have this" signal the armed catch ring uses on the ground. */
+#hudCarry{display:none;margin-top:8px;max-width:250px;background:#e4f2e2;}
+#hudCarry.on{display:inline-block;}
 #watchMeter{display:none;align-items:center;gap:8px;margin-top:8px;max-width:240px;
   background:var(--card);border:3px solid var(--ink);border-radius:12px;padding:5px 10px;
   font-size:12px;font-weight:bold;}
@@ -397,6 +403,15 @@ body.bigmap #touchCtl, body.arrived #touchCtl{display:none;}
   #tJump{width:76px;height:76px;}
 }
 
+/* Settings tab -- fixed top-left, above the canvas and below any modal. Mirrors the
+   floating touch controls rather than the header buttons, because it has to stay usable
+   during a walk when the header is gone. */
+#panelTab{position:fixed;top:10px;left:10px;z-index:40;width:44px;height:44px;
+  display:flex;align-items:center;justify-content:center;font-size:20px;padding:0;}
+#panelTab.hidden{display:none;}
+body.panel-open #panelTab{left:auto;right:10px;}
+@media (max-width:760px){ #panelTab{top:8px;left:8px;} }
+
 </style>
 </head>
 <body>
@@ -409,6 +424,10 @@ body.bigmap #touchCtl, body.arrived #touchCtl{display:none;}
     <div class="spacer"></div>
     <button class="btn icon" id="panelBtn" title="Settings (Tab) — adjust while you walk">⚙️</button>
   </header>
+  <!-- Settings tab. The header ⚙️ disappears with the rest of the chrome once a walk
+       starts, which left no way to reach the panel mid-walk on a touch device. This one is
+       fixed to the viewport rather than living in the header, so it survives play. -->
+  <button class="btn icon" id="panelTab" title="Settings (Tab)" aria-label="Settings">⚙️</button>
   <main>
     <aside id="panel">
       <p class="hint panel-lede">Change anything while you walk — you stay where you
@@ -437,9 +456,10 @@ body.bigmap #touchCtl, body.arrived #touchCtl{display:none;}
           <label>Contour step <span class="val" id="contourVal">3.0 m</span></label>
           <input type="range" id="contourStep" min="0.5" max="12" step="0.5" value="3">
         </div>
-        <p class="hint">1:1 is true size; a bigger N packs the map into a shorter walk
-          (and steepens it — drop exaggeration to match). Contour step is metres of
-          real elevation per terrace.</p>
+        <p class="hint">1:1 is true size; a bigger N packs the map into a shorter walk.
+          Hill exaggeration follows it automatically so slopes stay true — nudge it
+          yourself afterwards if you want them flatter or wilder. Contour step is metres
+          of real elevation per terrace.</p>
         <div class="statbox" id="mapStats"></div>
         <div id="trailList" class="trail-list"></div>
         <p class="hint" id="mapNote">Loading map…</p>
@@ -456,7 +476,7 @@ body.bigmap #touchCtl, body.arrived #touchCtl{display:none;}
         <p class="hint">Same trails, different country.</p>
         <div class="ctl">
           <label>Fog <span class="val" id="fogAmtVal">1.00×</span></label>
-          <input type="range" id="fogAmt" min="0.15" max="3" step="0.05" value="1">
+          <input type="range" id="fogAmt" min="0.15" max="5" step="0.05" value="1">
         </div>
       </div>
       <div class="sect">
@@ -482,11 +502,14 @@ body.bigmap #touchCtl, body.arrived #touchCtl{display:none;}
         <div id="hudTally">
           <span class="tally" id="hudSeen" title="Wildlife watched">✨ 0</span>
           <span class="tally" id="hudSpooked" title="Wildlife you sent running">💨 0</span>
+          <span class="tally" id="hudCaught" title="Wildlife you caught and carried">🤗 0</span>
         </div>
         <div id="hudReadout">
           <span class="tally" id="hudElev" title="Elevation above sea level">⛰ —</span>
           <span class="tally" id="hudDist" title="Distance travelled">👣 —</span>
         </div>
+        <!-- Who is riding along, and how to put them down. Only up while carrying. -->
+        <div id="hudCarry" class="tally">🤗 —</div>
         <div id="watchMeter">
           <span id="watchName">Watching…</span>
           <span class="wm-bar"><i id="watchFill"></i></span>
@@ -520,6 +543,7 @@ body.bigmap #touchCtl, body.arrived #touchCtl{display:none;}
             <div class="arr-stat"><b id="arrTime">0:00</b><span>on the trail</span></div>
             <div class="arr-stat"><b id="arrSeen">0</b><span>animals watched</span></div>
             <div class="arr-stat"><b id="arrSpooked">0</b><span>animals spooked</span></div>
+            <div class="arr-stat"><b id="arrCaught">0</b><span>animals carried</span></div>
           </div>
           <div class="arr-panel">
             <h3>📍 Landmarks found</h3>
@@ -1207,21 +1231,72 @@ function gaitStep(legLen, speed, dt, opts){
    about Z with positive Z swinging a paw FORWARD, so every sign below follows from that
    one convention. Returns per-leg targets for the caller to blend toward, rather than
    writing them, so the drivers keep sole ownership of their own refs. */
-function climbPose(amt, t, legCount){
-  const a = clamp(amt, 0, 1);
-  // alternating paw scrabble, fast and small -- a climb is not a walk cycle
-  const scrab = Math.sin(t*0.026)*0.38*a;
+/* CLINGING TO A VERTICAL FACE, which is a different animal from scrambling over a kerb.
+
+   The reported screenshot showed the pup sticking out of the rock nose-first, lying
+   horizontally like a shelf bracket: that is the walking orientation with a scramble pitch
+   of about 26 degrees added, which is right for hopping a terrace riser and completely
+   wrong for hanging off a wall. On a wall the body has to stand UP -- pitched most of a
+   right angle so the spine runs up the face and the belly is against the stone.
+
+   It is a PITCH and not a yaw because forward on this rig is +x and bodyG.rotation.z tips
+   the nose up; the driver turns the whole group to face the rock separately (main.js sets
+   player.yaw from the face normal), so pitch and yaw compose into "standing on the wall,
+   facing it" rather than "lying along it".
+
+   Paws scrabble in the same diagonal antiphase as the scramble, at a smaller amplitude --
+   a cling is holding on, not hauling. The slow sway keeps it from reading as a decal. */
+function wallPose(t, legCount){
+  const ph = t*0.009;
+  const A = Math.sin(ph), B = Math.sin(ph + Math.PI);
   const legs = [];
   for(let i=0;i<legCount;i++){
     const front = i<2;
-    legs.push(front
-      ? a*(1.05 + (i===0 ? scrab : -scrab))    // reach: paws up onto the lip
-      : a*(-0.62 + (i===2 ? -scrab : scrab))); // push: hind legs extend behind
+    const swing = ((i===0 || i===3) ? A : B);
+    legs.push(front ? 0.55 + swing*0.30 : -0.30 + swing*0.22);
   }
   return {
     legs,
-    pitch: a*0.40,      // bodyG.rotation.z -- nose up, because forward is +x
-    rise:  a*0.11,      // a little hop of the body as it hauls up
+    pitch: 1.32,                 // ~76 degrees: nose up the face, belly to the rock
+    rise:  0.02 + A*0.03,
+    roll:  A*0.10,
+  };
+}
+
+function climbPose(amt, t, legCount){
+  const a = clamp(amt, 0, 1);
+
+  /* A DIAGONAL SCRAMBLE, not a symmetric one. The first version swung both front legs
+     together against both hind legs, which is a pose rather than a movement -- it reads as
+     a dog frozen mid-stretch and holds that read for the whole ascent. Real climbing moves
+     one limb at a time and keeps three planted, so the two diagonals are driven in
+     antiphase: front-left reaches with hind-right while the other pair holds, then they
+     swap. Same cycle a trot uses, which is why it reads as locomotion instead of a stance.
+
+     Slower than the old 0.026 and deeper. The scrabble used to be fast and tiny, which at
+     a climb rate you can now watch just looked like a vibration; a climb that takes
+     several seconds needs strokes you can actually follow. */
+  const ph = t*0.0115;
+  const A = Math.sin(ph), B = Math.sin(ph + Math.PI);   // the two diagonals, in antiphase
+  const legs = [];
+  for(let i=0;i<legCount;i++){
+    const front = i<2;
+    const left = (i===0 || i===2);
+    // legs 0,3 form one diagonal and 1,2 the other -- matching the trot offsets below
+    const swing = ((i===0 || i===3) ? A : B);
+    legs.push(front
+      ? a*(0.95 + swing*0.55)                  // reach: paws haul up over the lip
+      : a*(-0.55 + swing*0.32));               // push: hind legs drive off the face
+    void left;
+  }
+  return {
+    legs,
+    pitch: a*0.46,                     // bodyG.rotation.z -- nose up, because forward is +x
+    /* Body surges with the stroke rather than bobbing on a timer of its own, so the rise
+       lands on the beat the paws pull -- that coupling is most of what sells the effort. */
+    rise:  a*(0.10 + A*0.06),
+    // a little roll into whichever side is reaching, which is what stops it reading flat
+    roll:  a*A*0.13,
   };
 }
 
@@ -1348,7 +1423,7 @@ function spookRadiusFor(key){
   return clamp(16 - s.brav*1.3, 4, 14) * (s.scale||1);
 }
 
-function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise){
+function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise, onWall){
   if(!group || !refs) return;
   group.position.set(wildPos.x, groundY + jumpY, wildPos.z);
   group.rotation.y = yaw;
@@ -1366,7 +1441,10 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap
   wildClimbAmt = lerp(wildClimbAmt, clamp(climb||0, 0, 1), 1-Math.pow(0.0001,dt));
   const legs = refs.legs||[];
   const lp = wildLeapAmt  > 0.002 ? leapPose(wildLeapAmt, rise||0, legs.length) : null;
-  const cp = wildClimbAmt > 0.002 ? climbPose(wildClimbAmt, t, legs.length) : null;
+  /* A wall cling and a kerb scramble share the climbT timer but not the pose: one stands
+     the pup vertically against the stone, the other tips it a few degrees over a step. */
+  const cp = onWall ? wallPose(t, legs.length)
+           : (wildClimbAmt > 0.002 ? climbPose(wildClimbAmt, t, legs.length) : null);
 
   wildLegPhase += g.dPhase*(1 - (lp ? lp.freeze : 0));
 
@@ -1399,6 +1477,10 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap
     let pitch = (cp ? cp.pitch : 0) + flex;
     if(lp) pitch = lerp(pitch, lp.pitch, wildLeapAmt);
     refs.bodyG.rotation.z = pitch;
+    /* Roll into whichever diagonal is reaching. Only the climb sets it, so this is zero on
+       every other frame and the body rests flat -- but without it a scramble is perfectly
+       bilateral, which is the thing that made the old pose read as a statue. */
+    refs.bodyG.rotation.x = cp ? cp.roll : 0;
   }
 }
 
@@ -1974,7 +2056,7 @@ function dogRunMul(){ return STATS.run / STATS.walk; }
 /* Called once per frame with the resolved ground height under the dog's feet (from
    terrain.js) and the current motion state. Everything below only touches `dog`/`R`,
    the live bindings runtime.js exports — never rebuilds geometry. */
-function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise){
+function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise, onWall){
   if(!dog || !R) return;
   const size = P ? P.size : 1;
   // dog.position is in SCENE space, unlike dog.scale -- shrinking the group above
@@ -2000,7 +2082,10 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, 
   leapAmt  = lerp(leapAmt,  clamp(leap||0, 0, 1),  1-Math.pow(0.000002,dt));
   climbAmt = lerp(climbAmt, clamp(climb||0, 0, 1), 1-Math.pow(0.0001,dt));
   const lp = leapAmt  > 0.002 ? leapPose(leapAmt, rise||0, R.legs.length) : null;
-  const cp = climbAmt > 0.002 ? climbPose(climbAmt, t, R.legs.length) : null;
+  /* A wall cling and a kerb scramble share the climbT timer but not the pose: one stands
+     the pup vertically against the stone, the other tips it a few degrees over a step. */
+  const cp = onWall ? wallPose(t, R.legs.length)
+           : (climbAmt > 0.002 ? climbPose(climbAmt, t, R.legs.length) : null);
 
   legPhase += g.dPhase*(1 - (lp ? lp.freeze : 0));
 
@@ -2041,10 +2126,20 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, 
     let pitch = (cp ? cp.pitch : 0) + flex;
     if(lp) pitch = lerp(pitch, lp.pitch, leapAmt);
     R.bodyG.rotation.z = pitch;
+    /* Roll into whichever diagonal is reaching. Only the climb sets it, so this is zero on
+       every other frame and the body rests flat -- but without it a scramble is perfectly
+       bilateral, which is the thing that made the old pose read as a statue. */
+    R.bodyG.rotation.x = cp ? cp.roll : 0;
   }
 }
 
 function setYaw(v){ setDogYaw(v); }
+
+/* Test seam. The wall pose is only right if it survives the whole path from player state
+   through updateDog to bodyG.rotation -- reading gait.js's return value instead would have
+   passed on the exact screenshot that prompted the fix, since the pose was correct and
+   simply never reached the rig. Same reason dogLegLength is exported. */
+function dogBodyPitch(){ return R && R.bodyG ? R.bodyG.rotation.z : null; }
 
 /* ==== src/trails/shadow.js ==== */
 /* A blob shadow under the player.
@@ -2197,39 +2292,87 @@ const LIFT = 0.13;          // clears the trail ribbon stack, same reasoning as 
 
 let ring = null, geom = null, mat = null;
 let shownR = 0;             // eased radius, so state changes glide rather than snap
+let catchRing = null, catchGeom = null, catchMat = null;
 
 /* Colour by how loud you are, because that is the thing being communicated. Green when
    you are quiet enough to approach, amber at a walk, red when you are broadcasting. */
 const QUIET = 0x4f9d4f, WALK = 0xd8922e, LOUD = 0xc4442e;
+/* The catch ring has exactly one colour now that it only exists while armed -- see
+   updateCatchRing. Kept as a named constant rather than inlined so the build-time default
+   passed to makeBand and the colour set every frame can't drift apart. */
+const REACH_ARMED = 0x7bc47f;
+
+/* One band, built once. Extracted the moment there were two of these: the noise ring and
+   the catch ring differ in colour, radius and what they mean, and in nothing at all about
+   how a draped annulus is constructed. Two copies of this would drift, and the drift would
+   be invisible -- both rings would still draw, just no longer comparably, which is fatal
+   for a mechanic whose entire readout is one circle sitting inside the other. */
+function makeBand(name, color, opacity, order){
+  const g = new THREE.BufferGeometry();
+  // two vertices per angular step: inner edge, outer edge
+  g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(SEGS*2*3), 3));
+  const idx = [];
+  for(let i=0;i<SEGS;i++){
+    const a = i*2, b = a+1, c = ((i+1)%SEGS)*2, d = c+1;
+    idx.push(a, b, d, a, d, c);
+  }
+  g.setIndex(idx);
+  const m = new THREE.MeshBasicMaterial({
+    color, transparent:true, opacity,
+    depthWrite:false, side:THREE.DoubleSide,
+    // same reasoning as shadow.js: a surface lying on the ground needs a firm depth
+    // bias or it strobes against the ground it is lying on
+    polygonOffset:true, polygonOffsetFactor:-8, polygonOffsetUnits:-8,
+  });
+  const mesh = new THREE.Mesh(g, m);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = order;
+  mesh.name = name;
+  scene.add(mesh);
+  return {mesh, geom:g, mat:m};
+}
+
+/* Write one circle's worth of draped vertices. Both edges are sampled onto the terrain
+   (see the module header on why a line loop was not enough), and `lift` differs per ring
+   so the two never z-fight where they cross -- which they do constantly, since the whole
+   point is watching one pass through the other. */
+function drapeBand(g, px, pz, radius, half, groundAt, lift){
+  const arr = g.attributes.position.array;
+  for(let i=0;i<SEGS;i++){
+    const a = i/SEGS*Math.PI*2, ca = Math.cos(a), sa = Math.sin(a);
+    for(let e=0;e<2;e++){
+      const rr = radius + (e ? half : -half);
+      const x = px + ca*rr, z = pz + sa*rr;
+      const o = (i*2+e)*3;
+      arr[o]   = x;
+      arr[o+1] = groundAt(x, z) + lift;
+      arr[o+2] = z;
+    }
+  }
+  g.attributes.position.needsUpdate = true;
+  if(g.computeBoundingSphere) g.computeBoundingSphere();
+}
 
 function ensureRing(){
   if(ring) return ring;
   try{
-    geom = new THREE.BufferGeometry();
-    // two vertices per angular step: inner edge, outer edge
-    geom.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(SEGS*2*3), 3));
-    const idx = [];
-    for(let i=0;i<SEGS;i++){
-      const a = i*2, b = a+1, c = ((i+1)%SEGS)*2, d = c+1;
-      idx.push(a, b, d, a, d, c);
-    }
-    geom.setIndex(idx);
-    mat = new THREE.MeshBasicMaterial({
-      color: WALK, transparent:true, opacity:0.55,
-      depthWrite:false, side:THREE.DoubleSide,
-      // same reasoning as shadow.js: a surface lying on the ground needs a firm depth
-      // bias or it strobes against the ground it is lying on
-      polygonOffset:true, polygonOffsetFactor:-8, polygonOffsetUnits:-8,
-    });
-    ring = new THREE.Mesh(geom, mat);
-    ring.frustumCulled = false;
-    ring.renderOrder = 3;
-    ring.name = 'noiseRing';
-    scene.add(ring);
+    const built = makeBand('noiseRing', WALK, 0.55, 3);
+    ring = built.mesh; geom = built.geom; mat = built.mat;
   }catch(err){
     ring = null;
   }
   return ring;
+}
+
+function ensureCatchRing(){
+  if(catchRing) return catchRing;
+  try{
+    const built = makeBand('catchRing', REACH_ARMED, 0.8, 4);
+    catchRing = built.mesh; catchGeom = built.geom; catchMat = built.mat;
+  }catch(err){
+    catchRing = null;
+  }
+  return catchRing;
 }
 
 /* noise:  critters.js's own multiplier for the current state (see updateCritters)
@@ -2248,20 +2391,7 @@ function updateNoiseRing(dt, px, pz, noise, baseR, groundAt, visible){
   // band width grows with the circle so it stays readable at any radius, with a floor so
   // a tight sneaking ring does not thin away to nothing
   const half = clamp(shownR*0.045, 0.30, 1.6)*0.5;
-  const arr = geom.attributes.position.array;
-  for(let i=0;i<SEGS;i++){
-    const a = i/SEGS*Math.PI*2, ca = Math.cos(a), sa = Math.sin(a);
-    for(let e=0;e<2;e++){
-      const rr = shownR + (e ? half : -half);
-      const x = px + ca*rr, z = pz + sa*rr;
-      const o = (i*2+e)*3;
-      arr[o]   = x;
-      arr[o+1] = groundAt(x, z) + LIFT;
-      arr[o+2] = z;
-    }
-  }
-  geom.attributes.position.needsUpdate = true;
-  if(geom.computeBoundingSphere) geom.computeBoundingSphere();
+  drapeBand(geom, px, pz, shownR, half, groundAt, LIFT);
 
   // colour tracks the multiplier, not the absolute radius, so it means the same thing
   // on a map full of jumpy deer as on one full of bold bears
@@ -2269,8 +2399,45 @@ function updateNoiseRing(dt, px, pz, noise, baseR, groundAt, visible){
   mat.opacity = noise <= 0.4 ? 0.7 : 0.5;
 }
 
+/* The catch ring: how far you can reach, drawn the same way the noise ring is so the two
+   can be read against each other at a glance.
+
+   CENTRED ON THE ANIMAL, NOT THE PLAYER, and shown only when there is one worth showing.
+
+   Two rounds of getting this wrong are worth recording, because they were the same
+   mistake at different sizes. First it was drawn continuously around the pup at a fixed
+   radius -- next to the noise ring, which visibly breathes as you move and sneak, a circle
+   that never changed read as a leftover rather than information ("a static blue ring that
+   seems unnecessary"). Gating it on having a target fixed the clutter but kept it stapled
+   to the player, which still asked the player to judge whether a moving animal had entered
+   a ring attached to themselves.
+
+   Drawing it around the animal inverts that into the question actually being asked: get
+   inside this and it is yours. The centre is passed in, so this module stays ignorant of
+   whose ring it is -- main.js decides, from critters.js's own search, which is what keeps
+   the ring and the rule that governs catching from ever drifting apart.
+
+   `armed` means the player is inside it right now. It gates colour rather than visibility
+   here (visibility is the caller's `visible`, which is "is there a target at all"), so the
+   ring fades in while you approach and brightens at the moment the jump would work. */
+function updateCatchRing(dt, px, pz, radius, groundAt, visible, armed){
+  const r = ensureCatchRing();
+  if(!r) return;
+  r.visible = !!visible;
+  if(!visible) return;
+  const rad = clamp(radius, 0.5, 60);
+  // a hair thinner than the noise band, so where they overlap it is still obvious which
+  // is which, and lifted clear of it so the crossing does not strobe
+  drapeBand(catchGeom, px, pz, rad, 0.16, groundAt, LIFT + 0.05);
+  catchMat.color.setHex(REACH_ARMED);
+  // dim while you are still closing in, solid once you could actually grab it
+  catchMat.opacity = armed ? 0.85 : 0.32;
+}
+
 function setNoiseRingVisible(v){ const r = ensureRing(); if(r) r.visible = !!v; }
+function setCatchRingVisible(v){ const r = ensureCatchRing(); if(r) r.visible = !!v; }
 function getNoiseRing(){ return ring; }
+function getCatchRing(){ return catchRing; }
 function noiseRingRadius(){ return shownR; }
 
 /* ==== src/trails/terrain.js ==== */
@@ -2326,6 +2493,34 @@ function rawGroundY(x,z){ // un-terraced, for reference / minimap shading if eve
   return WORLD ? WORLD.heightAt(x,z) - GROUND_M : 0;
 }
 
+/* How much of a polygon's own footprint has to be claimed already before it adopts a
+   neighbour's level instead of grading itself.
+
+   THIS USED TO BE ONE CELL. The claim map exists because ~20 parking-lot polygons on the
+   default map genuinely overlap, and re-levelling the second one leaves the first slab
+   hovering. But the test was `for(const k of mark){ if(claimed.has(k)){ lvl=...; break; } }`
+   -- a single shared cell, picked in Set iteration order, handed the whole polygon a
+   level graded for something else. Areas mark their bbox expanded by one cell plus every
+   cell their boundary crosses, so merely TOUCHING was enough.
+
+   Measured on data/rrworld.json, that is exactly what happened to both ponds: each one
+   shares an edge cell with a rock-formation polygon and inherited its band, landing 34 m
+   and 42 m above its own terrain. A pond sitting on top of a rock formation is precisely
+   the reported symptom, and it was never about water rendering -- it was the grading pass
+   next door. Requiring a real majority keeps the parking-lot case (those polygons overlap
+   substantially) and drops the touching case. */
+const CLAIM_SHARE = 0.5;
+
+/* Water does not sit on a plateau. Every other area kind is a slab someone levelled --
+   a lot, a footprint, a bench -- so the median band under it is the right answer. A pond
+   is the opposite: it is the LOW ground, and levelling it to its own median puts half the
+   surface above the shore it drains from. Grading to a low percentile instead makes the
+   footprint a shallow basin, which is both what water is and what "flush with the ground"
+   means. Not the minimum: one noisy DEM cell in a 40 m polygon should not sink the whole
+   pond a terrace. */
+const WATER_PCTILE = 0.25;
+function isWaterArea(a){ return a && a.kind === 'water'; }
+
 /* Flatten every DEM cell under an area polygon to one shared terrace band — the same
    grading pass as before, now operating on the band array instead of a bespoke grid.
    Overlapping polygons (this project has ~20 parking-lot polygons that touch) adopt a
@@ -2356,10 +2551,29 @@ function flattenAreaCells(areas, pointInArea, areaBBox){
     }
     if(!mark.size)continue;
     let lvl=null;
-    for(const k of mark){ if(claimed.has(k)){ lvl=claimed.get(k); break; } }
+    /* Adopt a neighbour's level only when this polygon is MOSTLY sitting on one, and take
+       the level the most shared cells actually hold rather than whichever the Set happened
+       to yield first -- an overlap can straddle two graded slabs, and picking arbitrarily
+       between them is the same coin flip in a smaller place. Water never inherits at all:
+       a pond that shares a boundary cell with a rock mass is not on the rock mass. */
+    if(!isWaterArea(a)){
+      const votes=new Map();
+      let shared=0;
+      for(const k of mark){
+        if(!claimed.has(k)) continue;
+        shared++;
+        const v=claimed.get(k);
+        votes.set(v,(votes.get(v)||0)+1);
+      }
+      if(shared/mark.size >= CLAIM_SHARE){
+        let bestN=-1;
+        for(const [v,n] of votes) if(n>bestN){ bestN=n; lvl=v; }
+      }
+    }
     if(lvl===null){
       const vals=[...mark].map(k=>BAND[k]).sort((p,q)=>p-q);
-      lvl=vals[Math.floor(vals.length/2)];
+      const pct=isWaterArea(a) ? WATER_PCTILE : 0.5;
+      lvl=vals[clamp(Math.floor(vals.length*pct),0,vals.length-1)];
     }
     a.groundY=(lvl*STEP-GROUND_M);   // metres, caller applies vertScale
     for(const k of mark){ BAND[k]=lvl; claimed.set(k,lvl); }
@@ -2860,7 +3074,14 @@ function updateChaseCam(dt, px, pz, groundY, jumpY, speed, vertScale, dist = 8.5
      this spring is smoothing a smooth signal -- deliberately. The first pass removes the
      step's spatial abruptness, this one removes its temporal abruptness, and it takes
      both to stop a contour crossing registering as a bump. */
-  const targetRigY = cameraGroundY(px, pz, vertScale) + 2;
+  /* Never below the surface the avatar is actually standing on. cameraGroundY samples
+     TERRAIN, which is the right answer everywhere except on top of a rock formation or a
+     roof -- there the avatar is metres above the terrain the rig is being aimed at, so the
+     boom sat down at the base of the formation and framed the rock rather than the pup on
+     it. `groundY` is world.js's answer including solid tops, so taking the higher of the
+     two keeps the terrain smoothing everywhere it applies and lifts the rig onto the
+     formation when there is one underfoot. */
+  const targetRigY = Math.max(cameraGroundY(px, pz, vertScale), groundY) + 2;
   [rigY, rigVY] = spring(rigY, rigVY, targetRigY, dt, 3.1);
 
   /* Look target height. Springs toward the avatar's real head height -- the avatar stays
@@ -3545,7 +3766,7 @@ const THEMES={
     trees:[['pine',0.4],['blob',0.4],['juniper',0.2]], treeDensity:1, treeScale:1,
     rocks:['#a8836a','#b28f76'], rockDensity:1, rockStyle:'boulder',
     tuft:'#5d8440', tuftCount:170,
-    wildlife:['rabbit','squirrel','deer']
+    wildlife:['rabbit','squirrel','chipmunk', 'deer', 'cat', 'fox']
   },
   forest:{
     id:'forest', mountain:['#4a6470','#3d545f','#587483'], mountainStyle:'peaks', em:'🌲', label:'Deep forest',
@@ -3556,7 +3777,7 @@ const THEMES={
     trees:[['pine',0.72],['blob',0.18],['juniper',0.1]], treeDensity:2.4, treeScale:1.5,
     rocks:['#6f7361','#7d8270'], rockDensity:1.4, rockStyle:'mossy',
     tuft:'#4a6b39', tuftCount:260,
-    wildlife:['rabbit','squirrel','deer','bear']
+    wildlife:['rabbit','squirrel','deer','bear', 'goat', 'fox', 'moose']
   },
   redrock:{
     id:'redrock', mountain:['#773c2b','#693326','#854834'], mountainStyle:'mesas', em:'🏜️', label:'Red rock',
@@ -3568,7 +3789,7 @@ const THEMES={
     trees:[['juniper',0.62],['pine',0.14],['blob',0.24]], treeDensity:0.5, treeScale:0.85,
     rocks:['#853828','#8f4730','#773226','#945439'], rockDensity:2.2, rockStyle:'fin',
     tuft:'#7c8c4e', tuftCount:90,
-    wildlife:['rabbit','bighorn','goat']
+    wildlife:['rabbit', 'rabbit','coyote', 'deer','deer', 'bighorn', 'cat']
   }
 };
 let THEME=THEMES.meadow;
@@ -3870,14 +4091,26 @@ const POI_STYLE={
   camp:{em:'⛺',label:'Campsite'},       water:{em:'💧',label:'Spring'},
   cairn:{em:'🗿',label:'Marker'},        tree:{em:'🌳',label:'Landmark tree'}
 };
+/* `solid` is a PHYSICS fact and it lives here, beside the drawing, because the two have
+   to agree: an area is solid exactly when this table gives it real height off the ground.
+   The landforms are extruded rock masses and a building is an extruded footprint with a
+   roof cap -- you can see they are there, so walking through them reads as a bug. Every
+   other kind is paint on the floor (a lot, a meadow, a pond), and blocking those would
+   fence the map off with lines the player cannot see.
+
+   Enforced OFF-TRAIL ONLY -- see world.js's areaBlocked and main.js's moveOffTrail. The
+   default map has ~5 m of trail crossing the Kissing Camels polygon and rrworld ~2 m
+   crossing a rock mass, so a collider that did not yield to the tread would wall off a
+   route the map is drawn as though you can walk. The tread wins, as it does everywhere
+   else in this game. */
 const AREA_STYLE={
   water:{fill:'#5c9fd6',op:0.72,em:'💧',label:'Water'},
   forest:{fill:'#3f6b40',op:0.5,em:'🌲',label:'Forest'},
   meadow:{fill:'#86a852',op:0.36,em:'🌾',label:'Meadow'},
-  rock:{fill:'#8a7360',op:0.6,em:'🪨',landform:true,label:'Rock formation'},
-  redrock:{fill:'#8a3e2c',op:0.65,em:'🪨',landform:true,label:'Red rock formation'},
-  lightrock:{fill:'#c9a87e',op:0.65,em:'🪨',landform:true,label:'Light rock formation'},
-  building:{fill:'#b08a63',op:1,em:'🏚️',label:'Building'},
+  rock:{fill:'#8a7360',op:0.6,em:'🪨',landform:true,solid:true,label:'Rock formation'},
+  redrock:{fill:'#8a3e2c',op:0.65,em:'🪨',landform:true,solid:true,label:'Red rock formation'},
+  lightrock:{fill:'#c9a87e',op:0.65,em:'🪨',landform:true,solid:true,label:'Light rock formation'},
+  building:{fill:'#b08a63',op:1,em:'🏚️',solid:true,label:'Building'},
   parking:{fill:'#8d8578',op:0.85,em:'🅿️',paved:true,label:'Parking'}
 };
 function plaqueTex(title,sub){
@@ -4047,7 +4280,23 @@ function buildLandform(a,st,shape,bb,rng){
     spire.position.set(x,hgt+sh/2-0.5,z);spire.rotation.y=rng()*6.28;g.add(spire);placed++;
     topY=Math.max(topY,hgt+sh-0.5);
   }
-  return{group:g,topY};
+  /* Two different heights, and conflating them is what would put the player standing in
+     mid-air on top of a spire tip. `topY` is the tallest thing in the group and is what
+     the floating label clears. `slabY` is the flat extruded mass underneath -- the only
+     part of a landform that is actually a surface -- and is what world.js registers as
+     the walkable top. */
+  /* THE MESH IS BIGGER THAN THE POLYGON, and every collision test in world.js needs to
+     know by how much. ExtrudeGeometry's bevel pushes the surface `bevelSize` OUTWARD from
+     the shape's outline and `bevelThickness` beyond each end of the extrusion -- so a rock
+     drawn from a given polygon occupies bevel*0.75 more ground in every direction and
+     stands bevel taller than `depth`.
+
+     Nothing accounted for that, so the collision outline was the bare polygon and the pup
+     could stand up to 0.75 units inside the visible stone. That is the reported screenshot:
+     a pup clinging to a face with its body sunk into the rock, and a pup with only its head
+     out of a wall. Reporting `inflate` here, from the same numbers that build the geometry,
+     is what keeps the bounds and the mesh from drifting apart. */
+  return{group:g,topY,slabY:hgt+bevel,inflate:bevel*0.75};
 }
 function floatingLabelTex(name,em){
   const c=document.createElement('canvas');c.width=512;c.height=128;
@@ -4092,11 +4341,23 @@ function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
   const shape=areaShape(a);
   const bb=areaBBox(a);
   let labelY=3.5; // flat ground cover: just enough clearance to read as floating signage
+  /* The height of the walkable top, in the group's own space -- null for anything that is
+     paint on the floor. world.js turns it into an absolute world height once the group has
+     been placed, and main.js stands the player on it (see areaSolidTop). Recorded here
+     because this is the function that decides how tall these things are drawn, and a
+     second opinion about it living anywhere else would be a surface that does not match
+     the mesh under it. */
+  let solidTop=null;
+  // how far the drawn surface reaches past the polygon outline -- see buildLandform
+  let solidInflate=0;
   if(st.landform){
     const built=buildLandform(a,st,shape,bb,rng);
     g.add(built.group);labelY=built.topY+2.2;
+    solidTop=built.slabY;
+    solidInflate=built.inflate;
   }else if(a.kind==='building'){
     const hgt=clamp(+(a.props.height||a.props.levels*3||0)||3.4,1.5,14);
+    solidTop=hgt;
     const geo=new THREE.ExtrudeGeometry(shape,{depth:hgt,bevelEnabled:false});
     const m=M(geo,toon(st.fill));
     // see buildLandform: rotation alone maps the extrude's base to y=0, no offset needed
@@ -4143,6 +4404,11 @@ function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
   // is what put every area with a claimed band floating above -- or sunk below -- the
   // ground mesh, which IS built with vertScale applied (buildTerrainMesh(VERT_SCALE)).
   g.position.y=(a.groundY!=null)?a.groundY*vertScale:groundYAt(bb.cx,bb.cz);
+  // absolute now that the group is placed, which is the form every consumer wants
+  if(solidTop!=null){
+    g.userData.solidTop=g.position.y+solidTop;
+    g.userData.solidInflate=solidInflate;   // 0 for buildings: their extrude has no bevel
+  }
   return g;
 }
 function areaSignTex(title,sub){
@@ -4907,6 +5173,268 @@ let GRAPH=null, TRAILHEADS=[], POIS=[], AREAS=[], WATER=[];
    per-frame size cap does not have to walk the whole graph looking for sprites.
    Cleared IN PLACE on rebuild -- see the module header on shared mutable arrays. */
 const AREA_LABELS=[];
+/* Areas you cannot walk through: the extruded rock masses and building footprints.
+   AREA_STYLE.solid is the single source of truth for which kinds those are (pieces.js),
+   because the fact "this polygon has real height" is the same fact that decides both how
+   it is drawn and whether it stops you.
+
+   Cleared IN PLACE like every other shared array here -- main.js holds this same
+   reference through areaBlocked, and reassigning it on a rebuild would leave the player
+   walking through rocks that are visibly there.
+
+   Each entry caches its own bbox. areaBlocked runs up to three times per frame from
+   moveOffTrail and ~24k times in one smoke assertion, and a bbox reject turns almost
+   every test into two comparisons instead of a ring walk. */
+const AREA_SOLIDS=[];
+function getAreaSolids(){ return AREA_SOLIDS; }
+
+/* Distance from a point to a polygon's boundary, ignoring which side it is on. Used to
+   give the player a BODY rather than a pen-point: standing 20 cm from a rock wall should
+   already be a collision, or the avatar visibly overlaps the mass it is standing against. */
+function distToRings(x,z,rings){
+  let best=Infinity;
+  for(const ring of rings){
+    for(let i=0,j=ring.length-1;i<ring.length;j=i++){
+      const ax=ring[j][0],az=ring[j][1],bx=ring[i][0],bz=ring[i][1];
+      const vx=bx-ax,vz=bz-az;
+      const L2=vx*vx+vz*vz;
+      let t=L2>0 ? ((x-ax)*vx+(z-az)*vz)/L2 : 0;
+      t=t<0?0:(t>1?1:t);
+      const d=Math.hypot(x-(ax+vx*t), z-(az+vz*t));
+      if(d<best) best=d;
+    }
+  }
+  return best;
+}
+
+/* The top of whatever solid thing stands at (x,z), or null for open ground.
+
+   THIS REPLACES A HARD COLLIDER, and the change is the whole fix for getting stuck inside
+   a rock. The first version answered a boolean -- "is this blocked" -- which makes a rock
+   mass a wall of infinite height with no inside and no top. Anything that ended up within
+   the footprint (walking the trail that runs through Kissing Camels, then stepping off it)
+   found every direction refused and was trapped, and there was no way to be on top of a
+   thing whose only property was that you could not be in it.
+
+   Answering with a HEIGHT instead makes a solid area a piece of terrain: the ground at
+   that point is simply higher. Everything else then falls out of rules that already exist
+   in main.js and needed no new concepts at all -- the step-up limit makes a tall face a
+   wall, being airborne above the top lets you land on it, walking off the edge is a fall
+   because absolute height is preserved, and anything that finds itself inside is standing
+   on top rather than trapped, because the ground beneath it is the top.
+
+   NO LONGER YIELDS TO THE TREAD, and that reversal is deliberate. The exemption existed so
+   a collider could not fence off a route -- about 5 m of trail runs through the Kissing
+   Camels polygon on the default map. But it meant that along those 5 m the rock was simply
+   not there, so the pup walked into the middle of a formation and vanished: measured, 1.66
+   units deep, rendered 7 units below the top of the mass it was standing inside.
+
+   Worse, it fought solidEmbed. Movement carried the pup in because the ground had not
+   risen; the embed check shoved it back out; the next frame carried it in again. That
+   oscillation at the boundary is the "stuck at the edge of the formation" the player feels.
+
+   A rock is now solid everywhere, tread or no tread. The cost is that a handful of metres
+   of trail become impassable where the map data runs a path through a rock mass -- a
+   conflict in the source polygons rather than a routing decision this code should be
+   papering over, and a far smaller problem than walking through a mountain. */
+function areaSolidTop(x,z){
+  if(!AREA_SOLIDS.length) return null;
+  let top=null;
+  for(const s of AREA_SOLIDS){
+    if(s.top==null) continue;
+    const bb=s.bb;
+    const inf=s.inflate||0;
+    if(x<bb.mnx-inf||x>bb.mxx+inf||z<bb.mnz-inf||z>bb.mxz+inf) continue;
+    // the bevelled skirt is part of the rock even though it lies outside the polygon
+    if(!pointInArea(x,z,s.area) && !(inf>0 && distToRings(x,z,s.area.rings)<=inf)) continue;
+    if(top===null||s.top>top) top=s.top;
+  }
+  return top;
+}
+
+/* Can you see from (ax,az) to (bx,bz)? Eye heights are above the surface at each end.
+
+   Terrain AND solid areas, because both are things you can be behind: a hill brow and a
+   rock formation occlude identically from the player's side of the screen, and a sightline
+   that only knew about one of them would let you bank a sighting through a boulder.
+
+   Walks the straight line between the two points and asks, at each sample, whether the
+   ground there rises above the line of sight. That is the same test camera.js already runs
+   to keep the brow of a hill out of the way of the avatar, which is where the sampling
+   density comes from -- a metre or so, fine enough to catch a terrace riser and coarse
+   enough to run for every animal every frame.
+
+   The near end is skipped: the surface directly under the viewer is by definition at eye
+   level minus eye height, and sampling it would make everything blind. */
+function lineOfSight(ax, az, bx, bz, eyeA, eyeB){
+  const dx=bx-ax, dz=bz-az;
+  const L=Math.hypot(dx,dz);
+  if(L<0.5) return true;
+  const y0=surfaceHeight(ax,az)+(eyeA==null?1.4:eyeA);
+  const y1=surfaceHeight(bx,bz)+(eyeB==null?0.8:eyeB);
+  const steps=clamp(Math.ceil(L/1.2), 2, 90);
+  for(let i=1;i<steps;i++){
+    const t=i/steps;
+    const x=ax+dx*t, z=az+dz*t;
+    // a little slack, so a terrace riser exactly level with the sightline is not a wall
+    if(surfaceHeight(x,z) > y0+(y1-y0)*t + 0.25) return false;
+  }
+  return true;
+}
+/* Terrain, or the top of a solid standing on it -- the surface a sightline can be stopped
+   by. Deliberately NOT the player's ground function: this asks what is in the way, which
+   includes solids the player could never stand on because they are too tall to climb. */
+function surfaceHeight(x,z){
+  const g=standingY(x,z);
+  const top=areaSolidTop(x,z);
+  return (top!=null && top>g) ? top : g;
+}
+
+/* The nearest climbable FACE to (x,z): the closest point on a solid's outline, the
+   outward normal there, and how high that solid stands.
+
+   Exists because a climb has to happen on the OUTSIDE. The first version moved the player
+   to the interior destination and raised them from there, so the pup spent the whole ascent
+   embedded in the rock with its tail poking out of the face -- correct height, wrong side
+   of the wall. Hanging on a face needs the face itself: a point on the boundary and the
+   direction "away from the rock", which a boolean or a height query cannot give.
+
+   `within` bounds the search so this stays cheap; it runs every frame while a climb is
+   live and once per frame while one is possible.
+
+   Unlike areaSolidTop this does NOT exempt trail corridors. The tread-wins rule exists so
+   a collider cannot fence off a route; it has nothing to say about whether you may put
+   your paws on a rock that happens to stand next to a path. Exempting corridors here just
+   made the faces beside a trail unclimbable, which is most of the faces a player ever
+   walks up to. */
+function nearestSolidFace(x,z,within){
+  const R=within||3;
+  let best=null;
+  for(const s of AREA_SOLIDS){
+    if(s.top==null) continue;
+    const bb=s.bb;
+    if(x<bb.mnx-R||x>bb.mxx+R||z<bb.mnz-R||z>bb.mxz+R) continue;
+    for(const ring of s.area.rings){
+      for(let i=0,j=ring.length-1;i<ring.length;j=i++){
+        const ax=ring[j][0],az=ring[j][1],bx=ring[i][0],bz=ring[i][1];
+        const vx=bx-ax,vz=bz-az;
+        const L2=vx*vx+vz*vz;
+        let t=L2>0 ? ((x-ax)*vx+(z-az)*vz)/L2 : 0;
+        t=t<0?0:(t>1?1:t);
+        const px=ax+vx*t, pz=az+vz*t;
+        const d=Math.hypot(x-px,z-pz);
+        if(d>R || (best && d>=best.d)) continue;
+        best={d, x:px, z:pz, top:s.top, area:s.area, kind:s.kind, inflate:s.inflate||0};
+      }
+    }
+  }
+  if(!best) return null;
+  /* Outward normal. Taken by stepping off the boundary point and asking which side is
+     inside, rather than from the edge's winding -- rings arrive from GeoJSON with no
+     guaranteed orientation, and a normal that points the wrong way puts the climber
+     INSIDE the thing it is meant to be hanging off. */
+  let ox=x-best.x, oz=z-best.z;
+  const oL=Math.hypot(ox,oz);
+  if(oL>1e-4){ ox/=oL; oz/=oL; }
+  else {
+    // standing exactly on the outline: probe outward along each axis for open ground
+    ox=1; oz=0;
+    for(const [tx,tz] of [[1,0],[-1,0],[0,1],[0,-1]]){
+      if(!pointInArea(best.x+tx*0.4, best.z+tz*0.4, best.area)){ ox=tx; oz=tz; break; }
+    }
+  }
+  if(pointInArea(best.x+ox*0.4, best.z+oz*0.4, best.area)){ ox=-ox; oz=-oz; }
+  best.ox=ox; best.oz=oz;
+  /* Move the reported face out onto the DRAWN surface. Callers stand the pup a fixed
+     standoff off this point, and measuring that standoff from the bare polygon put it
+     inside the bevelled skirt -- which is exactly how the pup ended up sunk into the rock
+     it was clinging to. `d` is corrected too so proximity tests stay honest. */
+  if(best.inflate>0){
+    best.x+=ox*best.inflate; best.z+=oz*best.inflate;
+    best.d=Math.max(0, best.d-best.inflate);
+  }
+  return best;
+}
+
+/* Distance from a point to ONE named solid's outline, and whether the point is inside it.
+   Deliberately not "the nearest solid": the whole difficulty in deciding whether a pup is
+   walking into a rock is that near a corner the nearest FACE and the face you are aimed at
+   are different, so any comparison has to be against a fixed subject. */
+function distToSolid(x,z,area){
+  return {d: distToRings(x,z,area.rings), inside: pointInArea(x,z,area)};
+}
+
+/* If (x,z,y) is INSIDE a solid and below its top, the shortest push that gets it out.
+   Returns null when there is nothing to fix, which is almost every call.
+
+   THE LAST LINE OF DEFENCE, and it exists because "how did the player get in there" turned
+   out to have more answers than the movement rules could enumerate. areaSolidTop exempts
+   trail corridors so a collider cannot fence off a route -- and about 5 m of trail on the
+   default map runs straight through the Kissing Camels polygon, so walking that trail
+   carried the pup into the middle of the rock at tread level with only its paws showing
+   through the face. Blocking every way in is whack-a-mole; asserting the invariant
+   directly is not. Wherever you came from, you do not get to be inside the rock.
+
+   Deliberately ignores corridors. The tread wins for BLOCKING, which is about not severing
+   routes; it does not get to win for being inside a mountain, which is not a route
+   question at all. */
+function solidEmbed(x,z,y){
+  for(const s of AREA_SOLIDS){
+    if(s.top==null || y >= s.top-0.3) continue;
+    const bb=s.bb;
+    const inf=s.inflate||0;
+    if(x<bb.mnx-inf||x>bb.mxx+inf||z<bb.mnz-inf||z>bb.mxz+inf) continue;
+    const insidePoly=pointInArea(x,z,s.area);
+    if(!insidePoly && !(inf>0 && distToRings(x,z,s.area.rings)<=inf)) continue;
+    // nearest point on the outline is the shortest way out
+    let best=null;
+    for(const ring of s.area.rings){
+      for(let i=0,j=ring.length-1;i<ring.length;j=i++){
+        const ax=ring[j][0],az=ring[j][1],bx=ring[i][0],bz=ring[i][1];
+        const vx=bx-ax,vz=bz-az;
+        const L2=vx*vx+vz*vz;
+        let t=L2>0 ? ((x-ax)*vx+(z-az)*vz)/L2 : 0;
+        t=t<0?0:(t>1?1:t);
+        const px=ax+vx*t, pz=az+vz*t;
+        const d=Math.hypot(x-px,z-pz);
+        if(!best||d<best.d) best={d,px,pz};
+      }
+    }
+    if(!best) continue;
+    let ox=x-best.px, oz=z-best.pz;
+    const L=Math.hypot(ox,oz);
+    if(L>1e-4){ ox/=L; oz/=L; }
+    else{
+      // dead on the outline: pick whichever axis leads to open ground
+      ox=1; oz=0;
+      for(const [tx,tz] of [[1,0],[-1,0],[0,1],[0,-1]]){
+        if(!pointInArea(best.px+tx*0.5, best.pz+tz*0.5, s.area)){ ox=tx; oz=tz; break; }
+      }
+    }
+    // outward, not inward -- the vector above points from the wall toward the player,
+    // who is inside, so it needs flipping before it is a way out
+    if(pointInArea(best.px+ox*0.5, best.pz+oz*0.5, s.area)){ ox=-ox; oz=-oz; }
+    // clear of the DRAWN surface, not just the polygon: the skirt is solid too
+    return {x:best.px+ox*((s.inflate||0)+0.6), z:best.pz+oz*((s.inflate||0)+0.6), top:s.top};
+  }
+  return null;
+}
+
+/* Is (x,z) inside -- or within `rad` of -- something solid? Kept because it answers a
+   question areaSolidTop cannot: "am I touching this at all", regardless of height. Used by
+   the smoke suite to assert the footprints are where they should be, and available to any
+   caller that wants presence rather than a surface. Movement does NOT use it -- see
+   areaSolidTop for why a boolean was the wrong shape for that job. */
+function areaBlocked(x,z,rad){
+  const r=rad||0;
+  for(const s of AREA_SOLIDS){
+    const bb=s.bb;
+    if(x<bb.mnx-r||x>bb.mxx+r||z<bb.mnz-r||z>bb.mxz+r) continue;
+    if(pointInArea(x,z,s.area)) return true;
+    if(r>0 && distToRings(x,z,s.area.rings)<r) return true;
+  }
+  return false;
+}
 let backdropG=null;             // horizon ring, re-centred on the camera by main.js
 let bboxW={minx:0,maxx:0,minz:0,maxz:0};
 let EXTRA=[];                   // raw GeoJSON FeatureCollections dropped in-session
@@ -5012,7 +5540,10 @@ function getExaggeration(){ return EXAG; }
 function getMapScale(){ return MAP_SCALE; }
 function getFogMultiplier(){ return FOG_MUL; }
 function setFogMultiplier(v){
-  FOG_MUL=clamp(Number(v)||1, 0.15, 3);
+  /* Upper bound matches the slider in trails/index.html. Raising the input's max alone
+     did nothing -- the value arrived here and was clamped straight back to 3, so the
+     handle moved and the view did not. Both ends of that have to agree. */
+  FOG_MUL=clamp(Number(v)||1, 0.15, 5);
   applyThemeLighting();          // fog only -- cheap enough to call straight from an input handler
 }
 function setMapScale(v){
@@ -6169,9 +6700,20 @@ function rebuildWorld(){
 
   // areas (ground cover) before trails, matching draw order in the original
   AREA_LABELS.length=0;
+  /* Registered from the SAME list, in the same pass, as the meshes -- so a polygon that
+     failed to build (the catch below) never leaves an invisible wall behind it. */
+  AREA_SOLIDS.length=0;
   AREAS.forEach((a,ai)=>{ try{
     const ag=buildArea(a,rng,groundYAt,nearestTrail,VERT_SCALE); ag.name='area:'+ai; worldG.add(ag);
     ag.traverse(o=>{ if(o.userData && o.userData.areaLabel) AREA_LABELS.push(o); });
+    const st=AREA_STYLE[a.kind];
+    // `top` comes off the built group, so the surface the player stands on is by
+    // construction the top of the mesh they can see -- see pieces.js's buildArea
+    if(st && st.solid) AREA_SOLIDS.push({area:a, kind:a.kind, bb:areaBBox(a),
+                                         top:ag.userData ? ag.userData.solidTop : null,
+                                         // the drawn surface reaches this far past the
+                                         // outline; see pieces.js's buildLandform
+                                         inflate:(ag.userData && ag.userData.solidInflate) || 0});
   }catch(err){ console.warn('area skipped',a.name,err); } });
 
   // Path colour/texture follows the source file's own highway/kind tag (pathKind, in
@@ -6573,6 +7115,218 @@ let watchBest = null;             // {name, progress 0..1} for the HUD meter, pe
 
 const WATCH_SECONDS = 3.2;        // how long you must hold still to bank a sighting
 const POPULATION = 14;
+/* How far a fleeing animal has to get before it may be recycled to a new spot. Nothing is
+   ever removed from the map inside this radius, so an animal you are chasing cannot blink
+   out in front of you -- see the flee branch in updateCritters for the whole reasoning.
+   World units, like every other position in this file, so it compacts with the map the
+   same way `dist` does; the two are compared directly and must share units. */
+const RESPAWN_FAR = 95;
+
+/* ---------- catching a small animal, and carrying it ----------
+
+   THE THIRD VERB. Watching rewards holding still and chasing is the failure case you can
+   choose; neither of them lets you TOUCH anything. Catching does, and it is deliberately
+   the hardest of the three, because the whole sneak system already exists to answer
+   exactly this question -- how close can I get -- and until now nothing paid out at the
+   very end of that scale.
+
+   THE RING IS THE MECHANIC. The catch ring's RADIUS is steady; the noise ring's is not --
+   it breathes with how loud you are (playerNoise below). So the readable rule the player
+   learns without being told is "when the noise ring pulls INSIDE the catch ring, anything
+   you can reach is yours". That means sneaking AND standing still, and see CATCH_NOISE for
+   why it means that on every roster rather than only on this one.
+
+   The catch ring itself only appears once something is actually in reach (noise-ring.js's
+   `armed` gate) -- it is not drawn continuously waiting to matter. A ring with a fixed
+   radius and nothing nearby has nothing to say, and reports that a constantly-visible one
+   read as an unexplained static circle confirmed it. Showing it exactly when it has
+   something to say is what makes it feel like a response to the world rather than a HUD
+   element that happens to be a circle. Nothing else in the game had to change to make the
+   underlying rule true; it falls out of the two rings being drawn against each other.
+
+   TRUE METRES, unscaled -- same rule as every other animal-to-player distance in this
+   file (see wanderTarget's note on why positions scale with the map and radii do not).
+
+   SMALL ANIMALS ONLY, and driven by the stats table rather than a list of names, the same
+   way DEFEND_BRAV names the defenders. SPECIES.scale ranks it cleanly: chipmunk 0.72 up
+   to coyote 1.05, then a gap to mountain goat 1.3 and deer 1.55. A threshold of 1.1
+   therefore means "things a pup could plausibly carry" and stays right if the roster
+   changes. A defender is excluded outright regardless of size -- an animal whose answer
+   to you being close is to charge does not have a second answer where you pick it up. */
+/* DERIVED from the same reference the noise ring is drawn against, not a bare constant,
+   and that is the difference between the mechanic working and merely happening to work.
+
+   A fixed 4.5 m was the first version and it was wrong for a reason worth recording: the
+   noise ring is drawn against typicalSpookRadius(), a MEAN over whoever is currently
+   alive on this map. That number moves -- with the theme roster, with the population, and
+   with what has fled -- so the gap between "settled sneak" and "reach" was a coincidence
+   that held at 16.2 m and broke at 13.7 m, where a settled WALK also landed inside the
+   ring. tools/smoke.js caught exactly that, one assertion after a scale change.
+
+   Expressing reach as a NOISE MULTIPLIER instead makes the ordering true by construction.
+   CATCH_NOISE sits between the settled-sneak multiplier (0.34*0.85*0.6 = 0.173) and both
+   of the next ones up -- a moving sneak (0.289) and a settled walk (0.281). So on any
+   roster, at any scale, settling into a sneak is the one state that puts the noise ring
+   inside the reach ring, and it cannot drift out of that relationship without someone
+   editing this line.
+
+   The clamp is the physical half of the answer: reach is an arm's length, so it is not
+   allowed to become 20 m on a map full of very jumpy deer or 30 cm on one full of bears. */
+/* PER-SPECIES, off that animal's OWN spook radius. The previous version used
+   typicalSpookRadius() -- the roster MEAN -- and that is why nothing could be caught.
+
+   Measured on the default meadow roster (rabbit, squirrel, deer): the mean is 16.2,
+   inflated by the deer at 21.7, giving a reach of 3.73 m. But whether a RABBIT bolts
+   depends on the rabbit's own radius of 14, and at a moving sneak that is 4.05 m. The
+   animal ran at 4.05 m and could not be grabbed until 3.73 m, so the window did not exist
+   -- not "hard", empty. Both catchable species on the default map were unreachable and
+   the third is too big to carry, so the honest answer to "why can't I catch anything" was
+   that you couldn't.
+
+   The mean was the wrong reference for a per-animal question. Deriving reach from the
+   SAME radius that decides whether this particular animal bolts makes the window exist by
+   construction, at any bravery, on any roster:
+
+     bolt at a moving sneak = R * 0.289      (0.34 * NOISE_TRIM)
+     reach                  = R * 0.36       <-- always larger, so you can close in
+     bolt at a moving walk  = R * 0.47       <-- always larger than reach, so walking fails
+
+   CATCH_MUL sits between those two multipliers and that ordering is the mechanic: sneak
+   and you can get inside reach before it runs; walk and it runs first. Stopping widens the
+   window a long way (a settled sneak drops the bolt to R*0.173), so the reliable move is
+   still sneak in, hold still, jump.
+
+   It also makes the ring honest now that it is drawn around the animal: a jumpy rabbit
+   visibly gets a bigger ring than a bold fox, because it is bigger. */
+const CATCH_MUL = 0.36;
+const CATCH_MIN_R = 2.2, CATCH_MAX_R = 7;
+const CATCH_MAX_SCALE = 1.1;
+function catchRadiusFor(key){
+  return clamp(spookRadiusFor(key)*CATCH_MUL, CATCH_MIN_R, CATCH_MAX_R);
+}
+/* The roster-wide figure, for callers with no particular animal in mind (the HUD, and the
+   smoke suite's ordering checks). Never used to decide an actual catch -- that always asks
+   about the animal in front of you. */
+function catchRadius(){
+  return clamp(typicalSpookRadius()*CATCH_MUL, CATCH_MIN_R, CATCH_MAX_R);
+}
+function isCatchable(key){
+  const S = SPECIES[key];
+  return !!S && (S.scale || 1) <= CATCH_MAX_SCALE && !isDefender(key);
+}
+
+/* The one being carried, or null. A module-level single rather than a flag on each
+   critter, because "who is on my back" is a question with exactly one answer and storing
+   it per-critter invites two of them being true at once. */
+let carried = null;
+let caught = 0;
+/* Where the rider sits, pushed in by main.js each frame. This module has no business
+   knowing what a player is (same rule as IMPACTS below), so it is handed a point and a
+   heading rather than reaching for one. `mount` is the scale to render the passenger at:
+   see setCarryAnchor. */
+const CARRY = {x:0, y:0, z:0, yaw:0, mount:0.3, live:false};
+function setCarryAnchor(x, y, z, yaw, mount){
+  CARRY.x = x; CARRY.y = y; CARRY.z = z; CARRY.yaw = yaw;
+  if(mount > 0) CARRY.mount = mount;
+  CARRY.live = true;
+}
+function getCarried(){ return carried; }
+function caughtCount(){ return caught; }
+
+/* What a passenger costs you. Scaled by the animal, so a chipmunk is barely noticeable
+   and a coyote is a real decision -- which is the point of the button existing at all.
+   Bounded well above zero: a carry that made you crawl would just be a punishment for
+   succeeding at the hardest thing in the game. */
+const CARRY_SLOW_FLOOR = 0.62;
+function carrySlow(){
+  if(!carried) return 1;
+  return clamp(0.98 - (carried.S.scale || 1)*0.2, CARRY_SLOW_FLOOR, 0.95);
+}
+
+/* Nearest animal you could actually pick up right now, with its distance -- for the ring
+   to light up with and for the HUD to name. Returns null when there is nothing in reach,
+   which is the common case and has to be cheap. */
+/* Nearest animal you could pick up, and how far off it is.
+
+   `maxD` widens the search beyond arm's length, which is what lets the ring be drawn
+   around the ANIMAL rather than around the player. Defaulting it to catchRadius() keeps
+   catchNear's meaning exactly as it was -- "what can I grab right now" -- while the ring
+   asks a different question with the same function: "what is close enough to be worth
+   showing a ring on". One search, two callers, so the ring can never highlight something
+   catchNear would refuse to pick up.
+
+   `inReach` is reported rather than left for the caller to re-derive, because the caller
+   would have to know catchRadius() to work it out and would then be a second place that
+   could disagree about what "in reach" means. */
+function nearestCatchable(px, pz, showMul){
+  let best = null;
+  for(const c of CRITTERS){
+    if(c === carried || c.state === 'flee' || !isCatchable(c.key)) continue;
+    const reach = catchRadiusFor(c.key);
+    const limit = showMul ? reach*showMul : reach;
+    const d = Math.hypot(c.x - px, c.z - pz);
+    if(d <= limit && (!best || d < best.d))
+      best = {d, critter: c, name: c.S.nm, reach, inReach: d <= reach};
+  }
+  return best;
+}
+
+/* Grab whatever is in reach. Returns the critter or null, so the caller can decide
+   whether anything worth reacting to happened without re-running the search.
+
+   The passenger is NOT reparented into the avatar rig. The rigs are disposed and rebuilt
+   whenever the player changes dog or species (main.js's ensureAvatar), and a critter
+   parented into one would be destroyed with it -- silently, mid-carry. It stays in the
+   scene and is placed at the anchor every frame instead, which is the same relationship
+   the shadow already has with the avatar and for the same reason. */
+function catchNear(px, pz){
+  if(carried) return null;
+  const hit = nearestCatchable(px, pz);
+  if(!hit) return null;
+  const c = hit.critter;
+  carried = c;
+  caught++;
+  c.state = 'carried';
+  c.watchT = 0;
+  c.alert.visible = false;
+  /* Shrink to ride. Wildlife is built by city/animal-models.js at Pup City's scale, and
+     the trail avatar is the same shared rig brought down by dog-driver's TRAIL_DOG_SCALE
+     -- so a critter standing in the world is roughly 3x the pup beside it. That is a
+     pre-existing quirk of the world population and is left alone, but it cannot survive
+     contact: an unshrunk rabbit on a 1.15 m pup's back is a rabbit wearing a pup. `mount`
+     comes from the rider's own measured body radius (main.js), so the passenger is sized
+     against whoever is actually carrying it rather than against a constant. */
+  c.baseScale = c.g.scale.x;
+  c.g.scale.setScalar(c.S.scale*CARRY.mount);
+  if(c.refs.headG) c.refs.headG.rotation.z = 0;
+  comicBurst('\ud83e\udd17 ' + c.S.nm + '!', c.x, c.y + c.S.scale*1.6, c.z, '#7bc47f');
+  cheerBlip();
+  return c;
+}
+
+/* Put it down. It lands behind you and runs, but it is NOT counted as spooked: you did
+   not blunder into it, you caught it and let it go, and folding the two together would
+   make the scorecard unable to tell a careful walk from a clumsy one -- which is the
+   whole reason sightings and spooks are separate numbers in the first place. */
+function releaseCarried(px, pz, yaw){
+  const c = carried;
+  if(!c) return null;
+  carried = null;
+  if(c.baseScale) c.g.scale.setScalar(c.baseScale);
+  // drop it a body-length behind the player, facing away
+  const bx = px - Math.cos(yaw)*1.6, bz = pz + Math.sin(yaw)*1.6;
+  c.x = bx; c.z = bz;
+  c.y = standingY(bx, bz);
+  c.home = {x: bx, z: bz};
+  c.state = 'flee';
+  c.fledT = 0;
+  c.sighted = false;
+  const away = Math.atan2(c.z - px, c.x - px);
+  c.target = {x: c.x + Math.cos(away)*140, z: c.z + Math.sin(away)*140};
+  c.alert.visible = true;
+  yipHigh(0.85);
+  return c;
+}
 
 /* ---------- big animals stand their ground ----------
 
@@ -6626,7 +7380,9 @@ function getCritterStats(){
   const log = [...SIGHTED.entries()]
     .map(([key, n]) => ({key, n, nm: (SPECIES[key]||{}).nm || key, emo: (SPECIES[key]||{}).emo || '\ud83d\udc3e'}))
     .sort((a, b) => b.n - a.n || a.nm.localeCompare(b.nm));
-  return {sightings, spooked, watching: watchBest, log};
+  return {sightings, spooked, caught, watching: watchBest, log,
+          carrying: carried ? {key: carried.key, name: carried.S.nm,
+                              emo: (SPECIES[carried.key]||{}).emo || '\ud83d\udc3e'} : null};
 }
 
 /* Cleared in place. Other modules (minimap.js) hold this same array reference, and
@@ -6637,7 +7393,8 @@ function resetCritters(){
     const c = CRITTERS.pop();
     scene.remove(c.g); disposeGroup(c.g);
   }
-  sightings = 0; spooked = 0; watchBest = null; SIGHTED.clear();
+  sightings = 0; spooked = 0; caught = 0; watchBest = null; SIGHTED.clear();
+  carried = null; CARRY.live = false;
 }
 
 /* Somewhere plausible for an animal to be: near enough to a trail that you'll actually
@@ -6787,9 +7544,31 @@ function bolt(c, px, pz){
    Exported because the on-screen noise ring draws THIS number. Two copies of a rule the
    player is being shown a picture of would drift apart, and the picture would quietly
    start lying -- which is worse than not drawing it. */
-function playerNoise(speed, topSpeed, sneaking, barking){
+/* NOISE_TRIM shrinks every radius on the map by a flat 15%, which is the "let me get a
+   little closer" ask expressed in the one number that already controls it. It is applied
+   to the multiplier and NOT to spookRadiusFor, so the notice radius (spookRadiusFor*2.4,
+   what opens the watchful window) is untouched: you get nearer before anything bolts,
+   while the window in which a sighting can be banked stays exactly as wide as it was.
+
+   STILLNESS is the second half. `pace` already fell to zero when you stopped, but it is
+   read straight off player.speed, which the loop lerps to zero in a fraction of a second
+   -- so "standing still" and "moving very slowly" were the same to every animal, and
+   stopping bought you a floor of 0.55 and nothing more. Stillness is time-based instead
+   (main.js counts the seconds), so holding position keeps paying: the ring keeps pulling
+   in for as long as you hold it, and starts growing again the moment you move. That is
+   what makes settling a thing you DO rather than a state you happen to be in, and it is
+   what puts the catch ring in reach -- see CATCH_NOISE.
+
+   Barking ignores it entirely. A bark from a pup that has been sitting perfectly still
+   for five seconds is not a quieter bark. */
+const NOISE_TRIM = 0.85;
+const STILL_FLOOR = 0.6;         // multiplier at fully settled
+const BARK_NOISE = 2.4*NOISE_TRIM;
+function playerNoise(speed, topSpeed, sneaking, barking, stillness){
+  if(barking) return BARK_NOISE;
   const pace = clamp(speed/Math.max(0.1, topSpeed), 0, 1);
-  return barking ? 2.4 : (sneaking ? 0.34 : 0.55 + pace*1.15);
+  const base = (sneaking ? 0.34 : 0.55 + pace*1.15)*NOISE_TRIM;
+  return base*lerp(1, STILL_FLOOR, clamp(stillness || 0, 0, 1));
 }
 
 /* A representative spook radius for the wildlife actually on this map, so the ring means
@@ -6806,6 +7585,31 @@ function typicalSpookRadius(){
   let sum = 0;
   for(const k of keys) sum += spookRadiusFor(k);
   return sum/keys.length;
+}
+
+/* Riding. Placed at the anchor main.js measured off the live avatar, so the passenger
+   travels with the pup through jumps, knockbacks and terrace steps without this module
+   knowing that any of those exist -- it only ever sees a point that moved.
+
+   Snapped, not eased. The anchor is already attached to a body that is itself smoothed,
+   so lerping toward it a second time would make the passenger lag its own mount by a
+   visible fraction of a second -- the animal appears to slide down the pup's back every
+   time it accelerates. The wriggle is the only motion of its own it gets, and it is what
+   keeps it from reading as a prop bolted on. */
+function carryPose(c, dt, t){
+  if(!CARRY.live) return;
+  const wob = Math.sin(t*0.006)*0.06;
+  c.x = CARRY.x; c.z = CARRY.z; c.y = CARRY.y;
+  c.yaw = CARRY.yaw + wob;
+  c.g.position.set(c.x, c.y, c.z);
+  c.g.rotation.y = c.yaw;
+  c.g.rotation.z = wob*0.5;
+  c.walkPh += dt*1.4;
+  (c.refs.legs||[]).forEach((leg, li)=>{
+    leg.rotation.z = Math.sin(c.walkPh + ((li===0||li===3) ? 0 : Math.PI))*0.12;
+  });
+  if(c.refs.headG) c.refs.headG.rotation.z = lerp(c.refs.headG.rotation.z, -0.12, 1 - Math.pow(0.02, dt));
+  if(c.refs.tailG) c.refs.tailG.rotation.x = Math.sin(t*0.011)*0.5;
 }
 
 /* Everything that turns one critter's STATE into a pose, in one place.
@@ -6863,7 +7667,7 @@ function poseCritter(c, dt, t, i, rnd){
   if(c.alert.material) c.alert.material.opacity = c.sighted ? 0.35 : 1;
 }
 
-function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
+function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking, stillness){
   const rnd = Math.random;
   const S = getMapScale();
   const bb = getBBox();
@@ -6871,10 +7675,21 @@ function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
 
   for(let i = CRITTERS.length - 1; i >= 0; i--){
     const c = CRITTERS[i];
+
+    /* A passenger has no AI. It is not grazing, it cannot be spooked, and it is certainly
+       not deciding whether to charge -- so it skips the whole state machine and is simply
+       placed. Taken FIRST, before any distance is measured, because every branch below
+       reasons about how far the animal is from the player and the answer for this one is
+       "on top of them", which no rule in this file is written for. */
+    if(c === carried){
+      carryPose(c, dt, t);
+      continue;
+    }
+
     const dx = c.x - px, dz = c.z - pz;
     const dist = Math.hypot(dx, dz);
 
-    const noise = playerNoise(speed, topSpeed, sneaking, barking);
+    const noise = playerNoise(speed, topSpeed, sneaking, barking, stillness);
     const spookR = spookRadiusFor(c.key)*noise;
     const noticeR = spookRadiusFor(c.key)*2.4;
 
@@ -6932,10 +7747,22 @@ function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
         c.state = 'watchful';
         c.yaw = Math.atan2(dz, -dx);
         c.alert.visible = true;
-        if(!c.sighted){
+        /* YOU HAVE TO BE ABLE TO SEE IT. Distance alone was banking sightings through
+           hillsides and rock formations -- stand on the wrong side of a brow with a deer
+           twelve metres away and the meter filled while the screen showed you a slope.
+           Watching is the one mechanic in this game whose whole subject is looking at
+           something, so a sighting you could not have witnessed is the worst thing it
+           could award.
+
+           The meter holds rather than decays while blocked: stepping behind a boulder
+           mid-watch should cost you the seconds you are hidden for, not the ones you
+           already earned. Decay stays where it was, on losing the animal entirely. */
+        const seen = lineOfSight(px, pz, c.x, c.z, 1.4, (c.S.scale||1)*0.9);
+        c.blocked = !seen;
+        if(!c.sighted && seen){
           c.watchT += dt;
           const p = clamp(c.watchT/WATCH_SECONDS, 0, 1);
-          if(!watchBest || p > watchBest.progress) watchBest = {name: c.S.nm, progress: p};
+          if(!watchBest || p > watchBest.progress) watchBest = {name: c.S.nm, progress: p, blocked: false};
           if(c.watchT >= WATCH_SECONDS){
             c.sighted = true;
             sightings++;
@@ -6943,6 +7770,10 @@ function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
             comicBurst('✨ ' + c.S.nm + '!', c.x, c.y + c.S.scale*1.7, c.z, '#ffd94a');
             cheerBlip();
           }
+        }else if(!c.sighted && !seen){
+          // still report it, so the meter shows why it has stopped moving
+          const p = clamp(c.watchT/WATCH_SECONDS, 0, 1);
+          if(!watchBest || p > watchBest.progress) watchBest = {name: c.S.nm, progress: p, blocked: true};
         }
       }else if(c.state === 'watchful'){
         c.state = 'graze';
@@ -6955,9 +7786,20 @@ function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
     if(c.state === 'flee'){
       c.fledT += dt;
       seek(c, c.target.x, c.target.z, c.S.speed*2.9, dt);
-      // gone: respawn somewhere else on the network so the map doesn't slowly empty out
-      if(c.fledT > 7 || dist > 130 ||
-         c.x < bb.minx || c.x > bb.maxx || c.z < bb.minz || c.z > bb.maxz){
+      const outside = c.x < bb.minx || c.x > bb.maxx || c.z < bb.minz || c.z > bb.maxz;
+      /* RECYCLING IS NOT ALLOWED TO HAPPEN IN FRONT OF YOU.
+
+         The old rule recycled on `fledT > 7 || dist > 130 || outside`, and the first of
+         those fires on a timer with no reference to where the player is. Chase something
+         and you watch it blink out at the seven-second mark and reappear somewhere else
+         on the map -- which is the reported bug, and it is worst in exactly the situation
+         the player is paying most attention.
+
+         The recycle exists for a real reason (a map that never re-seeds slowly empties as
+         everything flees to the edges), so it stays -- gated on the animal genuinely being
+         gone. RESPAWN_FAR is the whole gate: no animal is ever removed while it is close
+         enough to be watched. */
+      if(dist > RESPAWN_FAR && (c.fledT > 7 || dist > 130 || outside)){
         const spot = pickSpot(rnd);
         if(spot){
           c.x = spot.x; c.z = spot.z; c.home = {x: spot.x, z: spot.z};
@@ -6965,6 +7807,25 @@ function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking){
         }
         c.state = 'graze'; c.fledT = 0; c.watchT = 0; c.sighted = false;
         c.alert.visible = false;
+      }else if(c.fledT > 7){
+        /* It has run for seven seconds and you are still on it. Rather than vanish, it
+           gives up running and settles where it stands -- re-homing so it wanders about
+           its new spot instead of trekking back to the old one. That reads as an animal
+           that outran you and calmed down, which is what actually happens, and it leaves
+           it there to be found again. */
+        c.state = 'graze'; c.fledT = 0; c.watchT = 0; c.sighted = false;
+        c.alert.visible = false;
+        c.home = {x: c.x, z: c.z};
+        c.target = wanderTarget(c, rnd);
+      }else if(outside){
+        /* Cornered against the edge of the map with the player too close to recycle it.
+           Turn it around rather than let it keep running into the void -- an animal
+           standing still outside the bbox is invisible, which is the same bug wearing a
+           different hat. */
+        c.x = clamp(c.x, bb.minx, bb.maxx);
+        c.z = clamp(c.z, bb.minz, bb.maxz);
+        const inward = Math.atan2((bb.minz+bb.maxz)/2 - c.z, (bb.minx+bb.maxx)/2 - c.x);
+        c.target = {x: c.x + Math.cos(inward)*90, z: c.z + Math.sin(inward)*90};
       }
     }else if(c.state === 'graze'){
       c.timer -= dt;
@@ -7836,7 +8697,70 @@ const player = { x:0, z:0, y:0, vy:0, yaw:0, speed:0, dist:0, sneaking:false, ba
                     `knockT` counts down and is the ONLY thing that suppresses input --
                     which is deliberate and short: a hit you cannot respond to for a full
                     second stops being funny the second time it happens. */
-                 knockT:0, kvx:0, kvz:0, spinT:0, spin:0 };
+                 knockT:0, kvx:0, kvz:0, spinT:0, spin:0,
+                 /* Seconds spent holding position. Feeds critters.js's noise model, which
+                    could not previously tell "stopped" from "creeping", because the only
+                    signal it had was player.speed and the loop lerps that to zero in about
+                    a fifth of a second. Time is the honest measure of settling: it keeps
+                    paying out for as long as you hold, which is what makes standing still
+                    a move rather than an absence of one. */
+                 stillT:0, wall:null, regrabT:0 };
+/* Seconds of holding position to be fully settled, and seconds of moving to undo it.
+   ASYMMETRIC ON PURPOSE, and this is what makes the catch reachable at all. Settling has
+   to be slow enough to be a decision; losing it has to be slow enough that the two or
+   three sneaking steps between "close" and "in reach" do not hand the animal its full
+   spook radius back before you arrive. Measured against the default roster, a settled
+   sneak sits at ~2.9 m and a moving one at ~4.8 m, so those few steps are exactly the
+   window this constant governs. */
+/* How far out the reach ring starts being drawn, as a multiple of the reach itself. Wide
+   enough that it appears while you are still closing in -- a ring that only shows up once
+   you are already inside it tells you nothing you could act on -- and tight enough that it
+   is a response to one particular animal rather than ambient decoration. */
+const SHOW_MUL = 2.6;
+/* How far up you can clamber onto a rock or a roof, in world units. Set well above what a
+   jump alone reaches (1.74) so most formations and every building are gettable, and well
+   below the tallest fins (15) so those stay scenery you look at rather than furniture. */
+/* Still used by the smoke suite to sort formations into "a wall jump can plausibly reach
+   this" and "this is scenery", which is a judgement about the map rather than a rule the
+   game enforces -- the wall jump itself has no height limit, only a cling clock. */
+const MOUNT_REACH = 7;
+/* ---- wall jumping ----------------------------------------------------------------
+   Replaces a continuous hold-to-ascend climb, which was the wrong shape for this game.
+   Hauling up a face at a fixed rate asks nothing of the player but patience -- and the
+   thing Pup Trails is actually good at is small physical skills you get better at, like
+   sneaking. Jumping a rock in stages is a skill; holding a stick is not.
+
+   The loop: leap at a face, cling to it, and jump again before you slide off. Each wall
+   jump throws you up and a little away, so you have to steer back in to catch the rock
+   higher up. Miss the timing and you slide, miss the catch and you land. */
+const WALL_STANDOFF = 0.55;   // how far the pup's body sits off the rock while clinging
+const WALL_GRAB_DIST = 1.9;   // how close a face has to be to catch it in mid-air
+/* How squarely you have to be moving at a face to catch it. Looser than the old walking
+   grab, because in the air you are on a ballistic arc and cannot steer freely. */
+const WALL_GRAB_DOT = 0.35;
+/* Cling physics. You do not hang indefinitely: the slide starts gently and accelerates,
+   so there is a comfortable beat to push off in and a penalty for dithering. */
+const WALL_SLIDE_ACCEL = 5.2;
+const WALL_SLIDE_MAX = 4.5;
+const WALL_CLING_MAX = 1.6;   // seconds before your paws give out entirely
+/* The push-off. Up is most of it; OUT is small but not zero -- a wall jump that went
+   straight up would let you hold one direction and ratchet to the summit, which is the
+   patience mechanic again wearing a cape. Having to re-aim is the skill. */
+const WALL_JUMP_VY = 8.6;
+const WALL_JUMP_OUT = 2.6;
+/* A short grace after pushing off during which you cannot re-catch the SAME face. Without
+   it the frame after a wall jump re-grabs the rock you are still touching and the jump is
+   swallowed. */
+const WALL_REGRAB_DELAY = 0.22;
+/* How far up a face you must be before it can be caught. A plain jump reaches about 1.74,
+   so this leaves room to start a chain from the ground while refusing catches at ankle
+   height -- see tryWallCatch. */
+const WALL_MIN_CATCH = 1.0;
+function mountReach(){ return MOUNT_REACH; }
+const SETTLE_SECONDS = 1.4;
+const UNSETTLE_SECONDS = 1.1;
+const STILL_SPEED = 0.35;        // m/s below which the pup counts as holding position
+function stillness(){ return clamp(player.stillT/SETTLE_SECONDS, 0, 1); }
 const KNOCK_DUR = 0.55;      // seconds of lost control per hit
 const KNOCK_DRAG = 0.06;     // per-second velocity retention; a shove, not a slide
 const CLIMB_DUR = 0.42;    // seconds of scramble per step-up, refreshed on each new step
@@ -7942,7 +8866,7 @@ function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
   // shared with the critters and with everything world.js plants on a path. Off-trail it
   // is plain terrain; on-trail it reads the tread's own profile out of the spatial hash,
   // so the avatar can't clip through the ribbon inside the short ramps at a terrace step.
-  const groundY = standingY(player.x, player.z);
+  const groundY = playerGroundY(player.x, player.z);
   // eased 0..1: full while the scramble timer runs, decaying once it expires, so the
   // pose settles back into the walk instead of popping flat the instant the step is done
   const climb = player.climbT > 0 ? player.climbAmt : 0;
@@ -7952,21 +8876,41 @@ function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
      larger would miss the start of a hop, and anything smaller would flicker on the
      frame it lands. `rise` is vertical velocity normalised, so the pose knows whether it
      is still going up or already reaching for the landing. */
-  const leap = jumpY > 0.02 ? 1 : 0;
+  /* NOT while clinging to a wall. `jumpY` is height above the ground, which is metres of
+     rock face when the pup is hanging off one -- so this read as a permanent leap and the
+     drivers lerped the leap pose right over the wall pose, leaving the body pitched 32
+     degrees instead of 76. That is the reported screenshot: a pup lying horizontally,
+     sticking out of the stone nose-first. A cling is the opposite of airborne. */
+  const leap = (!player.wall && jumpY > 0.02) ? 1 : 0;
   const rise = clamp(player.vy/7, -1, 1);
   let radius = 0.5;
   if(mode==='dog'){
     setDogPos(player.x, player.z);
     setYaw(player.yaw);
-    updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise);
+    updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise, !!player.wall);
     radius = dogShadowRadius();
   }else{
     wildPos.set(player.x, 0, player.z);
     setWildYaw(player.yaw);
-    updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise);
+    updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise, !!player.wall);
     radius = wildShadowRadius();
   }
   updateShadow(player.x, player.z, groundY, jumpY, radius, true);
+  /* Where a passenger rides, measured off the LIVE rig rather than guessed. `radius` is
+     the shadow radius, which both drivers derive from their own measured leg length in
+     world units -- so it already accounts for TRAIL_DOG_SCALE, for whichever pup size the
+     player picked, and for a fox being smaller than a moose. Everything here is expressed
+     as a multiple of it, which is why a passenger sits correctly on any avatar without a
+     per-species table.
+
+     `mount` is that same radius used as a scale. An unshrunk city rig measures about 1.0
+     here, so passing the radius straight through renders the passenger at the same
+     reduction the avatar itself is carrying -- see critters.js's catchNear for why an
+     unscaled one is unusable. */
+  setCarryAnchor(player.x - Math.cos(player.yaw)*radius*0.7,
+                 groundY + jumpY + radius*2.2,
+                 player.z + Math.sin(player.yaw)*radius*0.7,
+                 player.yaw, radius);
   return groundY;
 }
 
@@ -8003,7 +8947,7 @@ function placeAtHead(i){
    trailhead you pinned would not re-open the summary. */
 function placeAt(x, z, yaw){
   player.x=x; player.z=z; player.yaw=yaw||0;
-  player.y=0; player.vy=0; player.speed=0;
+  player.y=0; player.vy=0; player.speed=0; player.wall=null; player.regrabT=0;
   setCamYaw(Math.atan2(Math.cos(player.yaw), -Math.sin(player.yaw)));
   ensureAvatar();
   const groundY = syncAvatar(0,0,0,0,false,false,false);
@@ -8066,7 +9010,7 @@ function afterWorldChange(ratio){
   const bb=getBBox(), F=55;
   player.x=clamp(player.x, bb.minx-F, bb.maxx+F);
   player.z=clamp(player.z, bb.minz-F, bb.maxz+F);
-  player.y=0; player.vy=0; player.speed=0;
+  player.y=0; player.vy=0; player.speed=0; player.wall=null; player.regrabT=0;
   ensureAvatar();
   const groundY = syncAvatar(0,0,0,0,player.sneaking,false,false);
   snapChaseCam(player.x, player.z, groundY, getVertScale(), 13);
@@ -8092,18 +9036,182 @@ function stepUpLimit(){
   return getContourStep()*getVertScale()*1.05;
 }
 
+/* ---- wall jumping ------------------------------------------------------------------
+
+   `player.wall` is a CLING: a point on a solid's outline, the outward normal there, and
+   nothing else -- height lives in player.y as it does everywhere else, so gravity, the
+   avatar and the camera all keep working without knowing a wall exists.
+
+   THE PUP HANGS VERTICALLY. That is a real requirement and not decoration: with the body
+   left in its walking orientation the pup sticks out of the rock like a shelf, nose-first,
+   which is what the reported screenshot showed. On a wall it is pitched nose-up with its
+   belly to the stone, so it reads as an animal holding on rather than one embedded in
+   masonry. The pitch is applied through gait.js's wall pose; the yaw here turns the pup to
+   FACE the rock so the pitch tips it up the face rather than sideways along it. */
+/* Which way the pup faces while clinging. The rig's forward is +x and yaw maps a world
+   direction through atan2(-dz, dx), so this points forward at the INWARD normal -- the pup
+   faces the rock.
+
+   That matters because of how the wall pitch works. Pitched ~76 degrees nose-up, the legs
+   swing to point along the body's backward axis, which is the opposite of forward. Facing
+   the pup AWAY from the rock therefore drove its legs straight INTO the stone -- reported
+   as the dog positioned backwards with its legs sticking through the formation, and
+   measured as forward pointing along the outward normal with a dot of exactly 1. Turning
+   it to face the rock puts the legs and paws on the outside, where they can be seen. */
+function wallYaw(f){ return Math.atan2(f.oz, -f.ox); }
+
+function wallFaceAt(x, z, dist){
+  const f = nearestSolidFace(x, z, dist);
+  if(!f) return null;
+  const base = standingY(f.x + f.ox*WALL_STANDOFF, f.z + f.oz*WALL_STANDOFF);
+  // a kerb is not a wall; anything you could step onto is not worth catching in mid-air
+  return (f.top - base > stepUpLimit()) ? {f, base, top: f.top} : null;
+}
+
+/* Catch a wall in mid-air. Airborne only -- on the ground you walk, and a grab that fired
+   while standing would glue the pup to every rock it brushed past. */
+function tryWallCatch(dirX, dirZ){
+  if(player.wall || player.knockT > 0) return false;
+  if(player.y <= 0.05 && player.vy <= 0) return false;
+  if(player.regrabT > 0) return false;
+  const L = Math.hypot(dirX, dirZ);
+  const lookX = L > 1e-6 ? dirX/L : 0, lookZ = L > 1e-6 ? dirZ/L : 0;
+  const hit = wallFaceAt(player.x + lookX*0.4, player.z + lookZ*0.4, WALL_GRAB_DIST);
+  if(!hit) return false;
+  /* HIGH ENOUGH TO BE WORTH CATCHING. Without this, jumping while stood next to a
+     formation caught the face at almost zero height -- and a cling that low slides to the
+     ground within a few frames and releases, so the jump was swallowed and the pup ended
+     up pinned to the bottom edge of the rock unable to get off the floor. That is the
+     reported "we try to jump and immediately get stuck at the bottom edge".
+
+     Measured from the face's own base rather than from player.y, because player.y is
+     height above whatever is underfoot and that is not the same datum once the terrain
+     around a formation slopes. */
+  const groundHere = standingY(player.x, player.z);
+  if(groundHere + player.y < hit.base + WALL_MIN_CATCH) return false;
+  /* Moving INTO the rock. On a ballistic arc the horizontal direction is whatever the
+     player steered, so this is the one thing they control in the air and the one thing
+     worth testing. With no input at all, catching is still allowed if the face is right
+     there -- falling onto a wall you are already touching should stick. */
+  if(L > 1e-6){
+    const dot = (lookX*-hit.f.ox + lookZ*-hit.f.oz);
+    if(dot <= WALL_GRAB_DOT) return false;
+  }
+  player.wall = {
+    fx: hit.f.x, fz: hit.f.z, ox: hit.f.ox, oz: hit.f.oz,
+    base: hit.base, top: hit.top,
+    slide: 0, clingT: 0,
+  };
+  player.vy = 0;
+  // snap onto the face, keeping whatever height the leap earned
+  player.x = hit.f.x + hit.f.ox*WALL_STANDOFF;
+  player.z = hit.f.z + hit.f.oz*WALL_STANDOFF;
+  player.yaw = wallYaw(hit.f);
+  thudSound();
+  return true;
+}
+
+/* Push off. Up and out, so the next catch has to be aimed rather than held. */
+function wallJump(){
+  const w = player.wall;
+  if(!w) return false;
+  player.wall = null;
+  player.vy = WALL_JUMP_VY;
+  player.regrabT = WALL_REGRAB_DELAY;
+  player.x += w.ox*0.35;
+  player.z += w.oz*0.35;
+  player.kvx = w.ox*WALL_JUMP_OUT;
+  player.kvz = w.oz*WALL_JUMP_OUT;
+  player.climbT = CLIMB_DUR;
+  player.climbAmt = 1;
+  return true;
+}
+
+function letGoWall(){ player.wall = null; }
+
+/* One frame of clinging. Returns true while the wall owns the frame. */
+function updateWall(dt){
+  const w = player.wall;
+  if(!w) return false;
+  w.clingT += dt;
+  // paws give out: the slide accelerates, then you are off entirely
+  w.slide = Math.min(WALL_SLIDE_MAX, w.slide + WALL_SLIDE_ACCEL*dt);
+  player.y -= w.slide*dt;
+
+  const groundHere = standingY(player.x, player.z);
+  const climbedTo = groundHere + player.y;
+
+  if(climbedTo >= w.top - 0.15){
+    /* Over the lip. Probe INWARD until areaSolidTop actually answers with this rock's top,
+       rather than trusting a fixed inset -- on a thin fin a fixed step lands on terrain
+       below the slab, and solidEmbed then ejects the pup off the rock it just climbed. */
+    for(const inset of [0.9, 1.4, 2.1, 3.0, 4.2]){
+      const inx = w.fx - w.ox*(WALL_STANDOFF + inset);
+      const inz = w.fz - w.oz*(WALL_STANDOFF + inset);
+      const top = areaSolidTop(inx, inz);
+      if(top != null && Math.abs(top - w.top) < 0.5){
+        player.wall = null;
+        player.x = inx; player.z = inz;
+        player.y = 0; player.vy = 0;
+        player.climbT = CLIMB_DUR;
+        player.climbAmt = 1;
+        cheerBlip();
+        return true;
+      }
+    }
+  }
+
+  if(player.y <= 0.02 || w.clingT > WALL_CLING_MAX){
+    player.wall = null;
+    player.y = Math.max(0, player.y);
+    return true;
+  }
+
+  player.x = w.fx + w.ox*WALL_STANDOFF;
+  player.z = w.fz + w.oz*WALL_STANDOFF;
+  player.yaw = wallYaw(w);
+  /* The pose that stands the pup up. climbAmt drives gait.js's wall pose, which pitches
+     the body nose-up against the stone -- see the note there on why this is a pitch and
+     not a yaw. */
+  player.climbT = Math.max(player.climbT, CLIMB_DUR);
+  player.climbAmt = 1;
+  return true;
+}
+
+/* THE ground height for the player: terrain, or the top of a solid area when one stands
+   here. One function, used by movement, by the avatar and by the shadow, for exactly the
+   reason the README gives about standingY -- when two consumers each answered "what am I
+   standing on" their own way, the pup sank into the tread. The same trap is available here
+   in a new place: an avatar drawn on terrain height while movement thought it was on a
+   rock is a pup standing inside a boulder.
+
+   This is also the whole of what makes a rock formation stand-on-able rather than a trap.
+   Nothing below needed a new rule: the step-up limit already turns a tall face into a
+   wall, `airborneOver` already lets a jump land on a ledge, preserving absolute height
+   already turns walking off an edge into a fall, and the gravity clamp already puts
+   anything that finds itself inside a footprint on top of it rather than in it. */
+function playerGroundY(x, z){
+  const g = standingY(x, z);
+  const top = areaSolidTop(x, z);
+  return (top != null && top > g) ? top : g;
+}
+
 function moveOffTrail(stepX, stepZ){
   const lim = stepUpLimit();
-  const gHere = standingY(player.x, player.z);
+  const gHere = playerGroundY(player.x, player.z);
   const feet = gHere + player.y;
   const tryMove = (dx, dz)=>{
     if(!dx && !dz) return false;
     const nx=player.x+dx, nz=player.z+dz;
-    const gThere = standingY(nx, nz);
+    const gThere = playerGroundY(nx, nz);
     const rise = gThere - gHere;
     // walkable if it is at most a single step up, or if we are already airborne high
     // enough to clear it -- which is precisely what makes jumping the answer to a ledge
     const airborneOver = feet >= gThere - 0.05;
+    /* Plain terrain rules, unchanged. A rock face is a wall to WALKING and always was --
+       getting on top of one is the wall jump's job now (see tryWallCatch), not something
+       the movement step should be talked into. An earlier version let a step-up mount a
+       solid directly, which is what produced a pup teleporting to the summit. */
     if(rise > lim && !airborneOver) return false;
     /* A step-up done ON FOOT costs speed and triggers the scramble. Clearing the same
        rise while airborne does neither -- the jump already paid for it, and taxing it
@@ -8120,6 +9228,11 @@ function moveOffTrail(stepX, stepZ){
        falls, instead of the old behaviour -- which re-read the ground every frame and
        slid the avatar down the cliff face as though it were a ramp. Stepping UP resolves
        to y=0 on the same frame, so a kerb stays a step rather than becoming a launch. */
+    /* Terrain keeps the plain clamp: a kerb resolves to a step on the same frame, and
+       walking off a ledge leaves a positive `y` so the pup falls. Solids no longer take
+       a shortcut through here at all -- mounting one is a CLIMB now, owned by
+       startClimb/updateClimb below, because it needs a face to hang on and an input to
+       drive it and neither of those is a thing a movement step can express. */
     player.y = Math.max(0, feet - gThere);
     return true;
   };
@@ -8148,7 +9261,7 @@ function movePlayer(stepX, stepZ){
      a 9 m wall. Granting free vertical movement was never what proximity meant. */
   const inCorridor = nt.d <= nt.hw;
   if(inCorridor &&
-     Math.abs(standingY(player.x+stepX, player.z+stepZ) - standingY(player.x, player.z)) <= stepUpLimit()){
+     Math.abs(playerGroundY(player.x+stepX, player.z+stepZ) - playerGroundY(player.x, player.z)) <= stepUpLimit()){
     /* On the tread, movement stays frictionless: the graded corridor is a continuous,
        walkable bench by construction (terrain.js's gradeProfile), so there is nothing to
        climb, and preserving absolute height on the way down would turn every graded
@@ -8302,9 +9415,43 @@ addEventListener('pointerup', endPointer); addEventListener('pointercancel', end
    button handler, so space and JUMP can never drift apart -- and both are gated on the
    walk being live, since jumping through the arrival summary does nothing visible and
    leaves you airborne when it closes. */
+/* Jump is now three verbs wearing one button, and the order below is the whole rule:
+   carrying beats catching, catching beats plain jumping, and you always leave the ground
+   either way.
+
+   ONE BUTTON, NOT THREE. A grab key and a release key would be two more things to teach
+   on a device with no keyboard, and they would be pressed in exactly the situations jump
+   already covers -- you are standing next to something small, or you have something on
+   your back. Overloading the key the player is already holding down means the mechanic
+   costs no new vocabulary at all. It is unambiguous because the three cases cannot
+   overlap: you either have a passenger or you do not, and if you do not, something is
+   either in reach or it is not.
+
+   The jump still happens in every case. Making the grab consume the press would mean the
+   pup sometimes refuses to jump for reasons the player cannot see -- a small animal they
+   had not noticed standing just inside the ring -- and an input that silently does
+   something else is worse than one that does two things at once. */
 function trailJump(){
   if(!playing || trip.paused || player.knockT > 0) return;
+  /* On a face, jump means LET GO -- push off and drop away from the rock. Taken before
+     anything else because a pup hanging four metres up a boulder cannot be picking
+     anything up, and the alternative reading (jump to climb faster) would leave no input
+     for getting off partway, which is the thing that was asked for. */
+  /* On a wall, jump means PUSH OFF. Taken before everything else: a pup clinging four
+     metres up a boulder is not picking anything up, and the wall jump is the whole
+     mechanic -- it must never be shadowed by another meaning of the same button. */
+  if(player.wall){ wallJump(); return; }
+  const carrying = getCarried();
+  if(carrying){
+    releaseCarried(player.x, player.z, player.yaw);
+  }else{
+    catchNear(player.x, player.z);
+  }
   if(player.y === 0) player.vy = 9.5;
+  /* A jump AT a rock catches it. Checked after the hop is launched so the pup is already
+     rising when it takes hold, which is what makes the first catch of a chain land partway
+     up the face rather than at its foot. */
+  if(!getCarried()) tryWallCatch(-Math.cos(player.yaw), Math.sin(player.yaw));
 }
 function toggleSneak(){
   if(!playing || trip.paused) return;
@@ -8358,6 +9505,7 @@ function loop(t){
     // too, now that it's part of the startup/selection screen and not just the play HUD.
     if(avatarKey) syncAvatar(dt, t, 0, 0, player.sneaking, false, false);
     setNoiseRingVisible(false);        // nothing to sneak up on until the walk starts
+    setCatchRingVisible(false);
     updateAreaLabels(camera.position.x, camera.position.y, camera.position.z);
     updateMinimap(player.x, player.z, player.yaw);
     renderer.render(scene,camera);
@@ -8382,7 +9530,43 @@ function loop(t){
      inside movePlayer so the pup still gets carried by its own momentum -- input is what
      is suspended, not physics. */
   const knocked = player.knockT > 0;
-  const moving=!knocked && mag>0.03&&(wx||wz);
+
+  /* ON A ROCK FACE the frame belongs to the climb: the same stick that walks you around
+     drives you up and down instead, and none of the ground movement below runs. `-iz` is
+     forward on this rig, so pushing the way you would walk into the rock climbs it and
+     pulling back comes down, which is the mapping a player will guess first.
+
+     Taken from the RAW input rather than the camera-relative world vector, because up a
+     face is not a compass direction -- swinging the camera round to look at the pup
+     should not invert which way it climbs. */
+  /* A FLAG, NOT AN EARLY RETURN. The first version of this returned out of loop() once a
+     climb took over the frame -- and renderer.render is the LAST line of loop(), so
+     touching a rock stopped the screen updating entirely. The climb was running correctly
+     underneath; nothing was drawn to show it, which presented as the game freezing the
+     moment you touched a formation.
+
+     Nothing in loop() may return early, because everything after the movement block --
+     the critters, both rings, the landmark and trailhead checks, the HUD and the render
+     itself -- has to run on every frame whatever the player happens to be doing. So a
+     climb suppresses the parts it replaces and lets the rest of the frame proceed. */
+  /* A FLAG, NOT AN EARLY RETURN. An earlier version returned out of loop() once a climb
+     took over the frame -- and renderer.render is the LAST line of loop(), so touching a
+     rock stopped the screen updating entirely. Nothing in loop() may return early: the
+     critters, both rings, the landmark and trailhead checks, the HUD and the render all
+     have to run every frame whatever the player is doing. */
+  if(player.regrabT > 0) player.regrabT = Math.max(0, player.regrabT - dt);
+  let onWall = false;
+  if(player.wall){
+    onWall = updateWall(dt);
+    if(onWall) player.speed = 0;
+  }else if(!knocked){
+    // in the air and steering at a face: catch it. This is the chain -- push off, arc,
+    // re-aim, catch higher.
+    tryWallCatch(wx, wz);
+    onWall = !!player.wall;
+  }
+
+  const moving=!onWall && !knocked && mag>0.03&&(wx||wz);
 
   const nt = nearestTrail(player.x,player.z);
   /* TWO different questions, which used to share one answer and caused the cliff bug.
@@ -8409,8 +9593,15 @@ function loop(t){
   // scrambling drags the top speed down; it does NOT touch the jump, which is what makes
   // "jump the big steps" the faster line through broken ground
   const climbDrag = player.climbT > 0 ? CLIMB_SLOW : 1;
-  const top = currentTopSpeed()*(player.sneaking?0.5:(run?currentRunMul():1))*surf*climbDrag*(stick.active?mag:1);
+  // carrySlow() is 1 with an empty back, so this costs nothing until it costs something
+  const top = currentTopSpeed()*(player.sneaking?0.5:(run?currentRunMul():1))*surf*climbDrag*carrySlow()*(stick.active?mag:1);
   player.speed = lerp(player.speed, moving?top:0, 1-Math.pow(0.0009,dt));
+  /* Settling. Measured off SPEED rather than off the input, so being knocked over or
+     sliding to a halt counts as movement until you have actually stopped -- an animal
+     does not care whether your hands are on the controls. */
+  player.stillT = player.speed < STILL_SPEED
+    ? player.stillT + dt
+    : Math.max(0, player.stillT - dt*(SETTLE_SECONDS/UNSETTLE_SECONDS));
   if(moving){
     const L=Math.hypot(wx,wz);
     const stepX=wx/L*player.speed*dt, stepZ=wz/L*player.speed*dt;
@@ -8445,8 +9636,26 @@ function loop(t){
   }
   const bb=getBBox(), F=55;
   player.x=clamp(player.x,bb.minx-F,bb.maxx+F); player.z=clamp(player.z,bb.minz-F,bb.maxz+F);
-  player.vy-=26*dt; player.y=Math.max(0,player.y+player.vy*dt);
-  if(player.y===0) player.vy=Math.max(0,player.vy);
+  /* Gravity is suspended on a face: updateClimb owns player.y while a climb is live, and
+     letting the fall integrator also write it would drag the pup down the rock as fast as
+     it hauled itself up. */
+  /* Gravity is suspended on a wall: updateWall owns player.y while a cling is live (it
+     applies its own slide), and letting the fall integrator write it too would drop the
+     pup off the rock as fast as it caught it. */
+  if(!onWall){
+    player.vy-=26*dt; player.y=Math.max(0,player.y+player.vy*dt);
+    if(player.y===0) player.vy=Math.max(0,player.vy);
+  }
+
+  /* NEVER INSIDE THE ROCK. Checked as an invariant after everything else has had its say,
+     rather than trusted to the movement rules -- see world.js's solidEmbed for why the
+     list of ways in turned out to be longer than the list of ways it was guarded. Skipped
+     while clinging, because a climber is held against the face on purpose and re-solving
+     its position here would fight updateWall for control of the same two numbers. */
+  if(!player.wall){
+    const out = solidEmbed(player.x, player.z, playerGroundY(player.x, player.z) + player.y);
+    if(out){ player.x = out.x; player.z = out.z; }
+  }
   player.barkT=Math.max(0,player.barkT-dt*2);
 
   const groundY = syncAvatar(dt,t,player.y,player.speed,player.sneaking,player.barkT>0,run);
@@ -8466,14 +9675,35 @@ function loop(t){
     decayShake(dt*1.6);
   }
 
+  const settled = stillness();
   updateCritters(dt, t, player.x, player.z, player.speed, noiseReference(),
-                 player.sneaking, player.barkT>0);
+                 player.sneaking, player.barkT>0, settled);
   applyImpacts(dt, groundY);
   /* Same call the critters just used, so the circle on the ground is the rule they are
      actually being judged by rather than a second guess at it. */
   updateNoiseRing(dt, player.x, player.z,
-                  playerNoise(player.speed, noiseReference(), player.sneaking, player.barkT>0),
+                  playerNoise(player.speed, noiseReference(), player.sneaking, player.barkT>0, settled),
                   typicalSpookRadius(), standingY, true);
+  /* The reach ring, drawn around the ANIMAL rather than around the pup.
+
+     It used to be a circle centred on the player, which put the burden the wrong way
+     round: the player had to judge whether a moving animal had entered a ring attached to
+     themselves. Centred on the animal it answers the question directly -- "get inside
+     this and it is yours" -- and it also stops being a ring that follows you everywhere,
+     which is what made the old one read as a static fixture.
+
+     SHOW_MUL widens the search past arm's length so the ring appears while you are still
+     approaching rather than popping into existence at the instant you could already grab.
+     It brightens once you are actually inside it (`inReach`), which is the moment the
+     jump would work.
+
+     The radius comes back FROM the search rather than being asked for separately, because
+     reach is now per-species (critters.js's catchRadiusFor) -- a jumpy rabbit has a bigger
+     one than a bold fox. Drawing a roster average around a specific animal would be a ring
+     that does not mean what it shows. */
+  const reach = getCarried() ? null : nearestCatchable(player.x, player.z, SHOW_MUL);
+  updateCatchRing(dt, reach ? reach.critter.x : player.x, reach ? reach.critter.z : player.z,
+                  reach ? reach.reach : 1, standingY, !!reach, !!(reach && reach.inReach));
   updateAreaLabels(camera.position.x, camera.position.y, camera.position.z);
   updateFX(dt, t);
   updateMinimap(player.x, player.z, player.yaw);
@@ -8521,6 +9751,7 @@ function enterPlay(){
   trip.paused = false;
   trip.landmarks.length = 0;
   trip.bonks = 0;
+  player.stillT = 0;
   playing=true;
   document.body.classList.add('play');
   document.body.classList.remove('panelopen');   // walk full-bleed; the drawer is opt-in
@@ -8533,7 +9764,12 @@ function exitPlay(){
   trip.paused=false;
   toggleBigMap(false);
   closeArrival();
+  /* Put the passenger down before the population is torn down. resetCritters disposes
+     every group including the carried one, and leaving `carried` pointing at a disposed
+     rig would have the next walk start with an invisible animal on your back. */
+  releaseCarried(player.x, player.z, player.yaw);
   resetCritters();
+  setCatchRingVisible(false);
   document.body.classList.remove('play','panelopen');
   placeAtHead(getStartHead());
 }
@@ -8591,8 +9827,13 @@ function applyImpacts(dt, groundY){
 function tripScore(st){
   // getting butted costs more than spooking something: one is bad luck, the other is
   // walking into a bear that spent three seconds telling you not to
+  /* A catch is worth more than a sighting because it is strictly harder: you have to bank
+     the sighting's worth of stillness AND then be inside a ring a third the size of the
+     one that would already have sent the animal running. It is not worth so much that
+     catching becomes the only thing to do -- two catches still lose to four quiet
+     sightings, which keeps the walk a walk. */
   return Math.max(0, Math.round(
-    player.dist*0.2 + st.sightings*60 + trip.landmarks.length*40
+    player.dist*0.2 + st.sightings*60 + (st.caught||0)*100 + trip.landmarks.length*40
     - st.spooked*10 - (trip.bonks||0)*35));
 }
 
@@ -8615,6 +9856,7 @@ function showArrival(i){
   set('#arrTime', Math.floor(secs/60)+':'+String(secs%60).padStart(2,'0'));
   set('#arrSeen', st.sightings);
   set('#arrSpooked', st.spooked);
+  set('#arrCaught', st.caught || 0);
 
   const lm = $('#arrLandmarks');
   if(lm){
@@ -8689,6 +9931,19 @@ function updateTrailHud(){
   if(seen) seen.textContent = '\u2728 ' + st.sightings;
   if(oops) oops.textContent = '\ud83d\udca8 ' + st.spooked;
 
+  /* Two separate readouts, not one. The tally is history (how many you caught this walk)
+     and the chip is state (who is on your back right now). Folding them together would
+     make the count blink between two meanings, and the one the player needs mid-walk is
+     the state -- it is the thing that explains why they are suddenly slower. */
+  const got = $('#hudCaught');
+  if(got) got.textContent = '\ud83e\udd17 ' + (st.caught || 0);
+  const carry = $('#hudCarry');
+  if(carry){
+    const c = st.carrying;
+    carry.classList.toggle('on', !!c);
+    if(c) carry.textContent = c.emo + ' ' + c.name + ' \u2014 jump to let go';
+  }
+
   const elev = $('#hudElev');
   if(elev){
     const ft = elevationFt(player.x, player.z);
@@ -8721,7 +9976,7 @@ function updateTrailHud(){
        ring's radius, so the chip and the circle can never disagree. */
     const r = noiseRingRadius();
     noise.textContent = '\ud83d\udd0a ' + (r>=1000 ? (r/1000).toFixed(1)+' km' : Math.round(r)+' m');
-    const n = playerNoise(player.speed, noiseReference(), player.sneaking, player.barkT>0);
+    const n = playerNoise(player.speed, noiseReference(), player.sneaking, player.barkT>0, stillness());
     noise.classList.toggle('quiet', n <= 0.4);
     noise.classList.toggle('loud', n >= 1.2);
   }
@@ -8869,6 +10124,9 @@ function renderThemePicker(){
    All three sliders below can rebuild the world, which is expensive, so the label
    updates on `input` and the rebuild only fires on `change` (pointer release /
    arrow-key commit) -- except fog, which is cheap enough to apply live (see below). */
+/* Set by wireScale once the exaggeration slider is wired. A no-op until then, so the
+   world-scale handler can call it unconditionally without caring about wiring order. */
+let syncExaggerationUI = ()=>{};
 function wireScale(){
   /* World scale, shown as "1 : N" (N = 1..1000, matching real map-scale notation --
      N=1 is true size, bigger N is more compacted) rather than the old "0.25x..2x"
@@ -8877,11 +10135,17 @@ function wireScale(){
      used as N directly -- linear would put every value between 1:1 and 1:50 (the range
      most trail networks actually need) into the first 5% of the handle's travel. */
   const map=$('#worldScale'), mapV=$('#worldScaleVal');
-  /* Full 1:1 .. 1:1000. Elevation no longer compacts alongside the footprint, so heavy
-     compaction genuinely steepens the country -- the Hill exaggeration slider (which now
-     reaches 0) is the counterweight, rather than the range being clipped for you. */
-  const posToN = t => Math.max(1, Math.round(Math.pow(10, t/1000*3)));   // 0..1000 -> 1..1000
-  const nToPos = n => clamp(Math.log10(Math.max(1,n))/3*1000, 0, 1000);  // inverse of posToN
+  /* 1:1 .. 1:15. The old range ran to 1:1000, which was three orders of magnitude of
+     handle travel for a setting whose useful span is the first one -- past about 1:15 a
+     real trail network is compacted into a courtyard and the terrain is a crumpled sheet.
+     Narrowing the range gives the whole handle to values worth choosing.
+
+     Still logarithmic, for the same reason as before: the interesting differences are
+     between 1:1 and 1:4, and a linear handle spends most of itself above 1:8. */
+  const SCALE_MAX = 15;
+  const LOG_MAX = Math.log10(SCALE_MAX);
+  const posToN = t => clamp(Math.round(Math.pow(10, t/1000*LOG_MAX)), 1, SCALE_MAX);
+  const nToPos = n => clamp(Math.log10(clamp(n,1,SCALE_MAX))/LOG_MAX*1000, 0, 1000);
   if(map && mapV){
     map.min=0; map.max=1000; map.step=1;
     map.value=nToPos(Math.round(1/getMapScale()));
@@ -8893,6 +10157,18 @@ function wireScale(){
       // player to the same real-world place in the recompacted coordinate system
       const before=getMapScale();
       setMapScale(1/posToN(+e.target.value));
+      /* KEEP THE PROPORTIONS. Elevation does not compact with the footprint, so at 1:N the
+         same hills are N times steeper -- which is why the exaggeration slider existed as
+         a manual counterweight and why the hint text told you to go and adjust it. Making
+         the link automatic is what "consistent proportions" means: exaggeration tracks the
+         map scale so the ratio EXAG/MAP_SCALE stays at 1 and the country keeps true slope
+         at every setting.
+
+         Still adjustable afterwards. This sets a sane default at the moment the scale
+         moves rather than locking the slider, so exaggeration remains a deliberate
+         stylistic choice instead of a correction you are obliged to make. */
+      setVertScale(getMapScale());
+      syncExaggerationUI();
       show(Math.round(1/getMapScale()));
       afterWorldChange(getMapScale()/before);
     });
@@ -8911,6 +10187,10 @@ function wireScale(){
   const exToPos = v => clamp(Math.sqrt(Math.max(0,v)/2)*1000, 0, 1000);
   const posToEx = t => Math.round(2*Math.pow(t/1000, 2)*1000)/1000;
   if(ex && exV){
+    /* Hoisted so the world-scale handler above can drive this slider when it re-links the
+       two. Assigned here rather than declared at function scope because it needs `show`,
+       which needs `exV` -- and a second copy of the readout formatting is exactly the kind
+       of duplication that ends with the number and the handle disagreeing. */
     ex.min=0; ex.max=1000; ex.step=1;
     ex.value=exToPos(getExaggeration());
     const show=v=>{
@@ -8928,6 +10208,7 @@ function wireScale(){
       show(getExaggeration());
       afterWorldChange(1);       // heights only -- x/z are untouched
     });
+    syncExaggerationUI = ()=>{ ex.value = exToPos(getExaggeration()); show(getExaggeration()); };
     // world scale changes the ratio too, so the readout has to follow it
     $('#worldScale')?.addEventListener('change', ()=> show(getExaggeration()));
   }
@@ -9019,13 +10300,17 @@ function renderSpotList(){
    is the sensible default when you are setting up and the wrong one when you are walking. */
 function togglePanel(force){
   const body=document.body;
+  let open;
   if(playing){
-    const open = force===undefined ? !body.classList.contains('panelopen') : !!force;
+    open = force===undefined ? !body.classList.contains('panelopen') : !!force;
     body.classList.toggle('panelopen', open);
   }else{
-    const open = force===undefined ? body.classList.contains('nopanel') : !!force;
+    open = force===undefined ? body.classList.contains('nopanel') : !!force;
     body.classList.toggle('nopanel', !open);
   }
+  // one class the tab's own styling can read, rather than making the CSS reason about
+  // two different open-states that mean the same thing to it
+  body.classList.toggle('panel-open', open);
   setTimeout(resize, 380);
 }
 /* WHERE A WALK STARTS WHEN NOBODY HAS PICKED YET.
@@ -9234,6 +10519,10 @@ $('#bigmapClose')?.addEventListener('click', ()=> toggleBigMap(false));
 // so the live pup/minimap preview underneath is reachable without leaving the setup
 // screen. Desktop never shows this button (icon.btn is display:none above 760px).
 $('#panelBtn')?.addEventListener('click', ()=> togglePanel());
+/* Same action, a second door. The header button vanishes with the chrome when a walk
+   starts; this one is fixed to the viewport and does not, so the panel stays reachable
+   mid-walk without a keyboard. */
+$('#panelTab')?.addEventListener('click', ()=> togglePanel());
 
 $('#playBtn')?.addEventListener('click', enterPlay);
 $('#exitBtn')?.addEventListener('click', exitPlay);

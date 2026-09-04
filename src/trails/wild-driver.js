@@ -9,7 +9,7 @@ import { clamp, lerp, mulberry32 } from '../core/math.js';
 import { scene, disposeGroup } from '../core/render.js';
 import { makeAnimalModel } from '../city/animal-models.js';
 import { SPECIES } from '../data/species.js';
-import { gaitStep, climbPose, leapPose, legSwingValue, gallopAmount } from './gait.js';
+import { gaitStep, climbPose, wallPose, leapPose, legSwingValue, gallopAmount } from './gait.js';
 
 let group = null, refs = null, speciesKey = null, S = null;
 let wildLegPhase = 0, wildBodyBaseY = 0, wildClimbAmt = 0, wildLeapAmt = 0;
@@ -57,7 +57,7 @@ function spookRadiusFor(key){
   return clamp(16 - s.brav*1.3, 4, 14) * (s.scale||1);
 }
 
-function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise){
+function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise, onWall){
   if(!group || !refs) return;
   group.position.set(wildPos.x, groundY + jumpY, wildPos.z);
   group.rotation.y = yaw;
@@ -75,7 +75,10 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap
   wildClimbAmt = lerp(wildClimbAmt, clamp(climb||0, 0, 1), 1-Math.pow(0.0001,dt));
   const legs = refs.legs||[];
   const lp = wildLeapAmt  > 0.002 ? leapPose(wildLeapAmt, rise||0, legs.length) : null;
-  const cp = wildClimbAmt > 0.002 ? climbPose(wildClimbAmt, t, legs.length) : null;
+  /* A wall cling and a kerb scramble share the climbT timer but not the pose: one stands
+     the pup vertically against the stone, the other tips it a few degrees over a step. */
+  const cp = onWall ? wallPose(t, legs.length)
+           : (wildClimbAmt > 0.002 ? climbPose(wildClimbAmt, t, legs.length) : null);
 
   wildLegPhase += g.dPhase*(1 - (lp ? lp.freeze : 0));
 
@@ -108,6 +111,10 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap
     let pitch = (cp ? cp.pitch : 0) + flex;
     if(lp) pitch = lerp(pitch, lp.pitch, wildLeapAmt);
     refs.bodyG.rotation.z = pitch;
+    /* Roll into whichever diagonal is reaching. Only the climb sets it, so this is zero on
+       every other frame and the body rests flat -- but without it a scramble is perfectly
+       bilateral, which is the thing that made the old pose read as a statue. */
+    refs.bodyG.rotation.x = cp ? cp.roll : 0;
   }
 }
 

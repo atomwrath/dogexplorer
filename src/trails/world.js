@@ -23,7 +23,7 @@ import { pointInArea, areaBBox } from './geom2d.js';
 import { resetSpatialHash, hashSeg, nearestTrail } from './spatial.js';
 import { THEME, THEMES, setTheme } from './themes.js';
 import { ribbonGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
-         pickTree, buildPOI, buildArea, buildAreaSign, POI_STYLE, shade,
+         pickTree, buildPOI, buildArea, buildAreaSign, POI_STYLE, AREA_STYLE, shade,
          buildBackdrop } from './pieces.js';
 
 let GRAPH=null, TRAILHEADS=[], POIS=[], AREAS=[], WATER=[];
@@ -31,6 +31,268 @@ let GRAPH=null, TRAILHEADS=[], POIS=[], AREAS=[], WATER=[];
    per-frame size cap does not have to walk the whole graph looking for sprites.
    Cleared IN PLACE on rebuild -- see the module header on shared mutable arrays. */
 const AREA_LABELS=[];
+/* Areas you cannot walk through: the extruded rock masses and building footprints.
+   AREA_STYLE.solid is the single source of truth for which kinds those are (pieces.js),
+   because the fact "this polygon has real height" is the same fact that decides both how
+   it is drawn and whether it stops you.
+
+   Cleared IN PLACE like every other shared array here -- main.js holds this same
+   reference through areaBlocked, and reassigning it on a rebuild would leave the player
+   walking through rocks that are visibly there.
+
+   Each entry caches its own bbox. areaBlocked runs up to three times per frame from
+   moveOffTrail and ~24k times in one smoke assertion, and a bbox reject turns almost
+   every test into two comparisons instead of a ring walk. */
+const AREA_SOLIDS=[];
+function getAreaSolids(){ return AREA_SOLIDS; }
+
+/* Distance from a point to a polygon's boundary, ignoring which side it is on. Used to
+   give the player a BODY rather than a pen-point: standing 20 cm from a rock wall should
+   already be a collision, or the avatar visibly overlaps the mass it is standing against. */
+function distToRings(x,z,rings){
+  let best=Infinity;
+  for(const ring of rings){
+    for(let i=0,j=ring.length-1;i<ring.length;j=i++){
+      const ax=ring[j][0],az=ring[j][1],bx=ring[i][0],bz=ring[i][1];
+      const vx=bx-ax,vz=bz-az;
+      const L2=vx*vx+vz*vz;
+      let t=L2>0 ? ((x-ax)*vx+(z-az)*vz)/L2 : 0;
+      t=t<0?0:(t>1?1:t);
+      const d=Math.hypot(x-(ax+vx*t), z-(az+vz*t));
+      if(d<best) best=d;
+    }
+  }
+  return best;
+}
+
+/* The top of whatever solid thing stands at (x,z), or null for open ground.
+
+   THIS REPLACES A HARD COLLIDER, and the change is the whole fix for getting stuck inside
+   a rock. The first version answered a boolean -- "is this blocked" -- which makes a rock
+   mass a wall of infinite height with no inside and no top. Anything that ended up within
+   the footprint (walking the trail that runs through Kissing Camels, then stepping off it)
+   found every direction refused and was trapped, and there was no way to be on top of a
+   thing whose only property was that you could not be in it.
+
+   Answering with a HEIGHT instead makes a solid area a piece of terrain: the ground at
+   that point is simply higher. Everything else then falls out of rules that already exist
+   in main.js and needed no new concepts at all -- the step-up limit makes a tall face a
+   wall, being airborne above the top lets you land on it, walking off the edge is a fall
+   because absolute height is preserved, and anything that finds itself inside is standing
+   on top rather than trapped, because the ground beneath it is the top.
+
+   NO LONGER YIELDS TO THE TREAD, and that reversal is deliberate. The exemption existed so
+   a collider could not fence off a route -- about 5 m of trail runs through the Kissing
+   Camels polygon on the default map. But it meant that along those 5 m the rock was simply
+   not there, so the pup walked into the middle of a formation and vanished: measured, 1.66
+   units deep, rendered 7 units below the top of the mass it was standing inside.
+
+   Worse, it fought solidEmbed. Movement carried the pup in because the ground had not
+   risen; the embed check shoved it back out; the next frame carried it in again. That
+   oscillation at the boundary is the "stuck at the edge of the formation" the player feels.
+
+   A rock is now solid everywhere, tread or no tread. The cost is that a handful of metres
+   of trail become impassable where the map data runs a path through a rock mass -- a
+   conflict in the source polygons rather than a routing decision this code should be
+   papering over, and a far smaller problem than walking through a mountain. */
+function areaSolidTop(x,z){
+  if(!AREA_SOLIDS.length) return null;
+  let top=null;
+  for(const s of AREA_SOLIDS){
+    if(s.top==null) continue;
+    const bb=s.bb;
+    const inf=s.inflate||0;
+    if(x<bb.mnx-inf||x>bb.mxx+inf||z<bb.mnz-inf||z>bb.mxz+inf) continue;
+    // the bevelled skirt is part of the rock even though it lies outside the polygon
+    if(!pointInArea(x,z,s.area) && !(inf>0 && distToRings(x,z,s.area.rings)<=inf)) continue;
+    if(top===null||s.top>top) top=s.top;
+  }
+  return top;
+}
+
+/* Can you see from (ax,az) to (bx,bz)? Eye heights are above the surface at each end.
+
+   Terrain AND solid areas, because both are things you can be behind: a hill brow and a
+   rock formation occlude identically from the player's side of the screen, and a sightline
+   that only knew about one of them would let you bank a sighting through a boulder.
+
+   Walks the straight line between the two points and asks, at each sample, whether the
+   ground there rises above the line of sight. That is the same test camera.js already runs
+   to keep the brow of a hill out of the way of the avatar, which is where the sampling
+   density comes from -- a metre or so, fine enough to catch a terrace riser and coarse
+   enough to run for every animal every frame.
+
+   The near end is skipped: the surface directly under the viewer is by definition at eye
+   level minus eye height, and sampling it would make everything blind. */
+function lineOfSight(ax, az, bx, bz, eyeA, eyeB){
+  const dx=bx-ax, dz=bz-az;
+  const L=Math.hypot(dx,dz);
+  if(L<0.5) return true;
+  const y0=surfaceHeight(ax,az)+(eyeA==null?1.4:eyeA);
+  const y1=surfaceHeight(bx,bz)+(eyeB==null?0.8:eyeB);
+  const steps=clamp(Math.ceil(L/1.2), 2, 90);
+  for(let i=1;i<steps;i++){
+    const t=i/steps;
+    const x=ax+dx*t, z=az+dz*t;
+    // a little slack, so a terrace riser exactly level with the sightline is not a wall
+    if(surfaceHeight(x,z) > y0+(y1-y0)*t + 0.25) return false;
+  }
+  return true;
+}
+/* Terrain, or the top of a solid standing on it -- the surface a sightline can be stopped
+   by. Deliberately NOT the player's ground function: this asks what is in the way, which
+   includes solids the player could never stand on because they are too tall to climb. */
+function surfaceHeight(x,z){
+  const g=standingY(x,z);
+  const top=areaSolidTop(x,z);
+  return (top!=null && top>g) ? top : g;
+}
+
+/* The nearest climbable FACE to (x,z): the closest point on a solid's outline, the
+   outward normal there, and how high that solid stands.
+
+   Exists because a climb has to happen on the OUTSIDE. The first version moved the player
+   to the interior destination and raised them from there, so the pup spent the whole ascent
+   embedded in the rock with its tail poking out of the face -- correct height, wrong side
+   of the wall. Hanging on a face needs the face itself: a point on the boundary and the
+   direction "away from the rock", which a boolean or a height query cannot give.
+
+   `within` bounds the search so this stays cheap; it runs every frame while a climb is
+   live and once per frame while one is possible.
+
+   Unlike areaSolidTop this does NOT exempt trail corridors. The tread-wins rule exists so
+   a collider cannot fence off a route; it has nothing to say about whether you may put
+   your paws on a rock that happens to stand next to a path. Exempting corridors here just
+   made the faces beside a trail unclimbable, which is most of the faces a player ever
+   walks up to. */
+function nearestSolidFace(x,z,within){
+  const R=within||3;
+  let best=null;
+  for(const s of AREA_SOLIDS){
+    if(s.top==null) continue;
+    const bb=s.bb;
+    if(x<bb.mnx-R||x>bb.mxx+R||z<bb.mnz-R||z>bb.mxz+R) continue;
+    for(const ring of s.area.rings){
+      for(let i=0,j=ring.length-1;i<ring.length;j=i++){
+        const ax=ring[j][0],az=ring[j][1],bx=ring[i][0],bz=ring[i][1];
+        const vx=bx-ax,vz=bz-az;
+        const L2=vx*vx+vz*vz;
+        let t=L2>0 ? ((x-ax)*vx+(z-az)*vz)/L2 : 0;
+        t=t<0?0:(t>1?1:t);
+        const px=ax+vx*t, pz=az+vz*t;
+        const d=Math.hypot(x-px,z-pz);
+        if(d>R || (best && d>=best.d)) continue;
+        best={d, x:px, z:pz, top:s.top, area:s.area, kind:s.kind, inflate:s.inflate||0};
+      }
+    }
+  }
+  if(!best) return null;
+  /* Outward normal. Taken by stepping off the boundary point and asking which side is
+     inside, rather than from the edge's winding -- rings arrive from GeoJSON with no
+     guaranteed orientation, and a normal that points the wrong way puts the climber
+     INSIDE the thing it is meant to be hanging off. */
+  let ox=x-best.x, oz=z-best.z;
+  const oL=Math.hypot(ox,oz);
+  if(oL>1e-4){ ox/=oL; oz/=oL; }
+  else {
+    // standing exactly on the outline: probe outward along each axis for open ground
+    ox=1; oz=0;
+    for(const [tx,tz] of [[1,0],[-1,0],[0,1],[0,-1]]){
+      if(!pointInArea(best.x+tx*0.4, best.z+tz*0.4, best.area)){ ox=tx; oz=tz; break; }
+    }
+  }
+  if(pointInArea(best.x+ox*0.4, best.z+oz*0.4, best.area)){ ox=-ox; oz=-oz; }
+  best.ox=ox; best.oz=oz;
+  /* Move the reported face out onto the DRAWN surface. Callers stand the pup a fixed
+     standoff off this point, and measuring that standoff from the bare polygon put it
+     inside the bevelled skirt -- which is exactly how the pup ended up sunk into the rock
+     it was clinging to. `d` is corrected too so proximity tests stay honest. */
+  if(best.inflate>0){
+    best.x+=ox*best.inflate; best.z+=oz*best.inflate;
+    best.d=Math.max(0, best.d-best.inflate);
+  }
+  return best;
+}
+
+/* Distance from a point to ONE named solid's outline, and whether the point is inside it.
+   Deliberately not "the nearest solid": the whole difficulty in deciding whether a pup is
+   walking into a rock is that near a corner the nearest FACE and the face you are aimed at
+   are different, so any comparison has to be against a fixed subject. */
+function distToSolid(x,z,area){
+  return {d: distToRings(x,z,area.rings), inside: pointInArea(x,z,area)};
+}
+
+/* If (x,z,y) is INSIDE a solid and below its top, the shortest push that gets it out.
+   Returns null when there is nothing to fix, which is almost every call.
+
+   THE LAST LINE OF DEFENCE, and it exists because "how did the player get in there" turned
+   out to have more answers than the movement rules could enumerate. areaSolidTop exempts
+   trail corridors so a collider cannot fence off a route -- and about 5 m of trail on the
+   default map runs straight through the Kissing Camels polygon, so walking that trail
+   carried the pup into the middle of the rock at tread level with only its paws showing
+   through the face. Blocking every way in is whack-a-mole; asserting the invariant
+   directly is not. Wherever you came from, you do not get to be inside the rock.
+
+   Deliberately ignores corridors. The tread wins for BLOCKING, which is about not severing
+   routes; it does not get to win for being inside a mountain, which is not a route
+   question at all. */
+function solidEmbed(x,z,y){
+  for(const s of AREA_SOLIDS){
+    if(s.top==null || y >= s.top-0.3) continue;
+    const bb=s.bb;
+    const inf=s.inflate||0;
+    if(x<bb.mnx-inf||x>bb.mxx+inf||z<bb.mnz-inf||z>bb.mxz+inf) continue;
+    const insidePoly=pointInArea(x,z,s.area);
+    if(!insidePoly && !(inf>0 && distToRings(x,z,s.area.rings)<=inf)) continue;
+    // nearest point on the outline is the shortest way out
+    let best=null;
+    for(const ring of s.area.rings){
+      for(let i=0,j=ring.length-1;i<ring.length;j=i++){
+        const ax=ring[j][0],az=ring[j][1],bx=ring[i][0],bz=ring[i][1];
+        const vx=bx-ax,vz=bz-az;
+        const L2=vx*vx+vz*vz;
+        let t=L2>0 ? ((x-ax)*vx+(z-az)*vz)/L2 : 0;
+        t=t<0?0:(t>1?1:t);
+        const px=ax+vx*t, pz=az+vz*t;
+        const d=Math.hypot(x-px,z-pz);
+        if(!best||d<best.d) best={d,px,pz};
+      }
+    }
+    if(!best) continue;
+    let ox=x-best.px, oz=z-best.pz;
+    const L=Math.hypot(ox,oz);
+    if(L>1e-4){ ox/=L; oz/=L; }
+    else{
+      // dead on the outline: pick whichever axis leads to open ground
+      ox=1; oz=0;
+      for(const [tx,tz] of [[1,0],[-1,0],[0,1],[0,-1]]){
+        if(!pointInArea(best.px+tx*0.5, best.pz+tz*0.5, s.area)){ ox=tx; oz=tz; break; }
+      }
+    }
+    // outward, not inward -- the vector above points from the wall toward the player,
+    // who is inside, so it needs flipping before it is a way out
+    if(pointInArea(best.px+ox*0.5, best.pz+oz*0.5, s.area)){ ox=-ox; oz=-oz; }
+    // clear of the DRAWN surface, not just the polygon: the skirt is solid too
+    return {x:best.px+ox*((s.inflate||0)+0.6), z:best.pz+oz*((s.inflate||0)+0.6), top:s.top};
+  }
+  return null;
+}
+
+/* Is (x,z) inside -- or within `rad` of -- something solid? Kept because it answers a
+   question areaSolidTop cannot: "am I touching this at all", regardless of height. Used by
+   the smoke suite to assert the footprints are where they should be, and available to any
+   caller that wants presence rather than a surface. Movement does NOT use it -- see
+   areaSolidTop for why a boolean was the wrong shape for that job. */
+function areaBlocked(x,z,rad){
+  const r=rad||0;
+  for(const s of AREA_SOLIDS){
+    const bb=s.bb;
+    if(x<bb.mnx-r||x>bb.mxx+r||z<bb.mnz-r||z>bb.mxz+r) continue;
+    if(pointInArea(x,z,s.area)) return true;
+    if(r>0 && distToRings(x,z,s.area.rings)<r) return true;
+  }
+  return false;
+}
 let backdropG=null;             // horizon ring, re-centred on the camera by main.js
 let bboxW={minx:0,maxx:0,minz:0,maxz:0};
 let EXTRA=[];                   // raw GeoJSON FeatureCollections dropped in-session
@@ -136,7 +398,10 @@ function getExaggeration(){ return EXAG; }
 function getMapScale(){ return MAP_SCALE; }
 function getFogMultiplier(){ return FOG_MUL; }
 function setFogMultiplier(v){
-  FOG_MUL=clamp(Number(v)||1, 0.15, 3);
+  /* Upper bound matches the slider in trails/index.html. Raising the input's max alone
+     did nothing -- the value arrived here and was clamped straight back to 3, so the
+     handle moved and the view did not. Both ends of that have to agree. */
+  FOG_MUL=clamp(Number(v)||1, 0.15, 5);
   applyThemeLighting();          // fog only -- cheap enough to call straight from an input handler
 }
 function setMapScale(v){
@@ -1293,9 +1558,20 @@ function rebuildWorld(){
 
   // areas (ground cover) before trails, matching draw order in the original
   AREA_LABELS.length=0;
+  /* Registered from the SAME list, in the same pass, as the meshes -- so a polygon that
+     failed to build (the catch below) never leaves an invisible wall behind it. */
+  AREA_SOLIDS.length=0;
   AREAS.forEach((a,ai)=>{ try{
     const ag=buildArea(a,rng,groundYAt,nearestTrail,VERT_SCALE); ag.name='area:'+ai; worldG.add(ag);
     ag.traverse(o=>{ if(o.userData && o.userData.areaLabel) AREA_LABELS.push(o); });
+    const st=AREA_STYLE[a.kind];
+    // `top` comes off the built group, so the surface the player stands on is by
+    // construction the top of the mesh they can see -- see pieces.js's buildArea
+    if(st && st.solid) AREA_SOLIDS.push({area:a, kind:a.kind, bb:areaBBox(a),
+                                         top:ag.userData ? ag.userData.solidTop : null,
+                                         // the drawn surface reaches this far past the
+                                         // outline; see pieces.js's buildLandform
+                                         inflate:(ag.userData && ag.userData.solidInflate) || 0});
   }catch(err){ console.warn('area skipped',a.name,err); } });
 
   // Path colour/texture follows the source file's own highway/kind tag (pathKind, in
@@ -1659,7 +1935,7 @@ function getBackdrop(){ return backdropG; }
 export { loadWorld, rebuildWorld, addLayers, clearLayers, hasBundle, setContourStep,
          standingY, getWorldRevision, pathWidth, getContourStep, getSignCount, getPathMix, getMapId, getCrossings,
          pathRank, kindLift, pathOutlineWidth,
-         getAreaLabels, updateAreaLabels,
+         getAreaLabels, updateAreaLabels, getAreaSolids, areaBlocked, areaSolidTop, lineOfSight, nearestSolidFace, solidEmbed, distToSolid,
          setThemeById, getTheme, setMapScale, getMapScale, getExaggeration, getBackdrop,
          setFogMultiplier, getFogMultiplier,
          getGraph, getTrailheads, getPOIs, getAreas, getBBox,

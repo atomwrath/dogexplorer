@@ -292,14 +292,26 @@ const POI_STYLE={
   camp:{em:'⛺',label:'Campsite'},       water:{em:'💧',label:'Spring'},
   cairn:{em:'🗿',label:'Marker'},        tree:{em:'🌳',label:'Landmark tree'}
 };
+/* `solid` is a PHYSICS fact and it lives here, beside the drawing, because the two have
+   to agree: an area is solid exactly when this table gives it real height off the ground.
+   The landforms are extruded rock masses and a building is an extruded footprint with a
+   roof cap -- you can see they are there, so walking through them reads as a bug. Every
+   other kind is paint on the floor (a lot, a meadow, a pond), and blocking those would
+   fence the map off with lines the player cannot see.
+
+   Enforced OFF-TRAIL ONLY -- see world.js's areaBlocked and main.js's moveOffTrail. The
+   default map has ~5 m of trail crossing the Kissing Camels polygon and rrworld ~2 m
+   crossing a rock mass, so a collider that did not yield to the tread would wall off a
+   route the map is drawn as though you can walk. The tread wins, as it does everywhere
+   else in this game. */
 const AREA_STYLE={
   water:{fill:'#5c9fd6',op:0.72,em:'💧',label:'Water'},
   forest:{fill:'#3f6b40',op:0.5,em:'🌲',label:'Forest'},
   meadow:{fill:'#86a852',op:0.36,em:'🌾',label:'Meadow'},
-  rock:{fill:'#8a7360',op:0.6,em:'🪨',landform:true,label:'Rock formation'},
-  redrock:{fill:'#8a3e2c',op:0.65,em:'🪨',landform:true,label:'Red rock formation'},
-  lightrock:{fill:'#c9a87e',op:0.65,em:'🪨',landform:true,label:'Light rock formation'},
-  building:{fill:'#b08a63',op:1,em:'🏚️',label:'Building'},
+  rock:{fill:'#8a7360',op:0.6,em:'🪨',landform:true,solid:true,label:'Rock formation'},
+  redrock:{fill:'#8a3e2c',op:0.65,em:'🪨',landform:true,solid:true,label:'Red rock formation'},
+  lightrock:{fill:'#c9a87e',op:0.65,em:'🪨',landform:true,solid:true,label:'Light rock formation'},
+  building:{fill:'#b08a63',op:1,em:'🏚️',solid:true,label:'Building'},
   parking:{fill:'#8d8578',op:0.85,em:'🅿️',paved:true,label:'Parking'}
 };
 function plaqueTex(title,sub){
@@ -469,7 +481,23 @@ function buildLandform(a,st,shape,bb,rng){
     spire.position.set(x,hgt+sh/2-0.5,z);spire.rotation.y=rng()*6.28;g.add(spire);placed++;
     topY=Math.max(topY,hgt+sh-0.5);
   }
-  return{group:g,topY};
+  /* Two different heights, and conflating them is what would put the player standing in
+     mid-air on top of a spire tip. `topY` is the tallest thing in the group and is what
+     the floating label clears. `slabY` is the flat extruded mass underneath -- the only
+     part of a landform that is actually a surface -- and is what world.js registers as
+     the walkable top. */
+  /* THE MESH IS BIGGER THAN THE POLYGON, and every collision test in world.js needs to
+     know by how much. ExtrudeGeometry's bevel pushes the surface `bevelSize` OUTWARD from
+     the shape's outline and `bevelThickness` beyond each end of the extrusion -- so a rock
+     drawn from a given polygon occupies bevel*0.75 more ground in every direction and
+     stands bevel taller than `depth`.
+
+     Nothing accounted for that, so the collision outline was the bare polygon and the pup
+     could stand up to 0.75 units inside the visible stone. That is the reported screenshot:
+     a pup clinging to a face with its body sunk into the rock, and a pup with only its head
+     out of a wall. Reporting `inflate` here, from the same numbers that build the geometry,
+     is what keeps the bounds and the mesh from drifting apart. */
+  return{group:g,topY,slabY:hgt+bevel,inflate:bevel*0.75};
 }
 function floatingLabelTex(name,em){
   const c=document.createElement('canvas');c.width=512;c.height=128;
@@ -514,11 +542,23 @@ function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
   const shape=areaShape(a);
   const bb=areaBBox(a);
   let labelY=3.5; // flat ground cover: just enough clearance to read as floating signage
+  /* The height of the walkable top, in the group's own space -- null for anything that is
+     paint on the floor. world.js turns it into an absolute world height once the group has
+     been placed, and main.js stands the player on it (see areaSolidTop). Recorded here
+     because this is the function that decides how tall these things are drawn, and a
+     second opinion about it living anywhere else would be a surface that does not match
+     the mesh under it. */
+  let solidTop=null;
+  // how far the drawn surface reaches past the polygon outline -- see buildLandform
+  let solidInflate=0;
   if(st.landform){
     const built=buildLandform(a,st,shape,bb,rng);
     g.add(built.group);labelY=built.topY+2.2;
+    solidTop=built.slabY;
+    solidInflate=built.inflate;
   }else if(a.kind==='building'){
     const hgt=clamp(+(a.props.height||a.props.levels*3||0)||3.4,1.5,14);
+    solidTop=hgt;
     const geo=new THREE.ExtrudeGeometry(shape,{depth:hgt,bevelEnabled:false});
     const m=M(geo,toon(st.fill));
     // see buildLandform: rotation alone maps the extrude's base to y=0, no offset needed
@@ -565,6 +605,11 @@ function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
   // is what put every area with a claimed band floating above -- or sunk below -- the
   // ground mesh, which IS built with vertScale applied (buildTerrainMesh(VERT_SCALE)).
   g.position.y=(a.groundY!=null)?a.groundY*vertScale:groundYAt(bb.cx,bb.cz);
+  // absolute now that the group is placed, which is the form every consumer wants
+  if(solidTop!=null){
+    g.userData.solidTop=g.position.y+solidTop;
+    g.userData.solidInflate=solidInflate;   // 0 for buildings: their extrude has no bevel
+  }
   return g;
 }
 function areaSignTex(title,sub){

@@ -25,6 +25,10 @@
     <div class="spacer"></div>
     <button class="btn icon" id="panelBtn" title="Settings (Tab) — adjust while you walk">⚙️</button>
   </header>
+  <!-- Settings tab. The header ⚙️ disappears with the rest of the chrome once a walk
+       starts, which left no way to reach the panel mid-walk on a touch device. This one is
+       fixed to the viewport rather than living in the header, so it survives play. -->
+  <button class="btn icon" id="panelTab" title="Settings (Tab)" aria-label="Settings">⚙️</button>
   <main>
     <aside id="panel">
       <p class="hint panel-lede">Change anything while you walk — you stay where you
@@ -53,9 +57,10 @@
           <label>Contour step <span class="val" id="contourVal">3.0 m</span></label>
           <input type="range" id="contourStep" min="0.5" max="12" step="0.5" value="3">
         </div>
-        <p class="hint">1:1 is true size; a bigger N packs the map into a shorter walk
-          (and steepens it — drop exaggeration to match). Contour step is metres of
-          real elevation per terrace.</p>
+        <p class="hint">1:1 is true size; a bigger N packs the map into a shorter walk.
+          Hill exaggeration follows it automatically so slopes stay true — nudge it
+          yourself afterwards if you want them flatter or wilder. Contour step is metres
+          of real elevation per terrace.</p>
         <div class="statbox" id="mapStats"></div>
         <div id="trailList" class="trail-list"></div>
         <p class="hint" id="mapNote">Loading map…</p>
@@ -72,7 +77,7 @@
         <p class="hint">Same trails, different country.</p>
         <div class="ctl">
           <label>Fog <span class="val" id="fogAmtVal">1.00×</span></label>
-          <input type="range" id="fogAmt" min="0.15" max="3" step="0.05" value="1">
+          <input type="range" id="fogAmt" min="0.15" max="5" step="0.05" value="1">
         </div>
       </div>
       <div class="sect">
@@ -98,11 +103,14 @@
         <div id="hudTally">
           <span class="tally" id="hudSeen" title="Wildlife watched">✨ 0</span>
           <span class="tally" id="hudSpooked" title="Wildlife you sent running">💨 0</span>
+          <span class="tally" id="hudCaught" title="Wildlife you caught and carried">🤗 0</span>
         </div>
         <div id="hudReadout">
           <span class="tally" id="hudElev" title="Elevation above sea level">⛰ —</span>
           <span class="tally" id="hudDist" title="Distance travelled">👣 —</span>
         </div>
+        <!-- Who is riding along, and how to put them down. Only up while carrying. -->
+        <div id="hudCarry" class="tally">🤗 —</div>
         <div id="watchMeter">
           <span id="watchName">Watching…</span>
           <span class="wm-bar"><i id="watchFill"></i></span>
@@ -136,6 +144,7 @@
             <div class="arr-stat"><b id="arrTime">0:00</b><span>on the trail</span></div>
             <div class="arr-stat"><b id="arrSeen">0</b><span>animals watched</span></div>
             <div class="arr-stat"><b id="arrSpooked">0</b><span>animals spooked</span></div>
+            <div class="arr-stat"><b id="arrCaught">0</b><span>animals carried</span></div>
           </div>
           <div class="arr-panel">
             <h3>📍 Landmarks found</h3>

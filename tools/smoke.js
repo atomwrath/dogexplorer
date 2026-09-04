@@ -290,6 +290,19 @@ const probe = `
   fogNear: scene.fog ? scene.fog.near : null,
   fogFar: scene.fog ? scene.fog.far : null,
   camFov: camera.fov,
+  chase: (()=>{ try{
+    const out={typical:+typicalSpookRadius().toFixed(2), reach:+catchRadius().toFixed(2), species:[]};
+    for(const k of ['rabbit','squirrel','chipmunk','fox']){
+      const R=spookRadiusFor(k);
+      out.species.push({k, spook:+R.toFixed(2),
+        boltMovingSneak:+(R*playerNoise(3,6,true,false,0)).toFixed(2),
+        boltSettledSneak:+(R*playerNoise(0,6,true,false,1)).toFixed(2),
+        boltMovingWalk:+(R*playerNoise(3,6,false,false,0)).toFixed(2),
+        boltSettledWalk:+(R*playerNoise(0,6,false,false,1)).toFixed(2),
+        reachable: R*playerNoise(3,6,true,false,0) < catchRadius() });
+    }
+    return out;
+  }catch(e){ return {err:e.message, st:e.stack}; } })(),
   camYaw: typeof getCamYaw === 'function' ? getCamYaw() : null,
   camPitch: typeof getCamPitch === 'function' ? getCamPitch() : null,
   critters: typeof CRITTERS !== 'undefined' ? CRITTERS.length : null,
@@ -363,6 +376,12 @@ function assertAll(window, errors, stats) {
   };
 
   let s = probe();
+  let __areaNote = '', __solidNote = '', __carryNote = '', blockedNote = '', __ringNote = '';
+  let __topNote = '', __climbNote = '', __reachNote = '', __sneakNote = '';
+  let __losNote = '', __seeNote = '';
+  let __frameNote = '', __embedNote = '', __outsideNote = '';
+  let __catchNote = '', __chainNote = '', __slideNote = '', __hangNote = '', __poseNote = '';
+  let __faceNote = '', __walkInNote = '', __jumpNote = '', __boundsNote = '';
   const txt = sel => (d.querySelector(sel)?.textContent || '').trim();
   const n = sel => d.querySelectorAll(sel).length;
 
@@ -434,14 +453,21 @@ function assertAll(window, errors, stats) {
   check('the summary follows the start point', txt('#startNow').startsWith(String.fromCharCode(65+target)),
     txt('#startNow'));
 
-  // World scale is a log-mapped 0..1000 slider position -> "1:N", not a raw multiplier
-  // (see wireScale's posToN/nToPos) -- position 500 is the slider's midpoint, N=~32,
-  // i.e. MAP_SCALE ~1/32. Drive it the same way a real drag would: set the raw slider
-  // position, not a multiplier value.
+  /* World scale is a log-mapped 0..1000 slider POSITION -> "1:N", not a raw multiplier
+     (see wireScale's posToN/nToPos). The range is now 1:1..1:15, so the far end of the
+     handle is N=15 -- it used to run to 1:1000 and this test drove the midpoint expecting
+     N=32. Driven to the top of the range rather than a midpoint so the assertion stays
+     "more compacted than wherever we were" regardless of what an earlier test left the
+     scale at, which is what it was always trying to say.
+
+     NOT the top of the handle, deliberately: a later test ('changing the world scale
+     mid-walk') nudges this same slider by +120 and asserts the scale actually moved, so
+     parking it at 1000 here silently turns that nudge into a no-op and fails a test three
+     hundred lines away for a reason that looks nothing like the cause. */
   const before = Math.hypot(s.heads[s.startHead].x, s.heads[s.startHead].z);
   const beforeMapScale = s.mapScale;
   const ms = d.querySelector('#worldScale');
-  ms.value = '500';
+  ms.value = '800';
   ms.dispatchEvent(new window.Event('change', { bubbles: true }));
   s = probe();
   const after = Math.hypot(s.heads[s.startHead].x, s.heads[s.startHead].z);
@@ -452,6 +478,15 @@ function assertAll(window, errors, stats) {
     Math.abs(after - before*expectRatio) < Math.max(1, before*expectRatio*0.02),
     `${before.toFixed(0)}m -> ${after.toFixed(0)}m (expected ~${(before*expectRatio).toFixed(0)}m)`);
   check('world scale keeps avatar seated', dist(s.wildPos, s.heads[s.startHead]) < 0.5);
+  /* Elevation does not compact with the footprint, so at 1:N the same hills are N times
+     steeper. Exaggeration is now re-linked whenever the scale moves so the ratio stays at
+     true slope -- the thing the panel hint used to tell you to go and do by hand. */
+  check('changing world scale keeps the slope true',
+    Math.abs(getExaggeration() - s.mapScale) < 1e-6,
+    `exaggeration ${getExaggeration().toFixed(3)} vs map scale ${s.mapScale.toFixed(3)}`);
+  check('the exaggeration slider followed the scale',
+    Math.abs(+d.querySelector('#vertScale').value - Math.sqrt(getExaggeration()/2)*1000) < 2,
+    `handle at ${d.querySelector('#vertScale').value}`);
 
   d.querySelector('#dogGrid button').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   s = probe();
@@ -481,6 +516,18 @@ function assertAll(window, errors, stats) {
     `near ${s.fogNear.toFixed(0)}->${s2.fogNear.toFixed(0)}, far ${s.fogFar.toFixed(0)}->${s2.fogFar.toFixed(0)}`);
   check('fog slider does not rebuild the world', s2.worldMeshes === meshesBefore,
     `${meshesBefore} -> ${s2.worldMeshes} meshes`);
+  /* The slider's max and world.js's clamp have to agree. Raising the input's max to 5 on
+     its own did nothing at all -- the value arrived at setFogMultiplier and was clamped
+     straight back to 3, so the handle moved and the view did not, which is exactly the
+     kind of change that looks done from the markup. Asserted through the setter, because
+     that is the half that was wrong. */
+  check('fog reaches the top of its slider', (() => {
+    const max = +d.querySelector('#fogAmt').max;
+    setFogMultiplier(max);
+    const got = getFogMultiplier();
+    setFogMultiplier(2);
+    return max >= 5 && Math.abs(got - max) < 1e-9;
+  })(), `slider max ${d.querySelector('#fogAmt').max}`);
 
   // free-look: a drag starting on the right half of the canvas orbits the camera and
   // does NOT drive the movement stick. Free-look only activates during play (same guard
@@ -1892,9 +1939,805 @@ function assertAll(window, errors, stats) {
     resetCritters();
   }
 
+  /* ---- areas: grading, and the ground they claim ------------------------------
+     The reported symptom was a pond floating at rock-formation height. The cause was not
+     in how water is drawn -- it was flattenAreaCells handing a polygon a level graded for
+     a NEIGHBOUR, off a single shared boundary cell picked in Set-iteration order. So the
+     assertion is the general rule, not the water special case: whatever level an area
+     claims has to be defensible from its OWN footprint. That is the check that would have
+     caught this before it shipped, and it keeps working on maps that have no water at all
+     (the default map has none -- both ponds are in data/rrworld.json). */
+  check('no area is graded to a level its own ground cannot justify', (() => {
+    const areas = getAreas(), W = getWorld();
+    if (!areas.length || !W) return false;
+    let worst = 0, who = '';
+    for (const a of areas) {
+      if (a.groundY == null) continue;
+      const bb = areaBBox(a);
+      const inside = [];
+      for (let i = 0; i <= 14; i++) for (let j = 0; j <= 14; j++) {
+        const x = bb.mnx + bb.w * i / 14, z = bb.mnz + bb.h * j / 14;
+        if (pointInArea(x, z, a)) inside.push(W.heightAt(x, z));
+      }
+      if (inside.length < 4) continue;
+      inside.sort((p, q) => p - q);
+      // datum-relative, the same units groundY is in (terrain.js: lvl*STEP - GROUND_M)
+      const lo = inside[0] - W.minM, hi = inside[inside.length - 1] - W.minM;
+      // one contour step of slack either side: grading quantises to a band by design
+      const over = Math.max(lo - getContourStep() - a.groundY, a.groundY - hi - getContourStep());
+      if (over > worst) { worst = over; who = (a.kind + ' ' + (a.name || '')).trim(); }
+    }
+    __areaNote = worst > 0 ? `worst ${worst.toFixed(1)}m outside its own relief (${who})`
+                           : 'every area within its own relief';
+    return worst <= 0;
+  })(), () => __areaNote);
+
+  /* Solid areas are walls OFF the trail and are not walls ON it. Both halves matter and
+     they pull in opposite directions, so both are asserted: a collider that yields to
+     nothing fences off the ~5 m of trail that runs through Kissing Camels, and one that
+     yields to everything is not a collider. */
+  {
+    const solids = getAreaSolids();
+    check('rock masses and buildings are registered as solid',
+      /* Pinned to the literal list rather than read back out of AREA_STYLE. Asserting a
+         table against itself passes no matter what the table says; naming the kinds here
+         is what makes "meadows and car parks are not walls" a thing the suite defends. */
+      solids.length > 0 && solids.every(s => ['building','rock','redrock','lightrock'].includes(s.kind)),
+      `${solids.length} solid areas: ${[...new Set(solids.map(s => s.kind))].join('/')}`);
+
+    /* Interior points are FOUND by scanning, not assumed to be the centroid. These are
+       digitised rock formations -- Kissing Camels is a long thin crescent -- and its
+       bounding-box centre is outside the polygon entirely, so the first version of this
+       check tested nothing and reported it as a failure. */
+    check('you cannot walk into a rock mass off-trail', (() => {
+      if (!solids.length) return false;
+      let tested = 0, blocked = 0, leaked = 0;
+      for (const s of solids) {
+        const bb = s.bb;
+        for (let i = 1; i < 26 && tested < 600; i++) for (let j = 1; j < 26; j++) {
+          const x = bb.mnx + bb.w * i / 26, z = bb.mnz + bb.h * j / 26;
+          if (!pointInArea(x, z, s.area)) continue;
+          // a point genuinely inside a solid polygon, and off-trail, must be blocked
+          const nt = nearestTrail(x, z);
+          if (nt.d <= nt.hw) continue;                 // the tread wins; tested elsewhere
+          tested++;
+          if (areaBlocked(x, z, 0.45)) blocked++; else leaked++;
+        }
+        // and open ground a good way outside it must not be
+        const out = { x: bb.mnx - 12, z: bb.mnz - 12 };
+        if (areaBlocked(out.x, out.z, 0.45)) leaked++;
+      }
+      blockedNote = `${blocked} of ${tested} interior samples blocked, ${leaked} leaks`;
+      return tested > 20 && leaked === 0 && blocked === tested;
+    })(), () => blockedNote);
+
+    /* What this defends is narrow and deliberate: the COLLIDER must never be the reason a
+       trail station is impassable. It is not a general "every trail is walkable" check --
+       that one already exists ('no terrace cliffs left along any trail') and is already
+       failing on a 5.8u riser that happens to sit inside the Kissing Camels corridor. If
+       this assertion counted that too it would report a pre-existing terrain bug as a
+       collider regression every time, which is the fastest way to teach someone to ignore
+       a red line. So a station stopped by ground the player could not have climbed anyway
+       is excluded by name, and only a stop the collider caused is a failure here. */
+    check('the colliders never wall off a trail', (() => {
+      const G = getGraph(), pl = getTrailPlayer();
+      const held = { x: pl.x, z: pl.z, y: pl.y, vy: pl.vy };
+      const limit = getContourStep() * getVertScale() * 1.05;
+      let crossed = 0, byCollider = 0, byTerrain = 0;
+      for (const s of solids) {
+        for (const e of G.edges) {
+          const p = e.prof && e.prof.pts ? e.prof.pts : e.pts;
+          for (let i = 0; i < p.length - 1; i++) {
+            if (!pointInArea(p[i][0], p[i][1], s.area)) continue;
+            const dx = p[i + 1][0] - p[i][0], dz = p[i + 1][1] - p[i][1];
+            const L = Math.hypot(dx, dz) || 1;
+            const x0 = p[i][0], z0 = p[i][1];
+            const tx = x0 + dx / L * 0.2, tz = z0 + dz / L * 0.2;
+            pl.x = x0; pl.z = z0; pl.y = 0; pl.vy = 0;
+            movePlayer(dx / L * 0.2, dz / L * 0.2);
+            crossed++;
+            if (Math.hypot(pl.x - x0, pl.z - z0) >= 0.1) continue;
+            // stopped. Would the ground alone have stopped it, collider or no collider?
+            if (Math.abs(standingY(tx, tz) - standingY(x0, z0)) > limit) byTerrain++;
+            else byCollider++;
+          }
+        }
+      }
+      Object.assign(pl, held);
+      __solidNote = `${crossed} trail stations inside a solid area, ${byCollider} walled by a collider` +
+                    (byTerrain ? `, ${byTerrain} already impassable terrain` : '');
+      return byCollider === 0;
+    })(), () => __solidNote);
+
+    /* Standing ON a rock, not stuck IN one. Reported as getting stuck inside a formation,
+       and the fix was to stop answering "is this blocked" and start answering "how high is
+       the ground here" -- so that is what gets asserted, at the level the player
+       experiences it: the surface under a point inside a footprint has to be the top of
+       the mesh they can see, and it has to be above the terrain it stands on. If this ever
+       returns raw terrain again, the pup is back inside the boulder. */
+    check('the ground inside a rock or building is its top, not the terrain under it', (() => {
+      let tested = 0, wrong = 0, tallest = 0;
+      for (const s of solids) {
+        if (s.top == null) continue;
+        const bb = s.bb;
+        for (let i = 1; i < 18 && tested < 300; i++) for (let j = 1; j < 18; j++) {
+          const x = bb.mnx + bb.w * i / 18, z = bb.mnz + bb.h * j / 18;
+          if (!pointInArea(x, z, s.area)) continue;
+          const nt = nearestTrail(x, z);
+          if (nt.d <= nt.hw) continue;                  // the tread wins; asserted above
+          tested++;
+          const top = areaSolidTop(x, z);
+          if (top == null || Math.abs(top - s.top) > 1e-6) { wrong++; continue; }
+          const rel = top - standingY(x, z);
+          if (rel <= 0) { wrong++; continue; }           // a solid you cannot stand on
+          /* THROUGH THE PLAYER'S OWN GROUND FUNCTION, not just world.js's query. The
+             first version of this check called areaSolidTop directly and therefore passed
+             with main.js's playerGroundY stubbed back to plain standingY -- it proved the
+             surface existed while proving nothing about the pup ever standing on it, which
+             is the entire bug. Asserting the function movement and the avatar actually
+             read is what closes that. */
+          if (Math.abs(playerGroundY(x, z) - top) > 1e-6) wrong++;
+          if (rel > tallest) tallest = rel;
+        }
+      }
+      __topNote = `${tested} interior samples, ${wrong} not standing on the mesh top, tallest ${tallest.toFixed(1)}u above terrain`;
+      return tested > 20 && wrong === 0;
+    })(), () => __topNote);
+
+    /* And the top has to be reachable, or "stand on top of it" is a promise the game does
+       not keep. Asserted as a property of the CLAMBER rule rather than by driving a jump,
+       because what matters is the guarantee: every solid whose top is within MOUNT_REACH
+       can be mounted, and the terrain rules are untouched (raw terrain is never eligible,
+       which is what keeps the cliff-walking bug fixed). */
+    check('most rocks and every building can actually be climbed', (() => {
+      let reachable = 0, walls = 0;
+      for (const s of solids) {
+        if (s.top == null) continue;
+        const bb = s.bb;
+        let base = null;
+        for (let i = 1; i < 18 && base == null; i++) for (let j = 1; j < 18; j++) {
+          const x = bb.mnx + bb.w * i / 18, z = bb.mnz + bb.h * j / 18;
+          if (pointInArea(x, z, s.area)) { base = standingY(x, z); break; }
+        }
+        if (base == null) continue;
+        if (s.top - base <= mountReach()) reachable++; else walls++;
+      }
+      __climbNote = `${reachable} climbable, ${walls} too tall to mount`;
+      return reachable > 0;
+    })(), () => __climbNote);
+
+    /* ---- wall jumping ----------------------------------------------------------
+       Replaces a hold-to-ascend climb, which asked nothing of the player but patience.
+       Driven through the real functions and, where it matters, the real frame loop -- both
+       bugs that shipped in the climb were invisible to tests that called the mechanic
+       directly: the trigger was unreachable from half the compass while every test passed,
+       and the frame that ran the climb returned before renderer.render. */
+    const findWall = () => {
+      for (const s of solids) {
+        if (s.top == null) continue;
+        const bb = s.bb;
+        for (const ring of s.area.rings) {
+          for (let i = 0; i < ring.length; i++) {
+            const a = ring[i], b = ring[(i + 1) % ring.length];
+            const f = nearestSolidFace((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 3);
+            if (!f) continue;
+            const base = standingY(f.x + f.ox * 0.55, f.z + f.oz * 0.55);
+            if (f.top - base > stepUpLimit() + 1) return { f, base, h: f.top - base, area: s.area };
+          }
+        }
+      }
+      return null;
+    };
+    const wall = findWall();
+    check('there is a wall to test against', !!wall, wall ? `${wall.h.toFixed(1)}u face` : 'none');
+
+    if (wall) {
+      const pl = getTrailPlayer();
+      const parked = { x: pl.x, z: pl.z, y: pl.y, vy: pl.vy, wall: pl.wall, regrabT: pl.regrabT };
+      /* `lift` is height UP THE FACE, measured from the face's own base -- not player.y,
+         which is height above whatever is underfoot and drifts from the face datum as soon
+         as the terrain beside a formation slopes. tryWallCatch has a minimum catch height
+         measured from the same base, so a test that set player.y directly was asking a
+         different question than the rule answers and failed on sloping ground. */
+      const atFace = (lift) => {
+        pl.wall = null; pl.regrabT = 0;
+        pl.x = wall.f.x + wall.f.ox * 1.1; pl.z = wall.f.z + wall.f.oz * 1.1;
+        pl.y = Math.max(0, (wall.base + lift) - standingY(pl.x, pl.z));
+        pl.vy = 4;
+      };
+
+      check('you cannot catch a wall while standing on the ground', (() => {
+        atFace(0); pl.y = 0; pl.vy = 0;
+        const got = tryWallCatch(-wall.f.ox, -wall.f.oz);
+        pl.wall = null;
+        return !got;
+      })());
+
+      check('jumping at a face in mid-air catches it', (() => {
+        atFace(2.0);
+        const got = tryWallCatch(-wall.f.ox, -wall.f.oz);
+        const stuck = got && !!pl.wall;
+        __catchNote = stuck ? `caught at ${pl.y.toFixed(2)}u` : 'no catch';
+        pl.wall = null;
+        return stuck;
+      })());
+
+      check('leaping ALONGSIDE a face does not catch it', (() => {
+        atFace(2.0);
+        const got = tryWallCatch(-wall.f.oz, wall.f.ox);   // tangent, not into the rock
+        pl.wall = null;
+        return !got;
+      })());
+
+      /* The mechanic: each push-off has to gain height, and a chain of them has to reach
+         the top. If a wall jump did not gain, the rock would be unclimbable; if one jump
+         cleared everything, there would be no skill in it. */
+      check('a chain of wall jumps climbs the rock, and one jump does not', (() => {
+        // start at the LOWEST legal catch, the way a player starting from the ground does;
+        // beginning halfway up let a single jump top out and the test stopped meaning
+        // anything about chaining
+        atFace(1.1);
+        if (!tryWallCatch(-wall.f.ox, -wall.f.oz)) return false;
+        const first = pl.y;
+        wallJump();
+        const oneJumpPeak = first + (pl.vy * pl.vy) / (2 * 26);
+        // now chain: fall, re-catch, push off again
+        let jumps = 1, topped = false, best = first;
+        for (let f = 0; f < 1200 && !topped; f++) {
+          const dt = 1 / 60;
+          if (pl.regrabT > 0) pl.regrabT = Math.max(0, pl.regrabT - dt);
+          if (pl.wall) {
+            updateWall(dt);
+            if (!pl.wall) {
+              /* Topping out sets player.y to 0 because the pup is now STANDING on the
+                 rock -- so "y is zero" cannot mean "fell off" here. Ask the ground instead:
+                 on the summit, playerGroundY is the rock's top. The first version of this
+                 test read the zero as a fall and reported a successful climb as stopping
+                 87% of the way up. */
+              topped = Math.abs(playerGroundY(pl.x, pl.z) - wall.f.top) < 0.5;
+              break;
+            }
+            best = Math.max(best, pl.y);
+            wallJump(); jumps++;
+          } else {
+            pl.vy -= 26 * dt; pl.y = Math.max(0, pl.y + pl.vy * dt);
+            if (pl.y <= 0 && pl.vy < 0) break;                 // landed: chain broken
+            tryWallCatch(-wall.f.ox, -wall.f.oz);
+          }
+        }
+        const reached = best + wall.base;
+        __chainNote = `${jumps} wall jumps, reached ${best.toFixed(1)}u of a ${wall.h.toFixed(1)}u face` +
+                      (topped ? ' -- topped out' : ' -- did NOT top out');
+        pl.wall = null;
+        /* Both halves matter. A chain has to REACH THE TOP or the rock is decoration, and a
+           single jump must not, or there is no skill in it and we are back to a button that
+           teleports you upward. */
+        /* Two properties, and no arbitrary jump count beyond them: a single push-off must
+           not clear the face (or there is no skill in it) and a chain must reach the top
+           (or the rock is decoration). How many jumps that takes is a property of the
+           formation's height, not of the mechanic. */
+        return topped && jumps >= 2 && oneJumpPeak - first < wall.h;
+      })(), () => __chainNote);
+
+      check('clinging slides you down, so dithering costs height', (() => {
+        atFace(3.4);
+        if (!tryWallCatch(-wall.f.ox, -wall.f.oz)) return false;
+        const y0 = pl.y;
+        for (let f = 0; f < 30; f++) updateWall(1 / 60);
+        const slid = pl.wall ? y0 - pl.y : y0;
+        pl.wall = null;
+        __slideNote = `slid ${slid.toFixed(2)}u in half a second`;
+        return slid > 0.05;
+      })(), () => __slideNote);
+
+      check('you cannot hang on a wall forever', (() => {
+        atFace(3.4);
+        if (!tryWallCatch(-wall.f.ox, -wall.f.oz)) return false;
+        let f = 0;
+        for (; f < 900 && pl.wall; f++) updateWall(1 / 60);
+        pl.wall = null;
+        __hangNote = `let go after ${(f / 60).toFixed(1)}s`;
+        return f < 900;
+      })(), () => __hangNote);
+
+      check('the pup hangs on the OUTSIDE of the rock', (() => {
+        atFace(2.0);
+        if (!tryWallCatch(-wall.f.ox, -wall.f.oz)) return false;
+        let inside = 0, n = 0;
+        for (let f = 0; f < 60 && pl.wall; f++) {
+          updateWall(1 / 60);
+          if (!pl.wall) break;
+          n++;
+          if (pointInArea(pl.x, pl.z, wall.area)) inside++;
+        }
+        pl.wall = null;
+        __outsideNote = `${n} frames clinging, ${inside} inside the footprint`;
+        return n > 10 && inside === 0;
+      })(), () => __outsideNote);
+
+      /* THE ORIENTATION. Reported with a screenshot: the pup stuck out of the rock
+         nose-first, lying horizontally like a shelf bracket, because the wall reused the
+         kerb-scramble pose -- a ~26 degree tip that is right for hopping a terrace riser
+         and wrong for hanging off a wall. Asserted at the RIG, through syncAvatar, because
+         the pose is only correct if it survives the whole path from player state to
+         bodyG.rotation: checking wallPose's return value alone would have passed on the
+         very screenshot that prompted this. */
+      check('the pup hangs vertically on a wall, not horizontally', (() => {
+        atFace(2.0);
+        if (!tryWallCatch(-wall.f.ox, -wall.f.oz)) return false;
+        /* Several frames, not one: the drivers EASE between poses, so a single frame after
+           catching still has most of the previous leap blended in. Twenty frames is a third
+           of a second -- long enough for the blend to settle, short enough that a pose which
+           never actually arrives will still be caught. */
+        for (let f = 0; f < 20; f++) {
+          updateWall(1 / 60);
+          if (!pl.wall) break;
+          syncAvatar(1 / 60, f * 16, pl.y, 0, false, false, false);
+        }
+        const pitch = dogBodyPitch();
+        pl.wall = null;
+        __poseNote = pitch == null ? 'no rig to read'
+                   : `body pitched ${(pitch * 180 / Math.PI).toFixed(0)} degrees`;
+        // upright-ish: well past the ~26 degree scramble tip, and nose UP not down
+        return pitch != null && pitch > 1.0;
+      })(), () => __poseNote);
+
+      /* LEGS OUT OF THE ROCK, NOT INTO IT. Reported as the dog positioned backwards with
+         its legs sticking through the formation. Pitched ~76 degrees nose-up the legs swing
+         to the body's backward axis, so which way the pup FACES decides which side its paws
+         end up on -- facing away from the rock buries them in it. Measured as the dot of
+         forward against the outward normal: it was +1 (facing away), it must be negative. */
+      check('the pup faces the rock so its legs stay outside it', (() => {
+        atFace(2.0);
+        if (!tryWallCatch(-wall.f.ox, -wall.f.oz)) return false;
+        updateWall(1 / 60);
+        const fx = Math.cos(pl.yaw), fz = -Math.sin(pl.yaw);
+        const dotOut = fx * wall.f.ox + fz * wall.f.oz;
+        pl.wall = null;
+        __faceNote = `forward vs outward normal ${dotOut.toFixed(2)}`;
+        return dotOut < -0.7;
+      })(), () => __faceNote);
+
+      /* WALKING INTO A ROCK. areaSolidTop used to exempt trail corridors so a collider
+         could not fence off a route -- which meant that along the ~5 m of trail running
+         through Kissing Camels the rock simply was not there, and the pup walked 1.66 units
+         into the mass and vanished. Asserted by walking at every face on the map. */
+      check('you cannot walk into a rock formation at all', (() => {
+        const parkedW = { x: pl.x, z: pl.z, y: pl.y, vy: pl.vy, wall: pl.wall };
+        let worst = 0, where = '';
+        for (const s of solids) {
+          if (s.top == null) continue;
+          for (const ring of s.area.rings) {
+            for (let i = 0; i < ring.length; i++) {
+              const a = ring[i], b = ring[(i + 1) % ring.length];
+              const f = nearestSolidFace((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 3);
+              if (!f) continue;
+              pl.x = f.x + f.ox * 2.5; pl.z = f.z + f.oz * 2.5;
+              pl.y = 0; pl.vy = 0; pl.wall = null;
+              for (let k = 0; k < 60; k++) movePlayer(-f.ox * 0.08, -f.oz * 0.08);
+              if (!pointInArea(pl.x, pl.z, s.area)) continue;
+              // standing ON the slab is fine; being inside it below the top is not
+              if (playerGroundY(pl.x, pl.z) + pl.y >= s.top - 0.3) continue;
+              const d = distToSolid(pl.x, pl.z, s.area).d;
+              if (d > worst) { worst = d; where = s.kind; }
+            }
+          }
+        }
+        Object.assign(pl, parkedW);
+        __walkInNote = worst > 0 ? `${worst.toFixed(2)}u inside a ${where}` : 'never got inside one';
+        return worst < 0.3;
+      })(), () => __walkInNote);
+
+      /* JUMPING BESIDE A ROCK. Catching had no minimum height, so a jump taken while stood
+         against a formation grabbed the face at ankle height -- and a cling that low slides
+         to the ground within a few frames and lets go, swallowing the jump. The pup ended
+         up pinned to the bottom edge, unable to leave the floor. */
+      check('jumping next to a rock is not swallowed by the wall', (() => {
+        const parkedJ = { x: pl.x, z: pl.z, y: pl.y, vy: pl.vy, wall: pl.wall, regrabT: pl.regrabT };
+        pl.x = wall.f.x + wall.f.ox * 1.0; pl.z = wall.f.z + wall.f.oz * 1.0;
+        pl.y = 0; pl.vy = 0; pl.wall = null; pl.regrabT = 0;
+        pl.yaw = Math.atan2(wall.f.oz, -wall.f.ox);
+        trailJump();
+        let peak = 0;
+        for (let f = 0; f < 40; f++) {
+          const dt = 1 / 60;
+          if (pl.wall) { updateWall(dt); } else {
+            pl.vy -= 26 * dt; pl.y = Math.max(0, pl.y + pl.vy * dt);
+            tryWallCatch(-wall.f.ox, -wall.f.oz);
+          }
+          peak = Math.max(peak, pl.y);
+        }
+        const stuck = peak < 0.5;
+        pl.wall = null;
+        Object.assign(pl, parkedJ);
+        __jumpNote = `jump reached ${peak.toFixed(2)}u beside the face`;
+        return !stuck;
+      })(), () => __jumpNote);
+
+      /* THE BOUNDS MUST MATCH WHAT IS DRAWN. Reported with two screenshots: a pup clinging
+         with its body sunk into the rock, and a pup with only its head out of a wall. The
+         cause was not the standoff but the outline it was measured from -- ExtrudeGeometry's
+         bevel pushes a landform's surface up to 0.75 units past its polygon, and every
+         collision test used the bare polygon. So the pup stood the correct distance from a
+         boundary that was not where the rock actually was.
+
+         Asserted against the INFLATED outline, which is the drawn surface. Testing against
+         the polygon is what let this ship: by that measure the pup was correctly outside
+         the whole time. */
+      check('a clinging pup is clear of the DRAWN rock, not just the polygon', (() => {
+        const parkedB = { x: pl.x, z: pl.z, y: pl.y, vy: pl.vy, wall: pl.wall };
+        let worst = Infinity, n = 0;
+        for (const s of solids) {
+          if (s.top == null) continue;
+          /* The skirt is recomputed HERE from the geometry's own formula rather than read
+             off s.inflate, and that is deliberate. The first version of this check used
+             s.inflate -- the very number the fix writes -- so reverting the fix set it to
+             zero and the assertion happily passed, measuring the pup against the same bare
+             polygon that caused the bug. A test that sources its expectation from the code
+             under test cannot fail. This mirrors pieces.js's buildLandform: bevel is
+             min(1, min(w,h)*0.1) and the surface is pushed out by bevelSize = bevel*0.75. */
+          const bevel = s.kind === 'building' ? 0 : Math.min(1.0, Math.min(s.bb.w, s.bb.h) * 0.1);
+          const inf = bevel * 0.75;
+          for (const ring of s.area.rings) {
+            for (let i = 0; i < ring.length; i++) {
+              const a = ring[i], b = ring[(i + 1) % ring.length];
+              const f = nearestSolidFace((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 3);
+              if (!f) continue;
+              const base = standingY(f.x + f.ox * 0.55, f.z + f.oz * 0.55);
+              if (f.top - base <= stepUpLimit() + 1) continue;
+              pl.wall = null; pl.regrabT = 0;
+              pl.x = f.x + f.ox * 1.1; pl.z = f.z + f.oz * 1.1;
+              pl.y = Math.max(0, (base + 2.0) - standingY(pl.x, pl.z));
+              pl.vy = 4;
+              if (!tryWallCatch(-f.ox, -f.oz)) continue;
+              updateWall(1 / 60);
+              if (!pl.wall) continue;
+              n++;
+              /* Clearance from the drawn surface: distance to the polygon, minus the
+                 bevel skirt, negative when the pup is inside the stone. */
+              const info = distToSolid(pl.x, pl.z, s.area);
+              const clear = (info.inside ? -info.d : info.d) - inf;
+              if (clear < worst) worst = clear;
+            }
+          }
+        }
+        pl.wall = null;
+        Object.assign(pl, parkedB);
+        __boundsNote = n ? `${n} faces tested, tightest clearance ${worst.toFixed(2)}u from the drawn surface`
+                         : 'no faces caught';
+        return n > 5 && worst > 0.05;
+      })(), () => __boundsNote);
+
+      /* THE FROZEN SCREEN, kept from the climb version because the failure mode belongs to
+         the frame loop and not to any particular mechanic: an early return past
+         renderer.render stops the picture while the game runs on underneath. */
+      check('the frame still renders while the pup is on a wall', (() => {
+        atFace(2.0);
+        if (!tryWallCatch(-wall.f.ox, -wall.f.oz)) { Object.assign(pl, parked); return false; }
+        const before = stats.renders;
+        let pumped = 0;
+        for (let f = 0; f < 20; f++) {
+          if (!global.__raf) break;
+          const fn = global.__raf; global.__raf = null;
+          fn(30000 + f * 16);
+          pumped++;
+        }
+        const drew = stats.renders - before;
+        pl.wall = null;
+        __frameNote = `${pumped} frames pumped on a wall, ${drew} rendered`;
+        return pumped > 5 && drew === pumped;
+      })(), () => __frameNote);
+
+      Object.assign(pl, parked);
+    }
+  }
+
+  /* ---- you have to be able to SEE it ------------------------------------------
+     Watching was banked on distance alone, so a deer twelve metres away on the far side
+     of a brow filled the meter while the screen showed you a slope. Watching is the one
+     mechanic whose entire subject is looking at something, so a sighting you could not
+     have witnessed is the worst thing it could award. */
+  {
+    check('line of sight is blocked by ground that stands between you', (() => {
+      const W = getWorld();
+      if (!W) return false;
+      let clearShort = 0, blockedFound = 0, tried = 0;
+      const bb = getBBox();
+      for (let i = 0; i < 400 && blockedFound < 1; i++) {
+        const ax = bb.minx + Math.random() * (bb.maxx - bb.minx);
+        const az = bb.minz + Math.random() * (bb.maxz - bb.minz);
+        const ang = Math.random() * Math.PI * 2, L = 12 + Math.random() * 25;
+        const bx = ax + Math.cos(ang) * L, bz = az + Math.sin(ang) * L;
+        tried++;
+        if (!lineOfSight(ax, az, bx, bz, 1.4, 0.9)) blockedFound++;
+      }
+      // and a point can always see itself, whatever the terrain is doing
+      for (let i = 0; i < 30; i++) {
+        const ax = bb.minx + Math.random() * (bb.maxx - bb.minx);
+        const az = bb.minz + Math.random() * (bb.maxz - bb.minz);
+        if (lineOfSight(ax, az, ax + 0.2, az + 0.2, 1.4, 0.9)) clearShort++;
+      }
+      __losNote = `${blockedFound} blocked sightline(s) in ${tried} tries, ${clearShort}/30 self-views clear`;
+      // on real terrain SOMETHING has to occlude, or the check is not doing anything
+      return blockedFound > 0 && clearShort === 30;
+    })(), () => __losNote);
+
+    check('a sighting cannot be banked through a hillside', (() => {
+      resetCritters();
+      spawnCritters(5150);
+      const pl = getTrailPlayer();
+      const held = { x: pl.x, z: pl.z };
+      const c = getCritters()[0];
+      // park the player just inside the notice radius but behind whatever is in the way
+      let blocked = null;
+      for (let a = 0; a < 32 && !blocked; a++) {
+        const th = a / 32 * Math.PI * 2, d = spookRadiusFor(c.key) * 1.6;
+        const x = c.x + Math.cos(th) * d, z = c.z + Math.sin(th) * d;
+        if (!lineOfSight(x, z, c.x, c.z, 1.4, 0.9)) blocked = { x, z };
+      }
+      if (!blocked) { resetCritters(); Object.assign(pl, held); __seeNote = 'no occluded angle on this map'; return true; }
+      pl.x = blocked.x; pl.z = blocked.z;
+      c.sighted = false; c.watchT = 0;
+      for (let f = 0; f < 400; f++) updateCritters(1 / 60, f * 16, pl.x, pl.z, 0, 6, true, false, 1);
+      const bankedBlind = c.sighted;
+      resetCritters();
+      Object.assign(pl, held);
+      __seeNote = bankedBlind ? 'banked a sighting through solid ground' : 'meter held while out of sight';
+      return !bankedBlind;
+    })(), () => __seeNote);
+  }
+
+  /* ---- wildlife stays put while you are looking at it -------------------------
+     Chasing something made it blink out at the seven-second mark and reappear elsewhere,
+     because the recycle fired on a timer with no reference to where the player was. The
+     recycle still exists (a map that never re-seeds slowly empties as everything flees to
+     the edges), so this asserts the GATE rather than its absence: nothing is removed while
+     it is close enough to watch. Driven through the real update loop with the player
+     pinned to the animal, which is exactly the situation that produced the report. */
+  {
+    resetCritters();
+    spawnCritters(31337);
+    const pl = getTrailPlayer();
+    const held = { x: pl.x, z: pl.z, y: pl.y, vy: pl.vy };
+    const c = getCritters()[0];
+    const startKey = c.key;
+    let jumped = 0, maxHop = 0;
+    // 12 seconds of chase, well past the 7s recycle timer, staying right on top of it
+    for (let f = 0; f < 720; f++) {
+      const bx = c.x, bz = c.z;
+      pl.x = c.x + 2; pl.z = c.z;
+      updateCritters(1 / 60, f * 16, pl.x, pl.z, 5, 6, false, false, 0);
+      const hop = Math.hypot(c.x - bx, c.z - bz);
+      if (hop > maxHop) maxHop = hop;
+      if (hop > 12) jumped++;          // a frame-to-frame move no animal could run
+    }
+    Object.assign(pl, held);
+    check('an animal you are chasing never blinks out and respawns elsewhere',
+      jumped === 0 && c.key === startKey,
+      `${jumped} teleports in 12s of chase, biggest single-frame move ${maxHop.toFixed(2)}u`);
+    resetCritters();
+  }
+
+  /* ---- catching a small animal ------------------------------------------------
+     The mechanic IS the two rings, so that is what gets asserted: not "catch works" but
+     the ordering that makes it legible. Sneaking and settling has to put the noise ring
+     inside the reach ring; anything else has to leave it outside. If that ordering ever
+     inverts, the ring the player is reading stops predicting what the animals do, which
+     is the failure that matters. */
+  {
+    const ref = 6, reach = catchRadius(), typ = typicalSpookRadius();
+    const ringAt = (sp, sneak, still) => typ * playerNoise(sp, ref, sneak, false, still);
+
+    /* THE ORDERING THAT MAKES A CATCH POSSIBLE AT ALL, asserted per species.
+
+       This replaces a pair of checks written against the roster MEAN, and the mean is
+       precisely what was broken: reach came from typicalSpookRadius() while whether a
+       given animal bolts comes from its own radius. On the default meadow roster that gap
+       made the window empty -- a rabbit ran at 4.05 m and could not be grabbed until
+       3.73 m -- so nothing on the map could be caught and the old assertions passed
+       throughout, because they only ever compared averages to averages.
+
+       The contract now, for every catchable species: reach sits ABOVE the moving-sneak
+       bolt radius (so you can close in while sneaking) and BELOW the moving-walk one (so
+       walking still fails). Both sides scale with the same R, so this holds at any
+       bravery on any roster -- which is the property the mean could not give. */
+    check('every catchable animal can actually be reached by sneaking', (() => {
+      const keys = ['rabbit', 'squirrel', 'chipmunk', 'fox', 'bobcat', 'raccoon', 'possum', 'cat'];
+      const bad = [];
+      for (const k of keys) {
+        const R = spookRadiusFor(k);
+        const r = catchRadiusFor(k);
+        const boltSneak = R * playerNoise(3, ref, true, false, 0);
+        const boltWalk = R * playerNoise(3, ref, false, false, 0);
+        if (!(r > boltSneak)) bad.push(`${k} unreachable (reach ${r.toFixed(1)} <= sneak bolt ${boltSneak.toFixed(1)})`);
+        if (!(r < boltWalk)) bad.push(`${k} catchable at a walk`);
+      }
+      __reachNote = bad.length ? bad.join('; ')
+        : `${keys.length} species, reach between the sneak and walk bolt radii for each`;
+      return bad.length === 0;
+    })(), () => __reachNote);
+    check('a settled sneak pulls the noise ring inside the reach ring',
+      ringAt(0, true, 1) < reach,
+      `settled sneak ${ringAt(0, true, 1).toFixed(2)}m vs ${reach.toFixed(2)}m reach`);
+    check('walking normally still scares everything off before you arrive', (() => {
+      const R = spookRadiusFor('rabbit');
+      return R * playerNoise(3, ref, false, false, 0) > catchRadiusFor('rabbit');
+    })());
+    check('holding still is what shrinks the ring, not just being slow',
+      ringAt(0, true, 1) < ringAt(0, true, 0) * 0.9,
+      `${ringAt(0, true, 0).toFixed(2)}m unsettled -> ${ringAt(0, true, 1).toFixed(2)}m settled`);
+    /* The trim is the "let me get closer" ask, and it must NOT have moved the watch
+       window -- that is the whole reason it lives on the multiplier and not on
+       spookRadiusFor. Asserted as an inequality against the notice radius so a future
+       tuning pass cannot quietly buy closeness by shortening the sighting window. */
+    check('getting closer did not shrink the window a sighting is banked in',
+      spookRadiusFor('rabbit') * 2.4 > ringAt(3, false, 0),
+      `notice ${(spookRadiusFor('rabbit') * 2.4).toFixed(1)}m still wider than a walking ring`);
+
+    /* THE WHOLE MECHANIC, END TO END, because the arithmetic checks above were all
+       passing on the day nothing on the map could be caught. Sneak a pup at a rabbit the
+       way a player would -- creep, stop, let the noise settle, jump -- and assert a catch
+       comes out. If this fails the feature does not work, whatever the radii say. */
+    check('a player can sneak up on a rabbit and catch it', (() => {
+      resetCritters();
+      spawnCritters(2024);
+      const pl = getTrailPlayer();
+      const held = { x: pl.x, z: pl.z, y: pl.y, vy: pl.vy, sneaking: pl.sneaking, speed: pl.speed, stillT: pl.stillT };
+      const target = getCritters().find(c => isCatchable(c.key));
+      if (!target) { Object.assign(pl, held); return false; }
+
+      // start outside its notice radius, on the far side, and creep straight in
+      const R = spookRadiusFor(target.key);
+      const ang = Math.atan2(pl.z - target.z, pl.x - target.x);
+      pl.x = target.x + Math.cos(ang) * R * 2.6;
+      pl.z = target.z + Math.sin(ang) * R * 2.6;
+      pl.y = 0; pl.vy = 0; pl.sneaking = true;
+
+      let caught = null, frames = 0;
+      const dt = 1 / 60;
+      while (!caught && frames < 1500) {
+        frames++;
+        const d = Math.hypot(target.x - pl.x, target.z - pl.z);
+        const reach = catchRadiusFor(target.key);
+        /* Creep only until the ring would light up, then STOP. Deliberately reach*0.95
+           and not something comfortably inside it: while you are moving, the band between
+           "in reach" (R*0.36) and "it bolts" (R*0.289) is only about a metre wide, so
+           creeping on past the moment the ring turns solid walks straight through the far
+           side of it. That is the actual skill the mechanic asks for, and the first
+           version of this test failed precisely by not doing it -- which is a fair
+           description of what a player who ignores the ring will experience. */
+        const closing = d > reach * 0.95;
+        if (closing) {
+          const a = Math.atan2(target.z - pl.z, target.x - pl.x);
+          const step = 1.6 * dt;                       // a sneaking pace
+          pl.x += Math.cos(a) * step; pl.z += Math.sin(a) * step;
+          pl.speed = 1.6;
+          pl.stillT = Math.max(0, pl.stillT - dt * (1.4 / 1.1));
+        } else {
+          pl.speed = 0;
+          pl.stillT += dt;
+        }
+        updateCritters(dt, frames * 16, pl.x, pl.z, pl.speed, ref, true, false,
+                       Math.min(1, pl.stillT / 1.4));
+        if (target.state === 'flee') break;            // blew it
+        if (!closing) caught = catchNear(pl.x, pl.z);  // jump, once settled and in reach
+      }
+      if (caught) releaseCarried(pl.x, pl.z, pl.yaw);
+      resetCritters();
+      Object.assign(pl, held);
+      __sneakNote = caught ? `caught a ${caught.S.nm} after ${(frames / 60).toFixed(1)}s`
+                           : `no catch in ${(frames / 60).toFixed(1)}s (it fled)`;
+      return !!caught;
+    })(), () => __sneakNote);
+
+    check('only small animals can be caught', (() => {
+      const small = ['rabbit', 'squirrel', 'chipmunk', 'fox', 'bobcat'];
+      const big = ['deer', 'bear', 'moose', 'bighorn', 'goat'];
+      return small.every(k => isCatchable(k)) && big.every(k => !isCatchable(k));
+    })());
+
+    /* Reported: a static blue-grey ring sitting on the ground for the whole walk with
+       nothing nearby to explain it. The ring's RADIUS never moved (that is deliberate --
+       see the header comment on updateCatchRing), which is exactly what makes an
+       always-visible one read as a leftover rather than a readout. Asserted as two states
+       of the same scene rather than by reading a colour, since a colour check would pass
+       on the very bug being fixed: dim-but-visible still renders. */
+    /* Reported twice, and the second report is the one this now defends. First the ring
+       was always visible around the pup ("a static blue ring that seems unnecessary");
+       gating it on having a target fixed the clutter but left it centred on the player,
+       which asks the player to judge whether a moving animal has entered a circle attached
+       to themselves. It is now drawn around the ANIMAL, so the assertion is about WHERE it
+       is as much as whether it is up. A colour check would not do -- the old bug rendered
+       perfectly, just in the wrong place. */
+    check('the reach ring is hidden with nothing near, and drawn on the animal when there is', (() => {
+      const pl = getTrailPlayer();
+      const held = { x: pl.x, z: pl.z };
+      resetCritters();
+      // nothing on the map at all -- resetCritters just cleared it
+      let near = nearestCatchable(pl.x, pl.z, catchRadius() * 2.6);
+      updateCatchRing(0.016, pl.x, pl.z, catchRadius(), standingY, !!near, false);
+      const hiddenIdle = !getCatchRing().visible;
+
+      spawnCritters(777);
+      const target = getCritters().find(c => isCatchable(c.key));
+      if (!target) { Object.assign(pl, held); return false; }
+      // stand a stride outside arm's length: the ring should be up, and centred on IT
+      pl.x = target.x + catchRadius() * 1.4; pl.z = target.z;
+      near = nearestCatchable(pl.x, pl.z, catchRadius() * 2.6);
+      updateCatchRing(0.016, near ? near.critter.x : pl.x, near ? near.critter.z : pl.z,
+                      catchRadius(), standingY, !!near, !!(near && near.inReach));
+      const shown = getCatchRing().visible;
+      // the band's own vertices say where it was actually drawn, not where we asked
+      const pos = getCatchRing().geometry.attributes.position.array;
+      let cx = 0, cz = 0;
+      const n = pos.length / 3;
+      for (let i = 0; i < n; i++) { cx += pos[i * 3]; cz += pos[i * 3 + 2]; }
+      cx /= n; cz /= n;
+      const onAnimal = Math.hypot(cx - target.x, cz - target.z) < 0.5;
+      const notOnPlayer = Math.hypot(cx - pl.x, cz - pl.z) > catchRadius() * 0.5;
+      const approaching = near && !near.inReach;   // outside arm's length, so dim not armed
+
+      resetCritters();
+      Object.assign(pl, held);
+      __ringNote = `idle=${hiddenIdle ? 'hidden' : 'VISIBLE'}, ` +
+                   `centre ${Math.hypot(cx - target.x, cz - target.z).toFixed(2)}m from the animal`;
+      return hiddenIdle && shown && onAnimal && notOnPlayer && approaching;
+    })(), () => __ringNote);
+
+    check('jumping beside a small animal picks it up, and jumping again puts it down', (() => {
+      resetCritters();
+      spawnCritters(4242);
+      const pl = getTrailPlayer();
+      /* Put the pup back afterwards. These tests teleport it next to a randomly placed
+         critter, and everything downstream -- the trailhead summary, the bark, the
+         mid-walk rebuild -- reads where the player is standing. Leaving it parked beside
+         a random animal made three later assertions pass or fail depending on the spawn
+         seed, which is worse than a failing test because it looks like a flake. */
+      const held = { x: pl.x, z: pl.z, y: pl.y, vy: pl.vy };
+      const target = getCritters().find(c => isCatchable(c.key));
+      if (!target) { Object.assign(pl, held); return false; }
+      // stand within reach, facing it
+      pl.x = target.x + 1.2; pl.z = target.z;
+      const free = currentTopSpeed() * carrySlow();
+      const got = catchNear(pl.x, pl.z);
+      if (!got || getCarried() !== got) return false;
+      const laden = currentTopSpeed() * carrySlow();
+      if (!(laden < free)) return false;
+      if (!(getCritterStats().caught === 1)) return false;
+      // and it rides: the anchor is pushed from syncAvatar, so drive one
+      syncAvatar(0.016, 0, 0, 0, false, false, false);
+      updateCritters(0.016, 0, pl.x, pl.z, 0, 6, false, false, 1);
+      const onBack = Math.hypot(got.g.position.x - pl.x, got.g.position.z - pl.z) < 2 &&
+                     got.g.position.y > standingY(pl.x, pl.z);
+      releaseCarried(pl.x, pl.z, pl.yaw);
+      Object.assign(pl, held);
+      __carryNote = `carried at ${(laden / free).toFixed(2)}x speed, rode ${onBack ? 'on the back' : 'OFF the back'}`;
+      return onBack && getCarried() === null && got.state === 'flee';
+    })(), () => __carryNote);
+
+    /* Letting one go is not the same as blundering into one. If these ever share a
+       counter the scorecard can no longer tell a careful walk from a clumsy one, which is
+       the entire reason sightings and spooks are two numbers instead of one. */
+    check('releasing a caught animal is not counted as spooking it', (() => {
+      resetCritters();
+      spawnCritters(99);
+      const pl = getTrailPlayer();
+      const held = { x: pl.x, z: pl.z, y: pl.y, vy: pl.vy };
+      const target = getCritters().find(c => isCatchable(c.key));
+      if (!target) { Object.assign(pl, held); return false; }
+      pl.x = target.x + 1.2; pl.z = target.z;
+      if (!catchNear(pl.x, pl.z)) { Object.assign(pl, held); return false; }
+      const before = getCritterStats().spooked;
+      releaseCarried(pl.x, pl.z, pl.yaw);
+      Object.assign(pl, held);
+      return getCritterStats().spooked === before;
+    })());
+    resetCritters();
+  }
+
   /* ---- crossings built as infrastructure -------------------------------------- */
   {
-    let __stuckNote = '', __postNote = '';
+    let __stuckNote = '', __postNote = '', __overlapNote = '', __uncutNote = '';
     const xs = getCrossings();
 
   /* A crosswalk is not "a road and a trail touch here". It is "a trail continues on the
@@ -2064,30 +2907,6 @@ function assertAll(window, errors, stats) {
       return uncut === 0;
     })(), () => __uncutNote);
 
-  /* Helpers -- add near the other local helpers at the top of smoke.js if not already there.
-
-  function ptSegSmoke(p, a, b){
-    const dx=b[0]-a[0], dz=b[1]-a[1], L2=dx*dx+dz*dz;
-    let t = L2===0 ? 0 : ((p[0]-a[0])*dx + (p[1]-a[1])*dz)/L2;
-    t = t<0?0:(t>1?1:t);
-    const q=[a[0]+t*dx, a[1]+t*dz];
-    return {t, q, d: Math.hypot(p[0]-q[0], p[1]-q[1])};
-  }
-  function projOnLine(pts, x, z){
-    let best={d:Infinity, px:x, pz:z, dir:[1,0]};
-    for(let i=0;i<pts.length-1;i++){
-      const r=ptSegSmoke([x,z], pts[i], pts[i+1]);
-      if(r.d<best.d){
-        let dx=pts[i+1][0]-pts[i][0], dz=pts[i+1][1]-pts[i][1];
-        const L=Math.hypot(dx,dz)||1;
-        best={d:r.d, px:r.q[0], pz:r.q[1], dir:[dx/L, dz/L]};
-      }
-    }
-    return best;
-  }
-  and declare `let __overlapNote='', __uncutNote='';` beside the other __note variables.
-  `segCross` is already exported from geo.js; add it to the names pulled off the bundle.
-  */
 
 
     check('road crossings are planned, not left to the survey angle',
@@ -2271,11 +3090,41 @@ function assertAll(window, errors, stats) {
 
   const failed = results.filter(r => !r.ok);
   console.log('\n---------------- smoke test ----------------');
-  for (const r of results) console.log(` ${r.ok ? 'ok  ' : 'FAIL'}  ${r.name}${r.detail ? '   (' + r.detail + ')' : ''}`);
+  for (const r of results) {
+    // detail is sometimes a thunk, because a note is filled in by the assertion itself
+    // and reading it eagerly at the call site captures the empty string it started as
+    const d = typeof r.detail === 'function' ? r.detail() : r.detail;
+    console.log(` ${r.ok ? 'ok  ' : 'FAIL'}  ${r.name}${d ? '   (' + d + ')' : ''}`);
+  }
   if (errors.length) console.log('\n runtime errors:\n  ' + errors.join('\n  '));
   console.log('-------------------------------------------');
   console.log(failed.length || errors.length
     ? `\n${failed.length} failed, ${errors.length} runtime error(s)`
     : `\nall ${results.length} checks passed`);
   process.exit(failed.length || errors.length ? 1 : 0);
+}
+
+/* Geometry helpers used by the displacement / overlap assertions above. They live here
+   rather than inside assertAll because two separate blocks need them, and a function
+   declaration at module scope hoists over both. Named ptSegSmoke, not ptSeg, because the
+   bundle already puts a ptSeg in global scope and shadowing it here would make it
+   ambiguous which one an assertion is measuring with. */
+function ptSegSmoke(p, a, b){
+  const dx = b[0]-a[0], dz = b[1]-a[1], L2 = dx*dx + dz*dz;
+  let t = L2 === 0 ? 0 : ((p[0]-a[0])*dx + (p[1]-a[1])*dz)/L2;
+  t = t < 0 ? 0 : (t > 1 ? 1 : t);
+  const q = [a[0] + t*dx, a[1] + t*dz];
+  return {t, q, d: Math.hypot(p[0]-q[0], p[1]-q[1])};
+}
+function projOnLine(pts, x, z){
+  let best = {d: Infinity, px: x, pz: z, dir: [1, 0]};
+  for(let i = 0; i < pts.length-1; i++){
+    const r = ptSegSmoke([x, z], pts[i], pts[i+1]);
+    if(r.d < best.d){
+      let dx = pts[i+1][0]-pts[i][0], dz = pts[i+1][1]-pts[i][1];
+      const L = Math.hypot(dx, dz) || 1;
+      best = {d: r.d, px: r.q[0], pz: r.q[1], dir: [dx/L, dz/L]};
+    }
+  }
+  return best;
 }

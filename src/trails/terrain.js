@@ -50,6 +50,34 @@ function rawGroundY(x,z){ // un-terraced, for reference / minimap shading if eve
   return WORLD ? WORLD.heightAt(x,z) - GROUND_M : 0;
 }
 
+/* How much of a polygon's own footprint has to be claimed already before it adopts a
+   neighbour's level instead of grading itself.
+
+   THIS USED TO BE ONE CELL. The claim map exists because ~20 parking-lot polygons on the
+   default map genuinely overlap, and re-levelling the second one leaves the first slab
+   hovering. But the test was `for(const k of mark){ if(claimed.has(k)){ lvl=...; break; } }`
+   -- a single shared cell, picked in Set iteration order, handed the whole polygon a
+   level graded for something else. Areas mark their bbox expanded by one cell plus every
+   cell their boundary crosses, so merely TOUCHING was enough.
+
+   Measured on data/rrworld.json, that is exactly what happened to both ponds: each one
+   shares an edge cell with a rock-formation polygon and inherited its band, landing 34 m
+   and 42 m above its own terrain. A pond sitting on top of a rock formation is precisely
+   the reported symptom, and it was never about water rendering -- it was the grading pass
+   next door. Requiring a real majority keeps the parking-lot case (those polygons overlap
+   substantially) and drops the touching case. */
+const CLAIM_SHARE = 0.5;
+
+/* Water does not sit on a plateau. Every other area kind is a slab someone levelled --
+   a lot, a footprint, a bench -- so the median band under it is the right answer. A pond
+   is the opposite: it is the LOW ground, and levelling it to its own median puts half the
+   surface above the shore it drains from. Grading to a low percentile instead makes the
+   footprint a shallow basin, which is both what water is and what "flush with the ground"
+   means. Not the minimum: one noisy DEM cell in a 40 m polygon should not sink the whole
+   pond a terrace. */
+const WATER_PCTILE = 0.25;
+function isWaterArea(a){ return a && a.kind === 'water'; }
+
 /* Flatten every DEM cell under an area polygon to one shared terrace band — the same
    grading pass as before, now operating on the band array instead of a bespoke grid.
    Overlapping polygons (this project has ~20 parking-lot polygons that touch) adopt a
@@ -80,10 +108,29 @@ function flattenAreaCells(areas, pointInArea, areaBBox){
     }
     if(!mark.size)continue;
     let lvl=null;
-    for(const k of mark){ if(claimed.has(k)){ lvl=claimed.get(k); break; } }
+    /* Adopt a neighbour's level only when this polygon is MOSTLY sitting on one, and take
+       the level the most shared cells actually hold rather than whichever the Set happened
+       to yield first -- an overlap can straddle two graded slabs, and picking arbitrarily
+       between them is the same coin flip in a smaller place. Water never inherits at all:
+       a pond that shares a boundary cell with a rock mass is not on the rock mass. */
+    if(!isWaterArea(a)){
+      const votes=new Map();
+      let shared=0;
+      for(const k of mark){
+        if(!claimed.has(k)) continue;
+        shared++;
+        const v=claimed.get(k);
+        votes.set(v,(votes.get(v)||0)+1);
+      }
+      if(shared/mark.size >= CLAIM_SHARE){
+        let bestN=-1;
+        for(const [v,n] of votes) if(n>bestN){ bestN=n; lvl=v; }
+      }
+    }
     if(lvl===null){
       const vals=[...mark].map(k=>BAND[k]).sort((p,q)=>p-q);
-      lvl=vals[Math.floor(vals.length/2)];
+      const pct=isWaterArea(a) ? WATER_PCTILE : 0.5;
+      lvl=vals[clamp(Math.floor(vals.length*pct),0,vals.length-1)];
     }
     a.groundY=(lvl*STEP-GROUND_M);   // metres, caller applies vertScale
     for(const k of mark){ BAND[k]=lvl; claimed.set(k,lvl); }

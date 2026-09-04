@@ -9,7 +9,7 @@
    be the wrong direction for the dependency arrow to point. */
 import { clamp, lerp } from '../core/math.js';
 import { P, dog, R, dogPos, dogYaw, STATS, setDog, setDogYaw } from '../dog/runtime.js';
-import { gaitStep, climbPose, leapPose, legSwingValue, gallopAmount } from './gait.js';
+import { gaitStep, climbPose, wallPose, leapPose, legSwingValue, gallopAmount } from './gait.js';
 
 let legPhase = 0;
 let crouchAmt = 0;
@@ -80,7 +80,7 @@ function dogRunMul(){ return STATS.run / STATS.walk; }
 /* Called once per frame with the resolved ground height under the dog's feet (from
    terrain.js) and the current motion state. Everything below only touches `dog`/`R`,
    the live bindings runtime.js exports — never rebuilds geometry. */
-function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise){
+function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise, onWall){
   if(!dog || !R) return;
   const size = P ? P.size : 1;
   // dog.position is in SCENE space, unlike dog.scale -- shrinking the group above
@@ -106,7 +106,10 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, 
   leapAmt  = lerp(leapAmt,  clamp(leap||0, 0, 1),  1-Math.pow(0.000002,dt));
   climbAmt = lerp(climbAmt, clamp(climb||0, 0, 1), 1-Math.pow(0.0001,dt));
   const lp = leapAmt  > 0.002 ? leapPose(leapAmt, rise||0, R.legs.length) : null;
-  const cp = climbAmt > 0.002 ? climbPose(climbAmt, t, R.legs.length) : null;
+  /* A wall cling and a kerb scramble share the climbT timer but not the pose: one stands
+     the pup vertically against the stone, the other tips it a few degrees over a step. */
+  const cp = onWall ? wallPose(t, R.legs.length)
+           : (climbAmt > 0.002 ? climbPose(climbAmt, t, R.legs.length) : null);
 
   legPhase += g.dPhase*(1 - (lp ? lp.freeze : 0));
 
@@ -147,10 +150,20 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, 
     let pitch = (cp ? cp.pitch : 0) + flex;
     if(lp) pitch = lerp(pitch, lp.pitch, leapAmt);
     R.bodyG.rotation.z = pitch;
+    /* Roll into whichever diagonal is reaching. Only the climb sets it, so this is zero on
+       every other frame and the body rests flat -- but without it a scramble is perfectly
+       bilateral, which is the thing that made the old pose read as a statue. */
+    R.bodyG.rotation.x = cp ? cp.roll : 0;
   }
 }
 
 function setYaw(v){ setDogYaw(v); }
 
+/* Test seam. The wall pose is only right if it survives the whole path from player state
+   through updateDog to bodyG.rotation -- reading gait.js's return value instead would have
+   passed on the exact screenshot that prompted the fix, since the pose was correct and
+   simply never reached the rig. Same reason dogLegLength is exported. */
+function dogBodyPitch(){ return R && R.bodyG ? R.bodyG.rotation.z : null; }
+
 export { spawnDog, updateDog, setYaw, setDogPos, getDogPos, setDogVisible,
-         dogTopSpeed, dogRunMul, dogLegLength, dogShadowRadius };
+         dogTopSpeed, dogRunMul, dogLegLength, dogShadowRadius, dogBodyPitch };

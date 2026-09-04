@@ -159,6 +159,12 @@ body.play #playHud{display:block;}
 #hudNoise.loud{background:#f7ded9;}
 .tally{background:var(--card);border:3px solid var(--ink);border-radius:11px;
   padding:4px 10px;font-size:13px;font-weight:bold;}
+/* Carry chip. Hidden unless something is riding along -- it is a state readout, and a
+   chip that says "nothing" every second of a walk in which you never catch anything is
+   just clutter. Green rather than the default card colour so it reads as the same "you
+   have this" signal the armed catch ring uses on the ground. */
+#hudCarry{display:none;margin-top:8px;max-width:250px;background:#e4f2e2;}
+#hudCarry.on{display:inline-block;}
 #watchMeter{display:none;align-items:center;gap:8px;margin-top:8px;max-width:240px;
   background:var(--card);border:3px solid var(--ink);border-radius:12px;padding:5px 10px;
   font-size:12px;font-weight:bold;}
@@ -366,3 +372,12 @@ body.bigmap #touchCtl, body.arrived #touchCtl{display:none;}
   .tbtn .lb{display:none;}
   #tJump{width:76px;height:76px;}
 }
+
+/* Settings tab -- fixed top-left, above the canvas and below any modal. Mirrors the
+   floating touch controls rather than the header buttons, because it has to stay usable
+   during a walk when the header is gone. */
+#panelTab{position:fixed;top:10px;left:10px;z-index:40;width:44px;height:44px;
+  display:flex;align-items:center;justify-content:center;font-size:20px;padding:0;}
+#panelTab.hidden{display:none;}
+body.panel-open #panelTab{left:auto;right:10px;}
+@media (max-width:760px){ #panelTab{top:8px;left:8px;} }

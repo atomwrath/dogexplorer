@@ -12,7 +12,7 @@ const THEMES={
     trees:[['pine',0.4],['blob',0.4],['juniper',0.2]], treeDensity:1, treeScale:1,
     rocks:['#a8836a','#b28f76'], rockDensity:1, rockStyle:'boulder',
     tuft:'#5d8440', tuftCount:170,
-    wildlife:['rabbit','squirrel','deer']
+    wildlife:['rabbit','squirrel','chipmunk', 'deer', 'cat', 'fox']
   },
   forest:{
     id:'forest', mountain:['#4a6470','#3d545f','#587483'], mountainStyle:'peaks', em:'🌲', label:'Deep forest',
@@ -23,7 +23,7 @@ const THEMES={
     trees:[['pine',0.72],['blob',0.18],['juniper',0.1]], treeDensity:2.4, treeScale:1.5,
     rocks:['#6f7361','#7d8270'], rockDensity:1.4, rockStyle:'mossy',
     tuft:'#4a6b39', tuftCount:260,
-    wildlife:['rabbit','squirrel','deer','bear']
+    wildlife:['rabbit','squirrel','deer','bear', 'goat', 'fox', 'moose']
   },
   redrock:{
     id:'redrock', mountain:['#773c2b','#693326','#854834'], mountainStyle:'mesas', em:'🏜️', label:'Red rock',
@@ -35,7 +35,7 @@ const THEMES={
     trees:[['juniper',0.62],['pine',0.14],['blob',0.24]], treeDensity:0.5, treeScale:0.85,
     rocks:['#853828','#8f4730','#773226','#945439'], rockDensity:2.2, rockStyle:'fin',
     tuft:'#7c8c4e', tuftCount:90,
-    wildlife:['rabbit','bighorn','goat']
+    wildlife:['rabbit', 'rabbit','coyote', 'deer','deer', 'bighorn', 'cat']
   }
 };
 let THEME=THEMES.meadow;

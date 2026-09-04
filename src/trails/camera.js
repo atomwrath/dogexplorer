@@ -90,7 +90,14 @@ function updateChaseCam(dt, px, pz, groundY, jumpY, speed, vertScale, dist = 8.5
      this spring is smoothing a smooth signal -- deliberately. The first pass removes the
      step's spatial abruptness, this one removes its temporal abruptness, and it takes
      both to stop a contour crossing registering as a bump. */
-  const targetRigY = cameraGroundY(px, pz, vertScale) + 2;
+  /* Never below the surface the avatar is actually standing on. cameraGroundY samples
+     TERRAIN, which is the right answer everywhere except on top of a rock formation or a
+     roof -- there the avatar is metres above the terrain the rig is being aimed at, so the
+     boom sat down at the base of the formation and framed the rock rather than the pup on
+     it. `groundY` is world.js's answer including solid tops, so taking the higher of the
+     two keeps the terrain smoothing everywhere it applies and lifts the rig onto the
+     formation when there is one underfoot. */
+  const targetRigY = Math.max(cameraGroundY(px, pz, vertScale), groundY) + 2;
   [rigY, rigVY] = spring(rigY, rigVY, targetRigY, dt, 3.1);
 
   /* Look target height. Springs toward the avatar's real head height -- the avatar stays

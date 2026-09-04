@@ -94,21 +94,72 @@ function gaitStep(legLen, speed, dt, opts){
    about Z with positive Z swinging a paw FORWARD, so every sign below follows from that
    one convention. Returns per-leg targets for the caller to blend toward, rather than
    writing them, so the drivers keep sole ownership of their own refs. */
-function climbPose(amt, t, legCount){
-  const a = clamp(amt, 0, 1);
-  // alternating paw scrabble, fast and small -- a climb is not a walk cycle
-  const scrab = Math.sin(t*0.026)*0.38*a;
+/* CLINGING TO A VERTICAL FACE, which is a different animal from scrambling over a kerb.
+
+   The reported screenshot showed the pup sticking out of the rock nose-first, lying
+   horizontally like a shelf bracket: that is the walking orientation with a scramble pitch
+   of about 26 degrees added, which is right for hopping a terrace riser and completely
+   wrong for hanging off a wall. On a wall the body has to stand UP -- pitched most of a
+   right angle so the spine runs up the face and the belly is against the stone.
+
+   It is a PITCH and not a yaw because forward on this rig is +x and bodyG.rotation.z tips
+   the nose up; the driver turns the whole group to face the rock separately (main.js sets
+   player.yaw from the face normal), so pitch and yaw compose into "standing on the wall,
+   facing it" rather than "lying along it".
+
+   Paws scrabble in the same diagonal antiphase as the scramble, at a smaller amplitude --
+   a cling is holding on, not hauling. The slow sway keeps it from reading as a decal. */
+function wallPose(t, legCount){
+  const ph = t*0.009;
+  const A = Math.sin(ph), B = Math.sin(ph + Math.PI);
   const legs = [];
   for(let i=0;i<legCount;i++){
     const front = i<2;
-    legs.push(front
-      ? a*(1.05 + (i===0 ? scrab : -scrab))    // reach: paws up onto the lip
-      : a*(-0.62 + (i===2 ? -scrab : scrab))); // push: hind legs extend behind
+    const swing = ((i===0 || i===3) ? A : B);
+    legs.push(front ? 0.55 + swing*0.30 : -0.30 + swing*0.22);
   }
   return {
     legs,
-    pitch: a*0.40,      // bodyG.rotation.z -- nose up, because forward is +x
-    rise:  a*0.11,      // a little hop of the body as it hauls up
+    pitch: 1.32,                 // ~76 degrees: nose up the face, belly to the rock
+    rise:  0.02 + A*0.03,
+    roll:  A*0.10,
+  };
+}
+
+function climbPose(amt, t, legCount){
+  const a = clamp(amt, 0, 1);
+
+  /* A DIAGONAL SCRAMBLE, not a symmetric one. The first version swung both front legs
+     together against both hind legs, which is a pose rather than a movement -- it reads as
+     a dog frozen mid-stretch and holds that read for the whole ascent. Real climbing moves
+     one limb at a time and keeps three planted, so the two diagonals are driven in
+     antiphase: front-left reaches with hind-right while the other pair holds, then they
+     swap. Same cycle a trot uses, which is why it reads as locomotion instead of a stance.
+
+     Slower than the old 0.026 and deeper. The scrabble used to be fast and tiny, which at
+     a climb rate you can now watch just looked like a vibration; a climb that takes
+     several seconds needs strokes you can actually follow. */
+  const ph = t*0.0115;
+  const A = Math.sin(ph), B = Math.sin(ph + Math.PI);   // the two diagonals, in antiphase
+  const legs = [];
+  for(let i=0;i<legCount;i++){
+    const front = i<2;
+    const left = (i===0 || i===2);
+    // legs 0,3 form one diagonal and 1,2 the other -- matching the trot offsets below
+    const swing = ((i===0 || i===3) ? A : B);
+    legs.push(front
+      ? a*(0.95 + swing*0.55)                  // reach: paws haul up over the lip
+      : a*(-0.55 + swing*0.32));               // push: hind legs drive off the face
+    void left;
+  }
+  return {
+    legs,
+    pitch: a*0.46,                     // bodyG.rotation.z -- nose up, because forward is +x
+    /* Body surges with the stroke rather than bobbing on a timer of its own, so the rise
+       lands on the beat the paws pull -- that coupling is most of what sells the effort. */
+    rise:  a*(0.10 + A*0.06),
+    // a little roll into whichever side is reaching, which is what stops it reading flat
+    roll:  a*A*0.13,
   };
 }
 
@@ -175,5 +226,5 @@ function leapPose(amt, rise, legCount){
   };
 }
 
-export { gaitStep, climbPose, leapPose, legSwingValue, gallopAmount,
+export { gaitStep, climbPose, wallPose, leapPose, legSwingValue, gallopAmount,
          STRIDE_MIN_RATIO, STRIDE_MAX_RATIO, TARGET_CADENCE };
