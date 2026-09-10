@@ -3,7 +3,15 @@
    on a touch device it also means the whole page can be dragged around under the game,
    which makes a drag-to-look control feel broken. Pinned here at the root rather than
    patched per-element so a new overlay cannot reintroduce it. */
-html, body{overflow:hidden;height:100%;max-width:100%;overscroll-behavior:none;}
+/* touch-action:manipulation page-wide is the BACKSTOP for double-tap zoom, and the value
+   matters: `manipulation` drops the double-tap and press-hold gestures while still allowing
+   pan and pinch, so the scrollable panes (#panel, #bigmapSide) keep scrolling under a
+   thumb. `none` here would freeze them. The play surface still overrides this with the
+   stricter `none` of its own further down -- there, pinch is not wanted either.
+   Note this is a backstop and not the whole fix: iOS ignores `user-scalable=no`, so the
+   zoom recognisers stay armed and a tap pair spanning two elements can still slip past
+   per-element touch-action. main.js closes that at the touchend/gesture level. */
+html, body{overflow:hidden;height:100%;max-width:100%;overscroll-behavior:none;touch-action:manipulation;}
 #app{max-width:100vw;overflow:hidden;}
 
 /* Pup Trails: layout only — colors/tokens come from styles/base.css. */

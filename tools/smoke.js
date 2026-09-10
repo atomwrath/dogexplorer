@@ -746,6 +746,80 @@ function assertAll(window, errors, stats) {
      on the very first frame, in the direction from the pad to the thumb -- not zero, and
      not the direction from the CANVAS origin, which is what a stale "origin = the touch
      point" bug would still (coincidentally) produce a nonzero, wrong-direction answer for. */
+  let __dtPairNote = '', __dtTabNote = '', __backstopNote = '';
+  /* ---- the zoom gestures touch-action cannot reach -------------------------------
+     iOS ignores `user-scalable=no`, so the double-tap and pinch recognisers stay armed no
+     matter what the viewport meta says, and per-element touch-action only covers touches
+     that BEGIN on that element -- which a jump double-tapped mid-stick-drag does not.
+     These assert the touchend/gesture layer that closes it. Driven with real dispatched
+     events rather than by calling anything directly, because the whole mechanism IS the
+     default-prevention, and only a dispatched event has a defaultPrevented to read. */
+  /* Real time, not a faked clock: performance.now() here is Date.now(), and the suite has
+     other consumers of it (the camera's look-backoff, tapBtn's click fallback, the audio
+     scheduler) that a jumped global clock would quietly disturb. A 400ms spin is cheap and
+     disturbs nothing -- it just puts a real gap between two taps so they cannot be read as
+     a pair. */
+  const waitOutDoubleTap = () => { const t = Date.now(); while (Date.now() - t < 400) {} };
+  const touchEndOn = (el) => {
+    const ev = new window.Event('touchend', { bubbles:true, cancelable:true });
+    Object.defineProperty(ev, 'target', { value: el, configurable: true });
+    el.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  };
+
+  check('a lone tap on the play surface is left alone', (() => {
+    waitOutDoubleTap();   // so this cannot be read as the tail of an earlier pair
+    return touchEndOn(canvas) === false;
+  })());
+
+  check('a second quick tap on the play surface is cancelled, killing double-tap zoom', (() => {
+    waitOutDoubleTap();
+    const first = touchEndOn(canvas);
+    const second = touchEndOn(canvas);   // immediately: well inside the 350ms window
+    __dtPairNote = `first prevented=${first}, second prevented=${second}`;
+    return first === false && second === true;
+  })(), () => __dtPairNote);
+
+  /* The JUMP button is the element the bug was actually reported on -- tapped twice fast
+     while the other thumb walks. It lives inside #touchCtl, so it has to be inside the
+     scope too, and the pair spans two DIFFERENT elements the way the real gesture does. */
+  check('a fast double-tap spanning the stick and the JUMP button is cancelled', (() => {
+    waitOutDoubleTap();
+    const onCanvas = touchEndOn(canvas);
+    const onJump = touchEndOn(d.querySelector('#tJump'));
+    return onCanvas === false && onJump === true;
+  })());
+
+  /* SCOPE. Cancelling a touchend also cancels the click it would have synthesised, which
+     is fine inside #touchCtl (those buttons fire from pointerdown) and would be a dead
+     button anywhere else -- the pane tabs, the drawer and both summary cards are all click
+     handlers. So two fast taps on a pane tab must NOT be cancelled. */
+  check('quick taps on the chrome buttons are not cancelled, so click still fires', (() => {
+    waitOutDoubleTap();
+    const tab = d.querySelector('#paneTabMap');
+    const first = touchEndOn(tab);
+    const second = touchEndOn(tab);
+    __dtTabNote = `tab taps prevented: ${first}, ${second}`;
+    return first === false && second === false;
+  })(), () => __dtTabNote);
+
+  /* The CSS backstop, asserted separately because the JS layer above would mask its
+     removal entirely -- without this, dropping the page-wide rule costs nothing in test and
+     shows up only on a device. `manipulation` and not `none` is the point of the check:
+     `none` here would stop the drawer panes scrolling under a thumb. */
+  check('the page-wide backstop drops double-tap zoom without freezing pane scrolling', (() => {
+    const cs = el => d.defaultView.getComputedStyle(el).getPropertyValue('touch-action');
+    const got = [cs(d.documentElement), cs(d.body)];
+    __backstopNote = `html=${got[0]}, body=${got[1]}`;
+    return got.every(v => v === 'manipulation');
+  })(), () => __backstopNote);
+
+  check("WebKit's own pinch gesture events are prevented during a walk", (() => {
+    const ev = new window.Event('gesturestart', { bubbles:true, cancelable:true });
+    window.dispatchEvent(ev);
+    return ev.defaultPrevented === true;
+  })());
+
   let __stickAwayNote = '';
   check('grabbing the stick away from the pad reads an immediate deflection toward the thumb', (() => {
     const knob = d.querySelector('#stickKnob');

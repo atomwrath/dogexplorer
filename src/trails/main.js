@@ -1483,6 +1483,56 @@ const endPointer=e=>{
 };
 addEventListener('pointerup', endPointer); addEventListener('pointercancel', endPointer);
 
+/* ---------- the zoom gestures touch-action cannot reach ----------------------------
+   `touch-action:none` closed the pinch that a stray finger on an overlay could start, and
+   it should in principle close double-tap zoom too. On iOS it does not close either one
+   completely, for a reason worth writing down: since iOS 10 Safari deliberately IGNORES
+   `user-scalable=no` and `maximum-scale` in the viewport meta -- an accessibility decision,
+   and not one a page can opt out of. So the page is always zoomable underneath, and the
+   double-tap and pinch recognisers are always armed; touch-action only ever suppresses
+   them per-element, for touches that begin on that element.
+
+   That per-element scoping is exactly what the reported bug slips through. A jump tapped
+   twice in quick succession WHILE the other thumb is mid-drag on the stick is not one
+   element's tap sequence -- it is two taps that can land on the canvas and the button in
+   either order, arriving during an already-active multi-touch drag. WebKit resolves that
+   sequence at the page level, before per-element touch-action has the final say, and zooms.
+
+   Neither listener below is reachable by a mouse: `touchend` and the `gesture*` family are
+   touch-only, and gesture events are WebKit's own. So this costs desktop nothing. */
+const DOUBLE_TAP_MS = 350;   // WebKit's own double-tap window is ~300ms; a little margin
+let lastTouchEndT = -1e9;
+/* SCOPED TO THE PLAY SURFACE, and that scope is load-bearing rather than tidiness.
+   Suppressing a touchend suppresses the synthesised `click` that follows it -- which is
+   harmless here (the buttons in #touchCtl fire from pointerdown; see tapBtn, where click is
+   only a fallback for a tap that never produced one) and would be actively broken anywhere
+   else. The pane tabs, the drawer, the map sheet and both summary cards are all `click`
+   handlers, so a page-wide suppressor would eat the second of any two quick taps on them --
+   trading a zoom bug for a dead button. */
+function inPlaySurface(node){
+  for(let n=node; n; n=n.parentNode){
+    if(n===renderer.domElement) return true;
+    if(n.id==='touchCtl') return true;
+  }
+  return false;
+}
+addEventListener('touchend', e=>{
+  if(!playing || !inPlaySurface(e.target)) return;
+  const now = performance.now();
+  // Only the SECOND tap of a pair is cancelled. Cancelling every touchend on the play
+  // surface would also work for zoom, but it throws away the click fallback entirely on
+  // devices that need it, for no extra benefit.
+  if(now - lastTouchEndT <= DOUBLE_TAP_MS) e.preventDefault();
+  lastTouchEndT = now;
+}, {passive:false});
+/* WebKit's proprietary pinch/rotate events, which fire in ADDITION to the pointer stream
+   and carry the page zoom themselves. Preventing gesturestart is the one thing that stops
+   a pinch on iOS regardless of what touch-action says, which is why it is here as well as
+   in the stylesheet rather than instead of it. Unknown events elsewhere: harmless no-ops. */
+for(const type of ['gesturestart','gesturechange','gestureend']){
+  addEventListener(type, e=>{ if(playing) e.preventDefault(); }, {passive:false});
+}
+
 /* ---------- the two verbs a touchscreen had no way to reach ----------
    Both go through the same functions the keys do rather than poking `player` from the
    button handler, so space and JUMP can never drift apart -- and both are gated on the
