@@ -25,23 +25,32 @@ function hashSeg(seg){
       const k=cx+'_'+cz;if(!SEG_HASH.has(k))SEG_HASH.set(k,[]);SEG_HASH.get(k).push(seg);
     }
 }
-/* {d, edge, y, hw}: distance to the centreline, the edge it belongs to, the tread height
-   interpolated along that segment, and the corridor half-width. `y` is null when the
-   segment was hashed without a height profile (the flat, no-DEM fallback path), which
-   callers must treat as "no opinion", not as "height zero". */
+/* {d, edge, y, hw, px, pz}: distance to the centreline, the edge it belongs to, the tread
+   height interpolated along that segment, the corridor half-width, and the point on the
+   centreline itself. `y` is null when the segment was hashed without a height profile (the
+   flat, no-DEM fallback path), which callers must treat as "no opinion", not as "height
+   zero"; px/pz are null when nothing was found at all, for the same reason.
+
+   px/pz is what "snap to paths" means. The course recorder cannot store where the player
+   WAS, because a recorded line has to be raceable by somebody running a different line
+   through the same corridor -- two walkers on opposite verges of one trail would otherwise
+   trace two courses that never meet. The projection is already computed here to get `d`,
+   so handing it back costs nothing and means the recorder and the "am I on a trail" test
+   can never disagree about which point on which trail they are talking about. */
 function nearestTrail(x,z){
   const segs=SEG_HASH.get(hashKey(x,z));
-  let best=1e9,edge=null,y=null,hw=0;
+  let best=1e9,edge=null,y=null,hw=0,px=null,pz=null;
   if(segs)for(const s of segs){
     const dx=s.b[0]-s.a[0],dz=s.b[1]-s.a[1],L2=dx*dx+dz*dz;
     let t=L2===0?0:((x-s.a[0])*dx+(z-s.a[1])*dz)/L2;t=t<0?0:(t>1?1:t);
-    const d=Math.hypot(x-(s.a[0]+t*dx),z-(s.a[1]+t*dz));
+    const qx=s.a[0]+t*dx, qz=s.a[1]+t*dz;
+    const d=Math.hypot(x-qx,z-qz);
     if(d<best){
-      best=d;edge=s.edge;hw=s.hw||0;
+      best=d;edge=s.edge;hw=s.hw||0;px=qx;pz=qz;
       y=(s.ya==null||s.yb==null)?null:s.ya+(s.yb-s.ya)*t;
     }
   }
-  return{d:best,edge,y,hw};
+  return{d:best,edge,y,hw,px,pz};
 }
 
 export { resetSpatialHash, hashKey, hashSeg, nearestTrail };

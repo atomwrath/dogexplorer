@@ -15,13 +15,22 @@ import { setWildVisible, setWildYaw, spawnWild, spookRadiusFor, topSpeedFor, upd
 import { dogRunMul, dogTopSpeed, setDogPos, setDogVisible, setYaw, spawnDog, updateDog, dogShadowRadius } from './dog-driver.js';
 import { updateShadow, setShadowVisible } from './shadow.js';
 import { updateNoiseRing, setNoiseRingVisible, noiseRingRadius, updateCatchRing, setCatchRingVisible } from './noise-ring.js';
-import { getWorld } from './terrain.js';
+import { getWorld, rawGroundY } from './terrain.js';
 
 import { addCamPitch, addCamYaw, addCamZoom, getCamPitch, getCamYaw, getCamZoom, setCamYaw, snapChaseCam, updateChaseCam } from './camera.js';
 import { getCritterStats, spawnCritters, resetCritters, updateCritters, WATCH_SECONDS, playerNoise, typicalSpookRadius, takeImpacts,
          catchNear, releaseCarried, getCarried, carrySlow, setCarryAnchor, nearestCatchable, catchRadius } from './critters.js';
-import { initMinimap, isBigMapOpen, toggleBigMap, updateMinimap, setHighlightRoute } from './minimap.js';
+import { initMinimap, isBigMapOpen, toggleBigMap, updateMinimap, setHighlightRoute,
+         setCourseShown, getCourseShown, setRaceFrac } from './minimap.js';
+import { setCourseLine, refreshCourseLine, clearCourseLine } from './course-line.js';
 import { addSpot, getSpots, removeSpot, setSpotMap, spotNear, spotWorld } from './spots.js';
+import { addCourse, courseBestFor, courseBestOverall, courseFinished, courseLengthM, courseLookFrac,
+         coursePoints, courseProgress, courseStartYaw, courseTimes, fmtCourseLen, fmtRaceTime,
+         getCourse, getCourses, polyLenM, recordCourseTime, removeCourse, setCourseMap,
+         COURSE_MAX_PTS, COURSE_MIN_M, COURSE_ON_M, COURSE_STEP_M, COURSE_JUMP_M,
+         COURSE_REJOIN_S, COURSE_SNAP_M, courseRelief, polyRelief, bumpRelief,
+         courseGhost, ghostAt, GHOST_DT, GHOST_MAX } from './courses.js';
+import { setGhostAvatar, placeGhost, hideGhost, disposeGhost, getGhostGroup } from './ghost.js';
 import { comicBurst, updateFX } from '../core/fx.js';
 import { shakeT, setShake, decayShake } from '../core/shake.js';
 import { barkSound, cheerBlip, initAudio, thudSound } from '../core/audio.js';
@@ -364,6 +373,592 @@ function flashSpotNote(msg){
   comicBurst(msg, player.x, standingY(player.x, player.z)+2.0, player.z, '#8d7a66');
 }
 
+
+/* ============================ RECORDING A COURSE ============================
+
+   WHAT IS ACTUALLY STORED, and why it is not where you walked. Every sample is the
+   projection of the player onto the nearest trail centreline (spatial.js's nearestTrail
+   now hands that point back), not the player's own position. Two walkers padding along
+   opposite verges of the same trail would otherwise trace two courses a metre and a half
+   apart, and a race against the other one would read as permanently off-line. Snapping
+   means a course is a fact about the NETWORK, which is what makes it raceable by anyone.
+
+   Off the trail, nothing is recorded and the trace simply pauses. That is deliberate
+   rather than a limitation: "record a path" on a trail map means a path, and a course
+   that wandered across open country could not be snapped, could not be followed on the
+   ground, and would be raced by cutting straight across the countryside anyway. Walking
+   off and rejoining leaves one long leg in the trace, which the race handles as a leg like
+   any other -- see courses.js's courseProgress on why a long leg is not a free shortcut.
+
+   Samples are in REAL METRES from the first one, not converted at save time, so dragging
+   the world-scale slider halfway through a recording does not leave a course with a kink
+   in it. */
+const rec = {on:false, pts:[], lenM:0, startName:'', offT:0, full:false, live:null};
+/* The live trace, as one object that never changes identity. minimap.js holds this by
+   reference and re-reads `pts` every frame, so appending a point is all the drawing needs
+   -- which is why `pts` below is cleared IN PLACE rather than reassigned, the same rule
+   COLLIDERS and SPOTS live under and for the same reason. */
+rec.live = {id:-1, name:'Recording', pts:rec.pts, lenM:0, times:{}};
+/* A finished trace waiting for a name. Held apart from `rec` because "stopped" and "saved"
+   are different states and the card shows a different thing in each -- and because
+   discarding has to be possible, which means the trace cannot go straight into storage. */
+let recPending = null;
+/* A course the walker has asked to SEE without racing it. Separate from the race's own
+   course so closing the finish card can leave the line on the map. */
+let previewCourse = null;
+
+/* ============================== RACING A COURSE =============================
+
+   `count` runs the 3-2-1, `go` holds the GO! flash, `t` is the clock and `frac` is how far
+   round the runner has got (courses.js owns the rule; this only holds the number). The
+   clock does not start until the countdown ends, and input is frozen until then -- a
+   countdown you can walk through is a countdown that means nothing.
+
+   `frac` is monotonic on purpose: it only ever moves forward, and only within a window
+   ahead of where it already is. That single property is the whole of the anti-shortcut
+   rule and it lives in courses.js, so a race and the line drawn on the map can never
+   disagree about how far round somebody is. */
+const race = {on:false, course:null, count:0, go:0, t:0, frac:0, off:0, done:false,
+              trail:[], trailT:0, ghost:null, ghostFrac:0, gap:null};
+const RACE_COUNT_SECS = 3;
+const RACE_GO_SECS = 0.8;
+/* Which ghost to chase: 'best' (the course record, by anyone), 'mine' (your own best with
+   the animal you are playing) or 'off'. Three rather than two because they are genuinely
+   different sessions -- chasing a record you have never been near is discouraging when
+   what you wanted was to beat yesterday's you, and vice versa. */
+let ghostMode = 'best';
+function getGhostMode(){ return ghostMode; }
+function setGhostMode(m){
+  ghostMode = (m === 'mine' || m === 'off') ? m : 'best';
+  if(race.on) armGhost();
+  renderCourseUI();
+}
+
+/* Who set the time. Two halves: a stable KEY that survives a rename and is what the
+   scoreboard is filed under, and a human name for the card to print. rosterKey() already
+   produces exactly the identity ensureAvatar rebuilds on, so a time is filed against the
+   thing the player actually chose rather than against a species or a size. */
+/* ELEVATION IN REAL METRES, whatever units the caller measures position in.
+
+   rawGroundY is the UN-TERRACED height straight off the DEM, and both halves of that
+   matter. Un-terraced, because the contour step is a drawing decision -- a trail does not
+   gain a metre of climb because somebody moved a slider from 4 m bands to 2 m ones. And
+   raw rather than terrainY, because terrainY multiplies by VERT_SCALE, which is the hill
+   exaggeration: sampling that would report a different total ascent for the same hill at
+   every setting of a control that exists purely to make the view nicer.
+
+   Two samplers because the two things being measured store position differently -- a
+   course in real metres, a trail route in world units -- and converting one to the other
+   just to convert it back would be a rounding step for nothing. */
+function courseElevAt(rx, rz){
+  const k = getMapScale() || 1;
+  return rawGroundY(rx*k, rz*k);
+}
+function worldElevAt(x, z){ return rawGroundY(x, z); }
+
+/* "480 m · ↗120 m ↘95 m · +25 m" -- the three numbers that answer three different
+   questions. Gain and loss are the CUMULATIVE climb and descent, which is what the legs
+   feel; net is the plain end-to-end difference, which on a loop is zero however hard it
+   was. Net is omitted when it is small enough to be noise, rather than printed as a
+   confident "+1 m" the DEM cannot actually support. */
+function fmtRelief(r){
+  if(!r || !r.ok) return '';
+  const bits = [];
+  if(r.gain >= 1 || r.loss >= 1)
+    bits.push('\u2197' + Math.round(r.gain) + ' m \u2198' + Math.round(r.loss) + ' m');
+  if(Math.abs(r.net) >= 3)
+    bits.push((r.net > 0 ? '+' : '\u2212') + Math.round(Math.abs(r.net)) + ' m net');
+  return bits.join(' \u00b7 ');
+}
+
+function avatarName(){
+  if(mode === 'dog') return dogChoice.label;
+  return (SPECIES[wildKey] && SPECIES[wildKey].nm) || wildKey;
+}
+
+/* The trace as it stands, shaped like a saved course so the map can draw it with no
+   special case (see minimap.js's setCourseShown). */
+function liveCourse(){
+  rec.live.name = rec.startName || 'Recording';
+  rec.live.lenM = rec.lenM;
+  return rec.live;
+}
+
+/* One place decides what the map and the ground are showing, because three things can each
+   want the overlay (a live trace, a live race, a previewed course) and letting each set it
+   directly is how you end up with a course line left on the map after the race that owned
+   it ended. Priority is most-live-first. */
+function syncCourseOverlay(){
+  const c = race.on ? race.course : (rec.on ? liveCourse() : previewCourse);
+  setCourseShown(c);
+  setRaceFrac(race.on && !race.done ? race.frac : null);
+  /* The GROUND ribbon is only for a course you are about to run over -- a race, or one
+     you have asked to see so you can go and find its start. It is deliberately NOT drawn
+     for the live trace: the trace is the ground behind you, which you can already see,
+     and the strip has baked geometry that would have to be rebuilt from scratch every
+     five metres for the whole length of a recording. The map disc still shows it, because
+     that costs a polyline stroke. */
+  if(c && playing && !rec.on) setCourseLine(c, standingY);
+  else clearCourseLine();
+}
+
+function startRecording(){
+  if(!getGraph() || race.on) return false;
+  rec.on = true;
+  rec.pts.length = 0;          // in place: rec.live holds this same array (see above)
+  rec.lenM = 0;
+  rec.full = false;
+  rec.offT = 0;
+  rec.startName = onTrail.name || '';
+  recPending = null;
+  toggleBigMap(false);        // you cannot walk a path with the sheet over the whole screen
+  renderCourseUI();
+  syncCourseOverlay();
+  comicBurst('\u23fa Recording', player.x, standingY(player.x, player.z)+2.2, player.z, '#d94fa0');
+  return true;
+}
+
+/* Stop, and hand the trace over to be named. A trace too short to be a course is dropped
+   rather than offered: naming and saving a nine-metre stumble is worse than being told it
+   did not take. */
+function stopRecording(){
+  if(!rec.on) return null;
+  rec.on = false;
+  const pts = rec.pts.slice();      // a copy, because the live array is about to be emptied
+  const lenM = rec.lenM;
+  rec.pts.length = 0;
+  rec.lenM = 0;
+  if(pts.length < 2 || lenM < COURSE_MIN_M){
+    recPending = null;
+    renderCourseUI();
+    syncCourseOverlay();
+    flashSpotNote('Too short to save \u2014 walk at least ' + COURSE_MIN_M + ' m on a trail');
+    return null;
+  }
+  recPending = {pts, lenM, name: rec.startName ? rec.startName + ' run'
+                                               : 'Course ' + (getCourses().length + 1)};
+  toggleBigMap(true);         // the naming half of the control lives on the map sheet
+  renderCourseUI();
+  syncCourseOverlay();
+  return recPending;
+}
+
+function saveRecording(name){
+  if(!recPending) return null;
+  const c = addCourse(name == null ? recPending.name : name, recPending.pts);
+  recPending = null;
+  if(c){ previewCourse = c; cheerBlip(); showHereCourse(c); }
+  renderCourseUI();
+  syncCourseOverlay();
+  return c;
+}
+
+function discardRecording(){
+  recPending = null;
+  renderCourseUI();
+  syncCourseOverlay();
+}
+
+/* One frame of the trace. `nt` is the lookup the loop already did, passed in rather than
+   re-hashed -- same arrangement as refreshOnTrail, and for the same reason.
+
+   The snap threshold is the corridor's own half-width with a floor, which is the same test
+   refreshOnTrail uses to decide the trail is underfoot. Using one rule for both means the
+   trail named in the HUD chip is always the trail being recorded. */
+function sampleRecording(nt, dt){
+  if(!rec.on || rec.full) return;
+  const k = getMapScale() || 1;
+  /* The corridor's own half-width, or six real metres, whichever is wider. It was a flat
+     3 world units, which is a different distance on every map: at 1:5 it let a walker
+     fifteen metres off the trail be snapped onto whichever parallel path happened to be
+     nearest, and near two parallel trails "nearest" flips back and forth. Expressed in
+     real metres it means the same thing at every scale, and a walker who is genuinely
+     beside the trail rather than on it now leaves a gap -- which is what the card on the
+     map sheet has always said happens off-trail. */
+  const snapMax = Math.max(nt.hw || 0, COURSE_SNAP_M*k);
+  if(!nt.edge || nt.d > snapMax || nt.px == null){ rec.offT += dt; return; }
+  const rx = nt.px/k, rz = nt.pz/k;                 // world units -> real metres
+  const last = rec.pts[rec.pts.length-1];
+  if(last){
+    const step = Math.hypot(rx-last[0], rz-last[1]);
+    // still inside the sampling interval: a normal on-trail frame, and the thing it
+    // establishes is that we are NOT away from a trail (see the jump gate below)
+    if(step < COURSE_STEP_M){ rec.offT = 0; return; }
+    /* THE JUMP GATE. See courses.js on COURSE_JUMP_M: a step several times the sampling
+       interval is the snap changing its mind about which of two parallel trails you are
+       on, not a stride. Refused while we have been continuously on a trail, allowed once
+       we have spent COURSE_REJOIN_S away from one -- which is the honest case of walking
+       off the network and rejoining it somewhere else.
+
+       `offT` grows on a refusal as well as on being off-trail, so a walker genuinely stuck
+       between two trails is not refused forever: after the rejoin delay the recorder takes
+       the point and carries on. It self-heals rather than silently stopping. */
+    if(step > COURSE_JUMP_M && rec.offT < COURSE_REJOIN_S){ rec.offT += dt; return; }
+    rec.lenM += step;
+  }
+  rec.offT = 0;
+  rec.pts.push([rx, rz]);
+  if(!rec.startName && nt.edge.name) rec.startName = nt.edge.name;
+  if(rec.pts.length >= COURSE_MAX_PTS){
+    // a cap, not a crash: stop growing and let the walker save what they have
+    rec.full = true;
+    stopRecording();
+  }
+}
+
+/* --- the race itself --- */
+
+function startRace(course){
+  if(!course || !getGraph()) return false;
+  if(rec.on){ flashSpotNote('Stop recording first'); return false; }
+  const pts = coursePoints(course);
+  if(pts.length < 2) return false;
+  closeArrival();
+  closeRaceCard();
+  toggleBigMap(false);
+  previewCourse = course;
+  race.on = true; race.course = course; race.done = false;
+  race.count = RACE_COUNT_SECS; race.go = 0; race.t = 0; race.frac = 0; race.off = 0;
+  /* At the start line, facing the way the course goes -- not facing wherever the walk left
+     you. Standing on a start line pointed backwards would cost a second nobody chose to
+     spend, on a clock that is the entire point of the mode. */
+  placeAt(pts[0][0], pts[0][1], courseStartYaw(course));
+  player.dist = 0;
+  race.trail = [];
+  race.trailT = 0;
+  race.gap = null;
+  race.ghostFrac = 0;
+  armGhost();
+  document.body.classList.add('racing');
+  syncCourseOverlay();
+  updateRaceHud();
+  return true;
+}
+
+/* Pick up the track to chase, and build a body for it. Called at the start of a race and
+   again whenever the mode changes mid-race, so switching from the record to your own best
+   swaps the ghost rather than needing a restart. */
+function armGhost(){
+  race.ghost = (ghostMode === 'off' || !race.course)
+    ? null : courseGhost(race.course, ghostMode, rosterKey());
+  if(!race.ghost){ hideGhost(); return; }
+  setGhostAvatar(race.ghost.key, dogParams());
+}
+
+/* Leave a race without finishing it. Nothing is banked -- a time only counts if you
+   crossed the line, which is the only thing that makes the scoreboard mean anything. */
+function quitRace(){
+  if(!race.on) return;
+  race.on = false; race.done = false; race.course = null;
+  race.count = 0; race.go = 0; race.t = 0; race.frac = 0;
+  race.trail = []; race.trailT = 0; race.ghost = null; race.gap = null;
+  hideGhost();
+  document.body.classList.remove('racing');
+  closeRaceCard();
+  syncCourseOverlay();
+  updateRaceHud();
+}
+
+function finishRace(){
+  if(!race.on || race.done) return null;
+  race.done = true;
+  const secs = race.t;
+  /* The track goes in with the time, so courses.js can keep the two together or drop
+     both -- see recordCourseTime on why a ghost from an older run beside a newer best is
+     worse than no ghost at all. */
+  const res = recordCourseTime(race.course, rosterKey(), avatarName(), secs, race.trail);
+  refreshHere();              // the scoreboard on the details card has just changed
+  cheerBlip();
+  showRaceCard(res, secs);
+  return res;
+}
+
+/* One frame of a live race. Called from the loop AFTER movement, so the clock and the
+   progress agree with where the runner actually ended the frame. */
+function updateRace(dt){
+  if(!race.on) return;
+  if(race.count > 0){
+    race.count -= dt;
+    if(race.count <= 0){ race.count = 0; race.go = RACE_GO_SECS; cheerBlip(); }
+    updateRaceHud();
+    return;
+  }
+  if(race.go > 0) race.go = Math.max(0, race.go - dt);
+  if(race.done){ updateRaceHud(); return; }
+  race.t += dt;
+  sampleGhostTrail(dt);
+  driveGhost(dt);
+  const pts = coursePoints(race.course);
+  const pr = courseProgress(pts, player.x, player.z, race.frac, courseLookFrac(race.course));
+  if(pr){
+    /* COURSE_ON_M is real metres; positions are world units, so it has to be compacted to
+       compare against one. Getting this backwards is the same mistake the noise chip made
+       in the other direction (see updateTrailHud) -- a tolerance that is a distance between
+       two things in the world scales with the world, and one that is a property of an
+       animal does not. */
+    const onM = COURSE_ON_M*(getMapScale() || 1);
+    if(pr.d <= onM){
+      race.frac = Math.max(race.frac, pr.frac);
+      race.off = 0;
+    }else{
+      race.off = pr.d/(getMapScale() || 1);
+    }
+    setRaceFrac(race.frac);
+  }
+  if(courseFinished(race.course, race.frac)) finishRace();
+  updateRaceHud();
+}
+
+/* One sample of the run being made, at the fixed GHOST_DT cadence courses.js stores. The
+   cadence is the timestamp (see the ghost notes there), so this has to hold the interval
+   exactly rather than sampling per frame: a track written at the frame rate would replay
+   at the wrong speed on any machine that rendered it at a different one. */
+function sampleGhostTrail(dt){
+  race.trailT += dt;
+  if(race.trail.length >= GHOST_MAX) return;      // five minutes; a cap, not a failure
+  const want = Math.floor(race.trailT/GHOST_DT) + 1;
+  if(race.trail.length >= want) return;
+  const k = getMapScale() || 1;
+  while(race.trail.length < want && race.trail.length < GHOST_MAX)
+    race.trail.push([player.x/k, player.z/k]);    // real metres, as always
+}
+
+/* Put the ghost where the record-holder was at this point in THEIR run, and work out who
+   is ahead. The gap is measured in DISTANCE ALONG THE COURSE converted back to a time, not
+   as a straight line between the two bodies: on a switchback the record-holder can be
+   thirty metres away and a second behind, and a straight-line gap would call that a huge
+   lead in whichever direction the geometry happened to point. */
+function driveGhost(dt){
+  if(!race.ghost){ hideGhost(); race.gap = null; return; }
+  const at = ghostAt(race.ghost, race.t);
+  if(!at){
+    // the ghost has finished; stop drawing it rather than parking it on the line, where it
+    // would look like it was waiting for you
+    hideGhost();
+    race.gap = race.t - race.ghost.t;
+    return;
+  }
+  const k = getMapScale() || 1;
+  const gx = at[0]*k, gz = at[1]*k;
+  const prev = ghostAt(race.ghost, Math.max(0, race.t - dt));
+  let yaw = 0, speed = 0;
+  if(prev){
+    const dx = gx - prev[0]*k, dz = gz - prev[1]*k;
+    const L = Math.hypot(dx, dz);
+    if(L > 1e-4) yaw = Math.atan2(-dz, dx);
+    speed = dt > 0 ? L/dt : 0;
+  }
+  placeGhost(gx, gz, standingY(gx, gz), yaw, speed, dt);
+
+  const pts = coursePoints(race.course);
+  const gp = courseProgress(pts, gx, gz, race.ghostFrac, courseLookFrac(race.course));
+  if(gp) race.ghostFrac = Math.max(race.ghostFrac, gp.frac);
+  /* Lead in seconds, from the fraction of the course between the two of you and the pace
+     the record was run at. Positive means the ghost is ahead. */
+  race.gap = (race.ghostFrac - race.frac)*race.ghost.t;
+}
+
+/* Input is frozen for the countdown and for nothing else. Being unable to move while a
+   summary card is up is trip.paused's job; this is the three seconds before the clock
+   starts, which is a different thing and has to leave the rest of the frame running. */
+function raceFrozen(){ return race.on && race.count > 0; }
+
+function isRaceCardOpen(){ return document.body.classList.contains('racedone'); }
+
+function showRaceCard(res, secs){
+  const c = race.course;
+  trip.paused = true;
+  document.body.classList.add('racedone');
+  const set = (id, v)=>{ const el=$(id); if(el) el.textContent=v; };
+  const mine = res && res.improved;
+  const rec_ = res && res.overallImproved;
+  set('#raceCardTitle', rec_ ? '\ud83c\udfc6 Course record!' : (mine ? '\u2b50 Your best yet!' : '\ud83c\udfc1 Finished!'));
+  const rel = c ? fmtRelief(courseRelief(c, courseElevAt)) : '';
+  set('#raceCardSub', c ? c.name + ' \u2014 ' + fmtCourseLen(courseLengthM(c)) +
+      (rel ? ' \u00b7 ' + rel : '') : '');
+  set('#raceCardTime', fmtRaceTime(secs));
+  set('#raceCardWho', avatarName());
+  const prev = res && res.prevMine;
+  set('#raceCardDelta', prev == null ? 'first run with ' + avatarName()
+      : (secs < prev ? '\u2212' + fmtRaceTime(prev-secs) + ' on your best'
+                     : '+' + fmtRaceTime(secs-prev) + ' off your best (' + fmtRaceTime(prev) + ')'));
+  const board = $('#raceBoard');
+  if(board){
+    board.innerHTML = '';
+    const rows = c ? courseTimes(c) : [];
+    if(!rows.length){
+      const n=document.createElement('div'); n.className='none';
+      n.textContent = 'No times on this course yet.';
+      board.appendChild(n);
+    } else rows.forEach((r, i)=>{
+      const el=document.createElement('div');
+      el.className='arr-row' + (r.key===rosterKey() ? ' me' : '');
+      el.innerHTML = '<span></span><span></span><span class="n"></span>';
+      el.children[0].textContent = i===0 ? '\ud83c\udfc6' : (r.key.startsWith('wild:') ? '\ud83e\udd8a' : '\ud83d\udc15');
+      el.children[1].textContent = r.name;
+      el.children[2].textContent = fmtRaceTime(r.t);
+      board.appendChild(el);
+    });
+  }
+}
+
+function closeRaceCard(){
+  if(!isRaceCardOpen()) return;
+  document.body.classList.remove('racedone');
+  trip.paused = false;
+  race.on = false; race.done = false;
+  document.body.classList.remove('racing');
+  syncCourseOverlay();
+  updateRaceHud();
+}
+
+/* --- the two readouts a race needs while it is running --- */
+function updateRaceHud(){
+  const hud = $('#raceHud'), cd = $('#raceCount');
+  if(cd){
+    const on = race.on && (race.count > 0 || race.go > 0);
+    cd.classList.toggle('on', !!on);
+    if(on) cd.textContent = race.count > 0 ? String(Math.ceil(race.count)) : 'GO!';
+  }
+  if(!hud) return;
+  hud.classList.toggle('on', !!race.on);
+  if(!race.on) return;
+  const c = race.course;
+  const set = (id, v)=>{ const el=$(id); if(el) el.textContent=v; };
+  set('#raceName', c ? c.name : '');
+  set('#raceClock', race.count > 0 ? '\u2014' : fmtRaceTime(race.t));
+  set('#raceProg', Math.round(race.frac*100) + '%');
+  const best = c ? courseBestOverall(c) : null;
+  const mine = c ? courseBestFor(c, rosterKey()) : null;
+  set('#raceBest', best ? '\ud83c\udfc6 ' + fmtRaceTime(best.t) + ' \u00b7 ' + best.name : 'no time yet');
+  set('#raceMine', mine ? '\u2b50 ' + fmtRaceTime(mine.t) : '\u2b50 \u2014');
+  const gapEl = $('#raceGap');
+  if(gapEl){
+    const g = race.gap;
+    /* SHOWN EVEN WHEN THERE IS NO GHOST, which is the point. A ghost only exists once
+       somebody has completed a run, so the first race on any course has none -- and the
+       first version of this hid the row entirely in that case, which left a player who had
+       just switched the ghost on staring at a screen with no ghost and nothing at all
+       saying why. An empty row that explains itself is worth more than a tidy one. */
+    const want = ghostMode !== 'off';
+    gapEl.classList.toggle('on', want);
+    gapEl.classList.toggle('ahead', !!race.ghost && g != null && g > 0);
+    gapEl.classList.toggle('behind', !!race.ghost && g != null && g < 0);
+    gapEl.classList.toggle('none', want && !race.ghost);
+    if(!want) gapEl.textContent = '';
+    else if(!race.ghost) gapEl.textContent = ghostMode === 'mine'
+      ? '\ud83d\udc7b no run of yours to chase yet'
+      : '\ud83d\udc7b no ghost yet \u2014 finish this run to set one';
+    else gapEl.textContent = g == null ? '\ud83d\udc7b \u2014'
+      : '\ud83d\udc7b ' + (g > 0 ? '\u2212' : '+') + fmtRaceTime(Math.abs(g)) +
+        ' \u00b7 ' + race.ghost.name + ' ' + fmtRaceTime(race.ghost.t);
+  }
+  const off = $('#raceOff');
+  if(off) off.classList.toggle('on', race.off > COURSE_ON_M);
+}
+
+/* --- the map sheet's course card, and the recording chip on the HUD --- */
+function renderCourseUI(){
+  const startBtn = $('#recStartBtn');
+  if(startBtn){
+    startBtn.textContent = rec.on ? '\u23f9 Stop recording' : '\u23fa Record a path';
+    startBtn.classList.toggle('primary', rec.on);
+    startBtn.disabled = !!race.on;
+  }
+  const saveRow = $('#recSaveRow');
+  if(saveRow) saveRow.classList.toggle('on', !!recPending);
+  const nameInput = $('#recName');
+  if(nameInput && recPending && nameInput.value !== recPending.name && !nameInput.dataset.touched)
+    nameInput.value = recPending.name;
+  if(nameInput && !recPending) nameInput.dataset.touched = '';
+  const note = $('#recNote');
+  if(note){
+    note.textContent = rec.on
+      ? 'Recording \u2014 walk the trails you want in the course, then stop.'
+      : (recPending ? 'Name it and save, or discard.'
+                    : 'Recording snaps to whatever trail you are on. Off-trail stretches are skipped.');
+  }
+  const gm = $('#ghostMode');
+  if(gm) for(const b of gm.querySelectorAll('button'))
+    b.classList.toggle('on', b.dataset.ghost === ghostMode);
+  updateRecChip();
+  renderCourseList();
+}
+
+/* The only part of the recording UI that changes while you walk, split out because the
+   rest of it is a dozen rows of DOM and rebuilding those sixty times a second would both
+   waste the frame and blow away the caret in the name field every time it was rendered. */
+function updateRecChip(){
+  const chip = $('#recHud');
+  if(chip) chip.classList.toggle('on', !!rec.on);
+  if(!rec.on) return;
+  const stat = $('#recStat');
+  if(stat) stat.textContent = fmtCourseLen(rec.lenM) + ' \u00b7 ' + rec.pts.length + ' pts' +
+    (rec.offT > 1.5 ? ' \u00b7 off trail' : '');
+}
+
+/* Courses as rows, mirroring the saved-pins list beside them: badge, name, the two times
+   that matter (the record, and yours with whoever you are playing as) and the one control
+   that is the whole point of a course -- race it. Tapping the NAME shows it on the map
+   without racing, because "where does that one go" is a question you ask before you commit
+   to running it. */
+function renderCourseList(){
+  const list = $('#courseList');
+  if(!list) return;
+  const courses = getCourses();
+  list.innerHTML = '';
+  if(!courses.length){
+    const n=document.createElement('div'); n.className='none';
+    n.textContent = 'No courses yet \u2014 tap Record a path and walk one.';
+    list.appendChild(n);
+    return;
+  }
+  courses.forEach((c, i)=>{
+    const row=document.createElement('div');
+    row.className='course-row' + (previewCourse && previewCourse.id===c.id ? ' shown' : '');
+    row.innerHTML =
+      '<span class="cs-badge"></span>' +
+      '<button class="cs-name"></button>' +
+      '<button class="cs-go" title="Race this course">\ud83c\udfc1</button>' +
+      '<button class="cs-x" title="Forget this course">\u2715</button>' +
+      '<div class="cs-best"></div>';
+    row.querySelector('.cs-badge').textContent = String(i+1);
+    row.querySelector('.cs-name').textContent = c.name + ' \u00b7 ' + fmtCourseLen(courseLengthM(c));
+    const rel = fmtRelief(courseRelief(c, courseElevAt));
+    if(rel) row.querySelector('.cs-name').textContent += ' \u00b7 ' + rel;
+    const best = courseBestOverall(c), mine = courseBestFor(c, rosterKey());
+    row.querySelector('.cs-best').textContent =
+      (best ? '\ud83c\udfc6 ' + fmtRaceTime(best.t) + ' \u00b7 ' + best.name : '\ud83c\udfc6 no time yet') +
+      '   ' + (mine ? '\u2b50 ' + fmtRaceTime(mine.t) : '\u2b50 ' + avatarName() + ': \u2014');
+    /* Tapping the name LOADS it into the details card and puts it on the map, rather than
+       only toggling the line. Showing a course without telling you anything about it made
+       the length and climb beside the name the only stats a course had, which is a poor
+       return for having measured them. */
+    row.querySelector('.cs-name').addEventListener('click', ()=>{
+      previewCourse = c;
+      showHereCourse(c);
+      renderCourseList();
+      syncCourseOverlay();
+    });
+    row.querySelector('.cs-go').addEventListener('click', ()=> startRace(c));
+    row.querySelector('.cs-x').addEventListener('click', ()=>{
+      if(previewCourse && previewCourse.id===c.id) previewCourse = null;
+      if(race.on && race.course && race.course.id===c.id) quitRace();
+      removeCourse(c.id);
+      refreshHere();          // the card may have been describing exactly this course
+      renderCourseUI();
+      syncCourseOverlay();
+    });
+    list.appendChild(row);
+  });
+}
+
+function toggleCourseShown(c){
+  previewCourse = (previewCourse && previewCourse.id === c.id) ? null : c;
+  renderCourseList();
+  syncCourseOverlay();
+}
+
 /* Re-seat the player after the world has been rebuilt underneath them.
 
    The panel is a live settings drawer now, so contour step, hill exaggeration, landscape
@@ -391,6 +986,14 @@ function afterWorldChange(ratio){
   snapChaseCam(player.x, player.z, groundY, getVertScale(), 13);
   refreshOnTrail();
   trip.parked = -1;
+  /* The ribbon was draped onto ground that no longer exists, and world scale has moved the
+     course points as well. Everything else on the map is derived per frame; this is the one
+     overlay with baked geometry, so it is the one that has to be told. */
+  refreshCourseLine();
+  /* Relief is cached per course (courses.js), and the ground it was measured against has
+     just been rebuilt. Contour step and exaggeration do not move rawGroundY, but loading a
+     different bundle does, and this is the one call that knows either happened. */
+  bumpRelief();
   renderStartPicker();
 }
 
@@ -664,7 +1267,7 @@ addEventListener('keydown', e=>{
   // while the arrival card is up only Escape does anything -- barking or jumping through
   // a summary screen you can't see the effect of is just confusing
   if(trip.paused){
-    if(e.code==='Escape') closeArrival();
+    if(e.code==='Escape'){ if(isRaceCardOpen()) closeRaceCard(); else closeArrival(); }
     return;
   }
   if(e.code==='Space'){ e.preventDefault(); trailJump(); }
@@ -674,7 +1277,14 @@ addEventListener('keydown', e=>{
   if(e.code==='KeyM') toggleBigMap();
   // Esc closes the map first if it's open -- quitting the whole walk because you wanted
   // to put the map away is the kind of thing you only forgive once
-  if(e.code==='Escape'){ if(isBigMapOpen()) toggleBigMap(false); else exitPlay(); }
+  /* Esc unwinds one layer at a time, outermost first. Quitting a whole walk because you
+     wanted to put the map away is the kind of thing you only forgive once, and abandoning
+     a walk because you wanted to abandon a race is the same mistake one level in. */
+  if(e.code==='Escape'){
+    if(isBigMapOpen()) toggleBigMap(false);
+    else if(race.on) quitRace();
+    else exitPlay();
+  }
 });
 addEventListener('keyup', e=> trailKeys[e.code]=false);
 
@@ -899,6 +1509,10 @@ function loop(t){
     const L=Math.hypot(stick.dx,stick.dy); mag=clamp(L,0,1);
     if(mag>0.06){ix=stick.dx/L;iz=stick.dy/L;run=mag>0.92&&!player.sneaking;} else {ix=iz=0;mag=0;}
   }
+  /* THE 3-2-1. Input is dropped, not the frame: the camera still follows, the animals
+     still move and the countdown still draws, because a countdown over a frozen still
+     frame reads as the game having hung rather than as a start line. */
+  if(raceFrozen()){ ix=0; iz=0; mag=0; run=false; }
   const fS=Math.sin(getCamYaw()), fC=Math.cos(getCamYaw());
   const wx=-fC*ix-fS*iz, wz=fS*ix-fC*iz;
   /* Knocked: the stick and the keys do nothing until you land. Checked here rather than
@@ -964,6 +1578,8 @@ function loop(t){
   const nearTrail = nt.d < 1.5;
   const surf = nearTrail ? 1 : 0.6;
   refreshOnTrail(nt);          // reuse the lookup above rather than hashing twice a frame
+  if(rec.on) sampleRecording(nt, dt);   // same lookup again: the trail named in the HUD
+                                        // and the trail being recorded are one answer
   if(player.climbT > 0) player.climbT = Math.max(0, player.climbT - dt);
   // scrambling drags the top speed down; it does NOT touch the jump, which is what makes
   // "jump the big steps" the faster line through broken ground
@@ -1081,6 +1697,12 @@ function loop(t){
                   reach ? reach.reach : 1, standingY, !!reach, !!(reach && reach.inReach));
   updateAreaLabels(camera.position.x, camera.position.y, camera.position.z);
   updateFX(dt, t);
+  /* AFTER movement, BEFORE the map draws. The clock and the progress have to describe
+     where the runner ended this frame, and the line on the disc has to show that same
+     number -- a race scored before the step and drawn after it would be a percentage that
+     always lagged the pup by one frame. */
+  updateRace(dt);
+  if(rec.on) updateRecChip();
   updateMinimap(player.x, player.z, player.yaw);
   updateTrailHud();
 
@@ -1103,7 +1725,10 @@ function loop(t){
     return(!b||d<b.d)?{d,i}:b;},null);
   if(nh){
     if(nh.d > 12 && trip.parked === nh.i) trip.parked = -1;      // walked away; it re-arms
-    if(nh.d < 5 && player.dist > 20 && trip.parked !== nh.i){
+    /* NOT during a race. Courses start and finish at trailheads more often than not (they
+       are where trails begin), so without this the summary card pauses the game and stops
+       the clock a couple of seconds into every run. */
+    if(nh.d < 5 && player.dist > 20 && trip.parked !== nh.i && !race.on){
       trip.parked = nh.i;
       showArrival(nh.i);
     }
@@ -1132,6 +1757,8 @@ function enterPlay(){
   document.body.classList.remove('panelopen');   // walk full-bleed; the drawer is opt-in
   refreshOnTrail();
   renderSpotList();
+  renderCourseUI();
+  syncCourseOverlay();
   updateTrailHud();
 }
 function exitPlay(){
@@ -1139,6 +1766,15 @@ function exitPlay(){
   trip.paused=false;
   toggleBigMap(false);
   closeArrival();
+  /* A race and a half-finished trace are both things about THIS walk. Leaving either
+     running would have the next walk open with a clock counting and a magenta line across
+     a course nobody chose. */
+  quitRace();
+  disposeGhost();
+  rec.on = false; rec.pts.length = 0; rec.lenM = 0;
+  recPending = null;
+  renderCourseUI();
+  syncCourseOverlay();
   /* Put the passenger down before the population is torn down. resetCritters disposes
      every group including the carried one, and leaving `carried` pointing at a disposed
      rig would have the next walk start with an invisible animal on your back. */
@@ -1630,6 +2266,198 @@ function headLetter(i){ return i<26 ? String.fromCharCode(65+i) : String(i+1); }
    now the picker outright, and the panel is settings only. All that is left here is the
    answer: which one is currently selected, shown on the sheet beside the badges so the
    letter you are reading has something to match against. */
+
+/* ====================== THE DETAILS PANEL ON THE MAP SHEET ======================
+
+   One card answering "what is this thing I just tapped", for both kinds of thing you can
+   tap on the sheet: a lettered trailhead badge and a saved course.
+
+   TAPPING NO LONGER TELEPORTS. It used to: a pick on the sheet placed the player and
+   started walking, because the map was the only way into a walk and a pick therefore had
+   to do the starting as well as the choosing. That was fine while a trailhead was just a
+   letter, and stopped being fine once there was anything to know about it -- you cannot
+   read the elevation of a place you have already been moved to, and a walk you did not
+   mean to start costs you the one you were in. So the pick now LOADS, and a button STARTS.
+
+   Both kinds of subject render through the same three slots (title, stats, actions) in the
+   same order, so wherever the answer appears for a trailhead it appears for a course too.
+   `hereSubject` is what is loaded, and it is a tagged object rather than two separate
+   nullable variables, because "a trailhead is showing" and "a course is showing" have to
+   be mutually exclusive and two variables can disagree about that. */
+let hereSubject = null;      // {kind:'head', i} | {kind:'course', c} | null
+
+function getHereSubject(){ return hereSubject; }
+
+function hereEl(){
+  return {title:$('#hereTitle'), idle:$('#hereIdle'),
+          stats:$('#hereStats'), actions:$('#hereActions')};
+}
+
+/* Back to the idle state: the current start point and the hint about tapping things. */
+function showHereIdle(){
+  hereSubject = null;
+  const el = hereEl();
+  if(el.title) el.title.textContent = '\u{1F6A9} Start here';
+  if(el.idle) el.idle.classList.remove('off');
+  if(el.stats){ el.stats.classList.remove('on'); el.stats.innerHTML = ''; }
+  if(el.actions){ el.actions.classList.remove('on'); el.actions.innerHTML = ''; }
+  renderStartPicker();
+}
+
+/* Small builders so the two subjects cannot drift into different-looking cards. */
+function hereRow(stats, label, value){
+  const r = document.createElement('div');
+  r.className = 'hs-row';
+  r.innerHTML = '<span></span><span></span>';
+  r.children[0].textContent = label;
+  r.children[1].textContent = value;
+  stats.appendChild(r);
+  return r;
+}
+function hereNote(stats, text){
+  const n = document.createElement('div');
+  n.className = 'hs-sub';
+  n.textContent = text;
+  stats.appendChild(n);
+  return n;
+}
+function hereBtn(actions, label, primary, fn){
+  const b = document.createElement('button');
+  b.className = 'btn small' + (primary ? ' primary' : '');
+  b.textContent = label;
+  b.addEventListener('click', fn);
+  actions.appendChild(b);
+  return b;
+}
+
+/* --- a trailhead --------------------------------------------------------------------- */
+function showHereHead(i){
+  const heads = getTrailheads();
+  if(!heads.length || i == null || i < 0 || i >= heads.length){ showHereIdle(); return; }
+  hereSubject = {kind:'head', i};
+  const h = heads[i];
+  const el = hereEl();
+  if(el.idle) el.idle.classList.add('off');
+  if(el.title) el.title.textContent = '\u{1F6A9} ' + headLetter(i) + ' \u00b7 ' + h.name;
+  const stats = el.stats, actions = el.actions;
+  if(!stats || !actions) return;
+  stats.innerHTML = ''; actions.innerHTML = '';
+
+  hereRow(stats, 'Trail', h.name + ' (' + h.where + ' end)');
+  const ft = elevationFt(h.x, h.z);
+  if(ft != null) hereRow(stats, 'Elevation', Math.round(ft).toLocaleString() + ' ft');
+  /* How far away it is, and in a straight line -- said so explicitly, because on a trail
+     network the walk is always longer and a number that looked like walking distance would
+     be wrong by a factor that varies with the terrain. */
+  const k = Math.max(1e-6, getMapScale());
+  const away = Math.hypot(h.x - player.x, h.z - player.z)/k;
+  hereRow(stats, 'From you', fmtCourseLen(away) + ' as the crow flies');
+
+  /* Which trails actually meet here. A trailhead is a dead end by definition, so this is
+     usually one -- but junction trailheads exist, and "three trails start here" is the
+     single most useful thing to know before committing a walk to it. */
+  const g = getGraph();
+  if(g){
+    const names = new Set();
+    g.edges.forEach(e=>{
+      if(!e.named) return;
+      const pts = e.pts || [];
+      for(const q of [pts[0], pts[pts.length-1]]){
+        if(q && Math.hypot(q[0]-h.x, q[1]-h.z) < 2.0) names.add(e.name);
+      }
+    });
+    if(names.size) hereNote(stats, [...names].join(' \u00b7 '));
+  }
+  stats.classList.add('on');
+
+  hereBtn(actions, '\u{1F6A9} Start here', true, ()=>{
+    placeAtHead(i);
+    if(!playing) enterPlay();
+    toggleBigMap(false);
+  });
+  hereBtn(actions, '\u2715 Close', false, showHereIdle);
+  actions.classList.add('on');
+}
+
+/* --- a course ------------------------------------------------------------------------- */
+function showHereCourse(c){
+  if(!c){ showHereIdle(); return; }
+  hereSubject = {kind:'course', c};
+  const el = hereEl();
+  if(el.idle) el.idle.classList.add('off');
+  if(el.title) el.title.textContent = '\u{1F3C1} ' + c.name;
+  const stats = el.stats, actions = el.actions;
+  if(!stats || !actions) return;
+  stats.innerHTML = ''; actions.innerHTML = '';
+
+  const rel = courseRelief(c, courseElevAt);
+  hereRow(stats, 'Length', fmtCourseLen(courseLengthM(c)));
+  if(rel.ok){
+    /* Cumulative and absolute kept on separate lines, because they answer different
+       questions and a loop is the case that proves it: 300 m of climbing and 0 m net. */
+    hereRow(stats, 'Climb', '\u2197 ' + Math.round(rel.gain) + ' m \u00b7 \u2198 ' +
+                            Math.round(rel.loss) + ' m');
+    hereRow(stats, 'Net rise', (rel.net >= 0 ? '+' : '\u2212') + Math.round(Math.abs(rel.net)) + ' m');
+    hereRow(stats, 'High / low', Math.round(rel.hi) + ' / ' + Math.round(rel.lo) + ' m');
+  }
+
+  const board = document.createElement('div');
+  board.className = 'hs-board';
+  const rows = courseTimes(c);
+  if(!rows.length){
+    hereNote(stats, 'No times on this course yet.');
+  }else rows.forEach((r, i)=>{
+    const row = document.createElement('div');
+    row.className = 'r' + (r.key === rosterKey() ? ' me' : '');
+    row.innerHTML = '<span></span><span></span><span></span>';
+    row.children[0].textContent = i === 0 ? '\u{1F3C6}' : (r.key.startsWith('wild:') ? '\u{1F98A}' : '\u{1F415}');
+    row.children[1].textContent = r.name;
+    row.children[2].textContent = fmtRaceTime(r.t);
+    board.appendChild(row);
+  });
+  stats.appendChild(board);
+
+  /* Whether there is a ghost to chase, said before the race rather than discovered during
+     it. A ghost that is slower than the record is normal (see recordCourseTime) and is
+     labelled with its own time, so the two numbers never quietly contradict each other. */
+  const gh = courseGhost(c, getGhostMode() === 'mine' ? 'mine' : 'best', rosterKey());
+  hereNote(stats, getGhostMode() === 'off'
+    ? '\u{1F47B} Ghost is off.'
+    : (gh ? '\u{1F47B} Chasing ' + gh.name + ' at ' + fmtRaceTime(gh.t)
+          : '\u{1F47B} No ghost yet \u2014 finish a run to set one.'));
+  stats.classList.add('on');
+
+  hereBtn(actions, '\u{1F3C1} Race this', true, ()=> startRace(c));
+  const shown = previewCourse && previewCourse.id === c.id;
+  hereBtn(actions, shown ? '\u{1F441} Hide on map' : '\u{1F441} Show on map', false, ()=>{
+    toggleCourseShown(c);
+    showHereCourse(c);
+  });
+  hereBtn(actions, '\u2715 Forget', false, ()=>{
+    if(previewCourse && previewCourse.id === c.id) previewCourse = null;
+    if(race.on && race.course && race.course.id === c.id) quitRace();
+    removeCourse(c.id);
+    showHereIdle();
+    renderCourseUI();
+    syncCourseOverlay();
+  });
+  actions.classList.add('on');
+}
+
+/* Re-render whatever is loaded, after something it displays has changed underneath it --
+   a new best time, a course removed, the map swapped. Silently drops a subject that no
+   longer exists rather than leaving a card describing something that is gone. */
+function refreshHere(){
+  if(!hereSubject){ showHereIdle(); return; }
+  if(hereSubject.kind === 'head'){
+    if(hereSubject.i >= getTrailheads().length) showHereIdle();
+    else showHereHead(hereSubject.i);
+  }else{
+    const still = getCourses().some(x => x.id === hereSubject.c.id);
+    if(still) showHereCourse(hereSubject.c); else showHereIdle();
+  }
+}
+
 function renderStartPicker(){
   const now=$('#startNow');
   const heads=getTrailheads();
@@ -1742,11 +2570,37 @@ function renderMapStats(){
     `<span class="flat">${hasBundle()?'elevation from DEM bundle':'flat — no elevation (Z) in this file'}</span>`;
   if(list){
     list.innerHTML='';
+    /* PER-ROUTE STATS, which means the edges have to be gathered back up first. splitT
+       cuts a path into a fragment per junction, so `named` holds one representative edge
+       each and the length beside a trail's name would be the length of whichever fragment
+       happened to be first -- a few dozen metres of a four-kilometre trail. Summing the
+       route's own edges is the only figure a walker would recognise as "how long is it".
+
+       Relief is measured on the route's geometry in world units and handed worldElevAt,
+       which reads the raw DEM in real metres: see courseElevAt above on why the drawn
+       terrain is the wrong thing to sample. */
+    const byRoute = new Map();
+    g.edges.forEach(e=>{
+      if(!byRoute.has(e.route)) byRoute.set(e.route, []);
+      byRoute.get(e.route).push(e);
+    });
+    const k = Math.max(1e-6, getMapScale());
     named.sort((a,b)=>a.name.localeCompare(b.name)).forEach(e=>{
+      const part = byRoute.get(e.route) || [e];
+      const lenM = part.reduce((sum,x)=>sum+(x.lenM||0),0)/k;
+      // stitched end to end: the fragments of one route are contiguous, so this is the
+      // profile a walker following the signs would actually climb
+      const line = [];
+      part.forEach(x=>{ (x.pts||[]).forEach(q=>line.push(q)); });
+      const rel = polyRelief(line, worldElevAt);
       const row=document.createElement('div');
       row.className='tl-row';
       row.innerHTML=`<span class="tl-dot" style="background:${e.color}"></span>`;
       row.appendChild(document.createTextNode(e.name));
+      const stat=document.createElement('span');
+      stat.className='tl-stat';
+      stat.textContent = fmtCourseLen(lenM) + (fmtRelief(rel) ? ' \u00b7 ' + fmtRelief(rel) : '');
+      row.appendChild(stat);
       list.appendChild(row);
     });
     if(unnamed){
@@ -1766,9 +2620,19 @@ function renderMapStats(){
    the three renderers below draws a stale list. */
 function refreshMapUI(){
   setSpotMap(getMapId());
-  renderStartPicker();
+  setCourseMap(getMapId());
+  /* A course traced somewhere else is not raceable here, so anything pointing at one from
+     the old map is dropped rather than left to draw a line across a network it was never
+     recorded on. */
+  quitRace();
+  previewCourse = null;
+  recPending = null;
+  rec.on = false; rec.pts.length = 0; rec.lenM = 0;
+  showHereIdle();             // a trailhead index or course from the old map means nothing
   renderMapStats();
   renderSpotList();
+  renderCourseUI();
+  syncCourseOverlay();
 }
 
 /* --- loaded GeoJSON file chips ---
@@ -1823,15 +2687,22 @@ async function boot(bundleUrl){
   // minimap.js needing to know anything about players, avatars or cameras
   // the sheet hands back BOTH kinds of pick without knowing anything about players,
   // avatars or cameras -- a trailhead index, or a saved spot
-  /* Picking a place on the map IS starting the walk now.
+  /* A PICK LOADS; A BUTTON STARTS.
 
-     The header's "Hit the trail" button and the HUD's "back to trailhead" button are both
-     gone by request, which leaves the map as the only way in -- so a pick has to do the
-     starting as well as the choosing. That is the arrangement the map-as-picker change
-     was heading towards anyway: you point at where you want to be and you are there. */
+     Picking used to place the player and start walking outright, because the map was the
+     only way into a walk and so a pick had to do the starting as well as the choosing.
+     That held while a trailhead was just a letter. It stopped holding once there was
+     anything worth reading about one: you cannot read the elevation of a place you have
+     already been moved to, and a walk you did not mean to start costs you the one you were
+     already in. So a trailhead pick now fills the details card and the card carries the
+     button.
+
+     Saved pins still go straight there, and that asymmetry is deliberate rather than an
+     oversight: a pin is a place YOU chose and named, so there is nothing to tell you about
+     it that you do not already know -- the whole point of dropping one is to come back. */
   initMinimap({
-    onTrailhead: i => { placeAtHead(i); if(!playing) enterPlay(); },
-    onSpot: sp => { placeAtSpot(sp); if(!playing) enterPlay(); },
+    onTrailhead: i => showHereHead(i),
+    onSpot: sp => { placeAtSpot(sp); if(!playing) enterPlay(); toggleBigMap(false); },
   });
   await loadMap(bundleUrl || DEFAULT_WORLD, !bundleUrl);
   renderRoster();
@@ -1889,6 +2760,50 @@ tapBtn($('#tSneak'), toggleSneak);
 $('#barkBtn')?.addEventListener('click', doBark);
 $('#saveSpotBtn')?.addEventListener('click', saveHere);
 $('#mapSaveSpotBtn')?.addEventListener('click', ()=>{ saveHere(); });
+
+/* The record control is ONE button with two jobs, because "record" and "stop" are the same
+   decision seen from either side of it and two buttons would leave one of them dead at any
+   moment. The stop chip on the HUD is the same call again: a walker who started recording
+   and walked off has no reason to reopen the map sheet just to stop. */
+$('#recStartBtn')?.addEventListener('click', ()=>{
+  if(getRecState().on) stopRecording(); else startRecording();
+});
+tapBtn($('#recStop'), ()=> stopRecording());
+$('#recSaveBtn')?.addEventListener('click', ()=>{
+  const el = $('#recName');
+  saveRecording(el ? el.value : null);
+  if(el){ el.value=''; el.dataset.touched=''; }
+});
+$('#recDropBtn')?.addEventListener('click', ()=>{
+  const el = $('#recName');
+  if(el){ el.value=''; el.dataset.touched=''; }
+  discardRecording();
+});
+// once the walker has typed, renderCourseUI stops overwriting the field -- otherwise the
+// per-frame refresh during a recording would eat every keystroke
+$('#recName')?.addEventListener('input', e=>{ e.target.dataset.touched = '1'; });
+// keyup as well as keydown: the walk's key table is a set of held keys, so swallowing only
+// the press would leave every letter typed here stuck down for the rest of the walk
+$('#recName')?.addEventListener('keyup', e=> e.stopPropagation());
+$('#recName')?.addEventListener('keydown', e=>{
+  e.stopPropagation();                       // W/A/S/D in a text field must type, not walk
+  if(e.key === 'Enter'){
+    const el = $('#recName');
+    saveRecording(el ? el.value : null);
+    if(el){ el.value=''; el.dataset.touched=''; }
+  }
+});
+$('#ghostMode')?.addEventListener('click', e=>{
+  const b = e.target.closest('button');
+  if(b && b.dataset.ghost) setGhostMode(b.dataset.ghost);
+});
+$('#raceQuit')?.addEventListener('click', ()=> quitRace());
+$('#raceAgain')?.addEventListener('click', ()=>{
+  const c = getRaceState().course;
+  closeRaceCard();
+  if(c) startRace(c);
+});
+$('#raceDone')?.addEventListener('click', ()=> closeRaceCard());
 $('#bigmapClose')?.addEventListener('click', ()=> toggleBigMap(false));
 // mobile only (see trails.css's body.nopanel rule): slides the options panel off-screen
 // so the live pup/minimap preview underneath is reachable without leaving the setup
@@ -1983,8 +2898,22 @@ function getTripState(){ return trip; }
 
 function getOnTrail(){ return onTrail; }
 
+/* The course machinery gets the same treatment for the same reason: `rec`, `race` and
+   `previewCourse` are top-level bindings that vanish into the bundle's one scope, so the
+   harness reaches them through calls. */
+function getRecState(){ return rec; }
+function getRaceState(){ return race; }
+function getPendingRecording(){ return recPending; }
+function getPreviewCourse(){ return previewCourse; }
+
 export { boot, enterPlay, exitPlay, placeAtHead, placeAt, placeAtSpot, saveHere, doBark,
-         togglePanel, trailIsPlaying, getTrailPlayer, getTripState, getOnTrail };
+         togglePanel, trailIsPlaying, getTrailPlayer, getTripState, getOnTrail,
+         startRecording, stopRecording, saveRecording, discardRecording, startRace,
+         quitRace, finishRace, toggleCourseShown, renderCourseUI, renderCourseList,
+         avatarName, raceFrozen, isRaceCardOpen, closeRaceCard, syncCourseOverlay,
+         getRecState, getRaceState, getPendingRecording, getPreviewCourse,
+         getGhostMode, setGhostMode, armGhost, fmtRelief, courseElevAt, worldElevAt,
+         showHereHead, showHereCourse, showHereIdle, refreshHere, getHereSubject };
 
 // auto-boot from a `?world=` query param, or wait for the panel's own load button
 {

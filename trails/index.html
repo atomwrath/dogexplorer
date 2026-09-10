@@ -111,6 +111,23 @@
         </div>
         <!-- Who is riding along, and how to put them down. Only up while carrying. -->
         <div id="hudCarry" class="tally">🤗 —</div>
+        <!-- Recording state, with its own stop. A walker who tapped Record on the map sheet
+             and walked off has no reason to reopen the sheet just to stop. -->
+        <div id="recHud">
+          <span class="rec-dot"></span><span id="recStat">0 m</span>
+          <button class="btn small" id="recStop" title="Stop recording">⏹</button>
+        </div>
+        <!-- The race readout: clock, how far round, the record to beat and your own best
+             with whoever you are playing as. Both times are shown because they are
+             different questions and a runner is usually chasing one of them specifically. -->
+        <div id="raceHud">
+          <div class="rc-top"><span id="raceName">—</span><span id="raceProg">0%</span></div>
+          <div class="rc-clock" id="raceClock">0:00.0</div>
+          <div class="rc-times"><span id="raceBest">—</span><span id="raceMine">⭐ —</span></div>
+          <div class="rc-gap" id="raceGap">👻 —</div>
+          <div class="rc-off" id="raceOff">↩ back to the course line</div>
+          <button class="btn small wide" id="raceQuit">✕ Give up (Esc)</button>
+        </div>
         <div id="watchMeter">
           <span id="watchName">Watching…</span>
           <span class="wm-bar"><i id="watchFill"></i></span>
@@ -132,6 +149,26 @@
           <button class="tbtn" id="tSneak" title="Sneak (C)"><span class="ic">🤫</span><span class="lb">SNEAK</span></button>
           <button class="tbtn" id="touchBarkBtn" title="Bark (B)"><span class="ic">🐕</span><span class="lb">BARK</span></button>
           <button class="tbtn" id="tJump" title="Jump (Space)"><span class="ic">🦘</span><span class="lb">JUMP</span></button>
+        </div>
+      </div>
+      <!-- The 3-2-1. Over the scene rather than in the HUD corner, because it is the one
+           thing on screen for those three seconds and it has to be readable at a glance
+           from wherever the eye happens to be. -->
+      <div id="raceCount">3</div>
+      <div id="raceWrap">
+        <div id="raceCard">
+          <h2 id="raceCardTitle">🏁 Finished!</h2>
+          <p class="arr-sub" id="raceCardSub"></p>
+          <div class="arr-score"><b id="raceCardTime">0:00.0</b><span id="raceCardWho">—</span></div>
+          <p class="rc-delta" id="raceCardDelta"></p>
+          <div class="arr-panel">
+            <h3>🏆 Best times</h3>
+            <div id="raceBoard"></div>
+          </div>
+          <div class="arr-actions">
+            <button class="btn" id="raceAgain">↻ Race again</button>
+            <button class="btn primary" id="raceDone">✓ Done</button>
+          </div>
         </div>
       </div>
       <div id="arrivalWrap">
@@ -168,11 +205,39 @@
           <button class="btn small" id="bigZoomOut" title="Zoom out">➖</button>
         </div>
         <div id="bigmapSide">
+          <div class="bm-card" id="hereCard">
+            <h3 id="hereTitle">🚩 Start here</h3>
+            <div id="hereIdle">
+              <p class="hint" id="startNow">—</p>
+              <p class="hint">Tap a lettered badge on the map, or a course below, to see
+                what is there. Every outer dead-end is a trailhead.</p>
+            </div>
+            <div id="hereStats" class="here-stats"></div>
+            <div id="hereActions" class="here-actions"></div>
+          </div>
           <div class="bm-card">
-            <h3>🚩 Start here</h3>
-            <p class="hint" id="startNow">—</p>
-            <p class="hint">Tap a lettered badge on the map to start walking from there.
-              Every outer dead-end is a trailhead.</p>
+            <h3>🏁 Courses</h3>
+            <div id="courseList" class="course-list"></div>
+            <button class="btn small wide" id="recStartBtn">⏺ Record a path</button>
+            <div id="recSaveRow" class="rec-save">
+              <input type="text" id="recName" maxlength="40" placeholder="Name this course"
+                     autocomplete="off" spellcheck="false">
+              <div class="io-row">
+                <button class="btn small" id="recSaveBtn">✓ Save</button>
+                <button class="btn small" id="recDropBtn">✕ Discard</button>
+              </div>
+            </div>
+            <p class="hint" id="recNote">Recording snaps to whatever trail you are on.
+              Off-trail stretches are skipped.</p>
+            <div class="ghost-pick">
+              <span>👻 Ghost</span>
+              <div id="ghostMode" class="seg">
+                <button data-ghost="best" class="on">🏆 Record</button>
+                <button data-ghost="mine">⭐ Yours</button>
+                <button data-ghost="off">Off</button>
+              </div>
+            </div>
+            <p class="hint">Tap a course name to show it on the map, 🏁 to race it.</p>
           </div>
           <div class="bm-card">
             <h3>📍 Saved spots</h3>

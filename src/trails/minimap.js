@@ -35,12 +35,16 @@
 import { clamp } from '../core/math.js';
 import { getAreas, getBBox, getGraph, getMapScale, getPOIs, getStartHead, getTrailheads, getWorldRevision } from './world.js';
 import { getSpots, spotWorld } from './spots.js';
+import { coursePoints } from './courses.js';
 import { reliefCanvas } from './terrain.js';
 import { getCritters } from './critters.js';
 import { THEME } from './themes.js';
 
 const INK_MAP = '#3a2517';
 const TRAIL_INK = {trail:'#9c6a35', track:'#8a6a45', road:'#6f6b62'};
+// the same magenta course-line.js paints on the ground (0xd94fa0), so the disc in the
+// corner and the strip underfoot are recognisably one object seen two ways
+const COURSE_MAP_INK = '#d94fa0';
 const BIG_ZOOM_MIN = 1, BIG_ZOOM_MAX = 10;
 
 let atlas = null;              // {canvas, x0, z0, w, h, ppm}
@@ -75,6 +79,33 @@ function highlightEdges(){
   hiCache = {route:hiRoute, rev, edges};
   return edges;
 }
+
+/* The course drawn over everything else: the one being recorded, raced or previewed.
+
+   Held as the course OBJECT rather than as a list of screen points, so this module re-reads
+   coursePoints() every frame and a course drawn here is always at the current world scale.
+   That also means the live recording draws for free -- main.js hands over a bare
+   {name, pts} while the trace is still growing, and nothing here has to know the difference
+   between a course that is finished and one that is three seconds old.
+
+   A separate slot from hiRoute, not a second use of it. The highlighted route is "the trail
+   underfoot", which changes every time you step across a fork; the course is a deliberate
+   choice that has to stay put while you run over a dozen different trails. Folding them
+   together would have the course vanish the moment the race left its first trail. */
+let shownCourse = null;
+let raceFrac = -1;              // 0..1 along the shown course, or <0 for "not racing"
+
+/* Held BY REFERENCE, and that is what makes the live recording free: main.js hands over
+   `rec.live` once when recording starts, its `pts` array is then appended to in place, and
+   every frame this module re-reads it. No per-sample push, no invalidation. drawCourse
+   already declines to draw fewer than two points, so a trace one point long is not a case
+   that needs handling here. */
+function setCourseShown(c){ shownCourse = (c && Array.isArray(c.pts)) ? c : null; }
+function getCourseShown(){ return shownCourse; }
+/* Where the runner has got to, so the sheet can show the part still to come in full
+   strength and the part already run dimmed. Set to <0 when no race is live. */
+function setRaceFrac(f){ raceFrac = (f == null || !isFinite(f)) ? -1 : f; }
+function getRaceFrac(){ return raceFrac; }
 
 function isBigMapOpen(){ return bigOpen; }
 
@@ -119,8 +150,13 @@ function pickTrailheadAt(px, py){
   }
   const hitR = Math.max(24*(dpr||1), 34);       // generous tap target, bigger than the drawn badge
   if(best<0 || bestD>hitR) return false;
+  /* CLOSING IS THE CALLBACK'S DECISION, NOT THIS FUNCTION'S. It used to close the sheet
+     here, because a pick meant "take me there" and there was nothing to stay for. Now a
+     trailhead pick fills a details card that lives ON the sheet, so closing it would hide
+     the very thing the tap was asking to see. A pin still closes, because going there IS
+     what tapping a pin means -- but that is a fact about pins, and it belongs with the
+     handler that knows it rather than in the hit test. */
   onTrailheadPick(best);
-  toggleBigMap(false);          // picked -> close the sheet so the live preview shows it
   return true;
 }
 
@@ -141,8 +177,7 @@ function pickSpotAt(px, py){
   }
   const hitR = Math.max(22*(dpr||1), 30);
   if(!best || bestD>hitR) return false;
-  onSpotPick(best);
-  toggleBigMap(false);
+  onSpotPick(best);             // the handler closes the sheet; see pickTrailheadAt above
   return true;
 }
 
@@ -374,6 +409,87 @@ function drawHighlight(g, X, Z, scale){
   g.restore();
 }
 
+/* The course line. Drawn ON TOP of the route highlight and under every marker, in an ink
+   nothing else on this map uses (the same magenta course-line.js paints on the ground, so
+   the disc in the corner and the strip underfoot are recognisably one thing).
+
+   Dashed rather than solid, and that is not decoration: a solid bright line over a network
+   of solid trail lines is one more line, whereas a dashed one reads as an overlay at a
+   glance even where it runs along a trail for a kilometre -- which is the normal case,
+   since a course is by construction made of trails.
+
+   While a race is live the stretch already run is drawn faint and the stretch still to come
+   full strength, so the sheet answers "how much is left" without a number. */
+function drawCourse(g, X, Z, scale, withEnds){
+  const c = shownCourse;
+  if(!c) return;
+  const pts = coursePoints(c);
+  if(pts.length < 2) return;
+  g.save();
+  g.lineCap = 'round'; g.lineJoin = 'round';
+
+  // cut the polyline at the runner's position, so the two halves can be stroked apart
+  const cut = raceFrac >= 0 ? Math.max(0, Math.min(1, raceFrac)) : 0;
+  const arc = [0];
+  for(let i=1;i<pts.length;i++)
+    arc[i] = arc[i-1] + Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1]);
+  const total = arc[arc.length-1] || 1;
+  const cutS = cut*total;
+
+  const strokeRange = (fromS, toS) => {
+    g.beginPath();
+    let started = false;
+    for(let i=0;i<pts.length-1;i++){
+      const a0 = arc[i], a1 = arc[i+1];
+      if(a1 < fromS || a0 > toS) continue;
+      const seg = a1-a0;
+      const t0 = seg > 0 ? Math.max(0, (fromS-a0)/seg) : 0;
+      const t1 = seg > 0 ? Math.min(1, (toS-a0)/seg) : 1;
+      const px0 = pts[i][0] + (pts[i+1][0]-pts[i][0])*t0;
+      const pz0 = pts[i][1] + (pts[i+1][1]-pts[i][1])*t0;
+      const px1 = pts[i][0] + (pts[i+1][0]-pts[i][0])*t1;
+      const pz1 = pts[i][1] + (pts[i+1][1]-pts[i][1])*t1;
+      if(!started){ g.moveTo(X(px0), Z(pz0)); started = true; }
+      else g.lineTo(X(px0), Z(pz0));
+      g.lineTo(X(px1), Z(pz1));
+    }
+    return started;
+  };
+
+  // pale casing under the whole thing, so the dashes stay legible over dark relief
+  g.setLineDash([]);
+  g.globalAlpha = 0.5;
+  g.lineWidth = 7*scale; g.strokeStyle = '#fff8e6';
+  if(strokeRange(0, total)) g.stroke();
+
+  g.setLineDash([9*scale, 6*scale]);
+  if(raceFrac >= 0 && cutS > 0){
+    g.globalAlpha = 0.28;
+    g.lineWidth = 3*scale; g.strokeStyle = COURSE_MAP_INK;
+    if(strokeRange(0, cutS)) g.stroke();
+  }
+  g.globalAlpha = 1;
+  g.lineWidth = 3.4*scale; g.strokeStyle = COURSE_MAP_INK;
+  if(strokeRange(raceFrac >= 0 ? cutS : 0, total)) g.stroke();
+  g.setLineDash([]);
+
+  if(withEnds){
+    const a = pts[0], b = pts[pts.length-1];
+    const r = 6*scale;
+    // start: a solid disc. finish: a ring, so the two are told apart by shape and not
+    // only by colour -- on a loop they land within a few metres of each other.
+    g.beginPath(); g.arc(X(a[0]), Z(a[1]), r, 0, 7);
+    g.fillStyle = '#4f9d4f'; g.fill();
+    g.lineWidth = Math.max(1.4, 1.8*scale); g.strokeStyle = INK_MAP; g.stroke();
+    g.beginPath(); g.arc(X(b[0]), Z(b[1]), r, 0, 7);
+    g.fillStyle = '#fff8e6'; g.fill();
+    g.lineWidth = Math.max(1.8, 2.4*scale); g.strokeStyle = INK_MAP; g.stroke();
+    g.beginPath(); g.arc(X(b[0]), Z(b[1]), r*0.42, 0, 7);
+    g.fillStyle = INK_MAP; g.fill();
+  }
+  g.restore();
+}
+
 /* Saved pins, numbered in the order they were dropped so the badge on the sheet matches
    the row in the list beside it. Drawn as a teardrop rather than a disc so a pin can
    never be mistaken for a trailhead badge or a sighted animal at a glance -- three kinds
@@ -462,6 +578,7 @@ function updateMinimap(px, pz, yaw){
     const X = x => (x - px)*ppx + W/2, Z = z => (z - pz)*ppx + H/2;
     const dpr = W/miniCv.clientWidth;
     drawHighlight(g, X, Z, dpr*0.85);
+    drawCourse(g, X, Z, dpr*0.85, true);
     drawSighted(g, X, Z, dpr);
     drawSpots(g, X, Z, dpr*1.05, false);
     drawPup(g, W/2, H/2, yaw, dpr*1.15);
@@ -489,6 +606,7 @@ function updateMinimap(px, pz, yaw){
       bigView = {ox, oy, s, baseS, at, W, H, dpr};
       const X = x => ox + (x - at.x0)*at.ppm*s, Z = z => oy + (z - at.z0)*at.ppm*s;
       drawHighlight(g, X, Z, dpr*1.4);
+      drawCourse(g, X, Z, dpr*1.4, true);
       drawTrailheadLabels(g, X, Z, dpr*1.3, getStartHead());
       drawSighted(g, X, Z, dpr*1.6);
       drawSpots(g, X, Z, dpr*1.9, true);
@@ -509,4 +627,5 @@ function updateMinimap(px, pz, yaw){
 }
 
 export { initMinimap, updateMinimap, toggleBigMap, isBigMapOpen, getBigView,
-         setHighlightRoute, getHighlightRoute, highlightEdges, pickSpotAt, pickOnSheet };
+         setHighlightRoute, getHighlightRoute, highlightEdges, pickSpotAt, pickOnSheet,
+         setCourseShown, getCourseShown, setRaceFrac, getRaceFrac };

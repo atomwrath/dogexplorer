@@ -286,6 +286,147 @@ body.arrived #arrivalWrap{display:flex;align-items:flex-start;justify-content:ce
 }
 
 
+/* --- recorded courses, and racing them ---------------------------------------
+   Magenta throughout, matching the ink minimap.js strokes and the strip course-line.js
+   paints on the ground. It is the one hue nothing else on this map uses, which is the
+   whole reason it was picked: following a course must never involve deciding which of
+   two similar lines is the course. */
+.course-list{display:flex;flex-direction:column;gap:5px;margin-bottom:8px;}
+.course-list .none{font-size:11.5px;opacity:.6;}
+.course-row{display:grid;grid-template-columns:20px 1fr auto auto;gap:6px;align-items:center;
+  border:3px solid var(--ink);border-radius:10px;background:#fff;padding:5px 8px;
+  font-size:11.5px;font-weight:bold;}
+.course-row.shown{background:#fdeaf5;border-color:#d94fa0;}
+.course-row .cs-badge{grid-column:1;width:20px;height:20px;border-radius:50%;background:#d94fa0;
+  color:#fff;border:2px solid var(--ink);display:flex;align-items:center;justify-content:center;
+  font-size:10px;}
+.course-row .cs-name{grid-column:2;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;text-align:left;background:none;border:none;font-family:inherit;
+  font-weight:bold;font-size:11.5px;cursor:pointer;padding:0;color:inherit;}
+.course-row .cs-go{grid-column:3;border:2px solid var(--ink);border-radius:8px;background:#fff8e6;
+  font-family:inherit;font-size:12px;line-height:1;padding:3px 5px;cursor:pointer;}
+.course-row .cs-go:hover{background:#d94fa0;}
+.course-row .cs-x{grid-column:4;border:none;background:none;font-family:inherit;font-weight:bold;
+  cursor:pointer;opacity:.5;font-size:13px;line-height:1;padding:0 2px;}
+.course-row .cs-x:hover{opacity:1;}
+.course-row .cs-best{grid-column:1 / -1;font-size:10.5px;font-weight:bold;opacity:.72;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+/* The naming half only exists between "stop" and "save", so it is hidden rather than
+   disabled -- an empty text field sitting on the card the rest of the time reads as a
+   control that is broken. */
+.rec-save{display:none;flex-direction:column;gap:6px;margin-top:8px;}
+.rec-save.on{display:flex;}
+.rec-save input{font-family:inherit;font-weight:bold;font-size:12px;color:inherit;
+  border:3px solid var(--ink);border-radius:10px;padding:6px 9px;background:#fff;
+  width:100%;box-sizing:border-box;}
+.rec-save .io-row{display:flex;gap:6px;}
+.rec-save .io-row .btn{flex:1;}
+#recStartBtn.primary{background:#d94fa0;color:#fff;}
+#recStartBtn:disabled{opacity:.45;cursor:default;}
+
+/* The details panel. One card that answers "what is this thing I just tapped", for both
+   kinds of thing you can tap -- a trailhead badge and a saved course. Same layout for both
+   so the answer always appears in the same place. */
+.here-stats{display:none;flex-direction:column;gap:3px;margin:6px 0 0;font-size:11.5px;
+  font-weight:bold;}
+.here-stats.on{display:flex;}
+.here-stats .hs-row{display:flex;gap:8px;align-items:baseline;}
+.here-stats .hs-row span:first-child{opacity:.6;flex:none;min-width:74px;}
+.here-stats .hs-row span:last-child{text-align:right;margin-left:auto;}
+.here-stats .hs-sub{font-size:10.5px;opacity:.62;font-weight:bold;line-height:1.35;}
+.here-stats .hs-board{display:flex;flex-direction:column;gap:2px;margin-top:4px;}
+.here-stats .hs-board .r{display:flex;gap:6px;font-size:10.5px;}
+.here-stats .hs-board .r span:last-child{margin-left:auto;}
+.here-stats .hs-board .r.me{color:#d94fa0;}
+.here-actions{display:none;gap:6px;margin-top:8px;flex-wrap:wrap;}
+.here-actions.on{display:flex;}
+.here-actions .btn{flex:1 1 auto;}
+#hereIdle{display:block;}
+#hereIdle.off{display:none;}
+
+/* Trail stats sit to the RIGHT of the name and shrink first, so a long trail name pushes
+   its own figures off rather than wrapping the row and turning a scannable list into a
+   paragraph. */
+.tl-row .tl-stat{margin-left:auto;padding-left:8px;font-size:10px;font-weight:bold;
+  opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;}
+
+/* Ghost picker: three states, not a checkbox, because "chase the record" and "chase your
+   own best" are different sessions and neither is the off switch. */
+.ghost-pick{display:flex;align-items:center;gap:8px;margin:8px 0 4px;font-size:11px;
+  font-weight:bold;}
+.ghost-pick .seg{display:flex;gap:0;margin-left:auto;border:2px solid var(--ink);
+  border-radius:9px;overflow:hidden;}
+.ghost-pick .seg button{font-family:inherit;font-weight:bold;font-size:10.5px;
+  border:none;background:#fff;padding:3px 7px;cursor:pointer;color:inherit;
+  border-left:2px solid var(--ink);}
+.ghost-pick .seg button:first-child{border-left:none;}
+.ghost-pick .seg button.on{background:#bfe4ff;}
+
+/* Recording chip: on the HUD, not on the map sheet, because the sheet covers the screen
+   and recording is a thing you do while walking. */
+#recHud{display:none;align-items:center;gap:8px;margin-top:8px;max-width:250px;
+  background:#fdeaf5;border:3px solid var(--ink);border-radius:12px;padding:4px 8px;
+  font-size:12px;font-weight:bold;}
+#recHud.on{display:flex;}
+#recHud .rec-dot{flex:none;width:11px;height:11px;border-radius:50%;background:#d94fa0;
+  border:2px solid var(--ink);animation:recblink 1.1s steps(1,end) infinite;}
+#recHud .btn{padding:2px 7px;font-size:12px;line-height:1.2;}
+@keyframes recblink{0%,55%{opacity:1;}56%,100%{opacity:.15;}}
+/* A blinking dot is the one piece of chrome here that moves for its own sake, so it is
+   also the one that has to stop moving when the reader asked everything to. */
+@media (prefers-reduced-motion:reduce){ #recHud .rec-dot{animation:none;} }
+
+#raceHud{display:none;flex-direction:column;gap:3px;margin-top:8px;width:214px;
+  background:var(--card);border:3px solid #d94fa0;border-radius:12px;padding:7px 10px;
+  font-size:11.5px;font-weight:bold;}
+#raceHud.on{display:flex;}
+#raceHud .rc-top{display:flex;gap:8px;align-items:baseline;}
+#raceHud .rc-top #raceName{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;}
+#raceHud .rc-top #raceProg{color:#d94fa0;}
+#raceHud .rc-clock{font-size:26px;line-height:1.05;letter-spacing:.5px;}
+#raceHud .rc-times{display:flex;justify-content:space-between;gap:8px;opacity:.78;
+  font-size:10.5px;white-space:nowrap;overflow:hidden;}
+/* Only up when you have actually wandered off the line -- a permanent "stay on the course"
+   label is advice, and advice that is always showing is wallpaper. */
+/* The gap to the ghost, coloured by which way it is going. Down IS ahead here -- the
+   number is how much time separates you, and the sign says who owns it -- so the colours
+   carry the meaning that a bare signed number would make you stop and work out. */
+#raceHud .rc-gap{display:none;font-size:12px;color:#7b6653;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;}
+#raceHud .rc-gap.on{display:block;}
+#raceHud .rc-gap.ahead{color:#c4442e;}
+#raceHud .rc-gap.behind{color:#3f8f45;}
+#raceHud .rc-gap.none{color:#7b6653;opacity:.75;font-size:10.5px;}
+#raceHud .rc-off{display:none;color:#c4442e;font-size:10.5px;}
+#raceHud .rc-off.on{display:block;}
+#raceHud .btn{margin-top:3px;padding:3px 8px;font-size:11px;}
+
+#raceCount{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+  z-index:11;pointer-events:none;font-size:140px;font-weight:bold;color:#fff8e6;
+  -webkit-text-stroke:6px var(--ink);paint-order:stroke fill;}
+#raceCount.on{display:flex;}
+@media (max-width:760px){ #raceCount{font-size:92px;-webkit-text-stroke-width:4px;} }
+
+/* Same shape as the arrival card and reusing its inner classes on purpose: finishing a
+   race and reaching a trailhead are the same moment in the walk (a thing ended, here is
+   what happened) and giving them two different layouts would say they were not. */
+#raceWrap{position:absolute;inset:0;display:none;z-index:13;
+  background:rgba(45,32,22,.5);overflow:auto;padding:18px;box-sizing:border-box;}
+body.racedone #raceWrap{display:flex;align-items:flex-start;justify-content:center;}
+#raceCard{background:var(--card);border:4px solid var(--ink);border-radius:22px;
+  box-shadow:0 6px 0 rgba(61,42,32,.3);padding:20px;max-width:420px;width:100%;
+  margin:auto;box-sizing:border-box;}
+#raceCard h2{margin:0 0 2px;font-size:26px;}
+#raceCard .arr-score{background:#d94fa0;}
+#raceCard .rc-delta{margin:0 0 10px;text-align:center;font-size:13px;font-weight:bold;
+  color:#7b6653;}
+#raceCard .arr-row.me{color:#d94fa0;}
+@media (max-width:520px){ #raceCard h2{font-size:21px;} }
+/* The joystick has no business floating over a summary, and the countdown is not a walk --
+   same rule the map sheet and the arrival card already live under. */
+body.racedone #touchCtl{display:none;}
+
 /* ---- controls that only exist without a keyboard ----------------------------
    Everything a walker does is bound to a key: WASD walks, space jumps, C sneaks, B barks
    (and B is also the only answer to a bear deciding to charge). On an iPad or a phone

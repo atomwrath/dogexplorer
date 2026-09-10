@@ -381,7 +381,15 @@ function assertAll(window, errors, stats) {
   let __losNote = '', __seeNote = '';
   let __frameNote = '', __embedNote = '', __outsideNote = '';
   let __catchNote = '', __chainNote = '', __slideNote = '', __hangNote = '', __poseNote = '';
-  let __faceNote = '', __walkInNote = '', __jumpNote = '', __boundsNote = '';
+  let __faceNote = '', __walkInNote = '', __jumpNote = '', __boundsNote = '', __hereNote = '';
+  let __courseNote = '', __snapNote = '', __raceNote = '', __finishNote = '', __stepNote = '';
+  let __giveNote = '', __reloadNote = '', __zigNote = '';
+  let __relNote = '', __relScaleNote = '', __noiseNote = '', __stairNote = '', __tlNote = '';
+  let __ghostNote = '', __ghostScaleNote = '', __ghostRunNote = '', __gapNote = '', __trimNote = '';
+  let __twiceNote = '', __twiceRunNote = '', __noGhostNote = '', __hereCourseNote = '', __trackless = '';
+  // const bindings vanish into the bundle's single scope, so the harness restates the two
+  // it needs to assert against rather than reaching for names it cannot see
+  const COURSE_ON_M_TEST = 14, GHOST_KEEP_TEST = 3, GHOST_DT_TEST = 0.25;
   const txt = sel => (d.querySelector(sel)?.textContent || '').trim();
   const n = sel => d.querySelectorAll(sel).length;
 
@@ -724,12 +732,16 @@ function assertAll(window, errors, stats) {
     return probe().bigMapOpen === true && d.body.classList.contains('bigmap');
   })());
 
-  // The full sheet is a pick surface: tap a lettered trailhead badge and it should both
-  // move the avatar there and close the sheet. minimap.js draws the badges at exact
-  // screen positions derived from getBigView()'s transform -- reproduce that same
-  // arithmetic here rather than guess coordinates, then hand them to the real pick
-  // function so this exercises the actual tap-handling code, not a mock of it.
-  check('tapping a trailhead on the full map moves the avatar and closes the map', (() => {
+  /* The full sheet is a pick surface, but A PICK LOADS AND A BUTTON STARTS. This check
+     used to assert the opposite -- that a tap moved the avatar and closed the sheet -- and
+     that was right while a trailhead was only a letter. Now that there is something to
+     read about one, being teleported by the act of asking is exactly the behaviour that
+     had to go: you cannot read the elevation of a place you have already left for.
+
+     minimap.js draws the badges at screen positions derived from getBigView()'s transform;
+     reproduce that arithmetic rather than guess coordinates, so this exercises the real
+     tap-handling code and not a mock of it. */
+  check('tapping a trailhead on the full map loads it without moving the walker', (() => {
     if (typeof getBigView !== 'function' || typeof pickTrailheadAt !== 'function') return false;
     if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(1016); }  // let updateMinimap draw it
     const bv = getBigView();
@@ -738,13 +750,38 @@ function assertAll(window, errors, stats) {
     const from = getStartHead();
     const to = (from + 1) % heads.length;
     const h = heads[to];
+    const was = probe().dogWorld;
     const px = bv.ox + (h.x - bv.at.x0) * bv.at.ppm * bv.s;
     const py = bv.oy + (h.z - bv.at.z0) * bv.at.ppm * bv.s;
     const picked = pickTrailheadAt(px, py);
-    const s3 = probe();
-    return picked && s3.startHead === to && !isBigMapOpen() &&
-      dist(s3.dogWorld, heads[to]) < 0.5;
+    const subj = getHereSubject();
+    return picked && !!subj && subj.kind === 'head' && subj.i === to &&
+      isBigMapOpen() &&                       // the sheet stays up so you can read it
+      probe().startHead === from &&           // and nothing has moved yet
+      dist(probe().dogWorld, was) < 0.01;
   })());
+
+  check('the loaded trailhead card carries the button that does move you', (() => {
+    const heads = getTrailheads();
+    const subj = getHereSubject();
+    if (!subj || subj.kind !== 'head') return false;
+    const to = subj.i;
+    const btn = d.querySelector('#hereActions .btn');
+    if (!btn) return false;
+    btn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    const s3 = probe();
+    return s3.startHead === to && !isBigMapOpen() && dist(s3.dogWorld, heads[to]) < 0.5;
+  })());
+
+  check('the trailhead card reports where it is and what meets it', (() => {
+    toggleBigMap(true);
+    showHereHead(0);
+    const rows = [...d.querySelectorAll('#hereStats .hs-row')]
+      .map(r => r.children[0].textContent + '=' + r.children[1].textContent);
+    __hereNote = rows.join(' | ');
+    return rows.length >= 2 && /Trail=/.test(__hereNote) && /From you=/.test(__hereNote) &&
+      d.querySelector('#hereStats').classList.contains('on');
+  })(), () => __hereNote);
 
   check('Escape closes the map before it quits the walk', (() => {
     toggleBigMap(true);
@@ -1684,6 +1721,686 @@ function assertAll(window, errors, stats) {
       renderSpotList();
       return getSpots().length === 0 && !!d.querySelector('#spotList .none');
     })());
+  }
+
+  /* ---- recorded courses, and racing them --------------------------------------
+     Driven end to end through the real controls rather than through the storage module:
+     the interesting failures here are all in the wiring (a recorder that stores where the
+     walker was instead of where the trail is, a countdown that does not actually freeze
+     anything, a clock that starts early, progress that can be skipped) and none of those
+     are visible from courses.js on its own. */
+  {
+    resetCourses();
+    quitRace();
+    closeRaceCard();
+    const pl = getTrailPlayer();
+    pl.dist = 0;              // keep the trailhead arrival card out of this: it pauses the
+                              // frame loop, which would stop the recorder mid-trace
+    let clock = 60000;
+    const pump = () => { if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(clock += 40); } };
+    const holdKey = (code, down) => {
+      const ev = new window.KeyboardEvent(down ? 'keydown' : 'keyup', { bubbles: true });
+      Object.defineProperty(ev, 'code', { value: code });
+      window.dispatchEvent(ev);
+    };
+
+    // the longest single stretch of trail on the map: a real route to walk, and long
+    // enough that COURSE_MIN_M is not what the recording test is really measuring
+    const G = getGraph();
+    const longest = G.edges.filter(e => !e.buried && e.pts.length >= 4)
+      .map(e => ({ e, L: polyLen(e.pts) })).sort((a, b) => b.L - a.L)[0];
+    /* Resampled to a STRIDE, not walked vertex to vertex. Douglas-Peucker leaves a
+       straight kilometre of trail as two points, so stepping the survey geometry directly
+       teleports the walker 86 m per frame -- past the recorder's own 5 m sampling interval
+       and past the race's anti-shortcut window, which would make this suite assert that
+       both of those are broken when what is broken is the way it is driving them. */
+    const resampleWalk = (pts, spacing) => {
+      const out = [pts[0].slice()];
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1], b = pts[i];
+        const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        const steps = Math.max(1, Math.ceil(L / spacing));
+        for (let k = 1; k <= steps; k++)
+          out.push([a[0] + (b[0] - a[0]) * k / steps, a[1] + (b[1] - a[1]) * k / steps]);
+      }
+      return out;
+    };
+    // a stride is shorter than the recorder's sampling interval, so the trace is limited
+    // by COURSE_STEP_M (which is the thing under test) and not by the frame rate
+    const walkPts = longest ? resampleWalk(longest.e.pts, 0.6 * getMapScale() * 5) : [];
+    __courseNote = walkPts.length
+      ? `${walkPts.length} strides over ${(polyLen(walkPts) / getMapScale()).toFixed(0)} real m`
+      : 'no edge long enough';
+    check('the map has a stretch of trail long enough to record a course on',
+      walkPts.length >= 4, () => __courseNote);
+
+    check('recording starts from the map sheet control and closes the sheet', (() => {
+      toggleBigMap(true);
+      const ok = startRecording();
+      return ok && getRecState().on && !isBigMapOpen();
+    })());
+
+    /* WALKED ALONG THE VERGE ON PURPOSE, two world units off the centreline and inside the
+       corridor. That offset is the entire point of the test: a course has to be a fact
+       about the network, so that somebody racing it down the other side of the same trail
+       is racing the same course. A recorder that stored player positions would pass every
+       other check here and fail this one. */
+    // five real metres off the centreline: a walker on the far side of a wide track. The
+    // whole point of snapping is that they record the same course as somebody on the near
+    // side, so the offset has to be real but has to stay inside the trail.
+    const VERGE = 1.0 * getMapScale() * 5;
+    const walkedAt = [];
+    placeAt(walkPts[0][0], walkPts[0][1], 0);
+    for (let i = 0; i < walkPts.length; i++) {
+      const a = walkPts[i], b = walkPts[Math.min(i + 1, walkPts.length - 1)];
+      let dx = b[0] - a[0], dz = b[1] - a[1];
+      const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L;
+      const x = a[0] - dz * VERGE, z = a[1] + dx * VERGE;
+      pl.x = x; pl.z = z;
+      walkedAt.push([x, z]);
+      pump();
+    }
+
+
+    const trace = getRecState().pts.slice();
+    check('walking a trail with the recorder on banks a trace',
+      trace.length >= 4, `${trace.length} points over ${fmtCourseLen(getRecState().lenM)}`);
+
+    check('the trace snaps to the trail, not to the line the walker took', (() => {
+      if (trace.length < 4) return false;
+      /* A MINIMUM over 164x334 point pairs is a coincidence detector, not a measurement:
+         on a switchback the offset walk swings back across the centreline and one pair
+         lands close, which says nothing about what was stored. State the claim directly
+         instead -- every recorded point is ON the centreline and the walker was
+         consistently OFF it, which together is exactly "we stored the trail, not you". */
+      const k = getMapScale();
+      let worstOff = 0;
+      for (const p of trace) worstOff = Math.max(worstOff, nearestTrail(p[0]*k, p[1]*k).d);
+      let walkedOff = 0;
+      for (const w of walkedAt) walkedOff += nearestTrail(w[0], w[1]).d;
+      walkedOff /= Math.max(1, walkedAt.length);
+      __snapNote = `${trace.length} points, worst ${worstOff.toFixed(3)}u off the centreline; ` +
+        `the walker averaged ${walkedOff.toFixed(2)}u off it`;
+      return worstOff < 0.05 && walkedOff > VERGE*0.7;
+    })(), () => __snapNote);
+
+
+    /* The trace has to be finer than the race's lookahead window or the course it produces
+       is unrunnable: every step forward would land past the window and bank nothing. That
+       is a relationship between two constants in courses.js, so assert it on the trace
+       rather than trusting the two to be edited together. */
+    check('the trace is sampled finely enough to be raceable', (() => {
+      let worst = 0;
+      for (let i = 1; i < trace.length; i++)
+        worst = Math.max(worst, Math.hypot(trace[i][0] - trace[i - 1][0], trace[i][1] - trace[i - 1][1]));
+      __stepNote = `widest gap ${worst.toFixed(1)} real m`;
+      return trace.length > 20 && worst < 12;
+    })(), () => __stepNote);
+
+    /* THE ZIG-ZAG, which is the failure snapping INTRODUCES rather than the one it fixes.
+       Taking the nearest trail every sample means that beside a pair of parallel paths
+       "nearest" can flip from one to the other and back between samples, writing a course
+       that crosses open ground repeatedly and comes out LONGER than the trail it was traced
+       on -- measured at 1368 m over a 979 m trail before the jump gate and the real-metre
+       snap window went in.
+
+       Recorded as its own pass, at a WIDER offset than the snap check above uses. That is
+       the whole reason this is a second walk: at the one-unit verge a real walker holds,
+       "nearest trail" is never ambiguous and the bug does not fire, so asserting length on
+       that trace would assert nothing. Fifteen real metres out is where the two candidate
+       trails compete. Length is the cheap invariant that catches it -- a trace of a trail
+       is the length of that trail, whatever line the walker wobbled along. */
+    check('a wobbling walker records the trail, not a zig-zag between two trails', (() => {
+      const keep = getRecState().pts.slice(), keepLen = getRecState().lenM;
+      const WOBBLE = 3.0 * getMapScale() * 5;
+      startRecording();
+      placeAt(walkPts[0][0], walkPts[0][1], 0);
+      for (let i = 0; i < walkPts.length; i++) {
+        const a = walkPts[i], b = walkPts[Math.min(i + 1, walkPts.length - 1)];
+        let dx = b[0] - a[0], dz = b[1] - a[1];
+        const L = Math.hypot(dx, dz); if (L < 1e-6) continue; dx /= L; dz /= L;
+        pl.x = a[0] - dz * WOBBLE; pl.z = a[1] + dx * WOBBLE;
+        pump();
+      }
+      const walkedM = polyLen(walkPts) / getMapScale();
+      const gotM = getRecState().lenM;
+      __zigNote = `${gotM.toFixed(0)} m recorded over a ${walkedM.toFixed(0)} m trail ` +
+        `from ${(WOBBLE / getMapScale()).toFixed(0)} m off the centreline`;
+      stopRecording();
+      discardRecording();
+      // put the good trace back so the rest of this block races the course it walked
+      startRecording();
+      const st = getRecState();
+      for (const q of keep) st.pts.push(q);
+      st.lenM = keepLen;
+      return gotM > walkedM * 0.85 && gotM < walkedM * 1.15;
+    })(), () => __zigNote);
+
+    const pending = stopRecording();
+    check('stopping hands the trace over to be named, on the map sheet',
+      !!pending && !getRecState().on && !!getPendingRecording() && isBigMapOpen());
+
+    const course = saveRecording('Test Course');
+    check('saving files the course', !!course && getCourses().length === 1,
+      course ? `${course.name}, ${fmtCourseLen(courseLengthM(course))}` : 'nothing saved');
+    check('the map sheet lists it with a race control',
+      n('#courseList .course-row') === 1 && !!d.querySelector('#courseList .cs-go'));
+
+    /* The reason courses.js stores real metres, same argument spots.js makes: world scale
+       moves every coordinate, and a course that did not move with it would be raced
+       kilometres from the trail it was traced on. */
+    check('a course survives a change of world scale', (() => {
+      const before = coursePoints(course);
+      const s0 = getMapScale();
+      setMapScale(s0 / 4);
+      const after = coursePoints(course);
+      const ok = after.length === before.length && after.every((p, i) =>
+        Math.abs(p[0] - before[i][0] / 4) < 0.01 && Math.abs(p[1] - before[i][1] / 4) < 0.01);
+      setMapScale(s0);
+      return ok;
+    })());
+
+    /* The anti-shortcut rule, on geometry rather than on the map, because it is the one
+       part of racing that has to hold for courses this map does not happen to contain. */
+    check('progress along a course never runs backwards', (() => {
+      const pts = [[0, 0], [10, 0], [20, 0], [30, 0], [40, 0]];
+      const at = courseProgress(pts, 30, 0, 0, 1);
+      const back = courseProgress(pts, 0, 0, at.frac, 1);
+      return Math.abs(at.frac - 0.75) < 1e-6 && back.frac >= at.frac - 1e-9;
+    })());
+    check('cutting ahead of the course banks no progress', (() => {
+      const pts = [[0, 0], [10, 0], [20, 0], [30, 0], [40, 0]];
+      const pr = courseProgress(pts, 40, 0, 0, 0.25);   // window reaches a quarter of the way
+      return pr.frac <= 0.25 + 1e-9 && pr.d > 20;
+    })());
+
+    check('racing puts you on the start line facing the way the course goes', (() => {
+      const ok = startRace(course);
+      const pts = coursePoints(course);
+      const q = getTrailPlayer();
+      const want = courseStartYaw(course);
+      let dy = q.yaw - want; while (dy > Math.PI) dy -= Math.PI * 2; while (dy < -Math.PI) dy += Math.PI * 2;
+      return ok && getRaceState().on && !isBigMapOpen() &&
+        Math.hypot(q.x - pts[0][0], q.z - pts[0][1]) < 0.5 && Math.abs(dy) < 0.01;
+    })());
+
+    check('the course is drawn on the map and painted on the ground',
+      getCourseShown() === course && !!getCourseLine() && getCourseLine().visible);
+
+    /* A countdown you can walk through is a countdown that means nothing, and a clock that
+       starts before it ends makes every time on the scoreboard a second long. Held W
+       throughout, so this fails if the freeze is cosmetic. */
+    check('the 3-2-1 freezes the runner and holds the clock at zero', (() => {
+      /* MEASURED ON player.dist, NOT ON POSITION. The odometer only accumulates inside the
+         input-driven movement branch, so it is the one number that isolates "the keys did
+         nothing" from "nothing touched the player at all" -- and those are different
+         claims. A bear can decide it has had enough of you while you stand on a start
+         line, and applyImpacts will legitimately shove you several units; asserting the
+         position never changed made this suite fail whenever the population happened to
+         spawn something bad-tempered nearby. startRace zeroes the odometer, so any growth
+         here is a step the frozen input was allowed to take. */
+      const q = getTrailPlayer();
+      holdKey('KeyW', true);
+      for (let f = 0; f < 20; f++) pump();          // 0.8s of the countdown
+      const st = getRaceState();
+      __raceNote = `count ${st.count.toFixed(2)}s left, clock ${st.t.toFixed(2)}s, ` +
+        `walked ${q.dist.toFixed(3)}u at ${q.speed.toFixed(3)}u/s`;
+      return st.count > 0 && st.t === 0 && raceFrozen() && q.dist === 0 && q.speed < 0.05;
+    })(), () => __raceNote);
+
+    check('the countdown is on screen while it runs',
+      (d.querySelector('#raceCount') || {}).classList.contains('on') &&
+      /^[123]$/.test(txt('#raceCount')), txt('#raceCount'));
+
+    check('the clock starts when the countdown ends, and not before', (() => {
+      for (let f = 0; f < 80; f++) pump();          // run the remaining ~2.2s out
+      holdKey('KeyW', false);
+      const st = getRaceState();
+      return st.count === 0 && st.t > 0 && !raceFrozen();
+    })());
+
+    check('the race HUD reports the clock, the progress and the time to beat',
+      (d.querySelector('#raceHud') || {}).classList.contains('on') &&
+      /\d/.test(txt('#raceClock')) && /%/.test(txt('#raceProg')),
+      `${txt('#raceClock')} / ${txt('#raceProg')}`);
+
+    check('running the course banks progress and crossing the line stops the clock', (() => {
+      const pts = coursePoints(course);
+      const q = getTrailPlayer();
+      for (const p of pts) { q.x = p[0]; q.z = p[1]; pump(); }
+      const st = getRaceState();
+      __finishNote = `${(st.frac * 100).toFixed(1)}% round in ${fmtRaceTime(st.t)}`;
+      return st.done && st.frac > 0.98 && st.t > 0;
+    })(), () => __finishNote);
+
+    check('the finish card shows the time and the scoreboard',
+      isRaceCardOpen() && /\d/.test(txt('#raceCardTime')) && n('#raceBoard .arr-row') >= 1,
+      txt('#raceCardTime'));
+
+    /* Captured here, immediately after the finish, because the scoreboard checks below
+       deliberately post faster synthetic times and a new best correctly takes its old
+       track with it. Reading the ghost after those would be reading the track of a time
+       that was never run. */
+    const ranTrack = (() => {
+      const g = courseGhost(course, 'mine', rosterKey());
+      return g ? g.g.map(q => q.slice()) : null;
+    })();
+    /* THE CADENCE IS THE TIMESTAMP. courses.js stores a ghost as bare positions with no
+       times on them, so the only thing that makes a replay run at the right speed is that
+       the samples were taken exactly GHOST_DT apart. Sampled per frame instead, a track
+       recorded on a fast machine replays in slow motion and the gap readout is nonsense --
+       and nothing about the track's contents would look wrong. So the length has to be
+       checked against the clock, not just against zero. */
+    const ranSecs = (courseBestFor(course, rosterKey()) || {t:0}).t;
+    check('a finished race banks a ghost track at the fixed replay cadence', (() => {
+      const want = ranSecs/GHOST_DT_TEST;
+      __ghostNote = ranTrack
+        ? `${ranTrack.length} samples for ${fmtRaceTime(ranSecs)} (${want.toFixed(1)} expected)`
+        : 'no track';
+      return !!ranTrack && ranTrack.length > 4 && Math.abs(ranTrack.length - want) <= 2;
+    })(), () => __ghostNote);
+
+    check('the run is banked against the animal that ran it', (() => {
+      const mine = courseBestFor(course, rosterKey());
+      const best = courseBestOverall(course);
+      return !!mine && !!best && best.t === mine.t && best.name === avatarName();
+    })(), avatarName());
+
+    check('a slower run does not overwrite a record', (() => {
+      const b0 = courseBestOverall(course);
+      if (!b0) return false;
+      const r = recordCourseTime(course, rosterKey(), avatarName(), b0.t + 30);
+      return !r.improved && courseBestOverall(course).t === b0.t;
+    })());
+
+    /* Two scoreboards off one record: yours with the animal you are playing, and the
+       course record by anyone. The overall best is derived rather than stored, so the check
+       that matters is that a faster animal takes the record WITHOUT touching yours. */
+    /* Derived from the run the harness just made, not hard-coded: a fixed 12 s is slower
+       than the ~7.5 s a pumped race posts, so recordCourseTime rightly refused it and this
+       check was quietly asserting nothing at all. */
+    const ranT = (courseBestOverall(course) || {t:10}).t;
+    const MINE_T = ranT/2, FOX_T = ranT/3;
+    check('best times are kept per animal, and the record is the fastest of them', (() => {
+      /* Both faster than the run just made, or recordCourseTime rightly refuses them and
+         this ends up asserting that a slow lap loses -- which the check above already
+         covers. The point here is that a faster ANIMAL takes the course record without
+         touching your own best. */
+      recordCourseTime(course, rosterKey(), avatarName(), MINE_T);
+      recordCourseTime(course, 'wild:fox', 'Fox', FOX_T);
+      const best = courseBestOverall(course), mine = courseBestFor(course, rosterKey());
+      return !!best && best.key === 'wild:fox' && best.t === FOX_T &&
+        !!mine && mine.t === MINE_T && courseTimes(course).length === 2;
+    })());
+
+    check('giving up on a race banks nothing', (() => {
+      closeRaceCard();
+      startRace(course);
+      for (let f = 0; f < 90; f++) pump();
+      const q = getTrailPlayer();
+      const pts = coursePoints(course);
+      for (const p of pts.slice(0, Math.floor(pts.length / 2))) { q.x = p[0]; q.z = p[1]; pump(); }
+      const partWay = getRaceState().frac;
+      quitRace();
+      const b = courseBestOverall(course), m = courseBestFor(course, rosterKey());
+      __giveNote = `partWay ${(partWay*100).toFixed(1)}%, best ${b && b.t}, mine ${m && m.t}`;
+      return partWay > 0.1 && !getRaceState().on &&
+        !!b && b.t === FOX_T && !!m && m.t === MINE_T;
+    })(), () => __giveNote);
+
+    check('the race control on a course row starts a race', (() => {
+      renderCourseList();
+      d.querySelector('#courseList .cs-go').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+      const on = getRaceState().on;
+      quitRace();
+      return on;
+    })());
+
+    check('there is a way to stop recording without reopening the map', !!d.querySelector('#recStop'));
+
+    check('a trace too short to race is refused rather than saved', (() => {
+      startRecording();
+      const p = stopRecording();         // stopped without walking anywhere
+      return p === null && !getPendingRecording() && getCourses().length === 1;
+    })());
+
+    check('courses and their times survive a reload', (() => {
+      const before = getCourses().length;
+      readCourses();
+      const after = getCourses();
+      __reloadNote = `${before} -> ${after.length}, pts ${after[0]&&after[0].pts.length}, ` +
+        `times ${after[0]&&JSON.stringify(after[0].times)}`;
+      return after.length === before && after[0].pts.length >= 4 &&
+        Object.keys(after[0].times).length === 2 &&
+        (courseBestOverall(after[0]) || {}).t === FOX_T;
+    })(), () => __reloadNote);
+
+
+    /* ---- elevation stats ---------------------------------------------------
+       The interesting property is not the arithmetic, it is WHICH SURFACE gets sampled.
+       Relief has to come off the raw DEM in real metres, so that neither the world-scale
+       slider nor the hill-exaggeration slider -- both of which exist purely to change how
+       the map looks -- can change how much climbing a trail is reported to have. */
+    check('a course reports cumulative climb and descent', (() => {
+      const r = courseRelief(course, courseElevAt);
+      __relNote = `\u2197${r.gain.toFixed(0)} m \u2198${r.loss.toFixed(0)} m, ` +
+        `net ${r.net.toFixed(0)} m, range ${r.range.toFixed(0)} m`;
+      return r.ok && r.gain > 0 && r.loss > 0 && r.range > 0 &&
+        r.gain < 4000 && r.loss < 4000;             // sane for a 1 km trail
+    })(), () => __relNote);
+
+    check('net rise is the end-to-end difference, not the cumulative one', (() => {
+      const r = courseRelief(course, courseElevAt);
+      // a course that climbs and descends has |net| strictly inside the cumulative totals;
+      // conflating the two is the classic way to report a loop as a mountain
+      return Math.abs(r.net) <= r.gain + r.loss && Math.abs(r.net) < Math.max(r.gain, r.loss) + 1;
+    })());
+
+    /* BOTH sliders, because they fail differently. World scale compacts positions, so
+       sampling the drawn ground would still survive it (VERT_SCALE deliberately excludes
+       MAP_SCALE); hill exaggeration multiplies height directly, and sampling anything but
+       the raw DEM makes a trail's total ascent track a control whose entire job is to make
+       the view look nicer. */
+    check('elevation is measured off the DEM, so neither slider can change it', (() => {
+      const before = courseRelief(course, courseElevAt);
+      const s0 = getMapScale(), v0 = getVertScale();
+      setMapScale(s0/4); bumpRelief();
+      const scaled = courseRelief(course, courseElevAt);
+      setMapScale(s0); bumpRelief();
+      setVertScale(v0*4); bumpRelief();
+      const exag = courseRelief(course, courseElevAt);
+      setVertScale(v0); bumpRelief();
+      const back = courseRelief(course, courseElevAt);
+      __relScaleNote = `${before.gain.toFixed(0)} m; at 1/4 scale ${scaled.gain.toFixed(0)} m; ` +
+        `at 4x exaggeration ${exag.gain.toFixed(0)} m`;
+      return Math.abs(scaled.gain - before.gain) < 1 &&
+             Math.abs(exag.gain - before.gain) < 1 &&
+             Math.abs(back.gain - before.gain) < 1e-6;
+    })(), () => __relScaleNote);
+
+    /* DEM noise is the whole reason polyRelief has a threshold: summing every rise between
+       samples turns a flat kilometre into hundreds of metres of imaginary climbing. */
+    check('sampling noise does not accumulate into imaginary climbing', (() => {
+      const flat = [];
+      for (let i = 0; i < 400; i++) flat.push([i*5, 0]);
+      let seed = 7;
+      const noisy = (x) => { seed = (seed*1103515245 + 12345) & 0x7fffffff; return ((seed/0x7fffffff)-0.5)*2; };
+      const r = polyRelief(flat, noisy);
+      __noiseNote = `\u00b11 m of noise over 2 km read as \u2197${r.gain.toFixed(0)} m`;
+      return r.gain < 5 && r.loss < 5;
+    })(), () => __noiseNote);
+
+    check('a real staircase is still counted', (() => {
+      const line = [];
+      for (let i = 0; i < 100; i++) line.push([i*5, 0]);
+      const r = polyRelief(line, (x) => x*0.1);      // a steady 10% climb over 495 m
+      __stairNote = `\u2197${r.gain.toFixed(0)} m of an actual ${(99*5*0.1).toFixed(0)} m climb`;
+      return r.gain > 45 && r.gain <= 50 && r.loss < 1 && Math.abs(r.net - 49.5) < 0.01;
+    })(), () => __stairNote);
+
+    check('the map sheet lists a length and a climb beside each named trail', (() => {
+      renderMapStats();
+      const stat = d.querySelector('#trailList .tl-stat');
+      __tlNote = stat ? stat.textContent : 'no stat element';
+      return !!stat && /\d/.test(stat.textContent) && /m|km/.test(stat.textContent);
+    })(), () => __tlNote);
+
+    /* ---- ghosts ------------------------------------------------------------ */
+    // reinstall the real track as the course record, so the checks below race against a
+    // ghost that actually ran rather than a hand-written one
+    recordCourseTime(course, rosterKey(), avatarName(), 0.5, ranTrack);
+
+    check('the ghost track is in real metres, so it survives a change of scale', (() => {
+      const g = courseGhost(course, 'best', rosterKey());
+      __ghostScaleNote = g ? '' : 'no ghost installed';
+      if (!g) return false;
+      const k = getMapScale();
+      // every sample has to land on the course it was run on, at any scale
+      let worst = 0;
+      const pts = coursePoints(course);
+      for (const q of g.g) {
+        const pr = courseProgress(pts, q[0]*k, q[1]*k, 0, 1);
+        if (pr) worst = Math.max(worst, pr.d);
+      }
+      __ghostScaleNote = `worst sample ${(worst/k).toFixed(1)} real m off the course`;
+      return worst/k < COURSE_ON_M_TEST;
+    })(), () => __ghostScaleNote);
+
+    check('the ghost is interpolated between samples, not hopped', (() => {
+      const g = courseGhost(course, 'best', rosterKey());
+      if (!g) return false;
+      const a = ghostAt(g, 0), mid = ghostAt(g, GHOST_DT_TEST*0.5), b = ghostAt(g, GHOST_DT_TEST);
+      if (!a || !mid || !b) return false;
+      // the half-step sample must sit between the two whole ones, not on either
+      const ab = Math.hypot(b[0]-a[0], b[1]-a[1]);
+      const am = Math.hypot(mid[0]-a[0], mid[1]-a[1]);
+      return ab > 0 ? Math.abs(am/ab - 0.5) < 0.02 : true;
+    })());
+
+    check('a ghost that has finished stops being drawn', (() => {
+      const g = courseGhost(course, 'best', rosterKey());
+      return !!g && ghostAt(g, g.t + 60) === null;
+    })());
+
+    check('racing with a ghost puts a second body on the course', (() => {
+      setGhostMode('best');
+      startRace(course);
+      for (let f = 0; f < 90; f++) pump();          // countdown out, then a few strides
+      const grp = getGhostGroup();
+      const st = getRaceState();
+      __ghostRunNote = grp ? `ghost visible ${grp.visible}, gap ${st.gap == null ? 'null' : st.gap.toFixed(2)}s` : 'no rig';
+      return !!grp && grp.visible && !!st.ghost && st.gap != null;
+    })(), () => __ghostRunNote);
+
+    check('the gap says who is ahead', (() => {
+      const st = getRaceState();
+      const q = getTrailPlayer();
+      const pts = coursePoints(course);
+      // jump most of the way round: the runner is now well ahead of a ghost that is only
+      // a couple of seconds into its lap, so the gap must go negative
+      for (const p of pts.slice(0, Math.floor(pts.length*0.9))) { q.x = p[0]; q.z = p[1]; pump(); }
+      __gapNote = `frac ${(st.frac*100).toFixed(0)}% vs ghost ${(st.ghostFrac*100).toFixed(0)}%, gap ${st.gap == null ? 'null' : st.gap.toFixed(2)}s`;
+      return st.gap != null && st.gap < 0 && st.frac > st.ghostFrac;
+    })(), () => __gapNote);
+
+    check('turning the ghost off mid-race removes it', (() => {
+      setGhostMode('off');
+      const st = getRaceState();
+      const grp = getGhostGroup();
+      quitRace();
+      return st.ghost === null && (!grp || !grp.visible);
+    })());
+
+    check('the ghost picker offers the record, your own best and off', (() => {
+      const btns = [...d.querySelectorAll('#ghostMode button')].map(b => b.dataset.ghost);
+      setGhostMode('mine');
+      const mine = getGhostMode();
+      setGhostMode('best');
+      return btns.join(',') === 'best,mine,off' && mine === 'mine';
+    })());
+
+    /* A ghost from an older, slower run sitting beside a newer best would finish AFTER the
+       time printed next to it, and a runner who beat the clock but lost to the ghost would
+       have no way to tell which was lying. The track has to move with the time. */
+    check('a new best replaces the old ghost, it does not keep it', (() => {
+      const before = courseGhost(course, 'mine', rosterKey());
+      const track = [[0,0],[1,0],[2,0],[3,0]];
+      recordCourseTime(course, rosterKey(), avatarName(), 0.4, track);
+      const after = courseGhost(course, 'mine', rosterKey());
+      return !!before && !!after && after.g.length === 4 && after.t === 0.4 &&
+        before.g.length !== 4;
+    })());
+
+    check('a time with no ghost is still a time', (() => {
+      recordCourseTime(course, 'wild:bear', 'Bear', 0.2, null);
+      const e = courseBestFor(course, 'wild:bear');
+      return !!e && e.t === 0.2 && !e.g &&
+        courseGhost(course, 'mine', 'wild:bear') === null;
+    })());
+
+    /* Ghost tracks dwarf the times they belong to, and only the fastest few are ever raced
+       against -- but pruning must never take a TIME with it. */
+    check('only the fastest few ghosts are kept, and no time is lost with them', (() => {
+      const times = {};
+      for (let i = 0; i < 6; i++)
+        times['k'+i] = {t: 10+i, name:'A'+i, at:1, g:[[0,0],[1,1],[2,2]]};
+      const out = trimTimes(times);
+      const withGhost = Object.keys(out).filter(k => out[k].g).length;
+      __trimNote = `${Object.keys(out).length} times, ${withGhost} ghosts`;
+      return Object.keys(out).length === 6 && withGhost === GHOST_KEEP_TEST &&
+        !!out.k0.g && !out.k5.g;
+    })(), () => __trimNote);
+
+
+    /* THE ACTUAL USER FLOW, end to end: race a course, then race it again and expect a
+       ghost. Every other ghost check here installs a track by hand, which tests the replay
+       but not the thing a player does -- and the bug this catches lived entirely in the
+       gap between those two. A course carrying a time set before ghosts existed has a fast
+       time and no track, so banking the track only on an improvement meant the only way to
+       get a ghost was to beat a time you needed the ghost to practise against. */
+    check('racing a course a second time gives you a ghost of the first run', (() => {
+      resetCourses();
+      const c2 = addCourse('Ghost Loop', trace);
+      if (!c2) return false;
+      // a legacy-style entry: a fast time with no track, exactly what an upgraded save has
+      recordCourseTime(c2, rosterKey(), avatarName(), 0.5, null);
+      const before = courseGhost(c2, 'best', rosterKey());
+
+      setGhostMode('best');
+      startRace(c2);
+      for (let f = 0; f < 90; f++) pump();            // countdown out
+      const q = getTrailPlayer();
+      for (const p of coursePoints(c2)) { q.x = p[0]; q.z = p[1]; pump(); }
+      closeRaceCard();
+
+      const after = courseGhost(c2, 'best', rosterKey());
+      const entry = courseBestFor(c2, rosterKey());
+      __twiceNote = `before ${before ? 'ghost' : 'none'}; after ` +
+        (after ? `${after.g.length} samples at ${fmtRaceTime(after.t)}` : 'none') +
+        `; record still ${entry ? fmtRaceTime(entry.t) : '?'}`;
+      // the track arrives, AND the faster old record is not overwritten by the slow lap
+      return !before && !!after && after.g.length > 4 && !!entry && entry.t === 0.5;
+    })(), () => __twiceNote);
+
+    check('the second race actually puts the ghost on the course', (() => {
+      const c2 = getCourses()[0];
+      startRace(c2);
+      for (let f = 0; f < 90; f++) pump();
+      const grp = getGhostGroup();
+      const st = getRaceState();
+      const moved = grp ? {x:grp.position.x, z:grp.position.z} : null;
+      for (let f = 0; f < 30; f++) pump();
+      const shifted = grp ? Math.hypot(grp.position.x - moved.x, grp.position.z - moved.z) : 0;
+      // read BEFORE quitting: getRaceState hands back the live object, and quitRace nulls
+      // race.ghost, so a check written after the call reads the teardown, not the race
+      const armed = !!st.ghost, visible = !!grp && grp.visible;
+      __twiceRunNote = grp
+        ? `armed ${armed}, visible ${visible}, moved ${shifted.toFixed(2)}u in 1.2s`
+        : 'no rig built';
+      quitRace();
+      return visible && armed && shifted > 0.1;
+    })(), () => __twiceRunNote);
+
+    /* THE RECORD HOLDER MAY HAVE NO TRACK, and then "the best ghost" and "the best time"
+       name different entries. That happens whenever the record predates ghosts or has had
+       its track pruned, and reading the track off the fastest TIME finds nothing and hides
+       a perfectly good ghost belonging to the second-fastest run. So 'best' means the
+       fastest run we can actually replay, which is a different question. */
+    check('the record holder having no track does not hide a slower run that has one', (() => {
+      const c2 = getCourses()[0];
+      const mine = courseGhost(c2, 'mine', rosterKey());
+      if (!mine) return false;
+      recordCourseTime(c2, 'wild:elk', 'Elk', 0.05, null);   // a new record, no track
+      const g = courseGhost(c2, 'best', rosterKey());
+      __trackless = g ? `${g.name} at ${fmtRaceTime(g.t)}` : 'none';
+      return !!courseBestOverall(c2) && courseBestOverall(c2).key === 'wild:elk' &&
+        !!g && g.key === rosterKey() && g.g.length === mine.g.length;
+    })(), () => __trackless);
+
+    check('a ghost slower than the record says so rather than pretending', (() => {
+      const c2 = getCourses()[0];
+      const g = courseGhost(c2, 'best', rosterKey());
+      const rec = courseBestFor(c2, rosterKey());
+      // the track's own time is what the HUD labels it with, so it can differ from the
+      // record beside it without either being a lie
+      return !!g && !!rec && g.t > rec.t && g.recordT === rec.t;
+    })());
+
+    check('with the ghost on but none to chase, the HUD says why', (() => {
+      resetCourses();
+      const c3 = addCourse('No Ghost Yet', trace);
+      setGhostMode('best');
+      startRace(c3);
+      for (let f = 0; f < 90; f++) pump();
+      const el = d.querySelector('#raceGap');
+      const shown = el && el.classList.contains('on') && el.classList.contains('none');
+      __noGhostNote = el ? el.textContent : 'no element';
+      quitRace();
+      return shown && /ghost/i.test(el.textContent);
+    })(), () => __noGhostNote);
+
+
+    /* The same card, the other subject. Both kinds of thing you can tap render through the
+       same three slots in the same order, so what matters here is that a course fills them
+       with course facts and offers the one action a course has. */
+    check('tapping a course loads its stats into the details card', (() => {
+      resetCourses();
+      const c4 = addCourse('Panel Course', trace);
+      recordCourseTime(c4, rosterKey(), avatarName(), 42, null);
+      renderCourseList();
+      d.querySelector('#courseList .cs-name').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+      const subj = getHereSubject();
+      const rows = [...d.querySelectorAll('#hereStats .hs-row')]
+        .map(r => r.children[0].textContent + '=' + r.children[1].textContent);
+      __hereCourseNote = rows.join(' | ');
+      return !!subj && subj.kind === 'course' && subj.c.id === c4.id &&
+        /Length=/.test(__hereCourseNote) && /Climb=/.test(__hereCourseNote) &&
+        /Net rise=/.test(__hereCourseNote) &&
+        d.querySelectorAll('#hereStats .hs-board .r').length === 1;
+    })(), () => __hereCourseNote);
+
+    check('the loaded course card carries the race button', (() => {
+      const btn = [...d.querySelectorAll('#hereActions .btn')]
+        .find(b => /Race/.test(b.textContent));
+      if (!btn) return false;
+      btn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+      const on = getRaceState().on;
+      quitRace();
+      return on;
+    })());
+
+    check('the details card says whether there is a ghost before you commit to a race', (() => {
+      const notes = [...d.querySelectorAll('#hereStats .hs-sub')].map(n => n.textContent);
+      return notes.some(t => /ghost/i.test(t));
+    })(), () => [...d.querySelectorAll('#hereStats .hs-sub')].map(n => n.textContent).join(' | '));
+
+    check('forgetting the loaded course empties the card rather than orphaning it', (() => {
+      const c4 = getCourses()[0];
+      showHereCourse(c4);
+      removeCourse(c4.id);
+      refreshHere();
+      return getHereSubject() === null && !d.querySelector('#hereStats').classList.contains('on');
+    })());
+
+    check('forgetting a course clears it off the map too', (() => {
+      // its own course, not whatever the previous check happened to leave behind: this
+      // used to read getCourses()[0] and started throwing the moment a check above it
+      // removed the last one
+      const c = addCourse('Forget Me', trace);
+      if (!c) return false;
+      toggleCourseShown(c);
+      removeCourse(c.id);
+      renderCourseUI();
+      syncCourseOverlay();
+      return !getCourses().some(x => x.id === c.id) && getCourses().length === 0 &&
+        !!d.querySelector('#courseList .none');
+    })());
+
+    resetCourses();
+    quitRace();
+    renderCourseUI();
+    syncCourseOverlay();
+    placeAtHead(getStartHead());
   }
 
   /* ---- barking --------------------------------------------------------------- */

@@ -166,4 +166,5 @@ function setYaw(v){ setDogYaw(v); }
 function dogBodyPitch(){ return R && R.bodyG ? R.bodyG.rotation.z : null; }
 
 export { spawnDog, updateDog, setYaw, setDogPos, getDogPos, setDogVisible,
-         dogTopSpeed, dogRunMul, dogLegLength, dogShadowRadius, dogBodyPitch };
+         dogTopSpeed, dogRunMul, dogLegLength, dogShadowRadius, dogBodyPitch,
+         TRAIL_DOG_SCALE };
