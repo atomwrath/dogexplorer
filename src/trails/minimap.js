@@ -107,8 +107,6 @@ function getCourseShown(){ return shownCourse; }
 function setRaceFrac(f){ raceFrac = (f == null || !isFinite(f)) ? -1 : f; }
 function getRaceFrac(){ return raceFrac; }
 
-function isBigMapOpen(){ return bigOpen; }
-
 // Same lettering as main.js's start-picker (A, B, C... then plain numbers past Z) so a
 // badge on the map and a card in the "Start here" list always agree. Duplicated rather
 // than imported: main.js imports THIS module, and the two never need to be the same
@@ -247,11 +245,17 @@ function initMinimap(onPick){
   wireBigMapControls();
 }
 
-function toggleBigMap(force){
-  const next = (force === undefined) ? !bigOpen : !!force;
-  if(next && !bigOpen){ bigZoom = 1; bigFocus = null; }   // fresh fit-to-screen every open
+/* Called by panes.js and nothing else. `bigOpen` is no longer an answer to "is the map
+   showing" -- panes.js owns that -- it is only this module's DRAW GATE, so updateMinimap
+   can skip a sheet nobody is looking at. It stopped touching body.bigmap for the same
+   reason: two writers of one class is how the class and the flag end up disagreeing.
+
+   The rising edge still resets zoom and focus, so every open is a fresh fit-to-screen
+   rather than wherever you happened to leave the camera three walks ago. */
+function setBigMapOpen(on){
+  const next = !!on;
+  if(next && !bigOpen){ bigZoom = 1; bigFocus = null; }
   bigOpen = next;
-  document.body.classList.toggle('bigmap', bigOpen);
 }
 
 // Test seam, same reason main.js exports trailIsPlaying/getTrailPlayer/getTripState:
@@ -626,6 +630,6 @@ function updateMinimap(px, pz, yaw){
   }
 }
 
-export { initMinimap, updateMinimap, toggleBigMap, isBigMapOpen, getBigView,
+export { initMinimap, updateMinimap, setBigMapOpen, getBigView,
          setHighlightRoute, getHighlightRoute, highlightEdges, pickSpotAt, pickOnSheet,
          setCourseShown, getCourseShown, setRaceFrac, getRaceFrac };

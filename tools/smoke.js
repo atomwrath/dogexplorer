@@ -307,12 +307,15 @@ const probe = `
   camPitch: typeof getCamPitch === 'function' ? getCamPitch() : null,
   critters: typeof CRITTERS !== 'undefined' ? CRITTERS.length : null,
   sightings: typeof getCritterStats === 'function' ? getCritterStats().sightings : null,
-  bigMapOpen: typeof isBigMapOpen === 'function' ? isBigMapOpen() : null,
+  pane: typeof getPane === 'function' ? getPane() : null,
+  // the DOM projection, read separately from the state on purpose: if panes.js ever
+  // stops writing the attribute, or something else starts writing it, these two
+  // disagree and the check below says so.
+  paneAttr: document.body.getAttribute('data-pane'),
   pathMix: typeof getPathMix === 'function' ? getPathMix() : null,
   spots: typeof getSpots === 'function' ? getSpots().map(s => ({id:s.id, name:s.name, rx:s.rx, rz:s.rz})) : null,
   onTrail: typeof getOnTrail === 'function' ? {route:getOnTrail().route, name:getOnTrail().name} : null,
   highlight: typeof getHighlightRoute === 'function' ? getHighlightRoute() : null,
-  panelOpen: document.body.classList.contains('panelopen'),
   dist: typeof getTrailPlayer === 'function' ? getTrailPlayer().dist : null,
   vertScale: typeof getVertScale === 'function' ? getVertScale() : null,
   worldMeshes: getWorldGroup() ? getWorldGroup().countMeshes() : 0,
@@ -369,6 +372,7 @@ function assertAll(window, errors, stats) {
   const dist = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
   const results = [];
   const check = (name, ok, detail) => results.push({ name, ok: !!ok, detail });
+  let __paneNote = '';
   const clickText = (sel, re) => {
     const b = [...d.querySelectorAll(sel)].find(x => re.test(x.textContent));
     if (!b) throw new Error(`no ${sel} matching ${re}`);
@@ -435,7 +439,7 @@ function assertAll(window, errors, stats) {
      HUD, the settings drawer and the touch controls key off. */
   check('boot starts a walk without anyone opening the map', trailIsPlaying());
   check('boot puts the page into play mode', d.body.classList.contains('play'));
-  check('boot does not open the map sheet over the walk', !d.body.classList.contains('bigmap'));
+  check('boot does not open a pane over the walk', !d.body.hasAttribute('data-pane'));
 
   // the bug that shipped: rig built, never positioned
   let head = s.heads[s.startHead];
@@ -729,7 +733,7 @@ function assertAll(window, errors, stats) {
     const ev = new window.KeyboardEvent('keydown', { bubbles:true });
     Object.defineProperty(ev, 'code', { value:'KeyM' });
     window.dispatchEvent(ev);
-    return probe().bigMapOpen === true && d.body.classList.contains('bigmap');
+    return probe().pane === 'map' && d.body.getAttribute('data-pane') === 'map';
   })());
 
   /* The full sheet is a pick surface, but A PICK LOADS AND A BUTTON STARTS. This check
@@ -756,7 +760,7 @@ function assertAll(window, errors, stats) {
     const picked = pickTrailheadAt(px, py);
     const subj = getHereSubject();
     return picked && !!subj && subj.kind === 'head' && subj.i === to &&
-      isBigMapOpen() &&                       // the sheet stays up so you can read it
+      getPane() === 'map' &&                  // the sheet stays up so you can read it
       probe().startHead === from &&           // and nothing has moved yet
       dist(probe().dogWorld, was) < 0.01;
   })());
@@ -770,11 +774,11 @@ function assertAll(window, errors, stats) {
     if (!btn) return false;
     btn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
     const s3 = probe();
-    return s3.startHead === to && !isBigMapOpen() && dist(s3.dogWorld, heads[to]) < 0.5;
+    return s3.startHead === to && getPane() === null && dist(s3.dogWorld, heads[to]) < 0.5;
   })());
 
   check('the trailhead card reports where it is and what meets it', (() => {
-    toggleBigMap(true);
+    showPane('map');
     showHereHead(0);
     const rows = [...d.querySelectorAll('#hereStats .hs-row')]
       .map(r => r.children[0].textContent + '=' + r.children[1].textContent);
@@ -784,12 +788,158 @@ function assertAll(window, errors, stats) {
   })(), () => __hereNote);
 
   check('Escape closes the map before it quits the walk', (() => {
-    toggleBigMap(true);
+    showPane('map');
     const ev = new window.KeyboardEvent('keydown', { bubbles:true });
     Object.defineProperty(ev, 'code', { value:'Escape' });
     window.dispatchEvent(ev);
-    return probe().bigMapOpen === false && d.body.classList.contains('play');
+    return probe().pane === null && d.body.classList.contains('play');
   })());
+
+  /* ---- ONE DRAWER, TWO PANES -------------------------------------------------
+
+     What this replaced: two toggles that shared nothing. The map was `body.bigmap`, opened
+     by a button under the minimap and closed by a ✕ in the sheet's top-left; settings was
+     `body.panelopen` OR `body.nopanel` (two resting states) plus `body.panel-open` (a third
+     class that existed only so the CSS would not have to read the first two), opened by a
+     ⚙ tab pinned top-left that JUMPED to the top-right once open. Same corner, three
+     meanings, and both surfaces openable at once so they stacked.
+
+     These checks are about the properties that replaced all that, not about the widgets:
+     one value with three states, one projection of it, mutual exclusion by construction,
+     and switching that does not close. Each was confirmed load-bearing by reverting the
+     behaviour and watching this specific line go red. */
+  {
+    const seg = k => d.querySelector('#paneSeg [data-pane="' + k + '"]');
+    const click = el => el && el.dispatchEvent(new window.MouseEvent('click', { bubbles:true }));
+    const key = code => {
+      const ev = new window.KeyboardEvent('keydown', { bubbles:true });
+      Object.defineProperty(ev, 'code', { value:code });
+      window.dispatchEvent(ev);
+    };
+    /* Every check below states the pane it starts from rather than inheriting whatever
+       the last one left open. Without that, breaking one of these cascades into the next
+       and the revert sweep cannot tell a genuine entanglement from a leaked fixture --
+       which is exactly what it reported the first time this block was swept. */
+    let __t = 5000;
+    const frame = () => { if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(__t += 16); } };
+
+    showPane(null);
+
+    /* Absence, asserted. Deleting four controls from the HTML is a one-commit job; putting
+       one back by accident while merging is also a one-commit job, and the corner
+       ambiguity comes back with it. */
+    check('the retired toggles are gone from the page',
+      !d.querySelector('#panelTab') && !d.querySelector('#panelBtn') &&
+      !d.querySelector('#mapBtn') && !d.querySelector('#bigmapClose'));
+    check('an edge tab opens its own pane', (() => {
+      showPane(null);
+      click(d.querySelector('#paneTabSet'));
+      return getPane() === 'settings';
+    })());
+
+    /* MUTUAL EXCLUSION. The old pair could both be up at once -- a settings drawer sliding
+       over a full-screen map sheet -- because neither knew the other existed. */
+    check('opening one pane closes the other', (() => {
+      showPane('settings');
+      click(d.querySelector('#paneTabMap'));
+      return getPane() === 'map' && d.body.getAttribute('data-pane') === 'map';
+    })());
+
+    /* THE POINT OF THE WHOLE REDESIGN. "Where am I going" and "how does this look" are two
+       questions about the same walk, and moving between them used to mean closing one
+       surface and hunting for the button that opened the other. */
+    check('switching panes from the drawer header does not close the drawer', (() => {
+      showPane('map');
+      click(seg('settings'));
+      if (getPane() !== 'settings') return false;
+      const c0 = getPaneChanges();
+      click(seg('map'));
+      // ONE transition. A handler that closed and reopened would land in the same place
+      // and count two, which on screen is the drawer flinching shut and back.
+      return getPane() === 'map' && getPaneChanges() === c0 + 1;
+    })());
+
+    /* An edge tab toggles, a header tab does not: on a segmented control, tapping the
+       segment already selected reads as a mis-tap, and closing the drawer under someone
+       who mis-tapped is a worse outcome than doing nothing. */
+    check('the header tab you are already on is not a close button', (() => {
+      showPane('map');
+      click(seg('map'));
+      return getPane() === 'map';
+    })());
+
+    check('the ✕ closes whichever pane is showing', (() => {
+      showPane('map');
+      click(d.querySelector('#paneClose'));
+      const a = getPane() === null;
+      showPane('settings');
+      click(d.querySelector('#paneClose'));
+      return a && getPane() === null;
+    })());
+
+    /* Both panes reachable with no mouse, and the same key that opened one puts it away --
+       there is no separate close key and no third state to get stuck in. */
+    check('Tab and M open their panes, and repeat to close', (() => {
+      showPane(null);
+      key('Tab');
+      const a = getPane() === 'settings';
+      key('Tab');
+      const b = getPane() === null;
+      key('KeyM');
+      const c = getPane() === 'map';
+      key('KeyM');
+      return a && b && c && getPane() === null;
+    })());
+
+    /* M used to sit behind the play gate, which meant the map was unreachable from exactly
+       the state you need it in -- a boot with no world loaded, where you have not started
+       walking and the pane holding the map controls is the only way forward. */
+    check('a key still reaches a pane while the walk is paused', (() => {
+      showPane(null);
+      const t = getTripState();
+      const was = t.paused;
+      t.paused = true;
+      key('KeyM');
+      const ok = getPane() === 'map';
+      showPane(null);
+      t.paused = was;
+      return ok;
+    })());
+
+    /* One value, one projection. Two body classes that meant the same thing is how the old
+       code ended up with a third to reconcile them. */
+    check('the body attribute never disagrees with the pane state', (() => {
+      for (const want of ['map', 'settings', null]) {
+        showPane(want);
+        const p = probe();
+        if (p.pane !== want) return false;
+        if (p.paneAttr !== want) return false;
+      }
+      return true;
+    })());
+
+    /* The draw gate moved out of minimap.js and became something panes.js pushes down, so
+       the rising edge that refits the sheet now fires from a pane change rather than from
+       a toggle nobody else could see. Measured, not assumed: zoom in, close, reopen, and
+       the transform has to be back at the fit-to-screen scale it opened with. */
+    check('reopening the map pane refits it to the sheet', (() => {
+      showPane(null);
+      showPane('map'); frame();
+      const bv0 = getBigView();
+      if (!bv0) return false;
+      const s0 = bv0.s;
+      click(d.querySelector('#bigZoomIn')); frame();
+      const s1 = getBigView().s;
+      showPane(null);
+      showPane('map'); frame();
+      const s2 = getBigView().s;
+      showPane(null);
+      __paneNote = 'fit ' + s0.toFixed(4) + ' -> zoomed ' + s1.toFixed(4) + ' -> reopened ' + s2.toFixed(4);
+      return s1 > s0 * 1.2 && Math.abs(s2 - s0) < 1e-9;
+    })(), () => __paneNote);
+
+    showPane(null);
+  }
 
   /* Trails that touch must be JOINED, not merely adjacent. splitT used to restart its
      whole scan after every cut and cap the restarts at 60, so on any real network it
@@ -1775,9 +1925,9 @@ function assertAll(window, errors, stats) {
       walkPts.length >= 4, () => __courseNote);
 
     check('recording starts from the map sheet control and closes the sheet', (() => {
-      toggleBigMap(true);
+      showPane('map');
       const ok = startRecording();
-      return ok && getRecState().on && !isBigMapOpen();
+      return ok && getRecState().on && getPane() === null;
     })());
 
     /* WALKED ALONG THE VERGE ON PURPOSE, two world units off the centreline and inside the
@@ -1878,7 +2028,7 @@ function assertAll(window, errors, stats) {
 
     const pending = stopRecording();
     check('stopping hands the trace over to be named, on the map sheet',
-      !!pending && !getRecState().on && !!getPendingRecording() && isBigMapOpen());
+      !!pending && !getRecState().on && !!getPendingRecording() && getPane() === 'map');
 
     const course = saveRecording('Test Course');
     check('saving files the course', !!course && getCourses().length === 1,
@@ -1920,7 +2070,7 @@ function assertAll(window, errors, stats) {
       const q = getTrailPlayer();
       const want = courseStartYaw(course);
       let dy = q.yaw - want; while (dy > Math.PI) dy -= Math.PI * 2; while (dy < -Math.PI) dy += Math.PI * 2;
-      return ok && getRaceState().on && !isBigMapOpen() &&
+      return ok && getRaceState().on && getPane() === null &&
         Math.hypot(q.x - pts[0][0], q.z - pts[0][1]) < 0.5 && Math.abs(dy) < 0.01;
     })());
 
@@ -2459,11 +2609,15 @@ function assertAll(window, errors, stats) {
     pl.x += 40; pl.z += 25; pl.dist = 300;
     const at = { x: pl.x, z: pl.z };
 
+    /* State only, deliberately. Whether body[data-pane] agrees with it is a separate
+       claim about a separate line, and it has its own check up in the drawer block --
+       asserting it twice meant one revert reddened two checks and neither could be
+       trusted to be measuring its own thing. */
     check('the settings drawer opens and closes mid-walk', (() => {
-      togglePanel(true);
-      const open = d.body.classList.contains('panelopen') || !d.body.classList.contains('nopanel');
-      togglePanel(false);
-      return open;
+      showPane('settings');
+      const open = getPane() === 'settings';
+      showPane(null);
+      return open && getPane() === null;
     })());
 
     check('changing the contour step mid-walk leaves you where you stand', (() => {

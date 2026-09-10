@@ -20,8 +20,9 @@ import { getWorld, rawGroundY } from './terrain.js';
 import { addCamPitch, addCamYaw, addCamZoom, getCamPitch, getCamYaw, getCamZoom, setCamYaw, snapChaseCam, updateChaseCam } from './camera.js';
 import { getCritterStats, spawnCritters, resetCritters, updateCritters, WATCH_SECONDS, playerNoise, typicalSpookRadius, takeImpacts,
          catchNear, releaseCarried, getCarried, carrySlow, setCarryAnchor, nearestCatchable, catchRadius } from './critters.js';
-import { initMinimap, isBigMapOpen, toggleBigMap, updateMinimap, setHighlightRoute,
+import { initMinimap, updateMinimap, setHighlightRoute,
          setCourseShown, getCourseShown, setRaceFrac } from './minimap.js';
+import { initPanes, getPane, showPane, togglePane } from './panes.js';
 import { setCourseLine, refreshCourseLine, clearCourseLine } from './course-line.js';
 import { addSpot, getSpots, removeSpot, setSpotMap, spotNear, spotWorld } from './spots.js';
 import { addCourse, courseBestFor, courseBestOverall, courseFinished, courseLengthM, courseLookFrac,
@@ -344,7 +345,7 @@ function placeAtSpot(spot){
   if(!spot) return;
   const p = spotWorld(spot);
   placeAt(p.x, p.z, spot.yaw);
-  toggleBigMap(false);
+  showPane(null);
 }
 
 /* Drop a pin where the player is standing.
@@ -511,7 +512,7 @@ function startRecording(){
   rec.offT = 0;
   rec.startName = onTrail.name || '';
   recPending = null;
-  toggleBigMap(false);        // you cannot walk a path with the sheet over the whole screen
+  showPane(null);             // you cannot walk a path with the sheet over the whole screen
   renderCourseUI();
   syncCourseOverlay();
   comicBurst('\u23fa Recording', player.x, standingY(player.x, player.z)+2.2, player.z, '#d94fa0');
@@ -537,7 +538,7 @@ function stopRecording(){
   }
   recPending = {pts, lenM, name: rec.startName ? rec.startName + ' run'
                                                : 'Course ' + (getCourses().length + 1)};
-  toggleBigMap(true);         // the naming half of the control lives on the map sheet
+  showPane('map');            // the naming half of the control lives on the map pane
   renderCourseUI();
   syncCourseOverlay();
   return recPending;
@@ -615,7 +616,7 @@ function startRace(course){
   if(pts.length < 2) return false;
   closeArrival();
   closeRaceCard();
-  toggleBigMap(false);
+  showPane(null);
   previewCourse = course;
   race.on = true; race.course = course; race.done = false;
   race.count = RACE_COUNT_SECS; race.go = 0; race.t = 0; race.frac = 0; race.off = 0;
@@ -1260,9 +1261,17 @@ function movePlayer(stepX, stepZ){
 const trailKeys = {};
 addEventListener('keydown', e=>{
   trailKeys[e.code]=true;
-  // Tab is the settings drawer in BOTH states, so it is handled before the play gate --
-  // and preventDefault always, or the browser moves focus into the panel behind it
-  if(e.code==='Tab'){ e.preventDefault(); togglePanel(); return; }
+  /* Both panes are reachable by key in BOTH states, so both keys are handled before the
+     play gate. M used to sit inside it, which meant the map -- the one thing that can get
+     you out of a lobby you are stuck in because the world failed to load -- was the only
+     pane you could not open from there. preventDefault on Tab always, or the browser
+     moves focus into the drawer behind it. */
+  if(e.code==='Tab'){ e.preventDefault(); togglePane('settings'); return; }
+  if(e.code==='KeyM'){ togglePane('map'); return; }
+  /* Esc unwinds one layer at a time, outermost first, and the drawer is the outermost
+     layer there is -- so this runs before the play gate too. Quitting a whole walk
+     because you wanted to put the map away is the kind of thing you only forgive once. */
+  if(e.code==='Escape' && getPane()){ showPane(null); return; }
   if(!playing) return;
   // while the arrival card is up only Escape does anything -- barking or jumping through
   // a summary screen you can't see the effect of is just confusing
@@ -1274,15 +1283,11 @@ addEventListener('keydown', e=>{
   if(e.code==='KeyC') toggleSneak();
   if(e.code==='KeyB') doBark();
   if(e.code==='KeyP') saveHere();
-  if(e.code==='KeyM') toggleBigMap();
-  // Esc closes the map first if it's open -- quitting the whole walk because you wanted
-  // to put the map away is the kind of thing you only forgive once
-  /* Esc unwinds one layer at a time, outermost first. Quitting a whole walk because you
-     wanted to put the map away is the kind of thing you only forgive once, and abandoning
-     a walk because you wanted to abandon a race is the same mistake one level in. */
+  /* The drawer was already dealt with above; what is left is the rest of the stack.
+     Abandoning a walk because you wanted to abandon a race is the same mistake the map
+     used to make, one level in. */
   if(e.code==='Escape'){
-    if(isBigMapOpen()) toggleBigMap(false);
-    else if(race.on) quitRace();
+    if(race.on) quitRace();
     else exitPlay();
   }
 });
@@ -1754,7 +1759,7 @@ function enterPlay(){
   player.stillT = 0;
   playing=true;
   document.body.classList.add('play');
-  document.body.classList.remove('panelopen');   // walk full-bleed; the drawer is opt-in
+  showPane(null);                   // walk full-bleed; the drawer is opt-in
   refreshOnTrail();
   renderSpotList();
   renderCourseUI();
@@ -1764,7 +1769,7 @@ function enterPlay(){
 function exitPlay(){
   playing=false;
   trip.paused=false;
-  toggleBigMap(false);
+  showPane(null);
   closeArrival();
   /* A race and a half-finished trace are both things about THIS walk. Leaving either
      running would have the next walk open with a clock counting and a magenta line across
@@ -1781,7 +1786,7 @@ function exitPlay(){
   releaseCarried(player.x, player.z, player.yaw);
   resetCritters();
   setCatchRingVisible(false);
-  document.body.classList.remove('play','panelopen');
+  document.body.classList.remove('play');
   placeAtHead(getStartHead());
 }
 
@@ -2373,7 +2378,7 @@ function showHereHead(i){
   hereBtn(actions, '\u{1F6A9} Start here', true, ()=>{
     placeAtHead(i);
     if(!playing) enterPlay();
-    toggleBigMap(false);
+    showPane(null);
   });
   hereBtn(actions, '\u2715 Close', false, showHereIdle);
   actions.classList.add('on');
@@ -2496,26 +2501,10 @@ function renderSpotList(){
   });
 }
 
-/* The settings drawer. Two different resting states, which is why this is not one class
-   toggle: in the lobby the panel is open by default (and `nopanel` hides it on a phone,
-   as it always has), while during a walk it is closed by default and `panelopen` slides
-   it in. Same button, same Tab key, opposite defaults -- because "settings are showing"
-   is the sensible default when you are setting up and the wrong one when you are walking. */
-function togglePanel(force){
-  const body=document.body;
-  let open;
-  if(playing){
-    open = force===undefined ? !body.classList.contains('panelopen') : !!force;
-    body.classList.toggle('panelopen', open);
-  }else{
-    open = force===undefined ? body.classList.contains('nopanel') : !!force;
-    body.classList.toggle('nopanel', !open);
-  }
-  // one class the tab's own styling can read, rather than making the CSS reason about
-  // two different open-states that mean the same thing to it
-  body.classList.toggle('panel-open', open);
-  setTimeout(resize, 380);
-}
+/* togglePanel is gone -- see src/trails/panes.js. It had to reason about two resting
+   states (open in the lobby, closed during a walk) across two class names, and it ended
+   by scheduling a resize because the panel used to be in the stage's flex flow. The
+   drawer overlays in both states, so there is one resting state and nothing to resize. */
 /* WHERE A WALK STARTS WHEN NOBODY HAS PICKED YET.
 
    "Surprise me" is gone: it was a button that answered a spatial question with a dice
@@ -2700,9 +2689,14 @@ async function boot(bundleUrl){
      Saved pins still go straight there, and that asymmetry is deliberate rather than an
      oversight: a pin is a place YOU chose and named, so there is nothing to tell you about
      it that you do not already know -- the whole point of dropping one is to come back. */
+  /* The drawer is wired before the map loads, so the settings pane is reachable even on
+     the failure path below -- a walker whose world did not load needs the pane that has
+     the "load a map" controls in it, and that used to be the one thing a broken boot
+     could not open. */
+  initPanes({ onChange: () => updateTrailHud() });
   initMinimap({
     onTrailhead: i => showHereHead(i),
-    onSpot: sp => { placeAtSpot(sp); if(!playing) enterPlay(); toggleBigMap(false); },
+    onSpot: sp => { placeAtSpot(sp); if(!playing) enterPlay(); showPane(null); },
   });
   await loadMap(bundleUrl || DEFAULT_WORLD, !bundleUrl);
   renderRoster();
@@ -2720,7 +2714,11 @@ async function boot(bundleUrl){
 
      Guarded on the graph: with no map loaded there is nothing to walk on, and the lobby
      is the right place to be told the map failed rather than standing in an empty void. */
+  /* No graph means no trail to stand on, so there is no walk to start. Open settings
+     rather than leaving a lobby with nothing on it: that pane holds the drop zone, the
+     bundle picker and #mapNote, which is where loadMap has just written what went wrong. */
   if(getGraph()) enterPlay();
+  else showPane('settings');
   requestAnimationFrame(loop);
 }
 
@@ -2750,7 +2748,6 @@ $('#defaultMapBtn')?.addEventListener('click', async ()=>{
   renderFileChips();
   if(await loadMap(DEFAULT_WORLD, true)){ refreshMapUI(); placeAtHead(pickDefaultHead()); }
 });
-$('#mapBtn')?.addEventListener('click', ()=> toggleBigMap());
 tapBtn($('#touchBarkBtn'), doBark);
 tapBtn($('#tJump'), trailJump);
 tapBtn($('#tSneak'), toggleSneak);
@@ -2804,15 +2801,8 @@ $('#raceAgain')?.addEventListener('click', ()=>{
   if(c) startRace(c);
 });
 $('#raceDone')?.addEventListener('click', ()=> closeRaceCard());
-$('#bigmapClose')?.addEventListener('click', ()=> toggleBigMap(false));
-// mobile only (see trails.css's body.nopanel rule): slides the options panel off-screen
-// so the live pup/minimap preview underneath is reachable without leaving the setup
-// screen. Desktop never shows this button (icon.btn is display:none above 760px).
-$('#panelBtn')?.addEventListener('click', ()=> togglePanel());
-/* Same action, a second door. The header button vanishes with the chrome when a walk
-   starts; this one is fixed to the viewport and does not, so the panel stays reachable
-   mid-walk without a keyboard. */
-$('#panelTab')?.addEventListener('click', ()=> togglePanel());
+/* Every door into the drawer -- the two edge tabs, the two header tabs and the one ✕ --
+   is wired inside panes.js, which owns the state they set. */
 
 $('#playBtn')?.addEventListener('click', enterPlay);
 $('#exitBtn')?.addEventListener('click', exitPlay);
@@ -2907,7 +2897,7 @@ function getPendingRecording(){ return recPending; }
 function getPreviewCourse(){ return previewCourse; }
 
 export { boot, enterPlay, exitPlay, placeAtHead, placeAt, placeAtSpot, saveHere, doBark,
-         togglePanel, trailIsPlaying, getTrailPlayer, getTripState, getOnTrail,
+         trailIsPlaying, getTrailPlayer, getTripState, getOnTrail,
          startRecording, stopRecording, saveRecording, discardRecording, startRace,
          quitRace, finishRace, toggleCourseShown, renderCourseUI, renderCourseList,
          avatarName, raceFrozen, isRaceCardOpen, closeRaceCard, syncCourseOverlay,

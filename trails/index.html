@@ -23,82 +23,150 @@
       <h1>PUP <span>TRAILS</span><small>real trails · real terrain</small></h1>
     </div>
     <div class="spacer"></div>
-    <button class="btn icon" id="panelBtn" title="Settings (Tab) — adjust while you walk">⚙️</button>
   </header>
-  <!-- Settings tab. The header ⚙️ disappears with the rest of the chrome once a walk
-       starts, which left no way to reach the panel mid-walk on a touch device. This one is
-       fixed to the viewport rather than living in the header, so it survives play. -->
-  <button class="btn icon" id="panelTab" title="Settings (Tab)" aria-label="Settings">⚙️</button>
   <main>
-    <aside id="panel">
-      <p class="hint panel-lede">Change anything while you walk — you stay where you
-        are standing. 🗺 Map to move somewhere else.</p>
-      <div class="sect">
-        <h2>🗺️ Trail map</h2>
-        <label class="dropzone" id="dropzone" for="worldFile">
-          <span class="dz-main">Drop your <code>.geojson</code> layers here<br>or tap to browse</span>
-          <span class="dz-sub">trails, points &amp; areas</span>
-        </label>
-        <input type="file" id="worldFile" accept=".geojson,.json,application/geo+json,application/json" multiple hidden>
-        <div id="fileChips" class="file-chips"></div>
-        <div class="io-row">
-          <button class="btn small" id="saveCombinedBtn">↓ Save combined</button>
-          <button class="btn small" id="clearLayersBtn">Clear map</button>
-        </div>
-        <div class="ctl">
-          <label>World scale <span class="val" id="worldScaleVal">1 : 1</span></label>
-          <input type="range" id="worldScale" min="0" max="1000" step="1" value="0">
-        </div>
-        <div class="ctl">
-          <label>Hill exaggeration <span class="val" id="vertScaleVal">1.00×</span></label>
-          <input type="range" id="vertScale" min="0" max="1000" step="1" value="707">
-        </div>
-        <div class="ctl">
-          <label>Contour step <span class="val" id="contourVal">3.0 m</span></label>
-          <input type="range" id="contourStep" min="0.5" max="12" step="0.5" value="3">
-        </div>
-        <p class="hint">1:1 is true size; a bigger N packs the map into a shorter walk.
-          Hill exaggeration follows it automatically so slopes stay true — nudge it
-          yourself afterwards if you want them flatter or wilder. Contour step is metres
-          of real elevation per terrace.</p>
-        <div class="statbox" id="mapStats"></div>
-        <div id="trailList" class="trail-list"></div>
-        <p class="hint" id="mapNote">Loading map…</p>
-        <div class="io-row">
-          <button class="btn small" id="defaultMapBtn">🏜️ Default map</button>
-        </div>
-        <p class="hint">Garden of the Gods loads by default. Drop a
-          <code>pup-world/1</code> bundle for real elevation, or pass
-          <code>?world=…</code> in the URL.</p>
-      </div>
-      <div class="sect">
-        <h2>🏞️ Landscape</h2>
-        <div id="envGrid" class="env-grid"></div>
-        <p class="hint">Same trails, different country.</p>
-        <div class="ctl">
-          <label>Fog <span class="val" id="fogAmtVal">1.00×</span></label>
-          <input type="range" id="fogAmt" min="0.15" max="5" step="0.05" value="1">
-        </div>
-      </div>
-      <div class="sect">
-        <h2>🐾 Who's exploring</h2>
-        <div class="toggle-row" id="pupModeToggle">
-          <button class="toggle sel" data-mode="dog">🐕 Dogs</button>
-          <button class="toggle" data-mode="wild">🦊 Wildlife</button>
-        </div>
-        <div id="dogGrid" class="pup-grid"></div>
-        <div id="animalGrid" class="pup-grid" hidden></div>
-        <div class="io-row">
-          <button class="btn small" id="randomPupBtn">🎲 Random pup</button>
-          <label class="btn small" for="pupFile">📥 Import</label>
-        </div>
-        <input type="file" id="pupFile" accept=".json,application/json" multiple hidden>
-        <p class="hint" id="pupNote"></p>
-        <p class="hint">Blue bar is speed, pink is how far off you spook the locals.</p>
-      </div>
-    </aside>
     <div id="stage">
       <canvas id="c"></canvas>
+
+      <!-- THE DRAWER, and the two index tabs that open it. See src/trails/panes.js for
+           what this replaced: two unrelated toggles, four body classes, and a ⚙ button
+           that changed corners depending on state you could not see.
+
+           Shut, you get the tabs. Open, the same two choices move into the drawer's own
+           header as a segmented control, so switching between "where am I going" and "how
+           does this look" never closes anything. One ✕, one Esc, one open-state. -->
+      <div id="paneTabs">
+        <button class="pane-tab" id="paneTabMap" title="Map (M)" aria-label="Open the map">🗺</button>
+        <button class="pane-tab" id="paneTabSet" title="Settings (Tab)" aria-label="Open settings">⚙️</button>
+      </div>
+      <div id="paneDrawer">
+        <div id="paneHead">
+          <div id="paneSeg" role="tablist">
+            <button data-pane="map" role="tab" aria-selected="false">🗺 Map</button>
+            <button data-pane="settings" role="tab" aria-selected="false">⚙️ Settings</button>
+          </div>
+          <button class="btn" id="paneClose" title="Close (Esc)" aria-label="Close">✕</button>
+        </div>
+        <div id="paneBody">
+          <aside id="panel">
+            <p class="hint panel-lede">Change anything while you walk — you stay where you
+              are standing. Switch to 🗺 Map to move somewhere else.</p>
+            <div class="sect">
+              <h2>🗺️ Trail map</h2>
+              <label class="dropzone" id="dropzone" for="worldFile">
+                <span class="dz-main">Drop your <code>.geojson</code> layers here<br>or tap to browse</span>
+                <span class="dz-sub">trails, points &amp; areas</span>
+              </label>
+              <input type="file" id="worldFile" accept=".geojson,.json,application/geo+json,application/json" multiple hidden>
+              <div id="fileChips" class="file-chips"></div>
+              <div class="io-row">
+                <button class="btn small" id="saveCombinedBtn">↓ Save combined</button>
+                <button class="btn small" id="clearLayersBtn">Clear map</button>
+              </div>
+              <div class="ctl">
+                <label>World scale <span class="val" id="worldScaleVal">1 : 1</span></label>
+                <input type="range" id="worldScale" min="0" max="1000" step="1" value="0">
+              </div>
+              <div class="ctl">
+                <label>Hill exaggeration <span class="val" id="vertScaleVal">1.00×</span></label>
+                <input type="range" id="vertScale" min="0" max="1000" step="1" value="707">
+              </div>
+              <div class="ctl">
+                <label>Contour step <span class="val" id="contourVal">3.0 m</span></label>
+                <input type="range" id="contourStep" min="0.5" max="12" step="0.5" value="3">
+              </div>
+              <p class="hint">1:1 is true size; a bigger N packs the map into a shorter walk.
+                Hill exaggeration follows it automatically so slopes stay true — nudge it
+                yourself afterwards if you want them flatter or wilder. Contour step is metres
+                of real elevation per terrace.</p>
+              <div class="statbox" id="mapStats"></div>
+              <div id="trailList" class="trail-list"></div>
+              <p class="hint" id="mapNote">Loading map…</p>
+              <div class="io-row">
+                <button class="btn small" id="defaultMapBtn">🏜️ Default map</button>
+              </div>
+              <p class="hint">Garden of the Gods loads by default. Drop a
+                <code>pup-world/1</code> bundle for real elevation, or pass
+                <code>?world=…</code> in the URL.</p>
+            </div>
+            <div class="sect">
+              <h2>🏞️ Landscape</h2>
+              <div id="envGrid" class="env-grid"></div>
+              <p class="hint">Same trails, different country.</p>
+              <div class="ctl">
+                <label>Fog <span class="val" id="fogAmtVal">1.00×</span></label>
+                <input type="range" id="fogAmt" min="0.15" max="5" step="0.05" value="1">
+              </div>
+            </div>
+            <div class="sect">
+              <h2>🐾 Who's exploring</h2>
+              <div class="toggle-row" id="pupModeToggle">
+                <button class="toggle sel" data-mode="dog">🐕 Dogs</button>
+                <button class="toggle" data-mode="wild">🦊 Wildlife</button>
+              </div>
+              <div id="dogGrid" class="pup-grid"></div>
+              <div id="animalGrid" class="pup-grid" hidden></div>
+              <div class="io-row">
+                <button class="btn small" id="randomPupBtn">🎲 Random pup</button>
+                <label class="btn small" for="pupFile">📥 Import</label>
+              </div>
+              <input type="file" id="pupFile" accept=".json,application/json" multiple hidden>
+              <p class="hint" id="pupNote"></p>
+              <p class="hint">Blue bar is speed, pink is how far off you spook the locals.</p>
+            </div>
+          </aside>
+          <div id="bigmapWrap">
+            <canvas id="bigmap"></canvas>
+            <div id="bigmapZoom">
+              <button class="btn small" id="bigZoomIn" title="Zoom in">➕</button>
+              <button class="btn small" id="bigZoomOut" title="Zoom out">➖</button>
+            </div>
+            <div id="bigmapSide">
+              <div class="bm-card" id="hereCard">
+                <h3 id="hereTitle">🚩 Start here</h3>
+                <div id="hereIdle">
+                  <p class="hint" id="startNow">—</p>
+                  <p class="hint">Tap a lettered badge on the map, or a course below, to see
+                    what is there. Every outer dead-end is a trailhead.</p>
+                </div>
+                <div id="hereStats" class="here-stats"></div>
+                <div id="hereActions" class="here-actions"></div>
+              </div>
+              <div class="bm-card">
+                <h3>🏁 Courses</h3>
+                <div id="courseList" class="course-list"></div>
+                <button class="btn small wide" id="recStartBtn">⏺ Record a path</button>
+                <div id="recSaveRow" class="rec-save">
+                  <input type="text" id="recName" maxlength="40" placeholder="Name this course"
+                         autocomplete="off" spellcheck="false">
+                  <div class="io-row">
+                    <button class="btn small" id="recSaveBtn">✓ Save</button>
+                    <button class="btn small" id="recDropBtn">✕ Discard</button>
+                  </div>
+                </div>
+                <p class="hint" id="recNote">Recording snaps to whatever trail you are on.
+                  Off-trail stretches are skipped.</p>
+                <div class="ghost-pick">
+                  <span>👻 Ghost</span>
+                  <div id="ghostMode" class="seg">
+                    <button data-ghost="best" class="on">🏆 Record</button>
+                    <button data-ghost="mine">⭐ Yours</button>
+                    <button data-ghost="off">Off</button>
+                  </div>
+                </div>
+                <p class="hint">Tap a course name to show it on the map, 🏁 to race it.</p>
+              </div>
+              <div class="bm-card">
+                <h3>📍 Saved spots</h3>
+                <div id="spotList" class="spot-list"></div>
+                <button class="btn small wide" id="mapSaveSpotBtn">📍 Save where I am</button>
+                <p class="hint">Tap a pin on the map or a row here to go back to it.</p>
+              </div>
+            </div>
+            <p class="hint bigmap-hint">Drag to pan, scroll or ➕/➖ to zoom.</p>
+          </div>
+        </div>
+      </div>
       <div id="playHud">
         <div id="hudTally">
           <span class="tally" id="hudSeen" title="Wildlife watched">✨ 0</span>
@@ -137,7 +205,6 @@
       <div id="miniWrap">
         <canvas id="minimap"></canvas>
         <span class="tally" id="hudTrail" title="The trail you are on">—</span>
-        <button class="btn small" id="mapBtn" title="Full map (M)">🗺 Map</button>
       </div>
 
       <!-- On-screen controls for phones and tablets. Hidden until <body> is marked
@@ -196,57 +263,6 @@
             <button class="btn primary" id="arrFinish">✓ Finish here</button>
           </div>
         </div>
-      </div>
-      <div id="bigmapWrap">
-        <canvas id="bigmap"></canvas>
-        <button class="btn small" id="bigmapClose">✕ Close map</button>
-        <div id="bigmapZoom">
-          <button class="btn small" id="bigZoomIn" title="Zoom in">➕</button>
-          <button class="btn small" id="bigZoomOut" title="Zoom out">➖</button>
-        </div>
-        <div id="bigmapSide">
-          <div class="bm-card" id="hereCard">
-            <h3 id="hereTitle">🚩 Start here</h3>
-            <div id="hereIdle">
-              <p class="hint" id="startNow">—</p>
-              <p class="hint">Tap a lettered badge on the map, or a course below, to see
-                what is there. Every outer dead-end is a trailhead.</p>
-            </div>
-            <div id="hereStats" class="here-stats"></div>
-            <div id="hereActions" class="here-actions"></div>
-          </div>
-          <div class="bm-card">
-            <h3>🏁 Courses</h3>
-            <div id="courseList" class="course-list"></div>
-            <button class="btn small wide" id="recStartBtn">⏺ Record a path</button>
-            <div id="recSaveRow" class="rec-save">
-              <input type="text" id="recName" maxlength="40" placeholder="Name this course"
-                     autocomplete="off" spellcheck="false">
-              <div class="io-row">
-                <button class="btn small" id="recSaveBtn">✓ Save</button>
-                <button class="btn small" id="recDropBtn">✕ Discard</button>
-              </div>
-            </div>
-            <p class="hint" id="recNote">Recording snaps to whatever trail you are on.
-              Off-trail stretches are skipped.</p>
-            <div class="ghost-pick">
-              <span>👻 Ghost</span>
-              <div id="ghostMode" class="seg">
-                <button data-ghost="best" class="on">🏆 Record</button>
-                <button data-ghost="mine">⭐ Yours</button>
-                <button data-ghost="off">Off</button>
-              </div>
-            </div>
-            <p class="hint">Tap a course name to show it on the map, 🏁 to race it.</p>
-          </div>
-          <div class="bm-card">
-            <h3>📍 Saved spots</h3>
-            <div id="spotList" class="spot-list"></div>
-            <button class="btn small wide" id="mapSaveSpotBtn">📍 Save where I am</button>
-            <p class="hint">Tap a pin on the map or a row here to go back to it.</p>
-          </div>
-        </div>
-        <p class="hint bigmap-hint">Drag to pan, scroll or ➕/➖ to zoom.</p>
       </div>
     </div>
   </main>

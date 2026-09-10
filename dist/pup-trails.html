@@ -52,30 +52,64 @@ h1 small{display:block;font-size:11px;opacity:.6;font-weight:normal;}
 .btn.primary{background:var(--orange);color:#fff;}
 .btn.small{font-size:12px;padding:6px 10px;}
 .btn.wide{width:100%;text-align:center;}
-.btn.icon{width:40px;padding:6px 0;display:none;}
 main{flex:1;display:flex;min-height:0;position:relative;}
-#panel{width:280px;min-width:280px;background:var(--card);border-right:4px solid var(--ink);
-  overflow-y:auto;padding:14px;transition:margin-left .35s ease;}
-/* The panel used to vanish outright the moment you hit play, which made every setting on
-   it a decision you had to get right before you had seen the map. It is now a drawer:
-   off-screen by default so the walk is full-bleed, slid in by the ⚙ button or Tab, and
-   over the scene rather than beside it so opening it never resizes the canvas mid-stride
-   (a resize costs a renderer reallocation and a visible hitch). */
-body.play #panel, body.done #panel{position:absolute;left:0;top:0;height:100%;z-index:9;
-  margin-left:-300px;box-shadow:6px 0 0 rgba(61,42,32,.18);}
-body.play.panelopen #panel{margin-left:0;}
-/* the ⚙ button is desktop-visible during play; the lobby keeps it phone-only */
-body.play .btn.icon{display:inline-block;}
+/* Settings is a PANE of #paneDrawer now, not a column beside the stage. It used to be a
+   flex child of <main> that went absolute on body.play, which meant the canvas was one
+   width in the lobby and another during a walk -- and every transition between them cost
+   a renderer reallocation and a visible hitch. The drawer overlays in both states, so the
+   stage is laid out once and never resized by a pane opening. */
+#panel{position:absolute;inset:0;overflow-y:auto;padding:14px;background:var(--card);
+  display:none;}
+body[data-pane="settings"] #panel{display:block;}
 .panel-lede{margin:0 0 12px;line-height:1.5;}
 #stage{flex:1;position:relative;}
 /* touch-action:none or the browser claims a drag as a pan/zoom gesture partway through
    and fires pointercancel -- which reads as the stick sticking, or letting go on its own,
    in the middle of a walk. */
 canvas#c{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;}
+
+/* ---------- one drawer, two panes ------------------------------------------------
+   Everything that slides over the walk lives in here. src/trails/panes.js owns which
+   pane is showing; this sheet only reads body[data-pane] and never writes a second
+   copy of it.
+
+   The tabs sit against the LEFT EDGE, top-ish, and #playHud is shifted right to clear
+   them -- not centred down the edge, which is where a thumb starts a walk-drag on a
+   phone and would have every other attempt to walk open the map instead. */
+#paneTabs{position:absolute;left:0;top:12px;z-index:11;display:flex;flex-direction:column;gap:8px;}
+body[data-pane] #paneTabs{display:none;}
+.pane-tab{font-family:inherit;font-size:20px;line-height:1;width:42px;height:46px;padding:0;
+  background:var(--card);border:4px solid var(--ink);border-left:none;
+  border-radius:0 15px 15px 0;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 3px 0 rgba(61,42,32,.22);}
+.pane-tab:hover{background:var(--cream);}
+
+/* Width is the only thing that differs between the panes, and it is animated: settings
+   is a column you read beside the world (so a slider's effect is visible while you drag
+   it), the map is the whole sheet. Switching tabs slides one into the other rather than
+   closing and reopening. */
+#paneDrawer{position:absolute;left:0;top:0;bottom:0;z-index:12;width:min(330px,86%);
+  background:var(--card);border-right:4px solid var(--ink);
+  box-shadow:6px 0 0 rgba(61,42,32,.18);display:flex;flex-direction:column;
+  transform:translateX(-101%);transition:transform .3s ease,width .3s ease;}
+body[data-pane] #paneDrawer{transform:translateX(0);}
+body[data-pane="map"] #paneDrawer{width:100%;border-right-color:transparent;box-shadow:none;}
+#paneHead{flex:none;display:flex;align-items:center;gap:8px;padding:9px 10px;
+  background:var(--cream);border-bottom:4px solid var(--ink);}
+#paneSeg{flex:1;display:flex;gap:6px;min-width:0;}
+#paneSeg button{flex:1;min-width:0;font-family:inherit;font-weight:bold;font-size:13px;
+  padding:8px 4px;border:3px solid var(--ink);border-radius:11px;background:#fff;
+  color:var(--ink);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+#paneSeg button.sel{background:var(--ink);color:#fff;}
+#paneClose{flex:none;width:40px;height:40px;padding:0;font-size:15px;
+  display:flex;align-items:center;justify-content:center;}
+#paneBody{flex:1;position:relative;min-height:0;}
 .sect{border:3px solid var(--ink);border-radius:16px;background:#fff;padding:12px;margin-bottom:14px;}
 .sect h2{margin:0 0 8px;font-size:15px;}
 .hint{font-size:11.5px;opacity:.65;}
-#playHud{position:absolute;top:10px;left:10px;display:none;}
+/* left:58px, not 10px -- #paneTabs owns the left edge from the top down. */
+#playHud{position:absolute;top:10px;left:58px;display:none;}
 body.play #playHud{display:block;}
 
 .io-row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;}
@@ -85,14 +119,6 @@ body.play #playHud{display:block;}
 .ctl label{display:flex;justify-content:space-between;font-size:12.5px;font-weight:bold;margin-bottom:4px;}
 .ctl label .val{opacity:.6;font-weight:normal;}
 .ctl input[type=range]{width:100%;accent-color:var(--orange);}
-@media (max-width:760px){
-  .btn.icon{display:inline-block;}
-  #panel{position:absolute;height:100%;z-index:5;}
-  /* panelBtn (🎒) toggles this so the live preview -- pup, terrain, minimap -- is
-     reachable on a phone without the options column permanently covering it. */
-  body.nopanel #panel{margin-left:-300px;}
-}
-
 /* --- drop zone (Trail map) --- */
 .dropzone{display:block;text-align:center;border:3px dashed var(--ink);border-radius:14px;
   padding:16px 10px;cursor:pointer;background:var(--cream);opacity:.85;}
@@ -213,7 +239,7 @@ body.play #playHud{display:block;}
    even hit Play. */
 #miniWrap{position:absolute;top:10px;right:10px;display:flex;flex-direction:column;
   align-items:center;gap:6px;}
-body.bigmap #miniWrap{display:none;}
+body[data-pane="map"] #miniWrap{display:none;}
 #minimap{width:172px;height:172px;border-radius:50%;border:4px solid var(--ink);
   background:#e9dcbe;box-shadow:0 3px 0 rgba(61,42,32,.25);display:block;}
 /* Which trail is underfoot, in the same ink as the highlight drawn on the disc above it
@@ -222,19 +248,20 @@ body.bigmap #miniWrap{display:none;}
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 #hudTrail.on{display:block;}
 
-/* --- full-sheet map --- */
-#bigmapWrap{position:absolute;inset:0;display:none;z-index:8;background:rgba(45,32,22,.55);
-  padding:14px;box-sizing:border-box;}
-body.bigmap #bigmapWrap{display:block;}
+/* --- the map pane --- */
+/* No scrim any more: the drawer IS the surface, so what used to be a dark wash over the
+   whole window is now a cream mat inside a pane that is already opaque. */
+#bigmapWrap{position:absolute;inset:0;display:none;background:var(--cream);
+  padding:12px;box-sizing:border-box;}
+body[data-pane="map"] #bigmapWrap{display:block;}
 #bigmap{width:100%;height:100%;display:block;border:4px solid var(--ink);border-radius:16px;
   background:#e9dcbe;box-sizing:border-box;cursor:grab;touch-action:none;}
 #bigmap:active{cursor:grabbing;}
-#bigmapClose{position:absolute;top:24px;left:24px;}
 /* The sheet is now a picker for two kinds of place -- trailheads and saved pins -- so it
    carries its own side card rather than borrowing space in the left panel, which is
    settings only. Scrolls independently: a walker with twenty pins should not lose the
    “Surprise me” button off the bottom of the screen. */
-#bigmapSide{position:absolute;top:24px;right:24px;width:230px;max-height:calc(100% - 130px);
+#bigmapSide{position:absolute;top:22px;right:22px;width:230px;max-height:calc(100% - 120px);
   overflow-y:auto;display:flex;flex-direction:column;gap:10px;}
 .bm-card{background:var(--card);border:3px solid var(--ink);border-radius:14px;padding:10px 12px;}
 .bm-card h3{margin:0 0 6px;font-size:14px;}
@@ -265,15 +292,13 @@ body.bigmap #bigmapWrap{display:block;}
     flex-direction:row;overflow-x:auto;}
   .bm-card{flex:1 0 200px;}
   #bigmapWrap{display:none;overflow-y:auto;}
-  body.bigmap #bigmapWrap{display:flex;flex-direction:column;}
+  body[data-pane="map"] #bigmapWrap{display:flex;flex-direction:column;}
   #bigmap{flex:1;min-height:60vh;}
-  #bigmapClose{position:static;align-self:flex-start;margin-bottom:8px;}
 }
 @media (max-width:760px){
   #bigmapZoom{bottom:14px;right:14px;gap:6px;}
   #bigmapZoom .btn{width:40px;height:40px;font-size:17px;}
   .bigmap-hint{left:14px;bottom:14px;max-width:170px;font-size:10.5px;padding:6px 9px;}
-  #bigmapClose{top:14px;left:14px;}
 }
 
 @media (max-width:760px){
@@ -475,7 +500,7 @@ body.racedone #touchCtl{display:none;}
   --safe-r:env(safe-area-inset-right,0px);
 }
 body.touch.play #touchCtl{display:block;}
-body.bigmap #touchCtl, body.arrived #touchCtl{display:none;}
+body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
 
 /* A FLOATING stick, shown resting at bottom-left and re-centred wherever the thumb
    actually lands. Fixed-base sticks are a thumb-position lottery on a tablet held any
@@ -544,15 +569,6 @@ body.bigmap #touchCtl, body.arrived #touchCtl{display:none;}
   #tJump{width:76px;height:76px;}
 }
 
-/* Settings tab -- fixed top-left, above the canvas and below any modal. Mirrors the
-   floating touch controls rather than the header buttons, because it has to stay usable
-   during a walk when the header is gone. */
-#panelTab{position:fixed;top:10px;left:10px;z-index:40;width:44px;height:44px;
-  display:flex;align-items:center;justify-content:center;font-size:20px;padding:0;}
-#panelTab.hidden{display:none;}
-body.panel-open #panelTab{left:auto;right:10px;}
-@media (max-width:760px){ #panelTab{top:8px;left:8px;} }
-
 </style>
 </head>
 <body>
@@ -563,82 +579,150 @@ body.panel-open #panelTab{left:auto;right:10px;}
       <h1>PUP <span>TRAILS</span><small>real trails · real terrain</small></h1>
     </div>
     <div class="spacer"></div>
-    <button class="btn icon" id="panelBtn" title="Settings (Tab) — adjust while you walk">⚙️</button>
   </header>
-  <!-- Settings tab. The header ⚙️ disappears with the rest of the chrome once a walk
-       starts, which left no way to reach the panel mid-walk on a touch device. This one is
-       fixed to the viewport rather than living in the header, so it survives play. -->
-  <button class="btn icon" id="panelTab" title="Settings (Tab)" aria-label="Settings">⚙️</button>
   <main>
-    <aside id="panel">
-      <p class="hint panel-lede">Change anything while you walk — you stay where you
-        are standing. 🗺 Map to move somewhere else.</p>
-      <div class="sect">
-        <h2>🗺️ Trail map</h2>
-        <label class="dropzone" id="dropzone" for="worldFile">
-          <span class="dz-main">Drop your <code>.geojson</code> layers here<br>or tap to browse</span>
-          <span class="dz-sub">trails, points &amp; areas</span>
-        </label>
-        <input type="file" id="worldFile" accept=".geojson,.json,application/geo+json,application/json" multiple hidden>
-        <div id="fileChips" class="file-chips"></div>
-        <div class="io-row">
-          <button class="btn small" id="saveCombinedBtn">↓ Save combined</button>
-          <button class="btn small" id="clearLayersBtn">Clear map</button>
-        </div>
-        <div class="ctl">
-          <label>World scale <span class="val" id="worldScaleVal">1 : 1</span></label>
-          <input type="range" id="worldScale" min="0" max="1000" step="1" value="0">
-        </div>
-        <div class="ctl">
-          <label>Hill exaggeration <span class="val" id="vertScaleVal">1.00×</span></label>
-          <input type="range" id="vertScale" min="0" max="1000" step="1" value="707">
-        </div>
-        <div class="ctl">
-          <label>Contour step <span class="val" id="contourVal">3.0 m</span></label>
-          <input type="range" id="contourStep" min="0.5" max="12" step="0.5" value="3">
-        </div>
-        <p class="hint">1:1 is true size; a bigger N packs the map into a shorter walk.
-          Hill exaggeration follows it automatically so slopes stay true — nudge it
-          yourself afterwards if you want them flatter or wilder. Contour step is metres
-          of real elevation per terrace.</p>
-        <div class="statbox" id="mapStats"></div>
-        <div id="trailList" class="trail-list"></div>
-        <p class="hint" id="mapNote">Loading map…</p>
-        <div class="io-row">
-          <button class="btn small" id="defaultMapBtn">🏜️ Default map</button>
-        </div>
-        <p class="hint">Garden of the Gods loads by default. Drop a
-          <code>pup-world/1</code> bundle for real elevation, or pass
-          <code>?world=…</code> in the URL.</p>
-      </div>
-      <div class="sect">
-        <h2>🏞️ Landscape</h2>
-        <div id="envGrid" class="env-grid"></div>
-        <p class="hint">Same trails, different country.</p>
-        <div class="ctl">
-          <label>Fog <span class="val" id="fogAmtVal">1.00×</span></label>
-          <input type="range" id="fogAmt" min="0.15" max="5" step="0.05" value="1">
-        </div>
-      </div>
-      <div class="sect">
-        <h2>🐾 Who's exploring</h2>
-        <div class="toggle-row" id="pupModeToggle">
-          <button class="toggle sel" data-mode="dog">🐕 Dogs</button>
-          <button class="toggle" data-mode="wild">🦊 Wildlife</button>
-        </div>
-        <div id="dogGrid" class="pup-grid"></div>
-        <div id="animalGrid" class="pup-grid" hidden></div>
-        <div class="io-row">
-          <button class="btn small" id="randomPupBtn">🎲 Random pup</button>
-          <label class="btn small" for="pupFile">📥 Import</label>
-        </div>
-        <input type="file" id="pupFile" accept=".json,application/json" multiple hidden>
-        <p class="hint" id="pupNote"></p>
-        <p class="hint">Blue bar is speed, pink is how far off you spook the locals.</p>
-      </div>
-    </aside>
     <div id="stage">
       <canvas id="c"></canvas>
+
+      <!-- THE DRAWER, and the two index tabs that open it. See src/trails/panes.js for
+           what this replaced: two unrelated toggles, four body classes, and a ⚙ button
+           that changed corners depending on state you could not see.
+
+           Shut, you get the tabs. Open, the same two choices move into the drawer's own
+           header as a segmented control, so switching between "where am I going" and "how
+           does this look" never closes anything. One ✕, one Esc, one open-state. -->
+      <div id="paneTabs">
+        <button class="pane-tab" id="paneTabMap" title="Map (M)" aria-label="Open the map">🗺</button>
+        <button class="pane-tab" id="paneTabSet" title="Settings (Tab)" aria-label="Open settings">⚙️</button>
+      </div>
+      <div id="paneDrawer">
+        <div id="paneHead">
+          <div id="paneSeg" role="tablist">
+            <button data-pane="map" role="tab" aria-selected="false">🗺 Map</button>
+            <button data-pane="settings" role="tab" aria-selected="false">⚙️ Settings</button>
+          </div>
+          <button class="btn" id="paneClose" title="Close (Esc)" aria-label="Close">✕</button>
+        </div>
+        <div id="paneBody">
+          <aside id="panel">
+            <p class="hint panel-lede">Change anything while you walk — you stay where you
+              are standing. Switch to 🗺 Map to move somewhere else.</p>
+            <div class="sect">
+              <h2>🗺️ Trail map</h2>
+              <label class="dropzone" id="dropzone" for="worldFile">
+                <span class="dz-main">Drop your <code>.geojson</code> layers here<br>or tap to browse</span>
+                <span class="dz-sub">trails, points &amp; areas</span>
+              </label>
+              <input type="file" id="worldFile" accept=".geojson,.json,application/geo+json,application/json" multiple hidden>
+              <div id="fileChips" class="file-chips"></div>
+              <div class="io-row">
+                <button class="btn small" id="saveCombinedBtn">↓ Save combined</button>
+                <button class="btn small" id="clearLayersBtn">Clear map</button>
+              </div>
+              <div class="ctl">
+                <label>World scale <span class="val" id="worldScaleVal">1 : 1</span></label>
+                <input type="range" id="worldScale" min="0" max="1000" step="1" value="0">
+              </div>
+              <div class="ctl">
+                <label>Hill exaggeration <span class="val" id="vertScaleVal">1.00×</span></label>
+                <input type="range" id="vertScale" min="0" max="1000" step="1" value="707">
+              </div>
+              <div class="ctl">
+                <label>Contour step <span class="val" id="contourVal">3.0 m</span></label>
+                <input type="range" id="contourStep" min="0.5" max="12" step="0.5" value="3">
+              </div>
+              <p class="hint">1:1 is true size; a bigger N packs the map into a shorter walk.
+                Hill exaggeration follows it automatically so slopes stay true — nudge it
+                yourself afterwards if you want them flatter or wilder. Contour step is metres
+                of real elevation per terrace.</p>
+              <div class="statbox" id="mapStats"></div>
+              <div id="trailList" class="trail-list"></div>
+              <p class="hint" id="mapNote">Loading map…</p>
+              <div class="io-row">
+                <button class="btn small" id="defaultMapBtn">🏜️ Default map</button>
+              </div>
+              <p class="hint">Garden of the Gods loads by default. Drop a
+                <code>pup-world/1</code> bundle for real elevation, or pass
+                <code>?world=…</code> in the URL.</p>
+            </div>
+            <div class="sect">
+              <h2>🏞️ Landscape</h2>
+              <div id="envGrid" class="env-grid"></div>
+              <p class="hint">Same trails, different country.</p>
+              <div class="ctl">
+                <label>Fog <span class="val" id="fogAmtVal">1.00×</span></label>
+                <input type="range" id="fogAmt" min="0.15" max="5" step="0.05" value="1">
+              </div>
+            </div>
+            <div class="sect">
+              <h2>🐾 Who's exploring</h2>
+              <div class="toggle-row" id="pupModeToggle">
+                <button class="toggle sel" data-mode="dog">🐕 Dogs</button>
+                <button class="toggle" data-mode="wild">🦊 Wildlife</button>
+              </div>
+              <div id="dogGrid" class="pup-grid"></div>
+              <div id="animalGrid" class="pup-grid" hidden></div>
+              <div class="io-row">
+                <button class="btn small" id="randomPupBtn">🎲 Random pup</button>
+                <label class="btn small" for="pupFile">📥 Import</label>
+              </div>
+              <input type="file" id="pupFile" accept=".json,application/json" multiple hidden>
+              <p class="hint" id="pupNote"></p>
+              <p class="hint">Blue bar is speed, pink is how far off you spook the locals.</p>
+            </div>
+          </aside>
+          <div id="bigmapWrap">
+            <canvas id="bigmap"></canvas>
+            <div id="bigmapZoom">
+              <button class="btn small" id="bigZoomIn" title="Zoom in">➕</button>
+              <button class="btn small" id="bigZoomOut" title="Zoom out">➖</button>
+            </div>
+            <div id="bigmapSide">
+              <div class="bm-card" id="hereCard">
+                <h3 id="hereTitle">🚩 Start here</h3>
+                <div id="hereIdle">
+                  <p class="hint" id="startNow">—</p>
+                  <p class="hint">Tap a lettered badge on the map, or a course below, to see
+                    what is there. Every outer dead-end is a trailhead.</p>
+                </div>
+                <div id="hereStats" class="here-stats"></div>
+                <div id="hereActions" class="here-actions"></div>
+              </div>
+              <div class="bm-card">
+                <h3>🏁 Courses</h3>
+                <div id="courseList" class="course-list"></div>
+                <button class="btn small wide" id="recStartBtn">⏺ Record a path</button>
+                <div id="recSaveRow" class="rec-save">
+                  <input type="text" id="recName" maxlength="40" placeholder="Name this course"
+                         autocomplete="off" spellcheck="false">
+                  <div class="io-row">
+                    <button class="btn small" id="recSaveBtn">✓ Save</button>
+                    <button class="btn small" id="recDropBtn">✕ Discard</button>
+                  </div>
+                </div>
+                <p class="hint" id="recNote">Recording snaps to whatever trail you are on.
+                  Off-trail stretches are skipped.</p>
+                <div class="ghost-pick">
+                  <span>👻 Ghost</span>
+                  <div id="ghostMode" class="seg">
+                    <button data-ghost="best" class="on">🏆 Record</button>
+                    <button data-ghost="mine">⭐ Yours</button>
+                    <button data-ghost="off">Off</button>
+                  </div>
+                </div>
+                <p class="hint">Tap a course name to show it on the map, 🏁 to race it.</p>
+              </div>
+              <div class="bm-card">
+                <h3>📍 Saved spots</h3>
+                <div id="spotList" class="spot-list"></div>
+                <button class="btn small wide" id="mapSaveSpotBtn">📍 Save where I am</button>
+                <p class="hint">Tap a pin on the map or a row here to go back to it.</p>
+              </div>
+            </div>
+            <p class="hint bigmap-hint">Drag to pan, scroll or ➕/➖ to zoom.</p>
+          </div>
+        </div>
+      </div>
       <div id="playHud">
         <div id="hudTally">
           <span class="tally" id="hudSeen" title="Wildlife watched">✨ 0</span>
@@ -677,7 +761,6 @@ body.panel-open #panelTab{left:auto;right:10px;}
       <div id="miniWrap">
         <canvas id="minimap"></canvas>
         <span class="tally" id="hudTrail" title="The trail you are on">—</span>
-        <button class="btn small" id="mapBtn" title="Full map (M)">🗺 Map</button>
       </div>
 
       <!-- On-screen controls for phones and tablets. Hidden until <body> is marked
@@ -736,57 +819,6 @@ body.panel-open #panelTab{left:auto;right:10px;}
             <button class="btn primary" id="arrFinish">✓ Finish here</button>
           </div>
         </div>
-      </div>
-      <div id="bigmapWrap">
-        <canvas id="bigmap"></canvas>
-        <button class="btn small" id="bigmapClose">✕ Close map</button>
-        <div id="bigmapZoom">
-          <button class="btn small" id="bigZoomIn" title="Zoom in">➕</button>
-          <button class="btn small" id="bigZoomOut" title="Zoom out">➖</button>
-        </div>
-        <div id="bigmapSide">
-          <div class="bm-card" id="hereCard">
-            <h3 id="hereTitle">🚩 Start here</h3>
-            <div id="hereIdle">
-              <p class="hint" id="startNow">—</p>
-              <p class="hint">Tap a lettered badge on the map, or a course below, to see
-                what is there. Every outer dead-end is a trailhead.</p>
-            </div>
-            <div id="hereStats" class="here-stats"></div>
-            <div id="hereActions" class="here-actions"></div>
-          </div>
-          <div class="bm-card">
-            <h3>🏁 Courses</h3>
-            <div id="courseList" class="course-list"></div>
-            <button class="btn small wide" id="recStartBtn">⏺ Record a path</button>
-            <div id="recSaveRow" class="rec-save">
-              <input type="text" id="recName" maxlength="40" placeholder="Name this course"
-                     autocomplete="off" spellcheck="false">
-              <div class="io-row">
-                <button class="btn small" id="recSaveBtn">✓ Save</button>
-                <button class="btn small" id="recDropBtn">✕ Discard</button>
-              </div>
-            </div>
-            <p class="hint" id="recNote">Recording snaps to whatever trail you are on.
-              Off-trail stretches are skipped.</p>
-            <div class="ghost-pick">
-              <span>👻 Ghost</span>
-              <div id="ghostMode" class="seg">
-                <button data-ghost="best" class="on">🏆 Record</button>
-                <button data-ghost="mine">⭐ Yours</button>
-                <button data-ghost="off">Off</button>
-              </div>
-            </div>
-            <p class="hint">Tap a course name to show it on the map, 🏁 to race it.</p>
-          </div>
-          <div class="bm-card">
-            <h3>📍 Saved spots</h3>
-            <div id="spotList" class="spot-list"></div>
-            <button class="btn small wide" id="mapSaveSpotBtn">📍 Save where I am</button>
-            <p class="hint">Tap a pin on the map or a row here to go back to it.</p>
-          </div>
-        </div>
-        <p class="hint bigmap-hint">Drag to pan, scroll or ➕/➖ to zoom.</p>
       </div>
     </div>
   </main>
@@ -8841,8 +8873,6 @@ function getCourseShown(){ return shownCourse; }
 function setRaceFrac(f){ raceFrac = (f == null || !isFinite(f)) ? -1 : f; }
 function getRaceFrac(){ return raceFrac; }
 
-function isBigMapOpen(){ return bigOpen; }
-
 // Same lettering as main.js's start-picker (A, B, C... then plain numbers past Z) so a
 // badge on the map and a card in the "Start here" list always agree. Duplicated rather
 // than imported: main.js imports THIS module, and the two never need to be the same
@@ -8981,11 +9011,17 @@ function initMinimap(onPick){
   wireBigMapControls();
 }
 
-function toggleBigMap(force){
-  const next = (force === undefined) ? !bigOpen : !!force;
-  if(next && !bigOpen){ bigZoom = 1; bigFocus = null; }   // fresh fit-to-screen every open
+/* Called by panes.js and nothing else. `bigOpen` is no longer an answer to "is the map
+   showing" -- panes.js owns that -- it is only this module's DRAW GATE, so updateMinimap
+   can skip a sheet nobody is looking at. It stopped touching body.bigmap for the same
+   reason: two writers of one class is how the class and the flag end up disagreeing.
+
+   The rising edge still resets zoom and focus, so every open is a fresh fit-to-screen
+   rather than wherever you happened to leave the camera three walks ago. */
+function setBigMapOpen(on){
+  const next = !!on;
+  if(next && !bigOpen){ bigZoom = 1; bigFocus = null; }
   bigOpen = next;
-  document.body.classList.toggle('bigmap', bigOpen);
 }
 
 // Test seam, same reason main.js exports trailIsPlaying/getTrailPlayer/getTripState:
@@ -9358,6 +9394,100 @@ function updateMinimap(px, pz, yaw){
     g.textAlign = 'center'; g.fillText('N', 0, -24*dpr);
     g.restore();
   }
+}
+
+/* ==== src/trails/panes.js ==== */
+/* ============================ THE ONE OPEN-STATE ============================
+
+   Everything that slides over the walk -- the map sheet and the settings drawer -- is
+   one drawer with two panes, and this module owns the single value that says which of
+   them is showing.
+
+   WHAT THIS REPLACED, AND WHY. There used to be two toggles that had nothing to do with
+   each other. The map lived on `body.bigmap`, driven by a 🗺 button under the minimap and
+   closed by a ✕ in the sheet's top-left corner. Settings lived on `body.panelopen` OR
+   `body.nopanel` -- two classes, because the panel rested open in the lobby and closed
+   during a walk -- plus a third, `body.panel-open`, that existed only so the CSS would not
+   have to reason about the first two. The ⚙ tab that opened it was pinned to the top-left
+   and JUMPED to the top-right once open, which is to say the same corner meant "open
+   settings", "close settings" and "close the map" depending on state nobody could see.
+
+   Four classes, two idioms, and both surfaces openable at once so they could stack. The
+   fix is not better labels on the buttons; it is that there was never more than one
+   question being asked. `openPane` is that question, and it has three answers.
+
+   The projection onto the DOM lives here too -- `body[data-pane]`, the segmented tabs'
+   selected state, and minimap.js's draw gate. Callers set the value; nobody else writes
+   the class, and nothing derives a second copy of it to disagree with.
+
+   The DEPENDENCY DIRECTION is deliberate: this module imports minimap.js and pushes the
+   draw gate down via setBigMapOpen(). It does not import main.js -- opening a pane may
+   want to poke something over there (a resize, a redraw), so main.js hands a callback in
+   through initPanes() the same way it hands its pick handlers to initMinimap(). Nothing
+   below this module knows a pane exists. */
+
+
+
+let openPane = null;            // 'map' | 'settings' | null -- the whole state
+let onPaneChange = null;        // main.js's hook, set by initPanes
+let paneChanges = 0;            // transitions, counted
+
+const PANES = ['map', 'settings'];
+
+function getPane(){ return openPane; }
+function isPaneOpen(){ return openPane !== null; }
+
+/* Both doors into the drawer, wired in one place.
+
+   The edge tabs are what you see when it is shut; the segmented buttons in the drawer's
+   own header are what you see when it is open. They are the same control seen from either
+   side, so they call the same function -- with one difference that matters. An edge tab
+   TOGGLES (tapping 🗺 twice is a reasonable way to change your mind), while a header tab
+   SHOWS (tapping the tab you are already on must not close the drawer out from under you,
+   because on a segmented control that reads as a mis-tap, not a decision). */
+function initPanes(opts){
+  onPaneChange = (opts && opts.onChange) || null;
+  document.getElementById('paneTabMap')?.addEventListener('click', ()=> togglePane('map'));
+  document.getElementById('paneTabSet')?.addEventListener('click', ()=> togglePane('settings'));
+  document.getElementById('paneClose')?.addEventListener('click', ()=> showPane(null));
+  document.getElementById('paneSeg')?.addEventListener('click', e=>{
+    const b = e.target.closest('button');
+    if(b && b.dataset.pane) showPane(b.dataset.pane);
+  });
+  syncPaneUI();
+}
+
+function showPane(name){
+  const next = PANES.includes(name) ? name : null;
+  if(next === openPane) return;
+  openPane = next;
+  paneChanges++;
+  syncPaneUI();
+  if(onPaneChange) onPaneChange(openPane);
+}
+
+/* Test seam, same arrangement as minimap.js's getBigView. Switching panes has to be ONE
+   transition, not a close followed by an open -- the difference is invisible in the final
+   state and very visible on screen, where it is the drawer flinching shut and back. A
+   counter is the only thing that can tell the two apart from outside. */
+function getPaneChanges(){ return paneChanges; }
+
+function togglePane(name){ showPane(openPane === name ? null : name); }
+function closePanes(){ showPane(null); }
+
+/* The attribute is REMOVED rather than set to '' when nothing is open, so `body[data-pane]`
+   is a usable "any pane is showing" selector in the stylesheet -- `[data-pane=""]` would
+   match an empty string and quietly make every such rule always true. */
+function syncPaneUI(){
+  const body = document.body;
+  if(openPane) body.setAttribute('data-pane', openPane);
+  else body.removeAttribute('data-pane');
+  document.querySelectorAll('#paneSeg button').forEach(b=>{
+    const sel = b.dataset.pane === openPane;
+    b.classList.toggle('sel', sel);
+    b.setAttribute('aria-selected', sel ? 'true' : 'false');
+  });
+  setBigMapOpen(openPane === 'map');
 }
 
 /* ==== src/trails/course-line.js ==== */
@@ -9803,6 +9933,7 @@ function parsePupFile(data){
 
 
 
+
 /* Trail networks run to real kilometres; Pup City's camera (far=300, tuned for one city
    block) would clip most of a trail map. Extend it rather than touch the shared file. */
 // far: trail networks run to real kilometres; Pup City's far=300 (tuned for one city
@@ -10101,7 +10232,7 @@ function placeAtSpot(spot){
   if(!spot) return;
   const p = spotWorld(spot);
   placeAt(p.x, p.z, spot.yaw);
-  toggleBigMap(false);
+  showPane(null);
 }
 
 /* Drop a pin where the player is standing.
@@ -10268,7 +10399,7 @@ function startRecording(){
   rec.offT = 0;
   rec.startName = onTrail.name || '';
   recPending = null;
-  toggleBigMap(false);        // you cannot walk a path with the sheet over the whole screen
+  showPane(null);             // you cannot walk a path with the sheet over the whole screen
   renderCourseUI();
   syncCourseOverlay();
   comicBurst('\u23fa Recording', player.x, standingY(player.x, player.z)+2.2, player.z, '#d94fa0');
@@ -10294,7 +10425,7 @@ function stopRecording(){
   }
   recPending = {pts, lenM, name: rec.startName ? rec.startName + ' run'
                                                : 'Course ' + (getCourses().length + 1)};
-  toggleBigMap(true);         // the naming half of the control lives on the map sheet
+  showPane('map');            // the naming half of the control lives on the map pane
   renderCourseUI();
   syncCourseOverlay();
   return recPending;
@@ -10372,7 +10503,7 @@ function startRace(course){
   if(pts.length < 2) return false;
   closeArrival();
   closeRaceCard();
-  toggleBigMap(false);
+  showPane(null);
   previewCourse = course;
   race.on = true; race.course = course; race.done = false;
   race.count = RACE_COUNT_SECS; race.go = 0; race.t = 0; race.frac = 0; race.off = 0;
@@ -11017,9 +11148,17 @@ function movePlayer(stepX, stepZ){
 const trailKeys = {};
 addEventListener('keydown', e=>{
   trailKeys[e.code]=true;
-  // Tab is the settings drawer in BOTH states, so it is handled before the play gate --
-  // and preventDefault always, or the browser moves focus into the panel behind it
-  if(e.code==='Tab'){ e.preventDefault(); togglePanel(); return; }
+  /* Both panes are reachable by key in BOTH states, so both keys are handled before the
+     play gate. M used to sit inside it, which meant the map -- the one thing that can get
+     you out of a lobby you are stuck in because the world failed to load -- was the only
+     pane you could not open from there. preventDefault on Tab always, or the browser
+     moves focus into the drawer behind it. */
+  if(e.code==='Tab'){ e.preventDefault(); togglePane('settings'); return; }
+  if(e.code==='KeyM'){ togglePane('map'); return; }
+  /* Esc unwinds one layer at a time, outermost first, and the drawer is the outermost
+     layer there is -- so this runs before the play gate too. Quitting a whole walk
+     because you wanted to put the map away is the kind of thing you only forgive once. */
+  if(e.code==='Escape' && getPane()){ showPane(null); return; }
   if(!playing) return;
   // while the arrival card is up only Escape does anything -- barking or jumping through
   // a summary screen you can't see the effect of is just confusing
@@ -11031,15 +11170,11 @@ addEventListener('keydown', e=>{
   if(e.code==='KeyC') toggleSneak();
   if(e.code==='KeyB') doBark();
   if(e.code==='KeyP') saveHere();
-  if(e.code==='KeyM') toggleBigMap();
-  // Esc closes the map first if it's open -- quitting the whole walk because you wanted
-  // to put the map away is the kind of thing you only forgive once
-  /* Esc unwinds one layer at a time, outermost first. Quitting a whole walk because you
-     wanted to put the map away is the kind of thing you only forgive once, and abandoning
-     a walk because you wanted to abandon a race is the same mistake one level in. */
+  /* The drawer was already dealt with above; what is left is the rest of the stack.
+     Abandoning a walk because you wanted to abandon a race is the same mistake the map
+     used to make, one level in. */
   if(e.code==='Escape'){
-    if(isBigMapOpen()) toggleBigMap(false);
-    else if(race.on) quitRace();
+    if(race.on) quitRace();
     else exitPlay();
   }
 });
@@ -11511,7 +11646,7 @@ function enterPlay(){
   player.stillT = 0;
   playing=true;
   document.body.classList.add('play');
-  document.body.classList.remove('panelopen');   // walk full-bleed; the drawer is opt-in
+  showPane(null);                   // walk full-bleed; the drawer is opt-in
   refreshOnTrail();
   renderSpotList();
   renderCourseUI();
@@ -11521,7 +11656,7 @@ function enterPlay(){
 function exitPlay(){
   playing=false;
   trip.paused=false;
-  toggleBigMap(false);
+  showPane(null);
   closeArrival();
   /* A race and a half-finished trace are both things about THIS walk. Leaving either
      running would have the next walk open with a clock counting and a magenta line across
@@ -11538,7 +11673,7 @@ function exitPlay(){
   releaseCarried(player.x, player.z, player.yaw);
   resetCritters();
   setCatchRingVisible(false);
-  document.body.classList.remove('play','panelopen');
+  document.body.classList.remove('play');
   placeAtHead(getStartHead());
 }
 
@@ -12130,7 +12265,7 @@ function showHereHead(i){
   hereBtn(actions, '\u{1F6A9} Start here', true, ()=>{
     placeAtHead(i);
     if(!playing) enterPlay();
-    toggleBigMap(false);
+    showPane(null);
   });
   hereBtn(actions, '\u2715 Close', false, showHereIdle);
   actions.classList.add('on');
@@ -12253,26 +12388,10 @@ function renderSpotList(){
   });
 }
 
-/* The settings drawer. Two different resting states, which is why this is not one class
-   toggle: in the lobby the panel is open by default (and `nopanel` hides it on a phone,
-   as it always has), while during a walk it is closed by default and `panelopen` slides
-   it in. Same button, same Tab key, opposite defaults -- because "settings are showing"
-   is the sensible default when you are setting up and the wrong one when you are walking. */
-function togglePanel(force){
-  const body=document.body;
-  let open;
-  if(playing){
-    open = force===undefined ? !body.classList.contains('panelopen') : !!force;
-    body.classList.toggle('panelopen', open);
-  }else{
-    open = force===undefined ? body.classList.contains('nopanel') : !!force;
-    body.classList.toggle('nopanel', !open);
-  }
-  // one class the tab's own styling can read, rather than making the CSS reason about
-  // two different open-states that mean the same thing to it
-  body.classList.toggle('panel-open', open);
-  setTimeout(resize, 380);
-}
+/* togglePanel is gone -- see src/trails/panes.js. It had to reason about two resting
+   states (open in the lobby, closed during a walk) across two class names, and it ended
+   by scheduling a resize because the panel used to be in the stage's flex flow. The
+   drawer overlays in both states, so there is one resting state and nothing to resize. */
 /* WHERE A WALK STARTS WHEN NOBODY HAS PICKED YET.
 
    "Surprise me" is gone: it was a button that answered a spatial question with a dice
@@ -12457,9 +12576,14 @@ async function boot(bundleUrl){
      Saved pins still go straight there, and that asymmetry is deliberate rather than an
      oversight: a pin is a place YOU chose and named, so there is nothing to tell you about
      it that you do not already know -- the whole point of dropping one is to come back. */
+  /* The drawer is wired before the map loads, so the settings pane is reachable even on
+     the failure path below -- a walker whose world did not load needs the pane that has
+     the "load a map" controls in it, and that used to be the one thing a broken boot
+     could not open. */
+  initPanes({ onChange: () => updateTrailHud() });
   initMinimap({
     onTrailhead: i => showHereHead(i),
-    onSpot: sp => { placeAtSpot(sp); if(!playing) enterPlay(); toggleBigMap(false); },
+    onSpot: sp => { placeAtSpot(sp); if(!playing) enterPlay(); showPane(null); },
   });
   await loadMap(bundleUrl || DEFAULT_WORLD, !bundleUrl);
   renderRoster();
@@ -12477,7 +12601,11 @@ async function boot(bundleUrl){
 
      Guarded on the graph: with no map loaded there is nothing to walk on, and the lobby
      is the right place to be told the map failed rather than standing in an empty void. */
+  /* No graph means no trail to stand on, so there is no walk to start. Open settings
+     rather than leaving a lobby with nothing on it: that pane holds the drop zone, the
+     bundle picker and #mapNote, which is where loadMap has just written what went wrong. */
   if(getGraph()) enterPlay();
+  else showPane('settings');
   requestAnimationFrame(loop);
 }
 
@@ -12507,7 +12635,6 @@ $('#defaultMapBtn')?.addEventListener('click', async ()=>{
   renderFileChips();
   if(await loadMap(DEFAULT_WORLD, true)){ refreshMapUI(); placeAtHead(pickDefaultHead()); }
 });
-$('#mapBtn')?.addEventListener('click', ()=> toggleBigMap());
 tapBtn($('#touchBarkBtn'), doBark);
 tapBtn($('#tJump'), trailJump);
 tapBtn($('#tSneak'), toggleSneak);
@@ -12561,15 +12688,8 @@ $('#raceAgain')?.addEventListener('click', ()=>{
   if(c) startRace(c);
 });
 $('#raceDone')?.addEventListener('click', ()=> closeRaceCard());
-$('#bigmapClose')?.addEventListener('click', ()=> toggleBigMap(false));
-// mobile only (see trails.css's body.nopanel rule): slides the options panel off-screen
-// so the live pup/minimap preview underneath is reachable without leaving the setup
-// screen. Desktop never shows this button (icon.btn is display:none above 760px).
-$('#panelBtn')?.addEventListener('click', ()=> togglePanel());
-/* Same action, a second door. The header button vanishes with the chrome when a walk
-   starts; this one is fixed to the viewport and does not, so the panel stays reachable
-   mid-walk without a keyboard. */
-$('#panelTab')?.addEventListener('click', ()=> togglePanel());
+/* Every door into the drawer -- the two edge tabs, the two header tabs and the one ✕ --
+   is wired inside panes.js, which owns the state they set. */
 
 $('#playBtn')?.addEventListener('click', enterPlay);
 $('#exitBtn')?.addEventListener('click', exitPlay);
