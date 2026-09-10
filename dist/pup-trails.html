@@ -1550,6 +1550,54 @@ function climbPose(amt, t, legCount){
 
    Returned as a SIN VALUE rather than a phase so callers can cross-fade between gaits
    without the wrap discontinuity that lerping two angles across +-PI would give. */
+/* WHEN DOES A PAW ACTUALLY HIT THE GROUND?
+
+   A footstep sound driven by a timer is the audio version of the paw-slide this file
+   exists to remove: it drifts against the legs you can see, and at a gallop it flattens
+   the rhythm into a metronome. The honest answer is already here, in legSwingValue.
+
+   Swing is sin(phase + offset) and a positive Z swings a paw FORWARD, so a leg is at
+   full forward reach when sin(...) = +1 -- and that is touchdown, the instant it stops
+   reaching and starts pushing the ground backwards. So leg i plants whenever
+
+       phase + offset(i) == pi/2   (mod 2pi)
+
+   with the SAME trot/gallop offset blend legSwingValue uses, which is what makes the
+   audible rhythm change gait exactly when the visible one does: four even beats at a
+   walk, collapsing into the clustered hind-pair/fore-pair pattern of a gallop.
+
+   Two consequences worth having, both free: a frozen cycle (leapPose) advances no phase
+   and so makes no footsteps in mid-air, and a standing animal has dPhase 0 and is
+   silent. Neither needs a special case.
+
+   Returns the legs that crossed touchdown in (prevPhase, phase], in the order they did.
+   At most once per leg per frame -- a frame hitch large enough to span a whole stride
+   should drop the extra beats, not fire a burst of them. */
+function footfalls(prevPhase, phase, gallopAmt, legCount){
+  const hits = [];
+  if(!(phase > prevPhase)) return hits;
+  const a = clamp(gallopAmt, 0, 1);
+  const n = Math.max(0, Math.min(legCount|0, 4));
+  for(let i=0;i<n;i++){
+    const trotPhase = (i%2?Math.PI:0) + (i>1?Math.PI*0.5:0);
+    const front = i<2;
+    const lead  = (i%2) ? 0.22 : 0;
+    const gallopPhase = (front ? Math.PI*0.62 : 0) + lead;
+    const off = trotPhase + (gallopPhase - trotPhase)*a;
+    let td = (Math.PI*0.5 - off) % TWO_PI;
+    if(td < 0) td += TWO_PI;
+    // the first touchdown instant strictly after prevPhase. The ceil can land exactly ON
+    // prevPhase (leg 2 plants at phase 0, and a fresh cycle starts there), and a strict
+    // `>` would then drop that paw for the whole stride -- so step past it explicitly.
+    let at = td + Math.ceil((prevPhase - td)/TWO_PI)*TWO_PI;
+    if(at <= prevPhase) at += TWO_PI;
+    if(at <= phase) hits.push({leg:i, front, at});
+  }
+  // a gallop lands two paws within a few hundredths of a stride; order carries the rhythm
+  hits.sort((p, q)=> p.at - q.at);
+  return hits;
+}
+
 function legSwingValue(i, phase, gallopAmt){
   const trotPhase   = (i%2?Math.PI:0) + (i>1?Math.PI*0.5:0);
   // i<2 are the forelegs (dog/build.js and animal-models.js both put them at +x)
@@ -1684,6 +1732,7 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap
   const cp = onWall ? wallPose(t, legs.length)
            : (wildClimbAmt > 0.002 ? climbPose(wildClimbAmt, t, legs.length) : null);
 
+  const prevPhase = wildLegPhase;
   wildLegPhase += g.dPhase*(1 - (lp ? lp.freeze : 0));
 
   /* A hopper keeps its own pattern (both hind legs together, always) -- it has no trot
@@ -1720,6 +1769,12 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap
        bilateral, which is the thing that made the old pose read as a statue. */
     refs.bodyG.rotation.x = cp ? cp.roll : 0;
   }
+  /* Same split as dog-driver: the driver reports WHEN, main.js decides what it landed on.
+     A hopper uses its own two-beat pattern rather than the quadruped offsets, so its
+     footfalls come from the hind pair alone -- two legs, both planting together. */
+  if(onWall) return [];
+  return hop ? footfalls(prevPhase, wildLegPhase, 0, 2)
+             : footfalls(prevPhase, wildLegPhase, gal, legs.length);
 }
 
 /* ==== src/dog/params.js ==== */
@@ -2325,6 +2380,7 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, 
   const cp = onWall ? wallPose(t, R.legs.length)
            : (climbAmt > 0.002 ? climbPose(climbAmt, t, R.legs.length) : null);
 
+  const prevPhase = legPhase;
   legPhase += g.dPhase*(1 - (lp ? lp.freeze : 0));
 
   /* Sprinting switches the FOOTFALL ORDER, not just the tempo: hind pair together, then
@@ -2369,6 +2425,11 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, 
        bilateral, which is the thing that made the old pose read as a statue. */
     R.bodyG.rotation.x = cp ? cp.roll : 0;
   }
+  /* Handed back rather than played here: the driver knows WHEN a paw lands, and only
+     main.js knows what it landed ON. Splitting it that way keeps the driver free of the
+     world and the surface rules in one place. Nothing underfoot while clinging to a
+     wall, and a frozen leap cycle produces no crossings anyway. */
+  return onWall ? [] : footfalls(prevPhase, legPhase, gal, R.legs.length);
 }
 
 function setYaw(v){ setDogYaw(v); }
@@ -3594,7 +3655,11 @@ function startAt(){ return (AC ? AC.currentTime : 0) + LEAD; }
 let MASTER = null;
 function out(){
   if(!AC) return null;
-  if(!MASTER){ MASTER = AC.createGain(); MASTER.gain.value = 0.85; MASTER.connect(out()); }
+  /* AC.destination, never out(). MASTER is assigned on the line above, so a recursive
+     out() here returns MASTER itself and wires the master gain into a self-loop: every
+     voice still builds a correct graph, nothing throws, and not one sample reaches the
+     speakers. tools/smoke.js asserts a voice can actually reach the destination. */
+  if(!MASTER){ MASTER = AC.createGain(); MASTER.gain.value = 0.85; MASTER.connect(AC.destination); }
   return MASTER;
 }
 
@@ -3682,15 +3747,26 @@ function yip(pitch){
     woofBurst(startAt(), pitch/Math.sqrt(P.size), 0.09);
   });
 }
+/* Long enough that a footstep can start at a RANDOM OFFSET into it. A 0.3 s buffer
+   always replayed from zero makes every paw the identical waveform, and at four
+   footfalls a stride that periodicity is plainly audible -- it is the single thing that
+   makes a synthetic footstep sound synthetic. It also has to outlast the longest tail
+   any voice here asks for, which the old 0.3 s did not: splashSound already ran 0.36 s
+   and was reading past the end of its own buffer. */
+const NOISE_SECS = 1.2;
 let noiseBuf = null;
 function getNoise(){
   if(!AC) return null;
   if(!noiseBuf){
-    noiseBuf = AC.createBuffer(1, AC.sampleRate*0.3, AC.sampleRate);
+    noiseBuf = AC.createBuffer(1, Math.floor(AC.sampleRate*NOISE_SECS), AC.sampleRate);
     const d = noiseBuf.getChannelData(0);
     for(let i=0;i<d.length;i++) d[i] = Math.random()*2-1;
   }
   return noiseBuf;
+}
+/* A random start point that still leaves `dur` of buffer to play. */
+function noiseOffset(dur){
+  return Math.max(0, Math.random()*Math.max(0, NOISE_SECS - dur - 0.05));
 }
 function huffSound(){
   whenRunning(()=>{
@@ -3927,6 +4003,266 @@ function bonkSound(sizeMul){
     ng.gain.exponentialRampToValueAtTime(0.0001, t0+0.18);
     src.connect(nf).connect(ng).connect(out());
     src.start(t0); src.stop(t0+0.2);
+  });
+}
+
+/* ================================================================= PHYSICALITY
+
+   Footfalls, landings, scrambles. These are the sounds that make a body feel like it has
+   weight, and they follow different rules from everything above.
+
+   NOT QUEUED. Every other sound in this file is worth hearing slightly late -- a bark, a
+   catch, a countdown pip all still mean something 200 ms after the fact, which is why
+   whenRunning() banks them. A footstep does not: it belongs to a paw that has already
+   left the ground, and flushing four of them in a burst the moment the context unlocks
+   is worse than the silence it replaced. So a step fired before audio is live is
+   dropped, on purpose. */
+function nowOnly(fn){
+  initAudio();
+  if(AC && AC.state === 'running'){ try{ fn(); }catch(err){} }
+}
+
+/* A footstep is the most repeated sound in the game -- four per stride, and at a gallop
+   several strides a second -- so "correct but identical every time" is audibly wrong
+   here in a way it is nowhere else. Three things vary it: the SURFACE picks the voice,
+   the SPEED sets weight and brightness, and a per-step jitter keeps two consecutive paws
+   from being the same event twice.
+
+   Voiced as a soft snare rather than a thud: a short noise burst through a bandpass (the
+   rattle) laid over a brief low sine (the head). The split is deliberate -- the noise
+   carries the surface AND is the part that survives a laptop speaker, so the band sits
+   well clear of SPEAKER_FLOOR_HZ. The sine carries weight and is treated as garnish,
+   exactly as the bark notes above require: never let the floor carry the sound.
+
+     hz/q      the rattle: where the surface lives
+     d         decay. Hard ground is short and tight; soft ground swallows the tail
+     b/be      the head, start -> end. 0 means no head at all, which is what makes
+               grass read as a swish through vegetation rather than a drum
+     n/bg      relative level of rattle and head */
+const STEP_SURFACES = {
+  trail: {hz:1750, q:0.9, d:0.075, b:210, be:120, n:0.30, bg:0.16}, // packed dirt, gravel
+  grass: {hz:2700, q:0.5, d:0.105, b:0,   be:0,   n:0.24, bg:0.00}, // off-trail: all swish
+  rock:  {hz:3100, q:1.7, d:0.068, b:300, be:170, n:0.34, bg:0.12}, // bright, tight, clacky
+  wood:  {hz:1150, q:2.4, d:0.090, b:260, be:150, n:0.26, bg:0.18}, // hollow, resonant
+  sand:  {hz:1500, q:0.4, d:0.130, b:0,   be:0,   n:0.22, bg:0.00}, // dull, no tail at all
+};
+function stepSurface(name){ return STEP_SURFACES[name] || STEP_SURFACES.trail; }
+
+/* opts: {surface, speed 0..1, weight, size}
+   `speed` is a fraction of THIS animal's own range, not m/s -- same reasoning as
+   gallopAmount in gait.js, so a fox and a moose both brighten across their own gait. */
+function stepSound(opts){
+  const o = opts || {};
+  const S = stepSurface(o.surface);
+  const spd  = Math.max(0, Math.min(1, o.speed == null ? 0.45 : o.speed));
+  const w    = Math.max(0.12, Math.min(5, o.weight == null ? 1 : o.weight));
+  const size = Math.max(0.25, Math.min(4, Number(o.size) || (P ? P.size : 1)));
+  nowOnly(()=>{
+    const tN = startAt();
+    // one jitter per step, shared by band and level, so a single step stays coherent
+    const j = 1 + (Math.random()*2 - 1)*0.13;
+    // a bigger animal is lower and heavier-footed; same shape as the bark's size term
+    const sizeMul = 1/Math.pow(size, 0.35);
+    const bright = 0.82 + spd*0.42;          // most of what tells a run from a walk
+    const level  = (0.10 + spd*0.16)*w;
+    const dur    = S.d*(1.12 - spd*0.28);    // quicker feet, tighter steps
+
+    const src = AC.createBufferSource(); src.buffer = getNoise();
+    const bp = AC.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = S.q;
+    bp.frequency.setValueAtTime(Math.max(SPEAKER_FLOOR_HZ*1.6, S.hz*bright*sizeMul*j), tN);
+    // the rattle darkens as it dies, the way a struck surface actually does
+    bp.frequency.exponentialRampToValueAtTime(
+      Math.max(SPEAKER_FLOOR_HZ*1.2, S.hz*0.55*sizeMul), tN+dur);
+    const ng = AC.createGain();
+    ng.gain.setValueAtTime(0.0001, tN);
+    ng.gain.exponentialRampToValueAtTime(S.n*level*j, tN+0.004);   // near-instant attack
+    ng.gain.exponentialRampToValueAtTime(0.0001, tN+dur);
+    src.connect(bp).connect(ng).connect(out());
+    src.start(tN, noiseOffset(dur));
+    src.stop(tN+dur+0.02);
+
+    if(S.bg > 0){
+      const ob = AC.createOscillator(), bg = AC.createGain();
+      ob.type = 'sine';
+      /* The head's ATTACK stays above the speaker floor so the weight is audible on a
+         laptop; only its fall-off drops below, where it is felt on headphones and simply
+         absent everywhere else. That is the honest version of "low end is garnish". */
+      ob.frequency.setValueAtTime(Math.max(SPEAKER_FLOOR_HZ*1.05, S.b*sizeMul*j), tN);
+      ob.frequency.exponentialRampToValueAtTime(Math.max(60, S.be*sizeMul), tN+dur*0.9);
+      bg.gain.setValueAtTime(0.0001, tN);
+      bg.gain.exponentialRampToValueAtTime(S.bg*level, tN+0.006);
+      bg.gain.exponentialRampToValueAtTime(0.0001, tN+dur*0.95);
+      ob.connect(bg).connect(out());
+      ob.start(tN); ob.stop(tN+dur+0.02);
+    }
+  });
+}
+
+/* Touching down after a hop. The same voice as a step, leaned on harder -- a landing is
+   not a different material, it is the same paw arriving with more of the animal behind
+   it. `impact` is 0..1 (main.js derives it from fall speed), and only a real drop earns
+   the extra low thump; a hop off a kerb should not sound like a boulder. */
+function landSound(impact, surface, size){
+  const i = Math.max(0, Math.min(1, Number(impact) || 0));
+  stepSound({surface, size, speed:0.3 + i*0.5, weight:1.4 + i*2.4});
+  if(i < 0.34) return;
+  nowOnly(()=>{
+    const tN = startAt();
+    const sz = Math.max(0.25, Math.min(4, Number(size) || (P ? P.size : 1)));
+    const o1 = AC.createOscillator(), gn = AC.createGain();
+    o1.type = 'sine';
+    o1.frequency.setValueAtTime(Math.max(SPEAKER_FLOOR_HZ*1.02, 200/Math.pow(sz, 0.3)), tN);
+    o1.frequency.exponentialRampToValueAtTime(70, tN+0.17);
+    gn.gain.setValueAtTime(0.0001, tN);
+    gn.gain.exponentialRampToValueAtTime(0.10 + i*0.16, tN+0.008);
+    gn.gain.exponentialRampToValueAtTime(0.0001, tN+0.19);
+    o1.connect(gn).connect(out());
+    o1.start(tN); o1.stop(tN+0.21);
+  });
+}
+
+/* Pushing off. Deliberately NOT a snare: a jump is a shove against the ground, so this
+   is a short noise swell that grows and cuts rather than a struck transient. Without the
+   contrast a jump and a landing sound like the same event twice. */
+function jumpSound(surface, size){
+  const S = stepSurface(surface);
+  const sz = Math.max(0.25, Math.min(4, Number(size) || (P ? P.size : 1)));
+  nowOnly(()=>{
+    const tN = startAt(), dur = 0.13;
+    const src = AC.createBufferSource(); src.buffer = getNoise();
+    const bp = AC.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 0.7;
+    const lo = Math.max(SPEAKER_FLOOR_HZ*1.4, S.hz*0.6/Math.pow(sz, 0.3));
+    bp.frequency.setValueAtTime(lo, tN);
+    bp.frequency.exponentialRampToValueAtTime(lo*2.1, tN+dur);   // rises: effort, not impact
+    const gn = AC.createGain();
+    gn.gain.setValueAtTime(0.0001, tN);
+    gn.gain.exponentialRampToValueAtTime(0.13, tN+dur*0.7);      // swell...
+    gn.gain.exponentialRampToValueAtTime(0.0001, tN+dur);        // ...then gone
+    src.connect(bp).connect(gn).connect(out());
+    src.start(tN, noiseOffset(dur)); src.stop(tN+dur+0.02);
+  });
+}
+
+/* Scrabbling up something. A rasp, not a step: longer, noisier, no head at all, and
+   pitched by how much of the animal's weight is hanging off its front paws. main.js
+   repeats it on a timer while the scramble runs, so the length here is one scuff. */
+function scrabbleSound(size){
+  const sz = Math.max(0.25, Math.min(4, Number(size) || (P ? P.size : 1)));
+  nowOnly(()=>{
+    const tN = startAt(), dur = 0.16 + Math.random()*0.07;
+    const src = AC.createBufferSource(); src.buffer = getNoise();
+    const bp = AC.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.1;
+    const base = Math.max(SPEAKER_FLOOR_HZ*1.8, 2400/Math.pow(sz, 0.3));
+    bp.frequency.setValueAtTime(base*(0.85 + Math.random()*0.3), tN);
+    bp.frequency.exponentialRampToValueAtTime(base*0.5, tN+dur);
+    const gn = AC.createGain();
+    gn.gain.setValueAtTime(0.0001, tN);
+    gn.gain.exponentialRampToValueAtTime(0.085, tN+0.02);   // slower attack: a drag
+    gn.gain.exponentialRampToValueAtTime(0.0001, tN+dur);
+    src.connect(bp).connect(gn).connect(out());
+    src.start(tN, noiseOffset(dur)); src.stop(tN+dur+0.02);
+  });
+}
+
+/* ==================================================================== EVENTS */
+
+/* Catching an animal. Two halves, because a catch IS two things: the grab (a soft
+   physical tap, the same family as a footstep) and the delight (a quick rising figure).
+   The figure is a D major arpeggio taken fast -- three short notes, not a fanfare. This
+   used to be cheerBlip, which was also the race start, the arrival chime and the course
+   preview; one sound doing six jobs is most of why the game read as flat. */
+function catchSound(){
+  stepSound({surface:'grass', speed:0.5, weight:0.8});
+  whenRunning(()=>{
+    const tN = startAt();
+    [587.33, 880, 1174.66].forEach((fr, k)=>{
+      const at = tN + k*0.045;
+      const o1 = AC.createOscillator(), gn = AC.createGain();
+      o1.type = 'triangle'; o1.frequency.setValueAtTime(fr, at);
+      gn.gain.setValueAtTime(0.0001, at);
+      gn.gain.exponentialRampToValueAtTime(0.11, at+0.01);
+      gn.gain.exponentialRampToValueAtTime(0.0001, at+0.13);
+      o1.connect(gn).connect(out());
+      o1.start(at); o1.stop(at+0.15);
+    });
+  });
+}
+
+/* Race countdown. The brief was "non-annoying", and the two things that make a countdown
+   annoying are harshness and surprise: a square wave stabs, and a GO that arrives at the
+   same pitch as the pips gives you nothing to anticipate. So the pips are soft sines on
+   one steady note, and GO answers them a fifth above with a fifth under it -- you can
+   hear it coming, and it resolves rather than jabs.
+
+   `n` is 3, 2, 1. The last pip is a touch brighter so the run-up has some shape. */
+function countPip(n){
+  const k = Math.max(1, Math.min(3, Number(n) || 1));
+  whenRunning(()=>{
+    const tN = startAt();
+    const o1 = AC.createOscillator(), gn = AC.createGain();
+    o1.type = 'sine';
+    o1.frequency.setValueAtTime(523.25 * (k === 1 ? 1.12 : 1), tN);   // C5, last one lifts
+    gn.gain.setValueAtTime(0.0001, tN);
+    gn.gain.exponentialRampToValueAtTime(0.085, tN+0.012);
+    gn.gain.exponentialRampToValueAtTime(0.0001, tN+0.16);
+    o1.connect(gn).connect(out());
+    o1.start(tN); o1.stop(tN+0.18);
+  });
+}
+/* The release. A fifth above the pips (G5) with its own fifth beneath, held a little
+   longer and let down gently -- an open sound rather than a buzzer. */
+function goTone(){
+  whenRunning(()=>{
+    const tN = startAt();
+    [783.99, 1174.66].forEach((fr, k)=>{
+      const o1 = AC.createOscillator(), gn = AC.createGain();
+      o1.type = k ? 'sine' : 'triangle';
+      o1.frequency.setValueAtTime(fr, tN);
+      gn.gain.setValueAtTime(0.0001, tN);
+      gn.gain.exponentialRampToValueAtTime(k ? 0.05 : 0.11, tN+0.015);
+      gn.gain.exponentialRampToValueAtTime(0.0001, tN+0.34);
+      o1.connect(gn).connect(out());
+      o1.start(tN); o1.stop(tN+0.36);
+    });
+  });
+}
+
+/* Straying off the course line. This is the sound with the highest chance of becoming
+   hateful, because unlike a countdown it can fire again and again while the player is
+   already frustrated and looking for the way back. So: no buzzer, no rising urgency, no
+   stab. A soft falling minor third on a triangle -- the shape of "hm, not that way",
+   quiet enough to sit under the footsteps. main.js owns the repeat interval and keeps it
+   long; this only knows how to say it once. */
+function offCourseSound(){
+  whenRunning(()=>{
+    const tN = startAt();
+    [[440, 0], [369.99, 0.13]].forEach(([fr, dt])=>{
+      const at = tN + dt;
+      const o1 = AC.createOscillator(), gn = AC.createGain();
+      o1.type = 'triangle'; o1.frequency.setValueAtTime(fr, at);
+      gn.gain.setValueAtTime(0.0001, at);
+      gn.gain.exponentialRampToValueAtTime(0.065, at+0.016);
+      gn.gain.exponentialRampToValueAtTime(0.0001, at+0.19);
+      o1.connect(gn).connect(out());
+      o1.start(at); o1.stop(at+0.21);
+    });
+  });
+}
+/* Back on the line. The same two notes the other way up, which is what makes the pair
+   read as a question answered rather than as two unrelated noises. */
+function rejoinSound(){
+  whenRunning(()=>{
+    const tN = startAt();
+    [[369.99, 0], [554.37, 0.11]].forEach(([fr, dt])=>{
+      const at = tN + dt;
+      const o1 = AC.createOscillator(), gn = AC.createGain();
+      o1.type = 'triangle'; o1.frequency.setValueAtTime(fr, at);
+      gn.gain.setValueAtTime(0.0001, at);
+      gn.gain.exponentialRampToValueAtTime(0.07, at+0.014);
+      gn.gain.exponentialRampToValueAtTime(0.0001, at+0.2);
+      o1.connect(gn).connect(out());
+      o1.start(at); o1.stop(at+0.22);
+    });
   });
 }
 
@@ -7547,7 +7883,11 @@ function catchNear(px, pz){
   c.g.scale.setScalar(c.S.scale*CARRY.mount);
   if(c.refs.headG) c.refs.headG.rotation.z = 0;
   comicBurst('\ud83e\udd17 ' + c.S.nm + '!', c.x, c.y + c.S.scale*1.6, c.z, '#7bc47f');
-  cheerBlip();
+  /* Its own sound, not the generic blip. cheerBlip was doing six jobs -- the catch, the
+     race start, the arrival chime, the course preview -- and one sound for six events is
+     most of why the game read as flat. A catch is two things at once and catchSound says
+     both: the grab (a soft physical tap) and the delight (a quick rising figure). */
+  catchSound();
   return c;
 }
 
@@ -9960,6 +10300,11 @@ let browseMode = 'dog';     // which roster grid the panel is showing -- indepen
                              // `mode` above, so you can look at Wildlife without it
                              // changing who you're actually playing as until you tap one
 const player = { x:0, z:0, y:0, vy:0, yaw:0, speed:0, dist:0, sneaking:false, barkT:0,
+                 /* What the last movement frame decided is underfoot, for the footstep
+                    voice. Defaulted so a footfall arriving before movement has run (a
+                    placement, a lobby preview) still has a surface to speak with. */
+                 surface:'trail',
+                 scuffT:0,          // countdown between climbing scuffs
                  /* climbT counts DOWN while the pup is scrambling up a step. It is set
                     only by an on-foot step-up (see moveOffTrail) -- never by a jump,
                     which is the whole point: jumping a ledge is the fast way over it and
@@ -10133,6 +10478,28 @@ function ensureAvatar(){
   setWildVisible(mode==='wild');
 }
 
+/* Turn the drivers' footfall reports into sound. Everything that varies is a fact the
+   game already has: how fast this animal is moving as a fraction of ITS OWN range -- so
+   a fox and a moose each brighten across their own gait rather than against an absolute
+   m/s, the same reasoning gallopAmount uses -- what is underfoot, and which pair the paw
+   belongs to.
+
+   Hind paws land heavier than front ones. That is not decoration: a quadruped drives off
+   its hind legs, and giving both pairs identical weight is what makes a gallop read as a
+   drum machine rather than an animal. A sneaking pup is PLACING its feet, so it gets the
+   same rhythm at a fraction of the level rather than a different sound. */
+function playFootfalls(steps, speed, sneaking){
+  if(!steps || !steps.length) return;
+  const ceiling = Math.max(0.01, currentTopSpeed()*currentRunMul());
+  const frac = clamp(speed/ceiling, 0, 1);
+  const hush = sneaking ? 0.32 : 1;
+  for(const s of steps){
+    stepSound({ surface: player.surface,
+                speed: frac,
+                weight: (s.front ? 0.78 : 1.12)*hush });
+  }
+}
+
 function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
   // standingY, not terrainY: it is the ONE definition of "what am I standing on",
   // shared with the critters and with everything world.js plants on a path. Off-trail it
@@ -10156,17 +10523,19 @@ function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
   const leap = (!player.wall && jumpY > 0.02) ? 1 : 0;
   const rise = clamp(player.vy/7, -1, 1);
   let radius = 0.5;
+  let steps = null;
   if(mode==='dog'){
     setDogPos(player.x, player.z);
     setYaw(player.yaw);
-    updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise, !!player.wall);
+    steps = updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise, !!player.wall);
     radius = dogShadowRadius();
   }else{
     wildPos.set(player.x, 0, player.z);
     setWildYaw(player.yaw);
-    updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise, !!player.wall);
+    steps = updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise, !!player.wall);
     radius = wildShadowRadius();
   }
+  playFootfalls(steps, speed, sneaking);
   updateShadow(player.x, player.z, groundY, jumpY, radius, true);
   /* Where a passenger rides, measured off the LIVE rig rather than guessed. `radius` is
      the shadow radius, which both drivers derive from their own measured leg length in
@@ -10307,9 +10676,16 @@ let previewCourse = null;
    rule and it lives in courses.js, so a race and the line drawn on the map can never
    disagree about how far round somebody is. */
 const race = {on:false, course:null, count:0, go:0, t:0, frac:0, off:0, done:false,
-              trail:[], trailT:0, ghost:null, ghostFrac:0, gap:null};
+              trail:[], trailT:0, ghost:null, ghostFrac:0, gap:null,
+              pip:-1,        // last countdown number spoken; -1 so the opening 3 counts
+              warned:false,  // has the walker been told they are off the line?
+              offT:0};       // countdown to repeating that
 const RACE_COUNT_SECS = 3;
 const RACE_GO_SECS = 0.8;
+/* How long before the off-course cue repeats. Deliberately long: this fires at someone
+   who is already lost, and a reminder that arrives faster than they can read the map is
+   the difference between a helpful game and one people mute. */
+const OFF_REMIND_S = 6;
 /* Which ghost to chase: 'best' (the course record, by anyone), 'mine' (your own best with
    the animal you are playing) or 'off'. Three rather than two because they are genuinely
    different sessions -- chasing a record you have never been near is discouraging when
@@ -10507,6 +10883,7 @@ function startRace(course){
   previewCourse = course;
   race.on = true; race.course = course; race.done = false;
   race.count = RACE_COUNT_SECS; race.go = 0; race.t = 0; race.frac = 0; race.off = 0;
+  race.pip = -1; race.warned = false; race.offT = 0;
   /* At the start line, facing the way the course goes -- not facing wherever the walk left
      you. Standing on a start line pointed backwards would cost a second nobody chose to
      spend, on a clock that is the entire point of the mode. */
@@ -10539,6 +10916,7 @@ function quitRace(){
   if(!race.on) return;
   race.on = false; race.done = false; race.course = null;
   race.count = 0; race.go = 0; race.t = 0; race.frac = 0;
+  race.pip = -1; race.warned = false; race.offT = 0;
   race.trail = []; race.trailT = 0; race.ghost = null; race.gap = null;
   hideGhost();
   document.body.classList.remove('racing');
@@ -10567,7 +10945,16 @@ function updateRace(dt){
   if(!race.on) return;
   if(race.count > 0){
     race.count -= dt;
-    if(race.count <= 0){ race.count = 0; race.go = RACE_GO_SECS; cheerBlip(); }
+    /* One pip per whole second, keyed to the number the HUD is SHOWING rather than to a
+       separate timer, so the two can never disagree and a long frame cannot skip or
+       double a pip. Tracking the last number pipped (instead of watching for a crossing)
+       is also what gets the opening "3" -- there is no crossing into it. */
+    const n = Math.max(0, Math.ceil(race.count));
+    if(n !== race.pip){
+      race.pip = n;
+      if(n >= 1) countPip(n);
+    }
+    if(race.count <= 0){ race.count = 0; race.go = RACE_GO_SECS; goTone(); }
     updateRaceHud();
     return;
   }
@@ -10587,9 +10974,24 @@ function updateRace(dt){
     const onM = COURSE_ON_M*(getMapScale() || 1);
     if(pr.d <= onM){
       race.frac = Math.max(race.frac, pr.frac);
-      race.off = 0;
+      /* Rejoining only speaks if you had strayed far enough to have been TOLD. Without
+         that guard, brushing the edge of the tolerance would chime every time the
+         distance wobbled across it. */
+      if(race.warned) rejoinSound();
+      race.warned = false;
+      race.off = 0; race.offT = 0;
     }else{
       race.off = pr.d/(getMapScale() || 1);
+      /* The nag, and the sound most able to become hateful: it can fire repeatedly at
+         someone already lost and already annoyed. So it says it once on the way out, then
+         waits a long OFF_REMIND_S before saying it again, and never escalates. A player
+         who knows they are off the line does not need to be told faster. */
+      race.offT -= dt;
+      if(!race.warned || race.offT <= 0){
+        offCourseSound();
+        race.warned = true;
+        race.offT = OFF_REMIND_S;
+      }
     }
     setRaceFrac(race.frac);
   }
@@ -11324,7 +11726,10 @@ function trailJump(){
   }else{
     catchNear(player.x, player.z);
   }
-  if(player.y === 0) player.vy = 9.5;
+  /* Only when the hop actually happens. `trailJump` is also the catch and release button,
+     so firing this unconditionally would scuff every time you picked something up
+     without moving. */
+  if(player.y === 0){ player.vy = 9.5; jumpSound(player.surface); }
   /* A jump AT a rock catches it. Checked after the hop is launched so the pup is already
      rising when it takes hold, which is what makes the first catch of a chain land partway
      up the face rather than at its foot. */
@@ -11468,11 +11873,36 @@ function loop(t){
      is exactly the set of cliff-edge spots where this was reachable. */
   const inCorridor = nt.d <= nt.hw;
   const nearTrail = nt.d < 1.5;
+  /* What is underfoot, for the footstep voice. Derived from what movement ALREADY knows
+     rather than from a new material system: `inCorridor` is the same test that decides
+     you are standing on the tread at all, so the sound changes at exactly the boundary
+     the ground does. Anything else would need a per-polygon material table nothing else
+     in the game wants, and would drift out of step with the surface you can see.
+
+     Rock is the scramble case rather than a place: a kerb or a face is stone whichever
+     side of the trail edge it sits on, and it is the one surface you hear before you can
+     see why. */
+  player.surface = (player.climbT > 0 || player.wall) ? 'rock'
+                 : (inCorridor ? 'trail' : 'grass');
   const surf = nearTrail ? 1 : 0.6;
   refreshOnTrail(nt);          // reuse the lookup above rather than hashing twice a frame
   if(rec.on) sampleRecording(nt, dt);   // same lookup again: the trail named in the HUD
                                         // and the trail being recorded are one answer
   if(player.climbT > 0) player.climbT = Math.max(0, player.climbT - dt);
+  /* Scrabbling. A scramble is not a sequence of discrete footfalls -- the paws are
+     dragging at the stone rather than striking it -- so this is a repeat on its own
+     timer rather than anything the gait phase could report. The interval is jittered
+     because a scuff landing on an exact beat is the thing that would turn a climb into a
+     rhythm loop, which is the one way this becomes annoying. */
+  if(player.climbT > 0 || player.wall){
+    player.scuffT -= dt;
+    if(player.scuffT <= 0){
+      scrabbleSound();
+      player.scuffT = 0.17 + Math.random()*0.13;
+    }
+  }else{
+    player.scuffT = 0;      // next contact scuffs immediately, not after a stale delay
+  }
   // scrambling drags the top speed down; it does NOT touch the jump, which is what makes
   // "jump the big steps" the faster line through broken ground
   const climbDrag = player.climbT > 0 ? CLIMB_SLOW : 1;
@@ -11526,8 +11956,18 @@ function loop(t){
      applies its own slide), and letting the fall integrator write it too would drop the
      pup off the rock as fast as it caught it. */
   if(!onWall){
+    const wasAir = player.y > 0;
+    const fell = player.vy;                 // impact speed, before the clamp discards it
     player.vy-=26*dt; player.y=Math.max(0,player.y+player.vy*dt);
-    if(player.y===0) player.vy=Math.max(0,player.vy);
+    if(player.y===0){
+      /* The one frame where a landing is knowable. The clamp below is about to throw the
+         downward velocity away, so the impact has to be read here or not at all -- and
+         `wasAir` is what stops a pup standing still on the ground from re-landing every
+         frame. Scaled against the jump's own launch speed (9.5) rather than an absolute,
+         so stepping off a kerb is a tap and a drop off a terrace is a thump. */
+      if(wasAir && fell < -1.5) landSound(clamp(-fell/9.5, 0, 1), player.surface);
+      player.vy=Math.max(0,player.vy);
+    }
   }
 
   /* NEVER INSIDE THE ROCK. Checked as an invariant after everything else has had its say,

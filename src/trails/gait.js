@@ -175,6 +175,54 @@ function climbPose(amt, t, legCount){
 
    Returned as a SIN VALUE rather than a phase so callers can cross-fade between gaits
    without the wrap discontinuity that lerping two angles across +-PI would give. */
+/* WHEN DOES A PAW ACTUALLY HIT THE GROUND?
+
+   A footstep sound driven by a timer is the audio version of the paw-slide this file
+   exists to remove: it drifts against the legs you can see, and at a gallop it flattens
+   the rhythm into a metronome. The honest answer is already here, in legSwingValue.
+
+   Swing is sin(phase + offset) and a positive Z swings a paw FORWARD, so a leg is at
+   full forward reach when sin(...) = +1 -- and that is touchdown, the instant it stops
+   reaching and starts pushing the ground backwards. So leg i plants whenever
+
+       phase + offset(i) == pi/2   (mod 2pi)
+
+   with the SAME trot/gallop offset blend legSwingValue uses, which is what makes the
+   audible rhythm change gait exactly when the visible one does: four even beats at a
+   walk, collapsing into the clustered hind-pair/fore-pair pattern of a gallop.
+
+   Two consequences worth having, both free: a frozen cycle (leapPose) advances no phase
+   and so makes no footsteps in mid-air, and a standing animal has dPhase 0 and is
+   silent. Neither needs a special case.
+
+   Returns the legs that crossed touchdown in (prevPhase, phase], in the order they did.
+   At most once per leg per frame -- a frame hitch large enough to span a whole stride
+   should drop the extra beats, not fire a burst of them. */
+function footfalls(prevPhase, phase, gallopAmt, legCount){
+  const hits = [];
+  if(!(phase > prevPhase)) return hits;
+  const a = clamp(gallopAmt, 0, 1);
+  const n = Math.max(0, Math.min(legCount|0, 4));
+  for(let i=0;i<n;i++){
+    const trotPhase = (i%2?Math.PI:0) + (i>1?Math.PI*0.5:0);
+    const front = i<2;
+    const lead  = (i%2) ? 0.22 : 0;
+    const gallopPhase = (front ? Math.PI*0.62 : 0) + lead;
+    const off = trotPhase + (gallopPhase - trotPhase)*a;
+    let td = (Math.PI*0.5 - off) % TWO_PI;
+    if(td < 0) td += TWO_PI;
+    // the first touchdown instant strictly after prevPhase. The ceil can land exactly ON
+    // prevPhase (leg 2 plants at phase 0, and a fresh cycle starts there), and a strict
+    // `>` would then drop that paw for the whole stride -- so step past it explicitly.
+    let at = td + Math.ceil((prevPhase - td)/TWO_PI)*TWO_PI;
+    if(at <= prevPhase) at += TWO_PI;
+    if(at <= phase) hits.push({leg:i, front, at});
+  }
+  // a gallop lands two paws within a few hundredths of a stride; order carries the rhythm
+  hits.sort((p, q)=> p.at - q.at);
+  return hits;
+}
+
 function legSwingValue(i, phase, gallopAmt){
   const trotPhase   = (i%2?Math.PI:0) + (i>1?Math.PI*0.5:0);
   // i<2 are the forelegs (dog/build.js and animal-models.js both put them at +x)
@@ -226,5 +274,5 @@ function leapPose(amt, rise, legCount){
   };
 }
 
-export { gaitStep, climbPose, wallPose, leapPose, legSwingValue, gallopAmount,
+export { gaitStep, climbPose, wallPose, leapPose, legSwingValue, gallopAmount, footfalls,
          STRIDE_MIN_RATIO, STRIDE_MAX_RATIO, TARGET_CADENCE };

@@ -9,7 +9,7 @@ import { clamp, lerp, mulberry32 } from '../core/math.js';
 import { scene, disposeGroup } from '../core/render.js';
 import { makeAnimalModel } from '../city/animal-models.js';
 import { SPECIES } from '../data/species.js';
-import { gaitStep, climbPose, wallPose, leapPose, legSwingValue, gallopAmount } from './gait.js';
+import { gaitStep, climbPose, wallPose, leapPose, legSwingValue, gallopAmount, footfalls } from './gait.js';
 
 let group = null, refs = null, speciesKey = null, S = null;
 let wildLegPhase = 0, wildBodyBaseY = 0, wildClimbAmt = 0, wildLeapAmt = 0;
@@ -80,6 +80,7 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap
   const cp = onWall ? wallPose(t, legs.length)
            : (wildClimbAmt > 0.002 ? climbPose(wildClimbAmt, t, legs.length) : null);
 
+  const prevPhase = wildLegPhase;
   wildLegPhase += g.dPhase*(1 - (lp ? lp.freeze : 0));
 
   /* A hopper keeps its own pattern (both hind legs together, always) -- it has no trot
@@ -116,6 +117,12 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap
        bilateral, which is the thing that made the old pose read as a statue. */
     refs.bodyG.rotation.x = cp ? cp.roll : 0;
   }
+  /* Same split as dog-driver: the driver reports WHEN, main.js decides what it landed on.
+     A hopper uses its own two-beat pattern rather than the quadruped offsets, so its
+     footfalls come from the hind pair alone -- two legs, both planting together. */
+  if(onWall) return [];
+  return hop ? footfalls(prevPhase, wildLegPhase, 0, 2)
+             : footfalls(prevPhase, wildLegPhase, gal, legs.length);
 }
 
 export { spawnWild, updateWild, setWildYaw, setWildVisible, topSpeedFor, spookRadiusFor,

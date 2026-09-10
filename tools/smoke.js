@@ -231,10 +231,38 @@ window.fetch = global.fetch;
    reproduce, which is invisible to any test that only asks "did it make a sound". This
    stub records what is scheduled so the assertions can ask what BAND it was scheduled in,
    and whether anything was scheduled against a context that was still suspended. */
-const AUDIO = { osc: [], scheduledWhileSuspended: 0, nodes: 0, live: null };
+/* The edge list matters as much as the band. A master gain wired to itself instead of to
+   destination builds a flawless-looking graph -- right voices, right frequencies, no
+   error -- and emits nothing at all, because no path terminates at the speakers. Asking
+   "was something scheduled" cannot see that; only "can a voice REACH destination" can. */
+const AUDIO = { osc: [], filt: [], starts: [], scheduledWhileSuspended: 0, nodes: 0, live: null, edges: [], dest: null };
+/* Is there any path from a voice (oscillator / buffer source) to AC.destination? */
+AUDIO.voiceReachesDestination = function(){
+  if(!AUDIO.dest) return false;
+  const adj = new Map();
+  for(const [f, t] of AUDIO.edges){ if(!adj.has(f)) adj.set(f, []); adj.get(f).push(t); }
+  const reaches = (start)=>{
+    const seen = new Set([start]); const stack = [start];
+    while(stack.length){
+      const cur = stack.pop();
+      if(cur === AUDIO.dest) return true;
+      for(const nxt of (adj.get(cur) || [])) if(!seen.has(nxt)){ seen.add(nxt); stack.push(nxt); }
+    }
+    return false;
+  };
+  const voices = new Set();
+  for(const [f] of AUDIO.edges) if(/^(osc|src)\d+$/.test(f)) voices.add(f);
+  return voices.size > 0 && [...voices].every(reaches);
+};
+AUDIO.selfLoops = ()=> AUDIO.edges.filter(([f, t])=> f === t);
 class FakeParam {
   constructor(kind, name, ctx){ this.kind=kind; this.name=name; this.ctx=ctx; this.value=0; }
   _rec(v){ if(this.name==='freq' && this.kind.startsWith('osc')) AUDIO.osc.push(v);
+           /* Filter bands, recorded separately from oscillator pitch. A footstep is a
+              NOISE burst -- it has no oscillator to read a frequency off, so the band it
+              is heard in lives entirely in its bandpass, and a suite that only watches
+              oscillators is blind to whether a step is audible at all. */
+           if(this.name==='freq' && this.kind.startsWith('filt')) AUDIO.filt.push(v);
            if(this.ctx && this.ctx.state !== 'running') AUDIO.scheduledWhileSuspended++; }
   setValueAtTime(v){ this._rec(v); return this; }
   exponentialRampToValueAtTime(v){ this._rec(v); return this; }
@@ -248,13 +276,25 @@ class FakeNode {
     this.gain = new FakeParam(this.kind, 'gain', ctx);
     this.Q = new FakeParam(this.kind, 'Q', ctx);
   }
-  connect(d){ return d; }
-  start(){ if(this.ctx && this.ctx.state !== 'running') AUDIO.scheduledWhileSuspended++; }
+  /* A real AudioNode.connect(null) throws; do the same rather than quietly swallowing a
+     null out(), and record the edge so reachability is testable. */
+  connect(d){
+    if(d == null) throw new TypeError('connect(): destination node is null');
+    AUDIO.edges.push([this.kind, d.kind]);
+    return d;
+  }
+  /* `offset` is the second argument to BufferSource.start, and it is the whole of the
+     anti-repetition guarantee for footsteps: recorded so a test can prove two steps are
+     not the same slice of noise played twice. */
+  start(when, offset){
+    if(this.ctx && this.ctx.state !== 'running') AUDIO.scheduledWhileSuspended++;
+    if(this.kind.startsWith('src')) AUDIO.starts.push(offset == null ? 0 : offset);
+  }
   stop(){}
 }
 global.AudioContext = window.AudioContext = class {
   constructor(){ this.state = 'suspended'; this.sampleRate = 44100;
-    this.destination = new FakeNode('dest', this); AUDIO.live = this; }
+    this.destination = new FakeNode('dest', this); AUDIO.dest = this.destination.kind; AUDIO.live = this; }
   get currentTime(){ return 5; }
   resume(){ return Promise.resolve().then(()=>{ this.state = 'running'; }); }
   createOscillator(){ return new FakeNode('osc', this); }
@@ -2676,6 +2716,23 @@ function assertAll(window, errors, stats) {
     check('the queued bark plays as soon as the context comes up',
       A.osc.length > 0, `${A.osc.length} frequency points released`);
 
+    /* A correct band is worth nothing if the graph never terminates at the speakers.
+       `MASTER.connect(out())` reads fine and self-loops the master gain, because MASTER is
+       already assigned when the recursive out() runs -- every voice then builds correctly,
+       throws nothing, and is inaudible on every device including headphones. It must be
+       AC.destination. These two assertions are the only thing standing between that
+       one-word slip and a silent game. */
+    /* Do NOT clear A.edges here. The master gain is built once, lazily, on the first
+       sound of the session, so the single master -> destination edge is already in the
+       list; wiping it would fake exactly the failure being tested for. */
+    barkSound(1);
+    check('a bark can actually reach the speakers',
+      A.voiceReachesDestination(),
+      `${A.edges.length} edges, ${A.edges.filter(([, t]) => t === A.dest).length} into destination`);
+    check('no audio node is wired to itself',
+      A.selfLoops().length === 0,
+      A.selfLoops().map(e => e.join(' -> ')).join(', ') || 'none');
+
     const band = (fn) => { A.osc.length = 0; fn(); return A.osc.slice(); };
 
     const barkHz = band(() => barkSound(1));
@@ -2703,6 +2760,105 @@ function assertAll(window, errors, stats) {
     check('nothing is ever scheduled against a suspended context',
       A.scheduledWhileSuspended === 0, `${A.scheduledWhileSuspended} events`);
     check('the audio context ends up running', audioState() === 'running', audioState());
+  }
+
+  /* ---- footfalls: the rhythm has to come from the legs, not from a timer -------
+     A footstep driven by a metronome drifts against the legs you can see and flattens a
+     gallop into a drum machine. gait.js solves for the real touchdown instants out of the
+     same phase maths legSwingValue poses with, so these assertions are about the GAIT,
+     not about the sound: get the beats wrong and no amount of voicing rescues it. */
+  {
+    const TAU = Math.PI*2;
+    const gaps = (hits) => hits.map((h, i) =>
+      i ? h.at - hits[i-1].at : h.at + TAU - hits[hits.length-1].at);
+
+    const walk = footfalls(0, TAU, 0, 4);
+    check('a walking stride plants each of the four paws exactly once',
+      walk.length === 4, `${walk.length} footfalls per stride`);
+    check('a walk spaces its four beats evenly',
+      walk.length === 4 && gaps(walk).every(g => Math.abs(g - Math.PI/2) < 0.02),
+      walk.length === 4 ? gaps(walk).map(g => g.toFixed(2)).join(', ') : '');
+
+    /* A gallop is not four even beats taken faster -- it is two PAIRS, hind then fore,
+       each pair landing a fraction of a stride apart. That clustering is the whole
+       audible difference between a run and a fast walk. */
+    const gal = footfalls(0, TAU, 1, 4);
+    const gg = gal.length === 4 ? gaps(gal).slice().sort((a, b) => a - b) : [];
+    check('a gallop lands as two tight pairs, not four even beats',
+      gal.length === 4 && gg[0] < 0.3 && gg[1] < 0.3 && gg[2] > 1.0 && gg[3] > 1.0,
+      gg.length ? gg.map(g => g.toFixed(2)).join(', ') : `${gal.length} footfalls`);
+
+    /* Both fall out of the phase, with no special case: a leap freezes the cycle and a
+       standing animal has no dPhase, so neither can produce a beat. */
+    check('a frozen or standing gait makes no footfall at all',
+      footfalls(1.4, 1.4, 0, 4).length === 0 && footfalls(2.0, 1.9, 0, 4).length === 0);
+    /* A frame long enough to span several strides should drop the extra beats rather
+       than fire a burst of them -- a hitch must not sound like a machine gun. */
+    check('a long frame drops the beats it skipped instead of firing them all',
+      footfalls(0, TAU*5, 0, 4).length === 4,
+      `${footfalls(0, TAU*5, 0, 4).length} over five strides of phase`);
+  }
+
+  /* ---- the footstep voice ----------------------------------------------------- */
+  {
+    const A = global.__AUDIO;
+    const step = (opts) => { A.filt.length = 0; A.starts.length = 0; stepSound(opts); return A.filt.slice(); };
+
+    const trail = step({surface:'trail', speed:0.5});
+    check('a footstep actually schedules a band',
+      trail.length > 0, `${trail.length} band points`);
+    /* Same rule the bark had to learn: the part carrying the sound must sit where a
+       laptop can reproduce it. A footstep's carrier is its NOISE band, not a pitch. */
+    check('a footstep is voiced above the speaker floor',
+      trail.length > 0 && Math.min(...trail) >= speakerFloorHz(),
+      trail.length ? `${Math.round(Math.min(...trail))} Hz (floor ${speakerFloorHz()})` : '');
+
+    const grass = step({surface:'grass', speed:0.5});
+    check('the ground underfoot actually changes the sound',
+      grass.length > 0 && Math.max(...grass) > Math.max(...trail)*1.2,
+      `trail ${Math.round(Math.max(...trail))} Hz vs grass ${Math.round(Math.max(...grass))} Hz`);
+    /* Grass has no drum head at all, which is what makes off-trail read as a swish
+       through vegetation rather than as a quieter drum. */
+    check('soft ground is a swish, not a drum',
+      stepSurface('grass').bg === 0 && stepSurface('trail').bg > 0);
+
+    const fast = step({surface:'trail', speed:1});
+    check('running brightens the step against walking',
+      Math.max(...fast) > Math.max(...trail),
+      `walk ${Math.round(Math.max(...trail))} Hz vs run ${Math.round(Math.max(...fast))} Hz`);
+
+    /* The anti-repetition guarantee. Four footfalls a stride replaying the identical
+       slice of noise is the one artefact that makes a footstep sound synthetic, so each
+       step must start somewhere else in the buffer. */
+    const offs = [];
+    for(let i=0;i<12;i++){ A.starts.length = 0; stepSound({surface:'trail', speed:0.6}); offs.push(A.starts[0]); }
+    check('consecutive footsteps are not the same slice of noise twice',
+      new Set(offs.map(o => Math.round(o*1000))).size >= 10,
+      `${new Set(offs.map(o => Math.round(o*1000))).size} distinct offsets in 12 steps`);
+
+    /* Footsteps are the one sound in the file that must NOT be banked. A bark is worth
+       hearing late; a paw that has already left the ground is not, and flushing four of
+       them the instant the context unlocks is worse than the silence. */
+    if(A.live){
+      A.live.state = 'suspended';
+      const queued = pendingSounds();
+      A.filt.length = 0;
+      stepSound({surface:'trail', speed:0.6});
+      check('a footstep fired before audio is live is dropped, not queued',
+        pendingSounds() === queued && A.filt.length === 0,
+        `${pendingSounds() - queued} queued, ${A.filt.length} scheduled`);
+      A.live.state = 'running';
+      flushPending();
+    }
+
+    /* The countdown's shape: GO has to ANSWER the pips rather than repeat them, or there
+       is nothing to anticipate and it reads as a fourth pip. */
+    const tones = (fn) => { A.osc.length = 0; fn(); return A.osc.slice(); };
+    const pip = tones(() => countPip(2));
+    const go  = tones(() => goTone());
+    check('the GO tone answers the countdown rather than repeating it',
+      pip.length > 0 && go.length > 0 && Math.max(...go) > Math.max(...pip)*1.3,
+      `pip ${Math.round(Math.max(...pip))} Hz vs go ${Math.round(Math.max(...go))} Hz`);
   }
 
   /* ---- big animals stand their ground ---------------------------------------- */

@@ -9,7 +9,7 @@
    be the wrong direction for the dependency arrow to point. */
 import { clamp, lerp } from '../core/math.js';
 import { P, dog, R, dogPos, dogYaw, STATS, setDog, setDogYaw } from '../dog/runtime.js';
-import { gaitStep, climbPose, wallPose, leapPose, legSwingValue, gallopAmount } from './gait.js';
+import { gaitStep, climbPose, wallPose, leapPose, legSwingValue, gallopAmount, footfalls } from './gait.js';
 
 let legPhase = 0;
 let crouchAmt = 0;
@@ -111,6 +111,7 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, 
   const cp = onWall ? wallPose(t, R.legs.length)
            : (climbAmt > 0.002 ? climbPose(climbAmt, t, R.legs.length) : null);
 
+  const prevPhase = legPhase;
   legPhase += g.dPhase*(1 - (lp ? lp.freeze : 0));
 
   /* Sprinting switches the FOOTFALL ORDER, not just the tempo: hind pair together, then
@@ -155,6 +156,11 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, 
        bilateral, which is the thing that made the old pose read as a statue. */
     R.bodyG.rotation.x = cp ? cp.roll : 0;
   }
+  /* Handed back rather than played here: the driver knows WHEN a paw lands, and only
+     main.js knows what it landed ON. Splitting it that way keeps the driver free of the
+     world and the surface rules in one place. Nothing underfoot while clinging to a
+     wall, and a frozen leap cycle produces no crossings anyway. */
+  return onWall ? [] : footfalls(prevPhase, legPhase, gal, R.legs.length);
 }
 
 function setYaw(v){ setDogYaw(v); }

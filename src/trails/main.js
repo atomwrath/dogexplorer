@@ -34,7 +34,9 @@ import { addCourse, courseBestFor, courseBestOverall, courseFinished, courseLeng
 import { setGhostAvatar, placeGhost, hideGhost, disposeGhost, getGhostGroup } from './ghost.js';
 import { comicBurst, updateFX } from '../core/fx.js';
 import { shakeT, setShake, decayShake } from '../core/shake.js';
-import { barkSound, cheerBlip, initAudio, thudSound } from '../core/audio.js';
+import { barkSound, cheerBlip, initAudio, thudSound,
+         stepSound, landSound, jumpSound, scrabbleSound,
+         countPip, goTone, offCourseSound, rejoinSound } from '../core/audio.js';
 
 import { addLayers, clearLayers, compass, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapId, getMapScale, getPathMix, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, loadWorld, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY, areaBlocked, areaSolidTop, nearestSolidFace, solidEmbed, distToSolid } from './world.js';
 
@@ -73,6 +75,11 @@ let browseMode = 'dog';     // which roster grid the panel is showing -- indepen
                              // `mode` above, so you can look at Wildlife without it
                              // changing who you're actually playing as until you tap one
 const player = { x:0, z:0, y:0, vy:0, yaw:0, speed:0, dist:0, sneaking:false, barkT:0,
+                 /* What the last movement frame decided is underfoot, for the footstep
+                    voice. Defaulted so a footfall arriving before movement has run (a
+                    placement, a lobby preview) still has a surface to speak with. */
+                 surface:'trail',
+                 scuffT:0,          // countdown between climbing scuffs
                  /* climbT counts DOWN while the pup is scrambling up a step. It is set
                     only by an on-foot step-up (see moveOffTrail) -- never by a jump,
                     which is the whole point: jumping a ledge is the fast way over it and
@@ -246,6 +253,28 @@ function ensureAvatar(){
   setWildVisible(mode==='wild');
 }
 
+/* Turn the drivers' footfall reports into sound. Everything that varies is a fact the
+   game already has: how fast this animal is moving as a fraction of ITS OWN range -- so
+   a fox and a moose each brighten across their own gait rather than against an absolute
+   m/s, the same reasoning gallopAmount uses -- what is underfoot, and which pair the paw
+   belongs to.
+
+   Hind paws land heavier than front ones. That is not decoration: a quadruped drives off
+   its hind legs, and giving both pairs identical weight is what makes a gallop read as a
+   drum machine rather than an animal. A sneaking pup is PLACING its feet, so it gets the
+   same rhythm at a fraction of the level rather than a different sound. */
+function playFootfalls(steps, speed, sneaking){
+  if(!steps || !steps.length) return;
+  const ceiling = Math.max(0.01, currentTopSpeed()*currentRunMul());
+  const frac = clamp(speed/ceiling, 0, 1);
+  const hush = sneaking ? 0.32 : 1;
+  for(const s of steps){
+    stepSound({ surface: player.surface,
+                speed: frac,
+                weight: (s.front ? 0.78 : 1.12)*hush });
+  }
+}
+
 function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
   // standingY, not terrainY: it is the ONE definition of "what am I standing on",
   // shared with the critters and with everything world.js plants on a path. Off-trail it
@@ -269,17 +298,19 @@ function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
   const leap = (!player.wall && jumpY > 0.02) ? 1 : 0;
   const rise = clamp(player.vy/7, -1, 1);
   let radius = 0.5;
+  let steps = null;
   if(mode==='dog'){
     setDogPos(player.x, player.z);
     setYaw(player.yaw);
-    updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise, !!player.wall);
+    steps = updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise, !!player.wall);
     radius = dogShadowRadius();
   }else{
     wildPos.set(player.x, 0, player.z);
     setWildYaw(player.yaw);
-    updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise, !!player.wall);
+    steps = updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise, !!player.wall);
     radius = wildShadowRadius();
   }
+  playFootfalls(steps, speed, sneaking);
   updateShadow(player.x, player.z, groundY, jumpY, radius, true);
   /* Where a passenger rides, measured off the LIVE rig rather than guessed. `radius` is
      the shadow radius, which both drivers derive from their own measured leg length in
@@ -420,9 +451,16 @@ let previewCourse = null;
    rule and it lives in courses.js, so a race and the line drawn on the map can never
    disagree about how far round somebody is. */
 const race = {on:false, course:null, count:0, go:0, t:0, frac:0, off:0, done:false,
-              trail:[], trailT:0, ghost:null, ghostFrac:0, gap:null};
+              trail:[], trailT:0, ghost:null, ghostFrac:0, gap:null,
+              pip:-1,        // last countdown number spoken; -1 so the opening 3 counts
+              warned:false,  // has the walker been told they are off the line?
+              offT:0};       // countdown to repeating that
 const RACE_COUNT_SECS = 3;
 const RACE_GO_SECS = 0.8;
+/* How long before the off-course cue repeats. Deliberately long: this fires at someone
+   who is already lost, and a reminder that arrives faster than they can read the map is
+   the difference between a helpful game and one people mute. */
+const OFF_REMIND_S = 6;
 /* Which ghost to chase: 'best' (the course record, by anyone), 'mine' (your own best with
    the animal you are playing) or 'off'. Three rather than two because they are genuinely
    different sessions -- chasing a record you have never been near is discouraging when
@@ -620,6 +658,7 @@ function startRace(course){
   previewCourse = course;
   race.on = true; race.course = course; race.done = false;
   race.count = RACE_COUNT_SECS; race.go = 0; race.t = 0; race.frac = 0; race.off = 0;
+  race.pip = -1; race.warned = false; race.offT = 0;
   /* At the start line, facing the way the course goes -- not facing wherever the walk left
      you. Standing on a start line pointed backwards would cost a second nobody chose to
      spend, on a clock that is the entire point of the mode. */
@@ -652,6 +691,7 @@ function quitRace(){
   if(!race.on) return;
   race.on = false; race.done = false; race.course = null;
   race.count = 0; race.go = 0; race.t = 0; race.frac = 0;
+  race.pip = -1; race.warned = false; race.offT = 0;
   race.trail = []; race.trailT = 0; race.ghost = null; race.gap = null;
   hideGhost();
   document.body.classList.remove('racing');
@@ -680,7 +720,16 @@ function updateRace(dt){
   if(!race.on) return;
   if(race.count > 0){
     race.count -= dt;
-    if(race.count <= 0){ race.count = 0; race.go = RACE_GO_SECS; cheerBlip(); }
+    /* One pip per whole second, keyed to the number the HUD is SHOWING rather than to a
+       separate timer, so the two can never disagree and a long frame cannot skip or
+       double a pip. Tracking the last number pipped (instead of watching for a crossing)
+       is also what gets the opening "3" -- there is no crossing into it. */
+    const n = Math.max(0, Math.ceil(race.count));
+    if(n !== race.pip){
+      race.pip = n;
+      if(n >= 1) countPip(n);
+    }
+    if(race.count <= 0){ race.count = 0; race.go = RACE_GO_SECS; goTone(); }
     updateRaceHud();
     return;
   }
@@ -700,9 +749,24 @@ function updateRace(dt){
     const onM = COURSE_ON_M*(getMapScale() || 1);
     if(pr.d <= onM){
       race.frac = Math.max(race.frac, pr.frac);
-      race.off = 0;
+      /* Rejoining only speaks if you had strayed far enough to have been TOLD. Without
+         that guard, brushing the edge of the tolerance would chime every time the
+         distance wobbled across it. */
+      if(race.warned) rejoinSound();
+      race.warned = false;
+      race.off = 0; race.offT = 0;
     }else{
       race.off = pr.d/(getMapScale() || 1);
+      /* The nag, and the sound most able to become hateful: it can fire repeatedly at
+         someone already lost and already annoyed. So it says it once on the way out, then
+         waits a long OFF_REMIND_S before saying it again, and never escalates. A player
+         who knows they are off the line does not need to be told faster. */
+      race.offT -= dt;
+      if(!race.warned || race.offT <= 0){
+        offCourseSound();
+        race.warned = true;
+        race.offT = OFF_REMIND_S;
+      }
     }
     setRaceFrac(race.frac);
   }
@@ -1437,7 +1501,10 @@ function trailJump(){
   }else{
     catchNear(player.x, player.z);
   }
-  if(player.y === 0) player.vy = 9.5;
+  /* Only when the hop actually happens. `trailJump` is also the catch and release button,
+     so firing this unconditionally would scuff every time you picked something up
+     without moving. */
+  if(player.y === 0){ player.vy = 9.5; jumpSound(player.surface); }
   /* A jump AT a rock catches it. Checked after the hop is launched so the pup is already
      rising when it takes hold, which is what makes the first catch of a chain land partway
      up the face rather than at its foot. */
@@ -1581,11 +1648,36 @@ function loop(t){
      is exactly the set of cliff-edge spots where this was reachable. */
   const inCorridor = nt.d <= nt.hw;
   const nearTrail = nt.d < 1.5;
+  /* What is underfoot, for the footstep voice. Derived from what movement ALREADY knows
+     rather than from a new material system: `inCorridor` is the same test that decides
+     you are standing on the tread at all, so the sound changes at exactly the boundary
+     the ground does. Anything else would need a per-polygon material table nothing else
+     in the game wants, and would drift out of step with the surface you can see.
+
+     Rock is the scramble case rather than a place: a kerb or a face is stone whichever
+     side of the trail edge it sits on, and it is the one surface you hear before you can
+     see why. */
+  player.surface = (player.climbT > 0 || player.wall) ? 'rock'
+                 : (inCorridor ? 'trail' : 'grass');
   const surf = nearTrail ? 1 : 0.6;
   refreshOnTrail(nt);          // reuse the lookup above rather than hashing twice a frame
   if(rec.on) sampleRecording(nt, dt);   // same lookup again: the trail named in the HUD
                                         // and the trail being recorded are one answer
   if(player.climbT > 0) player.climbT = Math.max(0, player.climbT - dt);
+  /* Scrabbling. A scramble is not a sequence of discrete footfalls -- the paws are
+     dragging at the stone rather than striking it -- so this is a repeat on its own
+     timer rather than anything the gait phase could report. The interval is jittered
+     because a scuff landing on an exact beat is the thing that would turn a climb into a
+     rhythm loop, which is the one way this becomes annoying. */
+  if(player.climbT > 0 || player.wall){
+    player.scuffT -= dt;
+    if(player.scuffT <= 0){
+      scrabbleSound();
+      player.scuffT = 0.17 + Math.random()*0.13;
+    }
+  }else{
+    player.scuffT = 0;      // next contact scuffs immediately, not after a stale delay
+  }
   // scrambling drags the top speed down; it does NOT touch the jump, which is what makes
   // "jump the big steps" the faster line through broken ground
   const climbDrag = player.climbT > 0 ? CLIMB_SLOW : 1;
@@ -1639,8 +1731,18 @@ function loop(t){
      applies its own slide), and letting the fall integrator write it too would drop the
      pup off the rock as fast as it caught it. */
   if(!onWall){
+    const wasAir = player.y > 0;
+    const fell = player.vy;                 // impact speed, before the clamp discards it
     player.vy-=26*dt; player.y=Math.max(0,player.y+player.vy*dt);
-    if(player.y===0) player.vy=Math.max(0,player.vy);
+    if(player.y===0){
+      /* The one frame where a landing is knowable. The clamp below is about to throw the
+         downward velocity away, so the impact has to be read here or not at all -- and
+         `wasAir` is what stops a pup standing still on the ground from re-landing every
+         frame. Scaled against the jump's own launch speed (9.5) rather than an absolute,
+         so stepping off a kerb is a tap and a drop off a terrace is a thump. */
+      if(wasAir && fell < -1.5) landSound(clamp(-fell/9.5, 0, 1), player.surface);
+      player.vy=Math.max(0,player.vy);
+    }
   }
 
   /* NEVER INSIDE THE ROCK. Checked as an invariant after everything else has had its say,

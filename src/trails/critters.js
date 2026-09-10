@@ -21,7 +21,7 @@ import { clamp, lerp, mulberry32 } from '../core/math.js';
 import { scene, disposeGroup } from '../core/render.js';
 import { makeAnimalModel, makeAlert } from '../city/animal-models.js';
 import { comicBurst } from '../core/fx.js';
-import { cheerBlip, yipHigh, warnGrowl, bonkSound } from '../core/audio.js';
+import { cheerBlip, yipHigh, warnGrowl, bonkSound, catchSound } from '../core/audio.js';
 import { SPECIES } from '../data/species.js';
 import { spookRadiusFor } from './wild-driver.js';
 import { makeShadow } from './pieces.js';
@@ -223,7 +223,11 @@ function catchNear(px, pz){
   c.g.scale.setScalar(c.S.scale*CARRY.mount);
   if(c.refs.headG) c.refs.headG.rotation.z = 0;
   comicBurst('\ud83e\udd17 ' + c.S.nm + '!', c.x, c.y + c.S.scale*1.6, c.z, '#7bc47f');
-  cheerBlip();
+  /* Its own sound, not the generic blip. cheerBlip was doing six jobs -- the catch, the
+     race start, the arrival chime, the course preview -- and one sound for six events is
+     most of why the game read as flat. A catch is two things at once and catchSound says
+     both: the grab (a soft physical tap) and the delight (a quick rising figure). */
+  catchSound();
   return c;
 }
 
