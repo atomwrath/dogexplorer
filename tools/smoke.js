@@ -147,6 +147,19 @@ THREE.Euler = V3; THREE.Quaternion = class {};
 // ---------- DOM ----------
 const html = fs.readFileSync(path.join(ROOT, 'trails/index.html'), 'utf8');
 const dom = new JSDOM(html, { url: 'http://localhost:8000/trails/', pretendToBeVisual: true });
+/* jsdom never fetches the <link rel="stylesheet"> tags in index.html -- no `resources`
+   option was passed, and even with one this is a local file, not a server. Left alone,
+   EVERY property this suite might ever read via getComputedStyle would silently answer
+   from the UA default, not from trails.css, which would make a check that reads
+   `touch-action` (or any other real CSS value) pass or fail for reasons having nothing to
+   do with the actual stylesheet. Reading the same two files the page links, in the same
+   order, and inlining them makes the cascade the DOM sees match the real page's. */
+for (const cssFile of ['styles/base.css', 'styles/trails.css']) {
+  const css = fs.readFileSync(path.join(ROOT, cssFile), 'utf8');
+  const style = dom.window.document.createElement('style');
+  style.textContent = css;
+  dom.window.document.head.appendChild(style);
+}
 const { window } = dom;
 global.window = window; global.document = window.document;
 global.navigator = window.navigator; global.location = window.location;
@@ -592,6 +605,17 @@ function assertAll(window, errors, stats) {
   const yawBefore = s2b.camYaw, pitchBefore = s2b.camPitch;
   const canvas = d.querySelector('#c');
   Object.defineProperty(canvas, 'getBoundingClientRect', { value: () => ({left:0, top:0, width:1200, height:800}), configurable:true });
+  /* jsdom does no layout, so #stickBase's real getBoundingClientRect would be all zeros --
+     same problem the minimap/bigmap stubs above solve, for the same reason: main.js's
+     stickHome() now reads this element's rect to find the pad's fixed centre. The numbers
+     are a stand-in, not a mirror of the CSS math (which centres the pad via a negative-
+     margin trick that is not worth reproducing here) -- what matters for the checks below
+     is that the centre they imply, (96, 700), sits away from screen origin and away from
+     every touch point the checks use, so a regression back to "origin = the touch" is
+     visibly distinguishable from "origin = this fixed spot". */
+  const stickBaseEl = d.querySelector('#stickBase');
+  Object.defineProperty(stickBaseEl, 'getBoundingClientRect', { value: () => ({left:32, top:636, width:128, height:128}), configurable:true });
+  const STICK_HOME = {x: 96, y: 700};
   const down = new window.MouseEvent('pointerdown', { bubbles:true, clientX:1000, clientY:400 });
   down.pointerId = 77;
   canvas.dispatchEvent(down);
@@ -649,10 +673,30 @@ function assertAll(window, errors, stats) {
   check('the touch control layer exists', !!d.querySelector('#stickBase') &&
     !!d.querySelector('#stickKnob') && !!d.querySelector('#tJump') && !!d.querySelector('#tSneak'));
 
-  /* The visible stick is a READOUT of the same object movement reads. Asserting it
-     follows the thumb is asserting it cannot show one thing while the pup does another --
-     a stick frozen at centre while the pup sprints is the failure this catches. */
-  check('the stick follows the thumb and springs back on release', (() => {
+  let __touchActionNote = '';
+  /* PINCH-ZOOM LEAK. canvas#c and the action buttons already carried touch-action:none,
+     but three overlays sit on top of the canvas for the whole walk without it: the map/
+     settings tabs (top-left), the minimap (top-right) and the stat HUD (top-left, beside
+     the tabs) -- all places a hand can graze while the other thumb is mid-drag. The
+     instant ANY touch point lacks touch-action:none, the browser is free to read a second
+     finger as a pinch and fire pointercancel on every active pointer on the page, not just
+     the one over that element -- which is what could drop the walking stick out from under
+     an otherwise-correctly-protected thumb. window.getComputedStyle resolves this from the
+     bundle's own inlined <style>, so this is reading the real rule, not a copy of it. */
+  check('the always-visible overlays cannot leak a pinch/pan gesture', (() => {
+    const ids = ['paneTabs', 'miniWrap', 'playHud'];
+    const bad = ids.filter(id => {
+      const el = d.getElementById(id);
+      return !el || d.defaultView.getComputedStyle(el).getPropertyValue('touch-action') !== 'none';
+    });
+    __touchActionNote = bad.length ? `missing on: ${bad.join(', ')}` : 'all three protected';
+    return bad.length === 0;
+  })(), () => __touchActionNote);
+
+  /* The visible stick is a READOUT of the same object movement reads. Asserting the knob
+     moves and springs back is asserting it cannot show one thing while the pup does
+     another -- a stick frozen at centre while the pup sprints is the failure this catches. */
+  check('the knob moves with the thumb and springs back on release', (() => {
     const base = d.querySelector('#stickBase'), knob = d.querySelector('#stickKnob');
     const dn = new window.MouseEvent('pointerdown', { bubbles:true, clientX:200, clientY:500 });
     dn.pointerId = 91; Object.defineProperty(dn, 'pointerType', { value:'touch' });
@@ -667,10 +711,62 @@ function assertAll(window, errors, stats) {
     const up = new window.MouseEvent('pointerup', { bubbles:true });
     up.pointerId = 91; Object.defineProperty(up, 'pointerType', { value:'touch' });
     window.dispatchEvent(up);
-    const rested = !base.classList.contains('on') && !base.style.left &&
+    const rested = !base.classList.contains('on') &&
       /translate\(0px,\s*0px\)/.test(knob.style.transform || '');
     return held && moved && rested;
   })());
+
+  /* THE PAD ITSELF NO LONGER MOVES. This is the behaviour that changed: grabbing the
+     stick used to re-centre #stickBase under the thumb, which reads as "a thumb-position
+     lottery" the moment the tablet is held a little differently than expected -- so the
+     pad now stays at its CSS resting spot and only the knob (asserted above) tracks the
+     thumb. Asserted by never letting an inline left/top appear on the element, across two
+     grabs at two very different points -- the old code set exactly those two properties
+     the instant a touch landed, so a regression here is a `style.left` that used to be
+     empty string and is not any more. */
+  check('the joystick pad stays put at two different touch-down points', (() => {
+    const base = d.querySelector('#stickBase');
+    const grabAt = (id, cx, cy) => {
+      const dn = new window.MouseEvent('pointerdown', { bubbles:true, clientX:cx, clientY:cy });
+      dn.pointerId = id; Object.defineProperty(dn, 'pointerType', { value:'touch' });
+      canvas.dispatchEvent(dn);
+      const stillAtRest = base.style.left === '' && base.style.top === '';
+      const up = new window.MouseEvent('pointerup', { bubbles:true });
+      up.pointerId = id; Object.defineProperty(up, 'pointerType', { value:'touch' });
+      window.dispatchEvent(up);
+      return stillAtRest;
+    };
+    return grabAt(92, 150, 750) && grabAt(93, 500, 120);
+  })());
+
+  /* A FIXED origin means a touch that lands away from the pad reads as an IMMEDIATE
+     deflection, not a zero that builds as the thumb drags -- the old floating stick
+     always started a grab at (0,0) because the pad had just been drawn under the thumb.
+     Grabbing far from the resting spot (STICK_HOME) should read close to full deflection
+     on the very first frame, in the direction from the pad to the thumb -- not zero, and
+     not the direction from the CANVAS origin, which is what a stale "origin = the touch
+     point" bug would still (coincidentally) produce a nonzero, wrong-direction answer for. */
+  let __stickAwayNote = '';
+  check('grabbing the stick away from the pad reads an immediate deflection toward the thumb', (() => {
+    const knob = d.querySelector('#stickKnob');
+    const tx = 500, ty = 120;   // still left-half of a 1200-wide canvas
+    const dn = new window.MouseEvent('pointerdown', { bubbles:true, clientX:tx, clientY:ty });
+    dn.pointerId = 94; Object.defineProperty(dn, 'pointerType', { value:'touch' });
+    canvas.dispatchEvent(dn);
+    const m = /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/.exec(knob.style.transform || '');
+    const up = new window.MouseEvent('pointerup', { bubbles:true });
+    up.pointerId = 94; Object.defineProperty(up, 'pointerType', { value:'touch' });
+    window.dispatchEvent(up);
+    if (!m) return false;
+    const gx = +m[1], gy = +m[2];
+    const mag = Math.hypot(gx, gy);
+    // expected direction: from the fixed pad centre toward the touch point, unit-scaled
+    const ex = tx - STICK_HOME.x, ey = ty - STICK_HOME.y;
+    const eL = Math.hypot(ex, ey);
+    const dot = (gx/mag)*(ex/eL) + (gy/mag)*(ey/eL);
+    __stickAwayNote = `mag ${mag.toFixed(1)}px of 52, direction dot ${dot.toFixed(3)}`;
+    return mag > 45 && dot > 0.99;
+  })(), () => __stickAwayNote);
 
   check('the JUMP button gets the pup off the ground', (() => {
     const pl = getTrailPlayer();

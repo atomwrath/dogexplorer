@@ -76,7 +76,13 @@ canvas#c{position:absolute;inset:0;width:100%;height:100%;display:block;touch-ac
    The tabs sit against the LEFT EDGE, top-ish, and #playHud is shifted right to clear
    them -- not centred down the edge, which is where a thumb starts a walk-drag on a
    phone and would have every other attempt to walk open the map instead. */
-#paneTabs{position:absolute;left:0;top:12px;z-index:11;display:flex;flex-direction:column;gap:8px;}
+/* touch-action:none for the same reason canvas#c has it -- these two buttons sit right at
+   the top-left, exactly where a hand repositions during a hard left-thumb drag, and a
+   stray second touch here is the one that used to be allowed to start a native pinch/pan.
+   Once that gesture begins the browser fires pointercancel on EVERY active pointer, not
+   just the one over this element -- which is what dropped the walking stick mid-run even
+   though canvas#c's own touch-action was already correct. */
+#paneTabs{position:absolute;left:0;top:12px;z-index:11;display:flex;flex-direction:column;gap:8px;touch-action:none;}
 body[data-pane] #paneTabs{display:none;}
 .pane-tab{font-family:inherit;font-size:20px;line-height:1;width:42px;height:46px;padding:0;
   background:var(--card);border:4px solid var(--ink);border-left:none;
@@ -108,8 +114,11 @@ body[data-pane="map"] #paneDrawer{width:100%;border-right-color:transparent;box-
 .sect{border:3px solid var(--ink);border-radius:16px;background:#fff;padding:12px;margin-bottom:14px;}
 .sect h2{margin:0 0 8px;font-size:15px;}
 .hint{font-size:11.5px;opacity:.65;}
-/* left:58px, not 10px -- #paneTabs owns the left edge from the top down. */
-#playHud{position:absolute;top:10px;left:58px;display:none;}
+/* left:58px, not 10px -- #paneTabs owns the left edge from the top down.
+   touch-action:none for the same reason as #paneTabs and #miniWrap -- this readout sits
+   over the canvas the whole walk and is one more place a stray finger can leak a native
+   gesture from. */
+#playHud{position:absolute;top:10px;left:58px;display:none;touch-action:none;}
 body.play #playHud{display:block;}
 
 .io-row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;}
@@ -237,8 +246,11 @@ body.play #playHud{display:block;}
    live preview companion, showing where the currently selected trailhead sits, and the
    🗺 button is how you reach the full map (with clickable trailheads) before you've
    even hit Play. */
+/* Same touch-action fix as #paneTabs, opposite corner: the minimap sits under the RIGHT
+   thumb's resting spot during a look-drag, so it is just as reachable by a stray second
+   finger as the tabs are on the left. */
 #miniWrap{position:absolute;top:10px;right:10px;display:flex;flex-direction:column;
-  align-items:center;gap:6px;}
+  align-items:center;gap:6px;touch-action:none;}
 body[data-pane="map"] #miniWrap{display:none;}
 #minimap{width:172px;height:172px;border-radius:50%;border:4px solid var(--ink);
   background:#e9dcbe;box-shadow:0 3px 0 rgba(61,42,32,.25);display:block;}
@@ -502,11 +514,13 @@ body.racedone #touchCtl{display:none;}
 body.touch.play #touchCtl{display:block;}
 body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
 
-/* A FLOATING stick, shown resting at bottom-left and re-centred wherever the thumb
-   actually lands. Fixed-base sticks are a thumb-position lottery on a tablet held any
-   way but the one they were designed for; the resting circle is there purely to say
-   "drag over here to walk". Purely a readout -- the canvas owns the pointer maths, so
-   this never intercepts a touch. */
+/* A FIXED pad: this circle never moves. It used to re-centre under wherever the thumb
+   first touched down, on the theory that a fixed base is a thumb-position lottery on a
+   tablet held any way but the one it was designed for -- but a base that jumps around
+   trades that for a control you cannot find without looking at the screen, which is worse.
+   Touching anywhere on the left half still grabs the stick (see main.js's stickHome()),
+   so this stays easy to hit; it just no longer relocates itself once grabbed. Purely a
+   readout -- the canvas owns the pointer maths, so this never intercepts a touch. */
 #stickBase{
   position:absolute;left:calc(96px + var(--safe-l));bottom:calc(36px + var(--safe-b));
   width:128px;height:128px;margin:-64px 0 0 -64px;border-radius:50%;
@@ -11629,17 +11643,30 @@ function isTouchPointer(e){ return e.pointerType === 'touch' || e.pointerType ==
    pup does another. It is also pointer-events:none in CSS, so drawing it under the thumb
    cannot swallow the very drag it is drawing. */
 const stickBase=$('#stickBase'), stickKnob=$('#stickKnob');
+/* THE FIXED PAD CENTRE. Read from the resting element itself rather than copying its CSS
+   position into a JS constant, so the two can never drift apart -- a future redesign or a
+   safe-area-inset change moves this along with it. Read fresh on every grab instead of
+   cached once, since the pad's on-screen spot changes across a rotate or resize between
+   walks. stickBase itself never moves any more (see paintStick), so this is always the
+   pad's true resting centre, active or not. */
+function stickHome(){
+  const r = stickBase.getBoundingClientRect();
+  return {x: r.left + r.width/2, y: r.top + r.height/2};
+}
+/* Thumb position, relative to a fixed origin, clamped to the travel radius. Shared by the
+   grab (pointerdown) and the drag (pointermove) so a touch that lands away from the pad
+   reads exactly the same direction whichever handler asks -- there is only one formula for
+   "how hard and which way", not a start-at-zero one and a follow-up one that could disagree. */
+function stickVectorFrom(cx, cy){
+  let dx=cx-stick.ox, dy=cy-stick.oy;
+  const L=Math.hypot(dx,dy), max=STICK_MAX;
+  if(L>max){dx*=max/L; dy*=max/L;}
+  return {dx: dx/max, dy: dy/max};
+}
 function paintStick(){
   if(!stickBase) return;
-  if(stick.active){
-    const rect=renderer.domElement.getBoundingClientRect();
-    stickBase.style.left=(stick.ox-rect.left)+'px';
-    stickBase.style.top=(stick.oy-rect.top)+'px';
-    stickBase.style.bottom='auto';
-  }else{
-    // back to the resting corner: clear the inline overrides and let the CSS place it
-    stickBase.style.left=''; stickBase.style.top=''; stickBase.style.bottom='';
-  }
+  // The pad is fixed at its CSS resting spot always -- nothing to position here any more,
+  // only the knob (below) and the state classes move.
   const mag = stick.active ? Math.hypot(stick.dx, stick.dy) : 0;
   stickBase.classList.toggle('on', stick.active);
   stickBase.classList.toggle('run', mag>0.92 && !player.sneaking);
@@ -11664,16 +11691,22 @@ renderer.domElement.addEventListener('pointerdown', e=>{
   if(rightHalf && !look.active){
     look.active=true; look.id=e.pointerId; look.lastX=e.clientX; look.lastY=e.clientY;
   }else if(!rightHalf && !stick.active){
-    stick.active=true; stick.id=e.pointerId; stick.ox=e.clientX; stick.oy=e.clientY; stick.dx=stick.dy=0;
+    // Grabbing the stick no longer means "the pad appears here" -- the origin is the
+    // fixed pad centre, and a touch that lands away from it reads as an immediate
+    // deflection in that direction rather than starting at zero. Touching anywhere on
+    // the left half still grabs it; only the pad's own position stopped moving.
+    stick.active=true; stick.id=e.pointerId;
+    const home = stickHome();
+    stick.ox = home.x; stick.oy = home.y;
+    const v = stickVectorFrom(e.clientX, e.clientY);
+    stick.dx = v.dx; stick.dy = v.dy;
     paintStick();
   }
 });
 addEventListener('pointermove', e=>{
   if(stick.active && e.pointerId===stick.id){
-    let dx=e.clientX-stick.ox, dy=e.clientY-stick.oy;
-    const L=Math.hypot(dx,dy), max=STICK_MAX;
-    if(L>max){dx*=max/L;dy*=max/L;}
-    stick.dx=dx/max; stick.dy=dy/max;
+    const v = stickVectorFrom(e.clientX, e.clientY);
+    stick.dx=v.dx; stick.dy=v.dy;
     paintStick();
   }else if(look.active && e.pointerId===look.id){
     const dx=e.clientX-look.lastX, dy=e.clientY-look.lastY;

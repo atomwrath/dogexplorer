@@ -1404,17 +1404,30 @@ function isTouchPointer(e){ return e.pointerType === 'touch' || e.pointerType ==
    pup does another. It is also pointer-events:none in CSS, so drawing it under the thumb
    cannot swallow the very drag it is drawing. */
 const stickBase=$('#stickBase'), stickKnob=$('#stickKnob');
+/* THE FIXED PAD CENTRE. Read from the resting element itself rather than copying its CSS
+   position into a JS constant, so the two can never drift apart -- a future redesign or a
+   safe-area-inset change moves this along with it. Read fresh on every grab instead of
+   cached once, since the pad's on-screen spot changes across a rotate or resize between
+   walks. stickBase itself never moves any more (see paintStick), so this is always the
+   pad's true resting centre, active or not. */
+function stickHome(){
+  const r = stickBase.getBoundingClientRect();
+  return {x: r.left + r.width/2, y: r.top + r.height/2};
+}
+/* Thumb position, relative to a fixed origin, clamped to the travel radius. Shared by the
+   grab (pointerdown) and the drag (pointermove) so a touch that lands away from the pad
+   reads exactly the same direction whichever handler asks -- there is only one formula for
+   "how hard and which way", not a start-at-zero one and a follow-up one that could disagree. */
+function stickVectorFrom(cx, cy){
+  let dx=cx-stick.ox, dy=cy-stick.oy;
+  const L=Math.hypot(dx,dy), max=STICK_MAX;
+  if(L>max){dx*=max/L; dy*=max/L;}
+  return {dx: dx/max, dy: dy/max};
+}
 function paintStick(){
   if(!stickBase) return;
-  if(stick.active){
-    const rect=renderer.domElement.getBoundingClientRect();
-    stickBase.style.left=(stick.ox-rect.left)+'px';
-    stickBase.style.top=(stick.oy-rect.top)+'px';
-    stickBase.style.bottom='auto';
-  }else{
-    // back to the resting corner: clear the inline overrides and let the CSS place it
-    stickBase.style.left=''; stickBase.style.top=''; stickBase.style.bottom='';
-  }
+  // The pad is fixed at its CSS resting spot always -- nothing to position here any more,
+  // only the knob (below) and the state classes move.
   const mag = stick.active ? Math.hypot(stick.dx, stick.dy) : 0;
   stickBase.classList.toggle('on', stick.active);
   stickBase.classList.toggle('run', mag>0.92 && !player.sneaking);
@@ -1439,16 +1452,22 @@ renderer.domElement.addEventListener('pointerdown', e=>{
   if(rightHalf && !look.active){
     look.active=true; look.id=e.pointerId; look.lastX=e.clientX; look.lastY=e.clientY;
   }else if(!rightHalf && !stick.active){
-    stick.active=true; stick.id=e.pointerId; stick.ox=e.clientX; stick.oy=e.clientY; stick.dx=stick.dy=0;
+    // Grabbing the stick no longer means "the pad appears here" -- the origin is the
+    // fixed pad centre, and a touch that lands away from it reads as an immediate
+    // deflection in that direction rather than starting at zero. Touching anywhere on
+    // the left half still grabs it; only the pad's own position stopped moving.
+    stick.active=true; stick.id=e.pointerId;
+    const home = stickHome();
+    stick.ox = home.x; stick.oy = home.y;
+    const v = stickVectorFrom(e.clientX, e.clientY);
+    stick.dx = v.dx; stick.dy = v.dy;
     paintStick();
   }
 });
 addEventListener('pointermove', e=>{
   if(stick.active && e.pointerId===stick.id){
-    let dx=e.clientX-stick.ox, dy=e.clientY-stick.oy;
-    const L=Math.hypot(dx,dy), max=STICK_MAX;
-    if(L>max){dx*=max/L;dy*=max/L;}
-    stick.dx=dx/max; stick.dy=dy/max;
+    const v = stickVectorFrom(e.clientX, e.clientY);
+    stick.dx=v.dx; stick.dy=v.dy;
     paintStick();
   }else if(look.active && e.pointerId===look.id){
     const dx=e.clientX-look.lastX, dy=e.clientY-look.lastY;
