@@ -68,6 +68,117 @@ function ribbonGeom(pts,w,y,elevArr){
   geo.__ribbon = pts.map(p=>[p[0],p[1]]);
   return geo;
 }
+/* ---------- fill embankment under a floating ribbon ----------
+
+   The tread is smooth (gradeProfile filters it independently of the cell grid) while the
+   terrain under it is a terrace staircase, so wherever the ground drops a whole band
+   faster than the trail does, the ribbon is left hanging in mid-air over the gap. You can
+   walk it -- standingY follows the tread, not the ground -- but it reads as a bug, and
+   worse, it hides the fact that the route IS continuous there.
+
+   So skirt it: a strip of ground sloping down and out from each edge of the tread to
+   wherever the real terrain is. That is what a fill embankment on a real trail is, and
+   the angle is the point -- a vertical curtain would close the hole just as well but
+   would still read as a cliff, and the player needs to see that the drop is something
+   you walk down rather than something that stops you.
+
+   FACADE ONLY. Nothing collides with it and standingY does not know it exists: off the
+   tread you are on terrain, exactly as before. Making it solid would mean feeding it back
+   into the height field, and the height field is the thing whose coarseness caused this.
+
+   groundYAt is passed in rather than imported, like buildArea's -- this module stays
+   ignorant of World, VERT_SCALE and the band grid. */
+const FILL_MIN_DROP = 0.35;   // under this the ribbon is on the ground; no skirt
+const FILL_RUN = 1.6;         // horizontal run per unit of drop, about 32 degrees
+const FILL_MAX_RUN = 9;       // a huge step gets a steeper skirt, not one across the map
+const FILL_STOP_GAP = 0.6;    // clear space left between a shortened skirt and the tread below
+const FILL_MIN_RUN_RATIO = 0.25;  // steepest the skirt is ever allowed to get, about 76 degrees
+
+function embankmentGeom(pts, halfW, topYs, groundYAt, buriesTreadAt){
+  if(!pts || pts.length < 2 || !topYs) return null;
+  const P=[],N=[],idx=[];
+  const push=(x,y,z)=>{ P.push(x,y,z); N.push(0,1,0); return P.length/3-1; };
+  const setN=(i,nx,ny,nz)=>{ N[i*3]=nx; N[i*3+1]=ny; N[i*3+2]=nz; };
+  const quad=(a,b,c,d)=>{
+    /* Outward-facing winding, worked out from the actual vertices rather than assumed:
+       the skirt runs down both sides of the trail and doubles back at switchbacks, so a
+       fixed winding is right half the time and invisible the other half. */
+    const ax=P[a*3],ay=P[a*3+1],az=P[a*3+2];
+    const e1=[P[b*3]-ax,P[b*3+1]-ay,P[b*3+2]-az];
+    const e2=[P[c*3]-ax,P[c*3+1]-ay,P[c*3+2]-az];
+    let nx=e1[1]*e2[2]-e1[2]*e2[1], ny=e1[2]*e2[0]-e1[0]*e2[2], nz=e1[0]*e2[1]-e1[1]*e2[0];
+    const L=Math.hypot(nx,ny,nz); if(L<1e-9) return;
+    nx/=L; ny/=L; nz/=L;
+    if(ny<0){ idx.push(a,c,b,a,d,c); nx=-nx; ny=-ny; nz=-nz; }
+    else    { idx.push(a,b,c,a,c,d); }
+    for(const v of [a,b,c,d]) setN(v,nx,ny,nz);
+  };
+
+  for(const side of [1,-1]){
+    let prev = null;
+    for(let i=0;i<pts.length;i++){
+      const p=pts[i];
+      const q=pts[Math.min(pts.length-1,i+1)], r=pts[Math.max(0,i-1)];
+      let dx=q[0]-r[0], dz=q[1]-r[1]; const L=Math.hypot(dx,dz)||1; dx/=L; dz/=L;
+      const ox=-dz*side, oz=dx*side;                 // outward, perpendicular to the run
+      const ex=p[0]+ox*halfW, ez=p[1]+oz*halfW;
+      const yTop=topYs[i];
+      const gEdge=groundYAt(ex,ez);
+      const drop=yTop-gEdge;
+      // no gap here: end the strip rather than bridging across a stretch that needs no fill
+      if(!(drop>FILL_MIN_DROP)){ prev=null; continue; }
+      let run=Math.min(drop*FILL_RUN, FILL_MAX_RUN);
+      /* STEEPEN RATHER THAN BURY. On a short switchback the next leg of the trail runs
+         back underneath this one only a few metres out, and a skirt at the natural angle
+         of repose reaches straight over the top of it -- the lower tread disappears under
+         the upper one's embankment.
+
+         So march out along the skirt and stop short of any tread that sits below us. The
+         fill gets steeper exactly where it has to and keeps its natural angle everywhere
+         else, which is better than steepening the whole map to fix the few places that
+         need it. Floored rather than abandoned: a very steep skirt still closes the hole
+         and still reads as ground, where no skirt at all leaves the tread hanging. */
+      if(buriesTreadAt){
+        const probes = 8;
+        for(let t=1;t<=probes;t++){
+          const dd = run*t/probes;
+          if(buriesTreadAt(ex+ox*dd, ez+oz*dd, yTop)){
+            run = Math.max(run*(t-1)/probes - FILL_STOP_GAP, 0);
+            break;
+          }
+        }
+        /* The march can step straight over a narrow tread between two clear probes, and
+           the shortened run can still land on one. So verify the foot itself and back off
+           until it is clear -- halving rather than re-marching, because by here we are
+           only trimming the last stride and the answer is monotonic. A run that shrinks to
+           nothing means there is no room for a fill at all, and no skirt is the right
+           outcome: better a visible gap than a covered path. */
+        let guard = 0;
+        while(run > 0 && buriesTreadAt(ex+ox*run, ez+oz*run, yTop) && guard++ < 8) run *= 0.5;
+        if(run <= FILL_STOP_GAP && buriesTreadAt(ex+ox*run, ez+oz*run, yTop)){ prev=null; continue; }
+      }
+      const fx=ex+ox*run, fz=ez+oz*run;
+      let yFoot=groundYAt(fx,fz);
+      /* Ground back up at the foot means the skirt would tunnel through a rise instead of
+         landing on it -- happens on the inside of a switchback, where the next terrace up
+         is within a run's reach. Land at the tread edge's own ground instead. */
+      if(yFoot > yTop-0.05) yFoot = gEdge;
+      const a=push(ex,yTop,ez), b=push(fx,yFoot,fz);
+      if(prev) quad(prev.a, prev.b, b, a);
+      prev={a,b};
+    }
+  }
+  if(!idx.length) return null;
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(P),3));
+  geo.setAttribute('normal',new THREE.BufferAttribute(new Float32Array(N),3));
+  geo.setIndex(idx);
+  // test seam (tools/smoke.js): how many skirt quads this edge needed
+  geo.userData = geo.userData || {};
+  geo.userData.skirtQuads = idx.length/6;
+  return geo;
+}
+
 /* `layer` is the path's CLASS rank (0 road, 1 track, 2 trail) -- see world.js's
    PATH_RANK. Every ribbon used to share one polygon offset, which is fine while nothing
    overlaps but is exactly wrong where a footpath crosses a service road: the two ribbons
@@ -770,7 +881,7 @@ function buildBackdrop(theme, rng, mapScale=1){
 }
 
 
-export { ribbonGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
+export { ribbonGeom, embankmentGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
          POI_STYLE, AREA_STYLE, nameplate, buildPOI, pavementTexture, buildLandform,
          buildFloatingLabel, buildArea, buildAreaSign, makeShadow, pickTree, shade,
          buildBackdrop, backdropRadius };

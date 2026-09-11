@@ -671,6 +671,15 @@ body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
               </div>
             </div>
             <div class="sect">
+              <h2>⛰️ Terrain detail</h2>
+              <div class="toggle-row" id="detailToggle">
+                <button class="toggle sel" data-detail="auto">⚖️ Auto</button>
+                <button class="toggle" data-detail="high">🗻 Fine</button>
+                <button class="toggle" data-detail="low">🪶 Coarse</button>
+              </div>
+              <p class="hint" id="detailNote">Auto keeps big maps light on phones and tablets and fine everywhere else. Drop to Coarse if a large map won't load; raise to Fine for crisper ground on a fast machine.</p>
+            </div>
+            <div class="sect">
               <h2>🔊 Sound</h2>
               <div class="toggle-row" id="soundToggle">
                 <button class="toggle sel" data-sound="on">🔊 On</button>
@@ -3204,11 +3213,31 @@ function gradeProfile(pts, vertScale, stepCells = 0.7, windowCells = 8, minStepM
    bench its ribbon sits on. Runs in the same slot flattenAreaCells does and for the same
    reason: buildTerrainMesh bakes the grid into geometry the moment it is called.
 
-   Every profile is resolved in ONE pass over a shared claim map keyed by cell, keeping
-   whichever station sits closest to that cell's centre. Per-profile last-write-wins would
-   hand a cell to whichever trail happened to be processed last rather than to the trail
-   actually running through it — which goes wrong exactly where it is most visible, at
-   junctions and wherever two trails run close together. */
+   Every profile is resolved in ONE pass over a shared claim map keyed by cell. Per-profile
+   last-write-wins would hand a cell to whichever trail happened to be processed last
+   rather than to the trail actually running through it — which goes wrong exactly where it
+   is most visible, at junctions and wherever two trails run close together.
+
+   THE CLAIM KEEPS THE LOWEST HEIGHT, NOT THE NEAREST STATION, and that is a correctness
+   rule rather than a taste one.
+
+   A cell gets ONE band, so it gets one height for ground that the ribbon crosses
+   continuously. Nearest-station picks the height at the cell's centre, which means the
+   terrain sits above the ribbon over roughly the uphill half of every cell. standingY
+   takes max(terrain, tread), so the pup was being lifted onto that overshoot and dropped
+   off it again at each cell boundary: a staircase along the trail with a riser of about
+   half a cell's worth of gradient.
+
+   That was invisible at 8 m cells (a 20% grade gives ~0.8 m, inside the step-up limit) and
+   became unwalkable once the quad budget started decimating big maps to 45 m cells, where
+   the same grade gives ~4.5 m. Keeping the minimum puts the cell at or below the tread
+   everywhere it is crossed, so max() resolves to the smooth ribbon and the walk is
+   continuous at any cell size. What is left in the terrain is a notch the ribbon bridges,
+   which is what a benched trail on a hillside looks like anyway.
+
+   The cost is a deeper cut bank beside the tread on coarse grids, since the cut is taken
+   over the whole bench radius. That is a step you take once when you leave the trail,
+   rather than one you take every cell while following it. */
 function gradeTrailCells(profiles){
   if(!WORLD || !BAND) return;
   const claim = new Map();
@@ -3222,6 +3251,45 @@ function gradeTrailCells(profiles){
     const r = Math.min(halfWidth + WORLD.cell*0.5, WORLD.cell*MAX_BENCH_CELLS);
     for(let i = 0; i < pts.length; i++){
       const p = pts[i];
+      /* THE CELL THE STATION IS STANDING IN, CLAIMED UNCONDITIONALLY.
+         The radius sweep below tests distance from the CELL CENTRE, and a cell's centre
+         can be up to cell/sqrt(2) from a point inside it -- about 0.707 of a cell --
+         while r only reaches 0.5 of a cell past the tread. So a trail clipping a cell
+         near its corner left that cell ungraded: raw terrain, sitting as much as a whole
+         band above the ribbon running across it, and standingY takes max(terrain, tread).
+         Measured on decimated pikesworld before this line existed: a 13.8-unit cliff at
+         x=1397.7 with the ribbon passing smoothly through it at 143. That is the "steps
+         too large to jump" report, and it is a gap in the corridor rather than a
+         staircase along it -- which is why it got worse with cell size but was never
+         really about cell size.
+
+         Claiming the containing cell directly is exact and costs one map write. */
+      const ci = clamp(WORLD.cellI(p[0]),0,WORLD.width-1), cj = clamp(WORLD.cellJ(p[1]),0,WORLD.height-1);
+      const ck = cj*WORLD.width + ci, cprev = claim.get(ck);
+      if(!cprev || hm[i] < cprev.h) claim.set(ck, {h: hm[i]});
+
+      /* AND EVERY CELL THE SEGMENT CROSSES ON THE WAY TO THE NEXT STATION.
+         Stations sit about 0.7 of a cell apart, so two consecutive ones are in the same
+         cell or in neighbours -- but a diagonal run between them can still clip the
+         corner of a third cell that holds neither. That cell stays raw, and one raw cell
+         under a trail is a full-band cliff across the tread. Stepping along the segment
+         at 0.4 of a cell cannot skip a cell of width 1, and the height is interpolated
+         because the profile between two stations is a straight line by construction. */
+      if(i+1 < pts.length){
+        const q = pts[i+1];
+        const dx = q[0]-p[0], dz = q[1]-p[1];
+        const seg = Math.hypot(dx, dz);
+        const n = Math.ceil(seg/(WORLD.cell*0.4));
+        for(let t = 1; t < n; t++){
+          const u = t/n;
+          const sx = p[0]+dx*u, sz = p[1]+dz*u;
+          const h = hm[i] + (hm[i+1]-hm[i])*u;
+          const si = clamp(WORLD.cellI(sx),0,WORLD.width-1), sj = clamp(WORLD.cellJ(sz),0,WORLD.height-1);
+          const sk = sj*WORLD.width + si, sprev = claim.get(sk);
+          if(!sprev || h < sprev.h) claim.set(sk, {h});
+        }
+      }
+
       const i0 = clamp(WORLD.cellI(p[0]-r),0,WORLD.width-1), i1 = clamp(WORLD.cellI(p[0]+r),0,WORLD.width-1),
             j0 = clamp(WORLD.cellJ(p[1]-r),0,WORLD.height-1), j1 = clamp(WORLD.cellJ(p[1]+r),0,WORLD.height-1);
       for(let j = j0; j <= j1; j++) for(let k = i0; k <= i1; k++){
@@ -3229,7 +3297,7 @@ function gradeTrailCells(profiles){
         const d = Math.hypot(c.x-p[0], c.z-p[1]);
         if(d > r) continue;
         const key = j*WORLD.width + k, prev = claim.get(key);
-        if(!prev || d < prev.d) claim.set(key, {d, h: hm[i]});
+        if(!prev || hm[i] < prev.h) claim.set(key, {h: hm[i]});
       }
     }
   }
@@ -4637,6 +4705,117 @@ function ribbonGeom(pts,w,y,elevArr){
   geo.__ribbon = pts.map(p=>[p[0],p[1]]);
   return geo;
 }
+/* ---------- fill embankment under a floating ribbon ----------
+
+   The tread is smooth (gradeProfile filters it independently of the cell grid) while the
+   terrain under it is a terrace staircase, so wherever the ground drops a whole band
+   faster than the trail does, the ribbon is left hanging in mid-air over the gap. You can
+   walk it -- standingY follows the tread, not the ground -- but it reads as a bug, and
+   worse, it hides the fact that the route IS continuous there.
+
+   So skirt it: a strip of ground sloping down and out from each edge of the tread to
+   wherever the real terrain is. That is what a fill embankment on a real trail is, and
+   the angle is the point -- a vertical curtain would close the hole just as well but
+   would still read as a cliff, and the player needs to see that the drop is something
+   you walk down rather than something that stops you.
+
+   FACADE ONLY. Nothing collides with it and standingY does not know it exists: off the
+   tread you are on terrain, exactly as before. Making it solid would mean feeding it back
+   into the height field, and the height field is the thing whose coarseness caused this.
+
+   groundYAt is passed in rather than imported, like buildArea's -- this module stays
+   ignorant of World, VERT_SCALE and the band grid. */
+const FILL_MIN_DROP = 0.35;   // under this the ribbon is on the ground; no skirt
+const FILL_RUN = 1.6;         // horizontal run per unit of drop, about 32 degrees
+const FILL_MAX_RUN = 9;       // a huge step gets a steeper skirt, not one across the map
+const FILL_STOP_GAP = 0.6;    // clear space left between a shortened skirt and the tread below
+const FILL_MIN_RUN_RATIO = 0.25;  // steepest the skirt is ever allowed to get, about 76 degrees
+
+function embankmentGeom(pts, halfW, topYs, groundYAt, buriesTreadAt){
+  if(!pts || pts.length < 2 || !topYs) return null;
+  const P=[],N=[],idx=[];
+  const push=(x,y,z)=>{ P.push(x,y,z); N.push(0,1,0); return P.length/3-1; };
+  const setN=(i,nx,ny,nz)=>{ N[i*3]=nx; N[i*3+1]=ny; N[i*3+2]=nz; };
+  const quad=(a,b,c,d)=>{
+    /* Outward-facing winding, worked out from the actual vertices rather than assumed:
+       the skirt runs down both sides of the trail and doubles back at switchbacks, so a
+       fixed winding is right half the time and invisible the other half. */
+    const ax=P[a*3],ay=P[a*3+1],az=P[a*3+2];
+    const e1=[P[b*3]-ax,P[b*3+1]-ay,P[b*3+2]-az];
+    const e2=[P[c*3]-ax,P[c*3+1]-ay,P[c*3+2]-az];
+    let nx=e1[1]*e2[2]-e1[2]*e2[1], ny=e1[2]*e2[0]-e1[0]*e2[2], nz=e1[0]*e2[1]-e1[1]*e2[0];
+    const L=Math.hypot(nx,ny,nz); if(L<1e-9) return;
+    nx/=L; ny/=L; nz/=L;
+    if(ny<0){ idx.push(a,c,b,a,d,c); nx=-nx; ny=-ny; nz=-nz; }
+    else    { idx.push(a,b,c,a,c,d); }
+    for(const v of [a,b,c,d]) setN(v,nx,ny,nz);
+  };
+
+  for(const side of [1,-1]){
+    let prev = null;
+    for(let i=0;i<pts.length;i++){
+      const p=pts[i];
+      const q=pts[Math.min(pts.length-1,i+1)], r=pts[Math.max(0,i-1)];
+      let dx=q[0]-r[0], dz=q[1]-r[1]; const L=Math.hypot(dx,dz)||1; dx/=L; dz/=L;
+      const ox=-dz*side, oz=dx*side;                 // outward, perpendicular to the run
+      const ex=p[0]+ox*halfW, ez=p[1]+oz*halfW;
+      const yTop=topYs[i];
+      const gEdge=groundYAt(ex,ez);
+      const drop=yTop-gEdge;
+      // no gap here: end the strip rather than bridging across a stretch that needs no fill
+      if(!(drop>FILL_MIN_DROP)){ prev=null; continue; }
+      let run=Math.min(drop*FILL_RUN, FILL_MAX_RUN);
+      /* STEEPEN RATHER THAN BURY. On a short switchback the next leg of the trail runs
+         back underneath this one only a few metres out, and a skirt at the natural angle
+         of repose reaches straight over the top of it -- the lower tread disappears under
+         the upper one's embankment.
+
+         So march out along the skirt and stop short of any tread that sits below us. The
+         fill gets steeper exactly where it has to and keeps its natural angle everywhere
+         else, which is better than steepening the whole map to fix the few places that
+         need it. Floored rather than abandoned: a very steep skirt still closes the hole
+         and still reads as ground, where no skirt at all leaves the tread hanging. */
+      if(buriesTreadAt){
+        const probes = 8;
+        for(let t=1;t<=probes;t++){
+          const dd = run*t/probes;
+          if(buriesTreadAt(ex+ox*dd, ez+oz*dd, yTop)){
+            run = Math.max(run*(t-1)/probes - FILL_STOP_GAP, 0);
+            break;
+          }
+        }
+        /* The march can step straight over a narrow tread between two clear probes, and
+           the shortened run can still land on one. So verify the foot itself and back off
+           until it is clear -- halving rather than re-marching, because by here we are
+           only trimming the last stride and the answer is monotonic. A run that shrinks to
+           nothing means there is no room for a fill at all, and no skirt is the right
+           outcome: better a visible gap than a covered path. */
+        let guard = 0;
+        while(run > 0 && buriesTreadAt(ex+ox*run, ez+oz*run, yTop) && guard++ < 8) run *= 0.5;
+        if(run <= FILL_STOP_GAP && buriesTreadAt(ex+ox*run, ez+oz*run, yTop)){ prev=null; continue; }
+      }
+      const fx=ex+ox*run, fz=ez+oz*run;
+      let yFoot=groundYAt(fx,fz);
+      /* Ground back up at the foot means the skirt would tunnel through a rise instead of
+         landing on it -- happens on the inside of a switchback, where the next terrace up
+         is within a run's reach. Land at the tread edge's own ground instead. */
+      if(yFoot > yTop-0.05) yFoot = gEdge;
+      const a=push(ex,yTop,ez), b=push(fx,yFoot,fz);
+      if(prev) quad(prev.a, prev.b, b, a);
+      prev={a,b};
+    }
+  }
+  if(!idx.length) return null;
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(P),3));
+  geo.setAttribute('normal',new THREE.BufferAttribute(new Float32Array(N),3));
+  geo.setIndex(idx);
+  // test seam (tools/smoke.js): how many skirt quads this edge needed
+  geo.userData = geo.userData || {};
+  geo.userData.skirtQuads = idx.length/6;
+  return geo;
+}
+
 /* `layer` is the path's CLASS rank (0 road, 1 track, 2 trail) -- see world.js's
    PATH_RANK. Every ribbon used to share one polygon offset, which is fine while nothing
    overlaps but is exactly wrong where a footpath crosses a service road: the two ribbons
@@ -6631,7 +6810,15 @@ function buildTrailheads(){
  * load, and silently rebuilding the terrain under a player mid-walk to a different shape
  * of ground is worse than leaving a map at the resolution it was opened with. */
 const TERRAIN_QUAD_BUDGET_MOBILE = 600000;
+/* Test seam. The shipped maps are all either well inside the budget or well outside it,
+   so nothing in the suite exercises a DECIMATED grid unless it can ask for one -- and the
+   bugs the budget introduced (ungraded cells under a trail) only appear there. Overriding
+   lets tools/smoke.js reload the default map at a stride it would never reach on its own.
+   null restores normal behaviour. */
+let QUAD_BUDGET_OVERRIDE = null;
+function setTerrainQuadBudget(n){ QUAD_BUDGET_OVERRIDE = (n == null) ? null : Number(n); }
 function terrainQuadBudget(){
+  if(QUAD_BUDGET_OVERRIDE != null) return QUAD_BUDGET_OVERRIDE;
   return QUALITY.tier === 'high' ? 0 : TERRAIN_QUAD_BUDGET_MOBILE;   // 0 = no limit
 }
 
@@ -6655,6 +6842,10 @@ function addLayers(layers){
 }
 function clearLayers(){ EXTRA=[]; rebuildWorld(); }
 function hasBundle(){ return !!BUNDLE; }
+/* 1 when the loaded bundle is at its native DEM resolution, higher when the quad budget
+   decimated it. Read by tools/smoke.js; also the honest thing to surface in the map note
+   if the panel ever wants to say a big map was coarsened to fit. */
+function getDemStride(){ return BUNDLE ? BUNDLE.demStride : null; }
 function setContourStep(m){ STEP_M=clamp(Number(m)||3, 0.5, 20); rebuildWorld(); }
 function getContourStep(){ return STEP_M; }
 function getSignCount(){ return SIGN_COUNT; }
@@ -6712,6 +6903,16 @@ function pathWidth(kind){ return PATH_W[kind]||PATH_W.trail; }
    if the ribbon isn't to spill off its own graded corridor onto stepped ground. */
 function pathOutlineWidth(kind){ return pathWidth(kind)*OUTLINE_MUL; }
 const OUTLINE_MUL = 1.5, SHOULDER_MUL = 1.24;
+/* "Is there a trail tread here, and is it below us?" -- the test embankmentGeom uses to
+   stop a fill from burying the next leg of a switchback. Asks the spatial hash rather
+   than the graph, so it catches a lower leg of the SAME edge, which is exactly the case a
+   same-edge comparison would miss and exactly the case switchbacks produce. The 0.6
+   margin keeps a skirt from stopping against its own tread where the hash's corridor is
+   wider than the painted outline. */
+function buriesTread(x, z, yTop){
+  const nt = nearestTrail(x, z);
+  return nt.y != null && nt.d <= nt.hw && nt.y < yTop - 0.6;
+}
 
 /* Which surface wins where two paths occupy the same ground.
 
@@ -7446,11 +7647,31 @@ let WORLD_REV = 0;
 function getWorldRevision(){ return WORLD_REV; }
 
 /* Height something STANDS on: the ground, or the trail tread when inside a trail's
-   corridor. Now that the ground under a trail is benched to the ribbon's own graded
-   height (terrain.js), the two agree to within the bench's cell-sized staircase and this
-   max() only smooths that last fraction of a unit away. It is the
-   single answer for the player, the critters and anything world.js plants on a path, so
-   they can't drift apart the way the avatar and the ribbons did.
+   corridor.
+
+   INSIDE THE CORRIDOR THE TREAD WINS OUTRIGHT. This used to be max(ground, tread), on the
+   reasoning that the benched ground and the ribbon agree to within a fraction of a unit
+   so the max only smoothed off the last of the difference. That reasoning holds only as
+   long as EVERY cell under a trail actually got graded, and a cell has many ways to miss:
+   the bench claim is a radius test against cell centres, the profile is sampled at
+   stations rather than continuously, and both get looser as the DEM is decimated. One
+   missed cell is a whole raw band sitting above the ribbon that runs across it, and max()
+   turned that into a wall the walker had to climb -- measured at up to 11 units on a
+   decimated map, against a step-up limit near 1.
+
+   The ribbon is the thing the player can see and the thing they are walking on, and it is
+   smooth by construction (gradeProfile resamples and box-filters it, independent of the
+   cell grid). So trust it. The grading fixes below still matter -- they keep the terrain
+   from poking up THROUGH the tread, which is a visual problem -- but traversal no longer
+   depends on them being perfect, which is the difference between a bug that blocks a walk
+   and a bug that looks untidy.
+
+   The 40 cm ease across the corridor edge is unchanged and now carries the whole
+   transition: off-trail you get plain terrain, on-trail you get the tread, and the blend
+   between them is short enough to read as a kerb rather than a ramp. Where the ground
+   beside a trail stands well above it the ease is steep, but that edge is a cut bank and
+   moveOffTrail's step-up limit already refuses to walk up it -- which is correct, and is a
+   different thing from being unable to walk ALONG the trail.
 
    Off-trail it is plain terrainY: no inflation, no floating near a rise. */
 function standingY(x,z){
@@ -7461,7 +7682,7 @@ function standingY(x,z){
   // proud of the dirt isn't a visible pop. Unscaled, like the corridor width it eases
   // across -- both are true metres now.
   const k = clamp((nt.hw - nt.d)/0.4, 0, 1);
-  return Math.max(g, g + (nt.y - g)*k);
+  return g + (nt.y - g)*k;
 }
 
 function rebuildWorld(){
@@ -7712,12 +7933,26 @@ function rebuildWorld(){
         let dx=q[0]-pr[0], dz=q[1]-pr[1]; const L=Math.hypot(dx,dz)||1;
         return [p[0]+dz/L*sd*(fw*0.5+kerb*0.5), p[1]-dx/L*sd*(fw*0.5+kerb*0.5)];
       });
+      // a footway beside a road floats over a drop exactly as a trail does; skirt it too
+      if(hs){
+        const sk = embankmentGeom(rpts, fw*1.35*0.5, hs.map(v=>v+lift+0.01),
+                                  (x,z)=>terrainY(x,z,VERT_SCALE), buriesTread);
+        if(sk) worldG.add(new THREE.Mesh(sk, trailMat(shade(st.shoulder,0.86),rank)));
+      }
       worldG.add(new THREE.Mesh(ribbonGeom(kerbPts,kerb,lift+0.03,hs),trailMat('#cdc3ad',rank)));
       worldG.add(new THREE.Mesh(ribbonGeom(rpts,fw*1.35,lift+0.012,hs),inkMats[rank]));
       worldG.add(new THREE.Mesh(ribbonGeom(rpts,fw,lift+0.05,hs),trailMat(st.tread,rank)));
       return;
     }
 
+    /* Skirt FIRST, under everything else: it is ground, and the casing and tread are
+       painted on top of ground. Built from the outline width so the fill starts where the
+       ink ends and no ribbon layer overhangs it. */
+    if(hs){
+      const skirt = embankmentGeom(rpts, W*OUTLINE_MUL*0.5, hs.map(v=>v+lift+0.01),
+                                   (x,z)=>terrainY(x,z,VERT_SCALE), buriesTread);
+      if(skirt) worldG.add(new THREE.Mesh(skirt, trailMat(shade(st.shoulder,0.86),rank)));
+    }
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*OUTLINE_MUL,lift+0.012,hs),inkMats[rank]));
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*SHOULDER_MUL,lift+0.02,hs),trailMat(st.shoulder,rank)));
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W,lift+0.05,hs),trailMat(st.tread,rank)));
@@ -10830,6 +11065,11 @@ const WALL_REGRAB_DELAY = 0.22;
    so this leaves room to start a chain from the ground while refusing catches at ankle
    height -- see tryWallCatch. */
 const WALL_MIN_CATCH = 1.0;
+/* How far a face's top must still stand above your feet for it to count as a wall rather
+   than a ledge you are on. Small on purpose: it only has to exceed the wobble in
+   standingY between the summit and the standoff point beside it, and anything larger
+   would start refusing legitimate catches on the last stretch of a climb. */
+const WALL_TOP_MARGIN = 0.05;
 function mountReach(){ return MOUNT_REACH; }
 const SETTLE_SECONDS = 1.4;
 const UNSETTLE_SECONDS = 1.1;
@@ -11797,16 +12037,42 @@ function tryWallCatch(dirX, dirZ){
 
      Measured from the face's own base rather than from player.y, because player.y is
      height above whatever is underfoot and that is not the same datum once the terrain
-     around a formation slopes. */
-  const groundHere = standingY(player.x, player.z);
+     around a formation slopes.
+
+     playerGroundY, NOT standingY. standingY answers "how high is the terrain and tread
+     here" and knows nothing about solids, so on top of a rock formation it returns the
+     ground at the BOTTOM of the rock -- the pup's feet were being placed tens of units
+     below where they actually were. Every height rule downstream was then reasoning about
+     the wrong datum. playerGroundY is the one the movement code already uses for exactly
+     this reason: max(standingY, areaSolidTop). */
+  const groundHere = playerGroundY(player.x, player.z);
   if(groundHere + player.y < hit.base + WALL_MIN_CATCH) return false;
+  /* AND NOT A FACE YOU ARE STANDING ON TOP OF.
+     WALL_MIN_CATCH above measures up from the face's BASE, which is the ground at its
+     foot -- so standing on the formation's summit clears it by the whole height of the
+     rock. Every test passed and the pup got snapped sideways onto the very cliff it was
+     stood on: the reported "jump straight up near the edge and we get stuck on the wall".
+
+     A face is only worth catching if it still rises above you. Once your feet are level
+     with its top you are not climbing it any more, you are on it, and the right outcome
+     for a jump is air. The margin keeps a catch available while cresting -- you can still
+     grab the last stretch of a face you have not quite topped out on. */
+  const feet = groundHere + player.y;
+  if(hit.top <= feet + WALL_TOP_MARGIN) return false;
   /* Moving INTO the rock. On a ballistic arc the horizontal direction is whatever the
      player steered, so this is the one thing they control in the air and the one thing
-     worth testing. With no input at all, catching is still allowed if the face is right
-     there -- falling onto a wall you are already touching should stick. */
+     worth testing. */
   if(L > 1e-6){
     const dot = (lookX*-hit.f.ox + lookZ*-hit.f.oz);
     if(dot <= WALL_GRAB_DOT) return false;
+  }else if(player.vy > 0){
+    /* NO INPUT AND STILL RISING IS A DELIBERATE HOP, NOT A LUNGE.
+       Catching with no input at all stays allowed on the way DOWN, because falling onto a
+       wall you are already touching should stick -- that is the case the exemption was
+       written for. On the way UP it is the opposite: a straight-up jump beside a rock is
+       the one input that unambiguously says "not at the wall", and treating it as a grab
+       took away the only way to hop on the spot anywhere near a formation. */
+    return false;
   }
   player.wall = {
     fx: hit.f.x, fz: hit.f.z, ox: hit.f.ox, oz: hit.f.oz,
@@ -12959,6 +13225,42 @@ document.querySelectorAll('#pupModeToggle .toggle').forEach(b=>{
   b.addEventListener('click', ()=>{ browseMode=b.dataset.mode; renderPupToggle(); });
 });
 
+/* ---------- terrain detail ----------
+   The quad budget exists because a big DEM can kill a tablet tab outright, and the
+   automatic tier check is a guess about the device rather than a measurement of it. Auto
+   is still the default and still right for almost everyone; this is the escape hatch for
+   the two cases the guess gets wrong -- a phone that needs less than Auto gives it, and a
+   desktop-class tablet that can take the full grid.
+
+   Applied by reloading the map, because the grid is decimated at bundle load and baked
+   into the terrain mesh, the collision heights and the minimap relief all at once. There
+   is no way to change it in place, and pretending otherwise would leave those three
+   disagreeing. The reload is the honest cost of the setting. */
+const DETAIL_KEY = 'pupDetail';
+const DETAIL_BUDGET = {auto: null, high: 0, low: 250000};
+let detailMode = 'auto';
+let lastMapWasDefault = true;
+try{ if(DETAIL_BUDGET[localStorage.getItem(DETAIL_KEY)] !== undefined) detailMode = localStorage.getItem(DETAIL_KEY); }catch(err){}
+function renderDetailToggle(){
+  document.querySelectorAll('#detailToggle .toggle').forEach(b=>{
+    b.classList.toggle('sel', b.dataset.detail===detailMode);
+  });
+}
+function applyDetail(mode, reload){
+  if(DETAIL_BUDGET[mode] === undefined) return;
+  detailMode = mode;
+  setTerrainQuadBudget(DETAIL_BUDGET[mode]);
+  try{ localStorage.setItem(DETAIL_KEY, mode); }catch(err){}
+  renderDetailToggle();
+  if(reload && lastMapUrl) return loadMap(lastMapUrl, lastMapWasDefault).then(ok=>{
+    if(ok){ refreshMapUI(); placeAtHead(pickDefaultHead()); }
+  });
+}
+document.querySelectorAll('#detailToggle .toggle').forEach(b=>{
+  b.addEventListener('click', ()=> applyDetail(b.dataset.detail, true));
+});
+applyDetail(detailMode, false);
+
 /* ---------- sound on/off ----------
    Persisted, because a player who turned the sound off did so about the game, not about
    this tab -- coming back to a silent walk is the expected outcome and having to find the
@@ -13624,13 +13926,20 @@ async function boot(bundleUrl){
 
 /* One place that loads a map by URL, so the boot path, the reload button and any future
    map list all report success and failure identically. */
+let lastMapUrl = null;
 async function loadMap(url, isDefault){
   const note=$('#mapNote');
   if(note) note.textContent='Loading map…';
   try{
     await loadWorld(url, [], 3);
+    lastMapUrl = url; lastMapWasDefault = !!isDefault;
+    /* Say so when a map was coarsened rather than leaving the player to wonder why the
+       ground looks blocky. The detail control is right above this note in the panel, so
+       the answer and the lever are in the same place. */
+    const st = getDemStride();
     if(note) note.textContent = (isDefault?'Default map: ':'Loaded: ')+url.split('/').pop()
-      + ` · ${getTrailheads().length} trailhead${getTrailheads().length===1?'':'s'}`;
+      + ` · ${getTrailheads().length} trailhead${getTrailheads().length===1?'':'s'}`
+      + (st > 1 ? ` · terrain coarsened ${st}× to fit` : '');
     return true;
   }catch(err){
     console.error('could not load world:', url, err);

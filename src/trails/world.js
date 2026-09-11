@@ -25,7 +25,7 @@ import { resetSpatialHash, hashSeg, nearestTrail } from './spatial.js';
 import { THEME, THEMES, setTheme } from './themes.js';
 import { ribbonGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
          pickTree, buildPOI, buildArea, buildAreaSign, POI_STYLE, AREA_STYLE, shade,
-         buildBackdrop, backdropRadius } from './pieces.js';
+         buildBackdrop, backdropRadius, embankmentGeom } from './pieces.js';
 
 let GRAPH=null, TRAILHEADS=[], POIS=[], AREAS=[], WATER=[];
 /* Every floating area name currently in the scene. Collected at build time so the
@@ -611,7 +611,15 @@ function buildTrailheads(){
  * load, and silently rebuilding the terrain under a player mid-walk to a different shape
  * of ground is worse than leaving a map at the resolution it was opened with. */
 const TERRAIN_QUAD_BUDGET_MOBILE = 600000;
+/* Test seam. The shipped maps are all either well inside the budget or well outside it,
+   so nothing in the suite exercises a DECIMATED grid unless it can ask for one -- and the
+   bugs the budget introduced (ungraded cells under a trail) only appear there. Overriding
+   lets tools/smoke.js reload the default map at a stride it would never reach on its own.
+   null restores normal behaviour. */
+let QUAD_BUDGET_OVERRIDE = null;
+function setTerrainQuadBudget(n){ QUAD_BUDGET_OVERRIDE = (n == null) ? null : Number(n); }
 function terrainQuadBudget(){
+  if(QUAD_BUDGET_OVERRIDE != null) return QUAD_BUDGET_OVERRIDE;
   return QUALITY.tier === 'high' ? 0 : TERRAIN_QUAD_BUDGET_MOBILE;   // 0 = no limit
 }
 
@@ -635,6 +643,10 @@ function addLayers(layers){
 }
 function clearLayers(){ EXTRA=[]; rebuildWorld(); }
 function hasBundle(){ return !!BUNDLE; }
+/* 1 when the loaded bundle is at its native DEM resolution, higher when the quad budget
+   decimated it. Read by tools/smoke.js; also the honest thing to surface in the map note
+   if the panel ever wants to say a big map was coarsened to fit. */
+function getDemStride(){ return BUNDLE ? BUNDLE.demStride : null; }
 function setContourStep(m){ STEP_M=clamp(Number(m)||3, 0.5, 20); rebuildWorld(); }
 function getContourStep(){ return STEP_M; }
 function getSignCount(){ return SIGN_COUNT; }
@@ -692,6 +704,16 @@ function pathWidth(kind){ return PATH_W[kind]||PATH_W.trail; }
    if the ribbon isn't to spill off its own graded corridor onto stepped ground. */
 function pathOutlineWidth(kind){ return pathWidth(kind)*OUTLINE_MUL; }
 const OUTLINE_MUL = 1.5, SHOULDER_MUL = 1.24;
+/* "Is there a trail tread here, and is it below us?" -- the test embankmentGeom uses to
+   stop a fill from burying the next leg of a switchback. Asks the spatial hash rather
+   than the graph, so it catches a lower leg of the SAME edge, which is exactly the case a
+   same-edge comparison would miss and exactly the case switchbacks produce. The 0.6
+   margin keeps a skirt from stopping against its own tread where the hash's corridor is
+   wider than the painted outline. */
+function buriesTread(x, z, yTop){
+  const nt = nearestTrail(x, z);
+  return nt.y != null && nt.d <= nt.hw && nt.y < yTop - 0.6;
+}
 
 /* Which surface wins where two paths occupy the same ground.
 
@@ -1426,11 +1448,31 @@ let WORLD_REV = 0;
 function getWorldRevision(){ return WORLD_REV; }
 
 /* Height something STANDS on: the ground, or the trail tread when inside a trail's
-   corridor. Now that the ground under a trail is benched to the ribbon's own graded
-   height (terrain.js), the two agree to within the bench's cell-sized staircase and this
-   max() only smooths that last fraction of a unit away. It is the
-   single answer for the player, the critters and anything world.js plants on a path, so
-   they can't drift apart the way the avatar and the ribbons did.
+   corridor.
+
+   INSIDE THE CORRIDOR THE TREAD WINS OUTRIGHT. This used to be max(ground, tread), on the
+   reasoning that the benched ground and the ribbon agree to within a fraction of a unit
+   so the max only smoothed off the last of the difference. That reasoning holds only as
+   long as EVERY cell under a trail actually got graded, and a cell has many ways to miss:
+   the bench claim is a radius test against cell centres, the profile is sampled at
+   stations rather than continuously, and both get looser as the DEM is decimated. One
+   missed cell is a whole raw band sitting above the ribbon that runs across it, and max()
+   turned that into a wall the walker had to climb -- measured at up to 11 units on a
+   decimated map, against a step-up limit near 1.
+
+   The ribbon is the thing the player can see and the thing they are walking on, and it is
+   smooth by construction (gradeProfile resamples and box-filters it, independent of the
+   cell grid). So trust it. The grading fixes below still matter -- they keep the terrain
+   from poking up THROUGH the tread, which is a visual problem -- but traversal no longer
+   depends on them being perfect, which is the difference between a bug that blocks a walk
+   and a bug that looks untidy.
+
+   The 40 cm ease across the corridor edge is unchanged and now carries the whole
+   transition: off-trail you get plain terrain, on-trail you get the tread, and the blend
+   between them is short enough to read as a kerb rather than a ramp. Where the ground
+   beside a trail stands well above it the ease is steep, but that edge is a cut bank and
+   moveOffTrail's step-up limit already refuses to walk up it -- which is correct, and is a
+   different thing from being unable to walk ALONG the trail.
 
    Off-trail it is plain terrainY: no inflation, no floating near a rise. */
 function standingY(x,z){
@@ -1441,7 +1483,7 @@ function standingY(x,z){
   // proud of the dirt isn't a visible pop. Unscaled, like the corridor width it eases
   // across -- both are true metres now.
   const k = clamp((nt.hw - nt.d)/0.4, 0, 1);
-  return Math.max(g, g + (nt.y - g)*k);
+  return g + (nt.y - g)*k;
 }
 
 function rebuildWorld(){
@@ -1692,12 +1734,26 @@ function rebuildWorld(){
         let dx=q[0]-pr[0], dz=q[1]-pr[1]; const L=Math.hypot(dx,dz)||1;
         return [p[0]+dz/L*sd*(fw*0.5+kerb*0.5), p[1]-dx/L*sd*(fw*0.5+kerb*0.5)];
       });
+      // a footway beside a road floats over a drop exactly as a trail does; skirt it too
+      if(hs){
+        const sk = embankmentGeom(rpts, fw*1.35*0.5, hs.map(v=>v+lift+0.01),
+                                  (x,z)=>terrainY(x,z,VERT_SCALE), buriesTread);
+        if(sk) worldG.add(new THREE.Mesh(sk, trailMat(shade(st.shoulder,0.86),rank)));
+      }
       worldG.add(new THREE.Mesh(ribbonGeom(kerbPts,kerb,lift+0.03,hs),trailMat('#cdc3ad',rank)));
       worldG.add(new THREE.Mesh(ribbonGeom(rpts,fw*1.35,lift+0.012,hs),inkMats[rank]));
       worldG.add(new THREE.Mesh(ribbonGeom(rpts,fw,lift+0.05,hs),trailMat(st.tread,rank)));
       return;
     }
 
+    /* Skirt FIRST, under everything else: it is ground, and the casing and tread are
+       painted on top of ground. Built from the outline width so the fill starts where the
+       ink ends and no ribbon layer overhangs it. */
+    if(hs){
+      const skirt = embankmentGeom(rpts, W*OUTLINE_MUL*0.5, hs.map(v=>v+lift+0.01),
+                                   (x,z)=>terrainY(x,z,VERT_SCALE), buriesTread);
+      if(skirt) worldG.add(new THREE.Mesh(skirt, trailMat(shade(st.shoulder,0.86),rank)));
+    }
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*OUTLINE_MUL,lift+0.012,hs),inkMats[rank]));
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*SHOULDER_MUL,lift+0.02,hs),trailMat(st.shoulder,rank)));
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W,lift+0.05,hs),trailMat(st.tread,rank)));
@@ -2001,6 +2057,6 @@ export { loadWorld, rebuildWorld, addLayers, clearLayers, hasBundle, setContourS
          pathRank, kindLift, pathOutlineWidth,
          getAreaLabels, updateAreaLabels, getAreaSolids, areaBlocked, areaSolidTop, lineOfSight, nearestSolidFace, solidEmbed, distToSolid,
          setThemeById, getTheme, setMapScale, getMapScale, getExaggeration, getBackdrop,
-         setFogMultiplier, getFogMultiplier,
+         setFogMultiplier, getFogMultiplier, setTerrainQuadBudget, getDemStride,
          getGraph, getTrailheads, getPOIs, getAreas, getBBox,
          getWorldGroup, setStartHead, getStartHead, setVertScale, getVertScale, compass, THEMES, THEME };

@@ -378,6 +378,42 @@ const benchProbe = `
     const b = d<100?'0-100': d<200?'100-200': d<400?'200-400': d<700?'400-700': d<1500?'700-1500':'1500+';
     buckets[b]=(buckets[b]||0)+1; counted++; });
   out.meshDistance=buckets; out.meshCounted=counted;
+  /* Worst step a walker meets ALONG a trail: sample standingY every 0.5 m down every
+     edge's own centreline and keep the biggest jump between consecutive samples. This is
+     the number the "steps too large to jump" report is about. */
+  out.probe = (()=>{
+    const x=1037.7, z=284.7, o=[];
+    for(let k=-6;k<=6;k++){
+      const px=x+k*0.5;
+      const nt=nearestTrail(px,z);
+      o.push({x:+px.toFixed(1), g:+terrainY(px,z,getVertScale()).toFixed(2), s:+standingY(px,z).toFixed(2),
+              ntd:nt.d==null?null:+nt.d.toFixed(2), nthw:nt.hw==null?null:+nt.hw.toFixed(2), nty:nt.y==null?null:+nt.y.toFixed(2)});
+    }
+    const bb=getBBox();
+    return {row:o, bbox:{minx:+bb.minx.toFixed(0),maxx:+bb.maxx.toFixed(0),minz:+bb.minz.toFixed(0),maxz:+bb.maxz.toFixed(0)},
+            demX:[+(BUNDLE.originX).toFixed(0), +(BUNDLE.originX+BUNDLE.width*BUNDLE.cell).toFixed(0)]};
+  })();
+  out.trailStep = (()=>{
+    const G=getGraph(); if(!G) return null;
+    let worst=0, where=null, n=0, over=0;
+    const lim=stepUpLimit();
+    for(const e of G.edges){
+      const pts=(e.prof&&e.prof.pts)||e.pts; if(!pts||pts.length<2) continue;
+      for(let i=1;i<pts.length;i++){
+        const ax=pts[i-1][0],az=pts[i-1][1],bx=pts[i][0],bz=pts[i][1];
+        const L=Math.hypot(bx-ax,bz-az), steps=Math.max(1,Math.ceil(L/0.5));
+        let prev=standingY(ax,az);
+        for(let k=1;k<=steps;k++){
+          const t=k/steps, x=ax+(bx-ax)*t, z=az+(bz-az)*t;
+          const y=standingY(x,z); const d=Math.abs(y-prev); n++;
+          if(d>lim) over++;
+          if(d>worst){ worst=d; where={x:+x.toFixed(1),z:+z.toFixed(1)}; }
+          prev=y;
+        }
+      }
+    }
+    return {worstStep:+worst.toFixed(2), stepUpLimit:+stepUpLimit().toFixed(2), samples:n, overLimit:over, where, cell:+(BUNDLE?BUNDLE.cell:0).toFixed(1), stride:(BUNDLE?BUNDLE.demStride:null)};
+  })();
   const byType={}; const seen=new Set();
   scene.traverse(o=>{ if(o.isMesh&&o.material&&!seen.has(o.material)){ seen.add(o.material);
     const t=(o.material.constructor&&o.material.constructor.name)||'?';
@@ -474,6 +510,7 @@ try {
     if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(i * 16); }
   }
   console.error = origError;
+  await (0,eval)(`(async()=>{ setTier('medium'); await loadWorld('../data/pikesworld.json', [], 3); })()`);
   const R = global.__bench(); if(0)(0,eval)(`(()=>{
     const out = {};
     out.critters = CRITTERS.length;

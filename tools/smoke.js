@@ -354,8 +354,30 @@ const probe = `
              backdropR: backdropRadius(THEME, getMapScale()),
              terrainFill: (()=>{ let f=null; scene.traverse(o=>{ if(o.isMesh&&o.geometry&&o.geometry.userData&&o.geometry.userData.terrainFill) f=o.geometry.userData.terrainFill; }); return f; })(),
              demStride: (typeof BUNDLE !== 'undefined' && BUNDLE) ? BUNDLE.demStride : null,
+             detailBtns: document.querySelectorAll('#detailToggle .toggle').length,
+             detailSel: (()=>{ const b=document.querySelector('#detailToggle .toggle.sel'); return b?b.dataset.detail:null; })(),
              soundBtns: document.querySelectorAll('#soundToggle .toggle').length,
              soundSel: (()=>{ const b=document.querySelector('#soundToggle .toggle.sel'); return b?b.dataset.sound:null; })(),
+             trailStep: (()=>{
+               const G=getGraph(); if(!G) return null;
+               let worst=0, over=0, n=0; const lim=stepUpLimit();
+               for(const e of G.edges){
+                 const pts=(e.prof&&e.prof.pts)||e.pts; if(!pts||pts.length<2) continue;
+                 for(let i=1;i<pts.length;i++){
+                   const ax=pts[i-1][0],az=pts[i-1][1],bx=pts[i][0],bz=pts[i][1];
+                   const L=Math.hypot(bx-ax,bz-az), st=Math.max(1,Math.ceil(L/0.5));
+                   let prev=standingY(ax,az);
+                   for(let k=1;k<=st;k++){
+                     const t=k/st, y=standingY(ax+(bx-ax)*t, az+(bz-az)*t);
+                     const dd=Math.abs(y-prev); n++;
+                     if(dd>lim) over++;
+                     if(dd>worst) worst=dd;
+                     prev=y;
+                   }
+                 }
+               }
+               return {worst:+worst.toFixed(2), over, n, lim:+lim.toFixed(2)};
+             })(),
              atlasSentinel: (()=>{ try{ return typeof atlasIntact === 'function'; }catch(e){ return false; } })() };
   })(),
   chase: (()=>{ try{
@@ -426,7 +448,7 @@ try {
     if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(i * 16); }
   }
   console.error = origError;
-  assertAll(window, errors, stats);
+  await assertAll(window, errors, stats);
 })().catch(e => {
   console.error = origError;
   origError('THREW during frame pump / assertions:', e.message, '\n', e.stack);
@@ -434,7 +456,7 @@ try {
 });
 
 // ---------- assertions ----------
-function assertAll(window, errors, stats) {
+async function assertAll(window, errors, stats) {
   const d = window.document;
   const probe = () => global.__probe();
   const dist = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
@@ -558,6 +580,8 @@ function assertAll(window, errors, stats) {
     s.perf.demStride === 1, `stride ${s.perf.demStride}`);
 
   /* ---------- settings ---------- */
+  check('the settings panel has a terrain-detail control', s.perf.detailBtns === 3, `${s.perf.detailBtns} buttons`);
+  check('terrain detail defaults to auto', s.perf.detailSel === 'auto', `selected: ${s.perf.detailSel}`);
   check('the settings panel has a sound toggle', s.perf.soundBtns === 2, `${s.perf.soundBtns} buttons`);
   check('sound defaults to on', s.perf.soundSel === 'on', `selected: ${s.perf.soundSel}`);
 
@@ -566,6 +590,132 @@ function assertAll(window, errors, stats) {
      survives, the pixels do not, and the map comes up blank except for the live trail
      overlay. atlasIntact is the pixel-level check that catches it. */
   check('the minimap can detect a discarded atlas', s.perf.atlasSentinel);
+
+  /* WALKING ALONG A TRAIL NEVER PRESENTS A STEP YOU CANNOT WALK UP.
+     Sampled every 0.5 m down every edge's own graded centreline, which is the path a
+     walker actually follows, and compared against the same stepUpLimit the movement code
+     gates on. This is the invariant that was quietly untrue: standingY used to take
+     max(ground, tread), so any cell the bench claim happened to miss became a full raw
+     band standing in the middle of the trail -- up to 11 units on a decimated map, with
+     nothing in the suite noticing because every other trail assertion looks at ribbon
+     geometry rather than at the height a walker gets back.
+
+     Asserted as "not one sample over the limit" rather than as a worst-case number, so it
+     stays meaningful at any contour step, map scale or DEM stride. */
+  check('walking a trail never meets a step taller than the step-up limit',
+    !!s.perf.trailStep && s.perf.trailStep.over === 0,
+    s.perf.trailStep
+      ? `worst ${s.perf.trailStep.worst}u vs limit ${s.perf.trailStep.lim}u, ${s.perf.trailStep.over} of ${s.perf.trailStep.n} samples over`
+      : 'no graph');
+
+  /* AND STILL TRUE WHEN THE DEM IS DECIMATED, which is the case that actually broke.
+     At native resolution the bench claim catches every cell under a trail, so the check
+     above passes with or without the fix -- it only bites once cells are big enough for
+     the radius test to miss one. Reload the same map at a stride it would never reach on
+     its own, re-measure, put it back. Last of the assertions because it rebuilds the
+     world underneath everything else. */
+  const coarse = await (0,eval)(`(async()=>{
+    setTerrainQuadBudget(30000);
+    await loadWorld('../data/world.json', [], 3);
+    const G=getGraph();
+    let worst=0, over=0, n=0; const lim=stepUpLimit();
+    for(const e of G.edges){
+      const pts=(e.prof&&e.prof.pts)||e.pts; if(!pts||pts.length<2) continue;
+      for(let i=1;i<pts.length;i++){
+        const ax=pts[i-1][0],az=pts[i-1][1],bx=pts[i][0],bz=pts[i][1];
+        const L=Math.hypot(bx-ax,bz-az), st=Math.max(1,Math.ceil(L/0.5));
+        let prev=standingY(ax,az);
+        for(let k=1;k<=st;k++){
+          const t=k/st, y=standingY(ax+(bx-ax)*t, az+(bz-az)*t);
+          const dd=Math.abs(y-prev); n++;
+          if(dd>lim) over++;
+          if(dd>worst) worst=dd;
+          prev=y;
+        }
+      }
+    }
+    /* Floating tread vs skirt coverage. A ribbon edge "floats" when the graded tread sits
+       well above the terrace under it -- the gap in the screenshot. Every one of those
+       should have skirt geometry near it; the skirt is a facade, so nothing else in the
+       suite would ever notice if it stopped being built. */
+    let floats = 0, covered = 0, skirtQuads = 0;
+    const skirtPts = [], skirtVerts = [];
+    const wg = getWorldGroup();
+    if(wg) wg.traverse(o=>{
+      if(o.isMesh && o.geometry && o.geometry.userData && o.geometry.userData.skirtQuads){
+        skirtQuads += o.geometry.userData.skirtQuads;
+        const pos = o.geometry.getAttribute && o.geometry.getAttribute('position');
+        const arr = pos && (pos.array || pos);
+        if(arr) for(let i=0;i<arr.length;i+=3){ skirtPts.push([arr[i], arr[i+2]]); skirtVerts.push([arr[i], arr[i+1], arr[i+2]]); }
+      }
+    });
+    for(const e of G.edges){
+      const pr=e.prof; if(!pr || !pr.pts || !pr.ys) continue;
+      /* Measured UNDER THE CENTRELINE, not out at some guessed offset. The skirt starts at
+         the outline edge, whose width varies by path class, so sampling at a fixed offset
+         was measuring plain terrain beyond the ribbon on narrow trails and scoring it as
+         an uncovered float. The centreline is unambiguous: if the tread centre is a metre
+         clear of the ground, that is the hole in the screenshot. */
+      for(let i=0;i<pr.pts.length;i++){
+        const p=pr.pts[i];
+        if(pr.ys[i] - terrainY(p[0],p[1],getVertScale()) <= 1.0) continue;
+        floats++;
+        for(const sp of skirtPts){ if(Math.abs(sp[0]-p[0])<4 && Math.abs(sp[1]-p[1])<4){ covered++; break; } }
+      }
+    }
+    /* Does any skirt vertex hang over a tread that sits below it? That is the switchback
+       case: the upper leg's fill reaching across the lower leg and hiding it. Measured on
+       the skirt's own vertices, since those are the surface that would do the burying. */
+    let buried = 0;
+    for(const sp of skirtVerts){
+      const nt = nearestTrail(sp[0], sp[2]);
+      if(nt.y != null && nt.d <= nt.hw && nt.y < sp[1] - 0.6) buried++;
+    }
+    const stride = getDemStride();
+    /* Put the world back at native resolution before returning: assertions after this one
+       measure ribbon geometry, terrace rises and crossing furniture, and every one of them
+       would be reading a coarsened map otherwise. */
+    setTerrainQuadBudget(null);
+    await loadWorld('../data/world.json', [], 3);
+    return {worst:+worst.toFixed(2), over, n, lim:+lim.toFixed(2), stride, floats, covered, skirtQuads, buried, skirtVerts: skirtVerts.length};
+  })()`);
+  check('a decimated DEM does not put un-walkable steps on a trail',
+    coarse.stride > 1 && coarse.over === 0,
+    `stride ${coarse.stride}, worst ${coarse.worst}u vs limit ${coarse.lim}u, ${coarse.over} of ${coarse.n} samples over`);
+
+  /* The skirt is pure facade -- no collision, not in standingY -- so nothing else in this
+     suite can tell whether it is built at all. Assert it directly, on the coarse map
+     where the floats actually occur. */
+  /* The control is only worth having if picking Coarse actually reaches the grid. Driven
+     through the button's own click handler rather than by calling applyDetail, so the
+     wiring between the DOM and the budget is part of what is asserted. Restores Auto and
+     reloads afterwards, like the coarse block above. */
+  const viaUi = await (0,eval)(`(async()=>{
+    const btn = document.querySelector('#detailToggle .toggle[data-detail="low"]');
+    if(!btn) return {ok:false, why:'no Coarse button'};
+    btn.click();
+    await new Promise(r=>setTimeout(r,0));
+    await loadWorld('../data/world.json', [], 3);
+    const stride = getDemStride();
+    document.querySelector('#detailToggle .toggle[data-detail="auto"]').click();
+    await new Promise(r=>setTimeout(r,0));
+    await loadWorld('../data/world.json', [], 3);
+    return {ok:true, stride, backTo: getDemStride()};
+  })()`);
+  check('choosing Coarse actually decimates the grid, and Auto puts it back',
+    viaUi.ok && viaUi.stride > 1 && viaUi.backTo === 1,
+    viaUi.ok ? `coarse stride ${viaUi.stride}, auto stride ${viaUi.backTo}` : viaUi.why);
+
+  check('a tread floating over a terrace drop gets a fill embankment under it',
+    coarse.floats > 0 && coarse.skirtQuads > 0 && coarse.covered / coarse.floats > 0.9,
+    `${coarse.covered} of ${coarse.floats} floating edge points near skirt geometry, ${coarse.skirtQuads} skirt quads`);
+
+  /* A fill that hides the path it was built to reveal is worse than no fill. On a short
+     switchback the upper leg's skirt reaches out over the lower leg at the natural angle
+     of repose, so the skirt has to steepen instead. */
+  check('a fill embankment never buries the trail below it',
+    coarse.skirtVerts > 0 && coarse.buried === 0,
+    `${coarse.buried} of ${coarse.skirtVerts} skirt vertices hang over a lower tread`);
 
   /* THE GAME OPENS ON A WALK, not on a lobby. Finding the 🗺 button and working out that
      tapping a lettered badge is how a game begins was a tutorial step in front of a game
@@ -3476,6 +3626,38 @@ function assertAll(window, errors, stats) {
         const got = tryWallCatch(-wall.f.oz, wall.f.ox);   // tangent, not into the rock
         pl.wall = null;
         return !got;
+      })());
+
+      /* ON TOP OF THE FORMATION, NOT BESIDE IT.
+         The minimum catch height is measured up from the face's BASE, so standing on the
+         summit clears it by the entire height of the rock and every other gate passed
+         too: a straight-up hop near the edge snapped the pup sideways onto the cliff it
+         was stood on. Placed just INSIDE the rim so a face is genuinely within grab
+         range -- the rule has to reject a reachable face, not merely fail to find one. */
+      check('you cannot catch a face you are standing on top of', (() => {
+        pl.wall = null; pl.regrabT = 0;
+        pl.x = wall.f.x - wall.f.ox * 0.5; pl.z = wall.f.z - wall.f.oz * 0.5;
+        pl.y = 0.8; pl.vy = 4;                     // mid-hop, straight up off the summit
+        const got = tryWallCatch(-wall.f.ox, -wall.f.oz);
+        pl.wall = null;
+        return !got;
+      })());
+
+      /* Rising with no steering is a deliberate hop and must not be read as a lunge. The
+         same no-input catch on the way DOWN is still allowed -- falling onto a wall you
+         are already touching should stick -- so assert both halves, or a fix that simply
+         banned no-input catches outright would pass. */
+      check('a straight-up hop beside a face does not catch it', (() => {
+        atFace(2.0); pl.vy = 4;
+        const got = tryWallCatch(0, 0);
+        pl.wall = null;
+        return !got;
+      })());
+      check('falling onto a face with no input still catches', (() => {
+        atFace(2.0); pl.vy = -4;
+        const got = tryWallCatch(0, 0);
+        pl.wall = null;
+        return !!got;
       })());
 
       /* The mechanic: each push-off has to gain height, and a chain of them has to reach

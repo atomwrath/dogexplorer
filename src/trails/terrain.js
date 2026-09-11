@@ -336,11 +336,31 @@ function gradeProfile(pts, vertScale, stepCells = 0.7, windowCells = 8, minStepM
    bench its ribbon sits on. Runs in the same slot flattenAreaCells does and for the same
    reason: buildTerrainMesh bakes the grid into geometry the moment it is called.
 
-   Every profile is resolved in ONE pass over a shared claim map keyed by cell, keeping
-   whichever station sits closest to that cell's centre. Per-profile last-write-wins would
-   hand a cell to whichever trail happened to be processed last rather than to the trail
-   actually running through it — which goes wrong exactly where it is most visible, at
-   junctions and wherever two trails run close together. */
+   Every profile is resolved in ONE pass over a shared claim map keyed by cell. Per-profile
+   last-write-wins would hand a cell to whichever trail happened to be processed last
+   rather than to the trail actually running through it — which goes wrong exactly where it
+   is most visible, at junctions and wherever two trails run close together.
+
+   THE CLAIM KEEPS THE LOWEST HEIGHT, NOT THE NEAREST STATION, and that is a correctness
+   rule rather than a taste one.
+
+   A cell gets ONE band, so it gets one height for ground that the ribbon crosses
+   continuously. Nearest-station picks the height at the cell's centre, which means the
+   terrain sits above the ribbon over roughly the uphill half of every cell. standingY
+   takes max(terrain, tread), so the pup was being lifted onto that overshoot and dropped
+   off it again at each cell boundary: a staircase along the trail with a riser of about
+   half a cell's worth of gradient.
+
+   That was invisible at 8 m cells (a 20% grade gives ~0.8 m, inside the step-up limit) and
+   became unwalkable once the quad budget started decimating big maps to 45 m cells, where
+   the same grade gives ~4.5 m. Keeping the minimum puts the cell at or below the tread
+   everywhere it is crossed, so max() resolves to the smooth ribbon and the walk is
+   continuous at any cell size. What is left in the terrain is a notch the ribbon bridges,
+   which is what a benched trail on a hillside looks like anyway.
+
+   The cost is a deeper cut bank beside the tread on coarse grids, since the cut is taken
+   over the whole bench radius. That is a step you take once when you leave the trail,
+   rather than one you take every cell while following it. */
 function gradeTrailCells(profiles){
   if(!WORLD || !BAND) return;
   const claim = new Map();
@@ -354,6 +374,45 @@ function gradeTrailCells(profiles){
     const r = Math.min(halfWidth + WORLD.cell*0.5, WORLD.cell*MAX_BENCH_CELLS);
     for(let i = 0; i < pts.length; i++){
       const p = pts[i];
+      /* THE CELL THE STATION IS STANDING IN, CLAIMED UNCONDITIONALLY.
+         The radius sweep below tests distance from the CELL CENTRE, and a cell's centre
+         can be up to cell/sqrt(2) from a point inside it -- about 0.707 of a cell --
+         while r only reaches 0.5 of a cell past the tread. So a trail clipping a cell
+         near its corner left that cell ungraded: raw terrain, sitting as much as a whole
+         band above the ribbon running across it, and standingY takes max(terrain, tread).
+         Measured on decimated pikesworld before this line existed: a 13.8-unit cliff at
+         x=1397.7 with the ribbon passing smoothly through it at 143. That is the "steps
+         too large to jump" report, and it is a gap in the corridor rather than a
+         staircase along it -- which is why it got worse with cell size but was never
+         really about cell size.
+
+         Claiming the containing cell directly is exact and costs one map write. */
+      const ci = clamp(WORLD.cellI(p[0]),0,WORLD.width-1), cj = clamp(WORLD.cellJ(p[1]),0,WORLD.height-1);
+      const ck = cj*WORLD.width + ci, cprev = claim.get(ck);
+      if(!cprev || hm[i] < cprev.h) claim.set(ck, {h: hm[i]});
+
+      /* AND EVERY CELL THE SEGMENT CROSSES ON THE WAY TO THE NEXT STATION.
+         Stations sit about 0.7 of a cell apart, so two consecutive ones are in the same
+         cell or in neighbours -- but a diagonal run between them can still clip the
+         corner of a third cell that holds neither. That cell stays raw, and one raw cell
+         under a trail is a full-band cliff across the tread. Stepping along the segment
+         at 0.4 of a cell cannot skip a cell of width 1, and the height is interpolated
+         because the profile between two stations is a straight line by construction. */
+      if(i+1 < pts.length){
+        const q = pts[i+1];
+        const dx = q[0]-p[0], dz = q[1]-p[1];
+        const seg = Math.hypot(dx, dz);
+        const n = Math.ceil(seg/(WORLD.cell*0.4));
+        for(let t = 1; t < n; t++){
+          const u = t/n;
+          const sx = p[0]+dx*u, sz = p[1]+dz*u;
+          const h = hm[i] + (hm[i+1]-hm[i])*u;
+          const si = clamp(WORLD.cellI(sx),0,WORLD.width-1), sj = clamp(WORLD.cellJ(sz),0,WORLD.height-1);
+          const sk = sj*WORLD.width + si, sprev = claim.get(sk);
+          if(!sprev || h < sprev.h) claim.set(sk, {h});
+        }
+      }
+
       const i0 = clamp(WORLD.cellI(p[0]-r),0,WORLD.width-1), i1 = clamp(WORLD.cellI(p[0]+r),0,WORLD.width-1),
             j0 = clamp(WORLD.cellJ(p[1]-r),0,WORLD.height-1), j1 = clamp(WORLD.cellJ(p[1]+r),0,WORLD.height-1);
       for(let j = j0; j <= j1; j++) for(let k = i0; k <= i1; k++){
@@ -361,7 +420,7 @@ function gradeTrailCells(profiles){
         const d = Math.hypot(c.x-p[0], c.z-p[1]);
         if(d > r) continue;
         const key = j*WORLD.width + k, prev = claim.get(key);
-        if(!prev || d < prev.d) claim.set(key, {d, h: hm[i]});
+        if(!prev || hm[i] < prev.h) claim.set(key, {h: hm[i]});
       }
     }
   }

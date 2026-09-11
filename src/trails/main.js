@@ -38,7 +38,7 @@ import { barkSound, cheerBlip, initAudio, thudSound,
          stepSound, landSound, jumpSound, scrabbleSound,
          countPip, goTone, offCourseSound, rejoinSound } from '../core/audio.js';
 
-import { addLayers, clearLayers, compass, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapId, getMapScale, getPathMix, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, loadWorld, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY, areaBlocked, areaSolidTop, nearestSolidFace, solidEmbed, distToSolid } from './world.js';
+import { setTerrainQuadBudget, getDemStride, addLayers, clearLayers, compass, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapId, getMapScale, getPathMix, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, loadWorld, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY, areaBlocked, areaSolidTop, nearestSolidFace, solidEmbed, distToSolid } from './world.js';
 
 import { THEME, THEMES } from './themes.js';
 import { renderer, scene, camera, resize, warmUp } from '../core/render.js';
@@ -155,6 +155,11 @@ const WALL_REGRAB_DELAY = 0.22;
    so this leaves room to start a chain from the ground while refusing catches at ankle
    height -- see tryWallCatch. */
 const WALL_MIN_CATCH = 1.0;
+/* How far a face's top must still stand above your feet for it to count as a wall rather
+   than a ledge you are on. Small on purpose: it only has to exceed the wobble in
+   standingY between the summit and the standoff point beside it, and anything larger
+   would start refusing legitimate catches on the last stretch of a climb. */
+const WALL_TOP_MARGIN = 0.05;
 function mountReach(){ return MOUNT_REACH; }
 const SETTLE_SECONDS = 1.4;
 const UNSETTLE_SECONDS = 1.1;
@@ -1122,16 +1127,42 @@ function tryWallCatch(dirX, dirZ){
 
      Measured from the face's own base rather than from player.y, because player.y is
      height above whatever is underfoot and that is not the same datum once the terrain
-     around a formation slopes. */
-  const groundHere = standingY(player.x, player.z);
+     around a formation slopes.
+
+     playerGroundY, NOT standingY. standingY answers "how high is the terrain and tread
+     here" and knows nothing about solids, so on top of a rock formation it returns the
+     ground at the BOTTOM of the rock -- the pup's feet were being placed tens of units
+     below where they actually were. Every height rule downstream was then reasoning about
+     the wrong datum. playerGroundY is the one the movement code already uses for exactly
+     this reason: max(standingY, areaSolidTop). */
+  const groundHere = playerGroundY(player.x, player.z);
   if(groundHere + player.y < hit.base + WALL_MIN_CATCH) return false;
+  /* AND NOT A FACE YOU ARE STANDING ON TOP OF.
+     WALL_MIN_CATCH above measures up from the face's BASE, which is the ground at its
+     foot -- so standing on the formation's summit clears it by the whole height of the
+     rock. Every test passed and the pup got snapped sideways onto the very cliff it was
+     stood on: the reported "jump straight up near the edge and we get stuck on the wall".
+
+     A face is only worth catching if it still rises above you. Once your feet are level
+     with its top you are not climbing it any more, you are on it, and the right outcome
+     for a jump is air. The margin keeps a catch available while cresting -- you can still
+     grab the last stretch of a face you have not quite topped out on. */
+  const feet = groundHere + player.y;
+  if(hit.top <= feet + WALL_TOP_MARGIN) return false;
   /* Moving INTO the rock. On a ballistic arc the horizontal direction is whatever the
      player steered, so this is the one thing they control in the air and the one thing
-     worth testing. With no input at all, catching is still allowed if the face is right
-     there -- falling onto a wall you are already touching should stick. */
+     worth testing. */
   if(L > 1e-6){
     const dot = (lookX*-hit.f.ox + lookZ*-hit.f.oz);
     if(dot <= WALL_GRAB_DOT) return false;
+  }else if(player.vy > 0){
+    /* NO INPUT AND STILL RISING IS A DELIBERATE HOP, NOT A LUNGE.
+       Catching with no input at all stays allowed on the way DOWN, because falling onto a
+       wall you are already touching should stick -- that is the case the exemption was
+       written for. On the way UP it is the opposite: a straight-up jump beside a rock is
+       the one input that unambiguously says "not at the wall", and treating it as a grab
+       took away the only way to hop on the spot anywhere near a formation. */
+    return false;
   }
   player.wall = {
     fx: hit.f.x, fz: hit.f.z, ox: hit.f.ox, oz: hit.f.oz,
@@ -2284,6 +2315,42 @@ document.querySelectorAll('#pupModeToggle .toggle').forEach(b=>{
   b.addEventListener('click', ()=>{ browseMode=b.dataset.mode; renderPupToggle(); });
 });
 
+/* ---------- terrain detail ----------
+   The quad budget exists because a big DEM can kill a tablet tab outright, and the
+   automatic tier check is a guess about the device rather than a measurement of it. Auto
+   is still the default and still right for almost everyone; this is the escape hatch for
+   the two cases the guess gets wrong -- a phone that needs less than Auto gives it, and a
+   desktop-class tablet that can take the full grid.
+
+   Applied by reloading the map, because the grid is decimated at bundle load and baked
+   into the terrain mesh, the collision heights and the minimap relief all at once. There
+   is no way to change it in place, and pretending otherwise would leave those three
+   disagreeing. The reload is the honest cost of the setting. */
+const DETAIL_KEY = 'pupDetail';
+const DETAIL_BUDGET = {auto: null, high: 0, low: 250000};
+let detailMode = 'auto';
+let lastMapWasDefault = true;
+try{ if(DETAIL_BUDGET[localStorage.getItem(DETAIL_KEY)] !== undefined) detailMode = localStorage.getItem(DETAIL_KEY); }catch(err){}
+function renderDetailToggle(){
+  document.querySelectorAll('#detailToggle .toggle').forEach(b=>{
+    b.classList.toggle('sel', b.dataset.detail===detailMode);
+  });
+}
+function applyDetail(mode, reload){
+  if(DETAIL_BUDGET[mode] === undefined) return;
+  detailMode = mode;
+  setTerrainQuadBudget(DETAIL_BUDGET[mode]);
+  try{ localStorage.setItem(DETAIL_KEY, mode); }catch(err){}
+  renderDetailToggle();
+  if(reload && lastMapUrl) return loadMap(lastMapUrl, lastMapWasDefault).then(ok=>{
+    if(ok){ refreshMapUI(); placeAtHead(pickDefaultHead()); }
+  });
+}
+document.querySelectorAll('#detailToggle .toggle').forEach(b=>{
+  b.addEventListener('click', ()=> applyDetail(b.dataset.detail, true));
+});
+applyDetail(detailMode, false);
+
 /* ---------- sound on/off ----------
    Persisted, because a player who turned the sound off did so about the game, not about
    this tab -- coming back to a silent walk is the expected outcome and having to find the
@@ -2949,13 +3016,20 @@ async function boot(bundleUrl){
 
 /* One place that loads a map by URL, so the boot path, the reload button and any future
    map list all report success and failure identically. */
+let lastMapUrl = null;
 async function loadMap(url, isDefault){
   const note=$('#mapNote');
   if(note) note.textContent='Loading map…';
   try{
     await loadWorld(url, [], 3);
+    lastMapUrl = url; lastMapWasDefault = !!isDefault;
+    /* Say so when a map was coarsened rather than leaving the player to wonder why the
+       ground looks blocky. The detail control is right above this note in the panel, so
+       the answer and the lever are in the same place. */
+    const st = getDemStride();
     if(note) note.textContent = (isDefault?'Default map: ':'Loaded: ')+url.split('/').pop()
-      + ` · ${getTrailheads().length} trailhead${getTrailheads().length===1?'':'s'}`;
+      + ` · ${getTrailheads().length} trailhead${getTrailheads().length===1?'':'s'}`
+      + (st > 1 ? ` · terrain coarsened ${st}× to fit` : '');
     return true;
   }catch(err){
     console.error('could not load world:', url, err);
