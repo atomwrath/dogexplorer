@@ -962,11 +962,14 @@ function updateRecChip(){
     (rec.offT > 1.5 ? ' \u00b7 off trail' : '');
 }
 
-/* Courses as rows, mirroring the saved-pins list beside them: badge, name, the two times
-   that matter (the record, and yours with whoever you are playing as) and the one control
-   that is the whole point of a course -- race it. Tapping the NAME shows it on the map
-   without racing, because "where does that one go" is a question you ask before you commit
-   to running it. */
+/* Courses as rows, mirroring the saved-pins list beside them: a badge, the name, and the
+   two times that matter (the record, and yours with whoever you are playing as). No
+   button of its own -- a race control and a forget button used to sit on every row too,
+   which meant "what happens when I tap this" had three different answers depending on
+   which few pixels you hit. Tapping the NAME is the one thing a row does: it loads the
+   course into the details card above (the same card a tapped trailhead uses) and puts it
+   on the map, and every action a course has -- racing it, forgetting it -- lives there
+   instead, the same place a trailhead's "Start here" does. */
 function renderCourseList(){
   const list = $('#courseList');
   if(!list) return;
@@ -984,8 +987,6 @@ function renderCourseList(){
     row.innerHTML =
       '<span class="cs-badge"></span>' +
       '<button class="cs-name"></button>' +
-      '<button class="cs-go" title="Race this course">\ud83c\udfc1</button>' +
-      '<button class="cs-x" title="Forget this course">\u2715</button>' +
       '<div class="cs-best"></div>';
     row.querySelector('.cs-badge').textContent = String(i+1);
     row.querySelector('.cs-name').textContent = c.name + ' \u00b7 ' + fmtCourseLen(courseLengthM(c));
@@ -1005,23 +1006,8 @@ function renderCourseList(){
       renderCourseList();
       syncCourseOverlay();
     });
-    row.querySelector('.cs-go').addEventListener('click', ()=> startRace(c));
-    row.querySelector('.cs-x').addEventListener('click', ()=>{
-      if(previewCourse && previewCourse.id===c.id) previewCourse = null;
-      if(race.on && race.course && race.course.id===c.id) quitRace();
-      removeCourse(c.id);
-      refreshHere();          // the card may have been describing exactly this course
-      renderCourseUI();
-      syncCourseOverlay();
-    });
     list.appendChild(row);
   });
-}
-
-function toggleCourseShown(c){
-  previewCourse = (previewCourse && previewCourse.id === c.id) ? null : c;
-  renderCourseList();
-  syncCourseOverlay();
 }
 
 /* Re-seat the player after the world has been rebuilt underneath them.
@@ -1633,7 +1619,7 @@ function loop(t){
     setNoiseRingVisible(false);        // nothing to sneak up on until the walk starts
     setCatchRingVisible(false);
     updateAreaLabels(camera.position.x, camera.position.y, camera.position.z);
-    updateMinimap(player.x, player.z, player.yaw);
+    updateMinimap(player.x, player.z, player.yaw, mapSelectedHead());
     renderer.render(scene,camera);
     return;
   }
@@ -1879,7 +1865,7 @@ function loop(t){
      always lagged the pup by one frame. */
   updateRace(dt);
   if(rec.on) updateRecChip();
-  updateMinimap(player.x, player.z, player.yaw);
+  updateMinimap(player.x, player.z, player.yaw, mapSelectedHead());
   updateTrailHud();
 
   /* Landmarks. Walking within a few metres of a POI banks it -- there is no interact
@@ -2464,6 +2450,24 @@ let hereSubject = null;      // {kind:'head', i} | {kind:'course', c} | null
 
 function getHereSubject(){ return hereSubject; }
 
+/* Which trailhead the big sheet should ring, pushed down to minimap.js every frame the
+   same way px/pz/yaw already are (see updateMinimap below) -- that module has no notion
+   of hereSubject and should not grow one just to answer this.
+
+   NOT getStartHead(). getStartHead is where a walk actually begins; hereSubject is what
+   the walker is looking at right now, and a tapped trailhead is a question, not a
+   commitment, until "Start here" is pressed. They agree exactly when nothing is loaded,
+   which is why idle falls back to the real start point instead of showing no ring at all.
+   A course loaded instead answers -1 -- a trailhead ring and a course line are two
+   answers to "what's selected", and only one is ever true at a time (see showHereHead and
+   showHereCourse, which keep hereSubject and the course preview from disagreeing about
+   which). */
+function mapSelectedHead(){
+  if(hereSubject && hereSubject.kind === 'head') return hereSubject.i;
+  if(hereSubject && hereSubject.kind === 'course') return -1;
+  return getStartHead();
+}
+
 function hereEl(){
   return {title:$('#hereTitle'), idle:$('#hereIdle'),
           stats:$('#hereStats'), actions:$('#hereActions')};
@@ -2511,6 +2515,11 @@ function showHereHead(i){
   const heads = getTrailheads();
   if(!heads.length || i == null || i < 0 || i >= heads.length){ showHereIdle(); return; }
   hereSubject = {kind:'head', i};
+  /* A trailhead and a previewed course are mutually exclusive answers to "what's
+     selected" (see mapSelectedHead above) -- loading one has to drop the other, or the
+     sheet would be ringing a trailhead AND tracing a course line that has nothing to do
+     with it. */
+  if(previewCourse){ previewCourse = null; renderCourseList(); syncCourseOverlay(); }
   const h = heads[i];
   const el = hereEl();
   if(el.idle) el.idle.classList.add('off');
@@ -2551,7 +2560,6 @@ function showHereHead(i){
     if(!playing) enterPlay();
     showPane(null);
   });
-  hereBtn(actions, '\u2715 Close', false, showHereIdle);
   actions.classList.add('on');
 }
 
@@ -2604,11 +2612,6 @@ function showHereCourse(c){
   stats.classList.add('on');
 
   hereBtn(actions, '\u{1F3C1} Race this', true, ()=> startRace(c));
-  const shown = previewCourse && previewCourse.id === c.id;
-  hereBtn(actions, shown ? '\u{1F441} Hide on map' : '\u{1F441} Show on map', false, ()=>{
-    toggleCourseShown(c);
-    showHereCourse(c);
-  });
   hereBtn(actions, '\u2715 Forget', false, ()=>{
     if(previewCourse && previewCourse.id === c.id) previewCourse = null;
     if(race.on && race.course && race.course.id === c.id) quitRace();
@@ -3070,7 +3073,7 @@ function getPreviewCourse(){ return previewCourse; }
 export { boot, enterPlay, exitPlay, placeAtHead, placeAt, placeAtSpot, saveHere, doBark,
          trailIsPlaying, getTrailPlayer, getTripState, getOnTrail,
          startRecording, stopRecording, saveRecording, discardRecording, startRace,
-         quitRace, finishRace, toggleCourseShown, renderCourseUI, renderCourseList,
+         quitRace, finishRace, renderCourseUI, renderCourseList,
          avatarName, raceFrozen, isRaceCardOpen, closeRaceCard, syncCourseOverlay,
          getRecState, getRaceState, getPendingRecording, getPreviewCourse,
          getGhostMode, setGhostMode, armGhost, fmtRelief, courseElevAt, worldElevAt,

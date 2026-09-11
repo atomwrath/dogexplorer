@@ -300,7 +300,7 @@ body[data-pane="map"] #bigmapWrap{display:block;}
 .spot-row .sp-x{flex:none;border:none;background:none;font-family:inherit;font-weight:bold;
   cursor:pointer;opacity:.5;font-size:13px;line-height:1;padding:0 2px;}
 .spot-row .sp-x:hover{opacity:1;}
-#bigmapZoom{position:absolute;bottom:24px;right:24px;display:flex;flex-direction:column;gap:8px;}
+#bigmapZoom{position:absolute;bottom:24px;right:24px;display:flex;flex-direction:row;gap:8px;}
 #bigmapZoom .btn{width:44px;height:44px;padding:0;font-size:20px;line-height:1;
   display:flex;align-items:center;justify-content:center;}
 .bigmap-hint{position:absolute;left:24px;bottom:24px;max-width:230px;margin:0;
@@ -368,7 +368,7 @@ body.arrived #arrivalWrap{display:flex;align-items:flex-start;justify-content:ce
    two similar lines is the course. */
 .course-list{display:flex;flex-direction:column;gap:5px;margin-bottom:8px;}
 .course-list .none{font-size:11.5px;opacity:.6;}
-.course-row{display:grid;grid-template-columns:20px 1fr auto auto;gap:6px;align-items:center;
+.course-row{display:grid;grid-template-columns:20px 1fr;gap:6px;align-items:center;
   border:3px solid var(--ink);border-radius:10px;background:#fff;padding:5px 8px;
   font-size:11.5px;font-weight:bold;}
 .course-row.shown{background:#fdeaf5;border-color:#d94fa0;}
@@ -378,12 +378,6 @@ body.arrived #arrivalWrap{display:flex;align-items:flex-start;justify-content:ce
 .course-row .cs-name{grid-column:2;min-width:0;overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap;text-align:left;background:none;border:none;font-family:inherit;
   font-weight:bold;font-size:11.5px;cursor:pointer;padding:0;color:inherit;}
-.course-row .cs-go{grid-column:3;border:2px solid var(--ink);border-radius:8px;background:#fff8e6;
-  font-family:inherit;font-size:12px;line-height:1;padding:3px 5px;cursor:pointer;}
-.course-row .cs-go:hover{background:#d94fa0;}
-.course-row .cs-x{grid-column:4;border:none;background:none;font-family:inherit;font-weight:bold;
-  cursor:pointer;opacity:.5;font-size:13px;line-height:1;padding:0 2px;}
-.course-row .cs-x:hover{opacity:1;}
 .course-row .cs-best{grid-column:1 / -1;font-size:10.5px;font-weight:bold;opacity:.72;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 /* The naming half only exists between "stop" and "save", so it is hidden rather than
@@ -732,7 +726,7 @@ body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
                     <button data-ghost="off">Off</button>
                   </div>
                 </div>
-                <p class="hint">Tap a course name to show it on the map, 🏁 to race it.</p>
+                <p class="hint">Tap a course to see it on the map, then race or forget it above.</p>
               </div>
               <div class="bm-card">
                 <h3>📍 Saved spots</h3>
@@ -9182,6 +9176,14 @@ let bigOpen = false;
 let bigZoom = 1;               // 1 = whole atlas fit to the sheet, higher = zoomed in
 let bigFocus = null;           // world {x,z} centred on the sheet; null -> atlas centre
 let bigView = null;            // last-drawn transform, for pointer/wheel picking: {ox,oy,s,dpr,at,W,H}
+/* Which trailhead badge the sheet should ring, as of the last frame drawn. Pushed in by
+   main.js on every call to updateMinimap rather than read from world.js's getStartHead()
+   the way drawTrailheadLabels used to -- getStartHead is where a walk actually BEGINS,
+   and tapping a badge to read about it is not the same claim as starting there. This
+   module has no way to know which of those two questions is the right one (it doesn't
+   know hereSubject exists), so main.js answers it and hands over a plain index the same
+   way it hands over px/pz/yaw. -1 means "highlight nothing", not "highlight head 0". */
+let lastSelectedHead = -1;
 let onTrailheadPick = null;    // main.js's placeAtHead, wired through initMinimap
 let onSpotPick = null;         // main.js's placeAtSpot, same arrangement
 let bigWired = false;          // guards against double-binding listeners if init runs twice
@@ -9391,6 +9393,11 @@ function setBigMapOpen(on){
 // built bundle, so a plain getter is the only way the harness can compute an exact
 // on-screen trailhead position and drive a real tap-to-pick end to end.
 function getBigView(){ return bigView; }
+
+// Same test seam, same reason: `lastSelectedHead` is a top-level `let`, invisible to
+// tools/smoke.js once flattened, so this is the only way the harness can confirm a tap
+// actually changed what the sheet is about to ring on its next draw.
+function getSelectedHead(){ return lastSelectedHead; }
 
 /* ---------- the static atlas ---------- */
 
@@ -9653,8 +9660,9 @@ function drawSpots(g, X, Z, scale, withLabels){
 
 /* Lettered, tappable trailhead badges for the full sheet -- constant SCREEN size
    regardless of zoom (like a map pin), same lettering as the "Start here" list so the
-   two always agree. The selected one gets a bright ring so "where am I starting" reads
-   at a glance even before you've moved. Drawn live rather than baked into the atlas: a
+   two always agree. The selected one gets a bright ring so "which one am I looking at"
+   reads at a glance -- see lastSelectedHead above for why that is not always the same
+   trailhead a walk would actually begin at. Drawn live rather than baked into the atlas: a
    handful of circles is cheap every frame, and it keeps the letters crisp at any zoom
    instead of blurring along with the raster underneath them. */
 function drawTrailheadLabels(g, X, Z, scale, selectedIdx){
@@ -9689,7 +9697,7 @@ function fitCanvas(cv){
   return true;
 }
 
-function updateMinimap(px, pz, yaw){
+function updateMinimap(px, pz, yaw, selectedHead){
   const at = ensureAtlas();
 
   if(miniCv && miniCtx && miniCv.clientWidth > 0 && fitCanvas(miniCv)){
@@ -9739,7 +9747,8 @@ function updateMinimap(px, pz, yaw){
       const X = x => ox + (x - at.x0)*at.ppm*s, Z = z => oy + (z - at.z0)*at.ppm*s;
       drawHighlight(g, X, Z, dpr*1.4);
       drawCourse(g, X, Z, dpr*1.4, true);
-      drawTrailheadLabels(g, X, Z, dpr*1.3, getStartHead());
+      lastSelectedHead = (selectedHead == null || selectedHead < 0) ? -1 : selectedHead;
+      drawTrailheadLabels(g, X, Z, dpr*1.3, lastSelectedHead);
       drawSighted(g, X, Z, dpr*1.6);
       drawSpots(g, X, Z, dpr*1.9, true);
       drawPup(g, X(px), Z(pz), yaw, dpr*2.2);
@@ -11209,11 +11218,14 @@ function updateRecChip(){
     (rec.offT > 1.5 ? ' \u00b7 off trail' : '');
 }
 
-/* Courses as rows, mirroring the saved-pins list beside them: badge, name, the two times
-   that matter (the record, and yours with whoever you are playing as) and the one control
-   that is the whole point of a course -- race it. Tapping the NAME shows it on the map
-   without racing, because "where does that one go" is a question you ask before you commit
-   to running it. */
+/* Courses as rows, mirroring the saved-pins list beside them: a badge, the name, and the
+   two times that matter (the record, and yours with whoever you are playing as). No
+   button of its own -- a race control and a forget button used to sit on every row too,
+   which meant "what happens when I tap this" had three different answers depending on
+   which few pixels you hit. Tapping the NAME is the one thing a row does: it loads the
+   course into the details card above (the same card a tapped trailhead uses) and puts it
+   on the map, and every action a course has -- racing it, forgetting it -- lives there
+   instead, the same place a trailhead's "Start here" does. */
 function renderCourseList(){
   const list = $('#courseList');
   if(!list) return;
@@ -11231,8 +11243,6 @@ function renderCourseList(){
     row.innerHTML =
       '<span class="cs-badge"></span>' +
       '<button class="cs-name"></button>' +
-      '<button class="cs-go" title="Race this course">\ud83c\udfc1</button>' +
-      '<button class="cs-x" title="Forget this course">\u2715</button>' +
       '<div class="cs-best"></div>';
     row.querySelector('.cs-badge').textContent = String(i+1);
     row.querySelector('.cs-name').textContent = c.name + ' \u00b7 ' + fmtCourseLen(courseLengthM(c));
@@ -11252,23 +11262,8 @@ function renderCourseList(){
       renderCourseList();
       syncCourseOverlay();
     });
-    row.querySelector('.cs-go').addEventListener('click', ()=> startRace(c));
-    row.querySelector('.cs-x').addEventListener('click', ()=>{
-      if(previewCourse && previewCourse.id===c.id) previewCourse = null;
-      if(race.on && race.course && race.course.id===c.id) quitRace();
-      removeCourse(c.id);
-      refreshHere();          // the card may have been describing exactly this course
-      renderCourseUI();
-      syncCourseOverlay();
-    });
     list.appendChild(row);
   });
-}
-
-function toggleCourseShown(c){
-  previewCourse = (previewCourse && previewCourse.id === c.id) ? null : c;
-  renderCourseList();
-  syncCourseOverlay();
 }
 
 /* Re-seat the player after the world has been rebuilt underneath them.
@@ -11880,7 +11875,7 @@ function loop(t){
     setNoiseRingVisible(false);        // nothing to sneak up on until the walk starts
     setCatchRingVisible(false);
     updateAreaLabels(camera.position.x, camera.position.y, camera.position.z);
-    updateMinimap(player.x, player.z, player.yaw);
+    updateMinimap(player.x, player.z, player.yaw, mapSelectedHead());
     renderer.render(scene,camera);
     return;
   }
@@ -12126,7 +12121,7 @@ function loop(t){
      always lagged the pup by one frame. */
   updateRace(dt);
   if(rec.on) updateRecChip();
-  updateMinimap(player.x, player.z, player.yaw);
+  updateMinimap(player.x, player.z, player.yaw, mapSelectedHead());
   updateTrailHud();
 
   /* Landmarks. Walking within a few metres of a POI banks it -- there is no interact
@@ -12711,6 +12706,24 @@ let hereSubject = null;      // {kind:'head', i} | {kind:'course', c} | null
 
 function getHereSubject(){ return hereSubject; }
 
+/* Which trailhead the big sheet should ring, pushed down to minimap.js every frame the
+   same way px/pz/yaw already are (see updateMinimap below) -- that module has no notion
+   of hereSubject and should not grow one just to answer this.
+
+   NOT getStartHead(). getStartHead is where a walk actually begins; hereSubject is what
+   the walker is looking at right now, and a tapped trailhead is a question, not a
+   commitment, until "Start here" is pressed. They agree exactly when nothing is loaded,
+   which is why idle falls back to the real start point instead of showing no ring at all.
+   A course loaded instead answers -1 -- a trailhead ring and a course line are two
+   answers to "what's selected", and only one is ever true at a time (see showHereHead and
+   showHereCourse, which keep hereSubject and the course preview from disagreeing about
+   which). */
+function mapSelectedHead(){
+  if(hereSubject && hereSubject.kind === 'head') return hereSubject.i;
+  if(hereSubject && hereSubject.kind === 'course') return -1;
+  return getStartHead();
+}
+
 function hereEl(){
   return {title:$('#hereTitle'), idle:$('#hereIdle'),
           stats:$('#hereStats'), actions:$('#hereActions')};
@@ -12758,6 +12771,11 @@ function showHereHead(i){
   const heads = getTrailheads();
   if(!heads.length || i == null || i < 0 || i >= heads.length){ showHereIdle(); return; }
   hereSubject = {kind:'head', i};
+  /* A trailhead and a previewed course are mutually exclusive answers to "what's
+     selected" (see mapSelectedHead above) -- loading one has to drop the other, or the
+     sheet would be ringing a trailhead AND tracing a course line that has nothing to do
+     with it. */
+  if(previewCourse){ previewCourse = null; renderCourseList(); syncCourseOverlay(); }
   const h = heads[i];
   const el = hereEl();
   if(el.idle) el.idle.classList.add('off');
@@ -12798,7 +12816,6 @@ function showHereHead(i){
     if(!playing) enterPlay();
     showPane(null);
   });
-  hereBtn(actions, '\u2715 Close', false, showHereIdle);
   actions.classList.add('on');
 }
 
@@ -12851,11 +12868,6 @@ function showHereCourse(c){
   stats.classList.add('on');
 
   hereBtn(actions, '\u{1F3C1} Race this', true, ()=> startRace(c));
-  const shown = previewCourse && previewCourse.id === c.id;
-  hereBtn(actions, shown ? '\u{1F441} Hide on map' : '\u{1F441} Show on map', false, ()=>{
-    toggleCourseShown(c);
-    showHereCourse(c);
-  });
   hereBtn(actions, '\u2715 Forget', false, ()=>{
     if(previewCourse && previewCourse.id === c.id) previewCourse = null;
     if(race.on && race.course && race.course.id === c.id) quitRace();

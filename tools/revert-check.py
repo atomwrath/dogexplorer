@@ -2,8 +2,9 @@
 """Break each behaviour on purpose; confirm the check that guards it goes red.
 
 A passing test is not evidence until it has failed against a revert. Each entry below
-undoes one property of the pane drawer, rebuilds, runs the suite, and asserts that the
-NAMED check fails and that the rest of the suite still fails only its known baseline.
+undoes one property of the code -- the pane drawer, or the trail/course selection state
+that layers on top of it -- rebuilds, runs the suite, and asserts that the NAMED check
+fails and that the rest of the suite still fails only its known baseline.
 Throwaway tooling -- not part of the delivered change.
 """
 import pathlib, subprocess, sys, re
@@ -64,6 +65,17 @@ REVERTS = [
 
     ('reopening the map pane refits it to the sheet', 'src/trails/minimap.js',
      'if(next && !bigOpen){ bigZoom = 1; bigFocus = null; }', ''),
+
+    # --- trail/race selection streamlining: one selected thing, not two independent ones ---
+
+    ('tapping a trailhead highlights it on the sheet, not wherever a walk would actually start',
+     'src/trails/minimap.js',
+     'lastSelectedHead = (selectedHead == null || selectedHead < 0) ? -1 : selectedHead;',
+     'lastSelectedHead = getStartHead();'),
+
+    ('tapping a trailhead clears a previewed course off the map', 'src/trails/main.js',
+     '  if(previewCourse){ previewCourse = null; renderCourseList(); syncCourseOverlay(); }\n',
+     ''),
 ]
 
 

@@ -975,6 +975,20 @@ function assertAll(window, errors, stats) {
       dist(probe().dogWorld, was) < 0.01;
   })());
 
+  /* The bug this catches: drawTrailheadLabels used to ring getStartHead() unconditionally,
+     so tapping a DIFFERENT trailhead to read about it left the sheet ringing the one you
+     would actually start at instead of the one you just asked about. lastSelectedHead is
+     what main.js now pushes into updateMinimap every frame from hereSubject, and this
+     reads it back the same way getBigView is read back above -- through a getter, since a
+     top-level `let` is invisible to this harness once flattened into the bundle. */
+  check('tapping a trailhead highlights it on the sheet, not wherever a walk would actually start', (() => {
+    if (typeof getSelectedHead !== 'function') return false;
+    const subj = getHereSubject();
+    if (!subj || subj.kind !== 'head') return true;   // the check above had nothing to pick between
+    if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(1032); }  // draw the pick
+    return getSelectedHead() === subj.i && getSelectedHead() !== getStartHead();
+  })());
+
   check('the loaded trailhead card carries the button that does move you', (() => {
     const heads = getTrailheads();
     const subj = getHereSubject();
@@ -2243,8 +2257,9 @@ function assertAll(window, errors, stats) {
     const course = saveRecording('Test Course');
     check('saving files the course', !!course && getCourses().length === 1,
       course ? `${course.name}, ${fmtCourseLen(courseLengthM(course))}` : 'nothing saved');
-    check('the map sheet lists it with a race control',
-      n('#courseList .course-row') === 1 && !!d.querySelector('#courseList .cs-go'));
+    check('the map sheet lists it, already loaded into the details card with a race control',
+      n('#courseList .course-row') === 1 &&
+      [...d.querySelectorAll('#hereActions .btn')].some(b => /Race/.test(b.textContent)));
 
     /* The reason courses.js stores real metres, same argument spots.js makes: world scale
        moves every coordinate, and a course that did not move with it would be raced
@@ -2408,9 +2423,12 @@ function assertAll(window, errors, stats) {
         !!b && b.t === FOX_T && !!m && m.t === MINE_T;
     })(), () => __giveNote);
 
-    check('the race control on a course row starts a race', (() => {
+    check('selecting a course row and racing it from the details card starts a race', (() => {
       renderCourseList();
-      d.querySelector('#courseList .cs-go').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+      d.querySelector('#courseList .cs-name').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+      const btn = [...d.querySelectorAll('#hereActions .btn')].find(b => /Race/.test(b.textContent));
+      if (!btn) return false;
+      btn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
       const on = getRaceState().on;
       quitRace();
       return on;
@@ -2734,6 +2752,17 @@ function assertAll(window, errors, stats) {
       return notes.some(t => /ghost/i.test(t));
     })(), () => [...d.querySelectorAll('#hereStats .hs-sub')].map(n => n.textContent).join(' | '));
 
+    /* A trailhead and a previewed course are the same slot, not two independent ones --
+       see mapSelectedHead/showHereHead in main.js. Loading a trailhead has to drop
+       whatever course was on the map, or the sheet would show a ring on one trailhead and
+       a line for a course that has nothing to do with it at the same time. */
+    check('tapping a trailhead clears a previewed course off the map', (() => {
+      if (getPreviewCourse() == null) return false;   // nothing shown -- would assert nothing
+      showHereHead(0);
+      return getPreviewCourse() === null && getCourseShown() === null &&
+        ![...d.querySelectorAll('#courseList .course-row')].some(r => r.classList.contains('shown'));
+    })());
+
     check('forgetting the loaded course empties the card rather than orphaning it', (() => {
       const c4 = getCourses()[0];
       showHereCourse(c4);
@@ -2748,7 +2777,8 @@ function assertAll(window, errors, stats) {
       // removed the last one
       const c = addCourse('Forget Me', trace);
       if (!c) return false;
-      toggleCourseShown(c);
+      renderCourseList();
+      d.querySelector('#courseList .cs-name').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
       removeCourse(c.id);
       renderCourseUI();
       syncCourseOverlay();

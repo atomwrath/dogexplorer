@@ -33,7 +33,7 @@
    still built once per world revision, so zooming in doesn't re-render anything, it
    just draws a bigger crop of the same offscreen image. */
 import { clamp } from '../core/math.js';
-import { getAreas, getBBox, getGraph, getMapScale, getPOIs, getStartHead, getTrailheads, getWorldRevision } from './world.js';
+import { getAreas, getBBox, getGraph, getMapScale, getPOIs, getTrailheads, getWorldRevision } from './world.js';
 import { getSpots, spotWorld } from './spots.js';
 import { coursePoints } from './courses.js';
 import { reliefCanvas } from './terrain.js';
@@ -54,6 +54,14 @@ let bigOpen = false;
 let bigZoom = 1;               // 1 = whole atlas fit to the sheet, higher = zoomed in
 let bigFocus = null;           // world {x,z} centred on the sheet; null -> atlas centre
 let bigView = null;            // last-drawn transform, for pointer/wheel picking: {ox,oy,s,dpr,at,W,H}
+/* Which trailhead badge the sheet should ring, as of the last frame drawn. Pushed in by
+   main.js on every call to updateMinimap rather than read from world.js's getStartHead()
+   the way drawTrailheadLabels used to -- getStartHead is where a walk actually BEGINS,
+   and tapping a badge to read about it is not the same claim as starting there. This
+   module has no way to know which of those two questions is the right one (it doesn't
+   know hereSubject exists), so main.js answers it and hands over a plain index the same
+   way it hands over px/pz/yaw. -1 means "highlight nothing", not "highlight head 0". */
+let lastSelectedHead = -1;
 let onTrailheadPick = null;    // main.js's placeAtHead, wired through initMinimap
 let onSpotPick = null;         // main.js's placeAtSpot, same arrangement
 let bigWired = false;          // guards against double-binding listeners if init runs twice
@@ -263,6 +271,11 @@ function setBigMapOpen(on){
 // built bundle, so a plain getter is the only way the harness can compute an exact
 // on-screen trailhead position and drive a real tap-to-pick end to end.
 function getBigView(){ return bigView; }
+
+// Same test seam, same reason: `lastSelectedHead` is a top-level `let`, invisible to
+// tools/smoke.js once flattened, so this is the only way the harness can confirm a tap
+// actually changed what the sheet is about to ring on its next draw.
+function getSelectedHead(){ return lastSelectedHead; }
 
 /* ---------- the static atlas ---------- */
 
@@ -525,8 +538,9 @@ function drawSpots(g, X, Z, scale, withLabels){
 
 /* Lettered, tappable trailhead badges for the full sheet -- constant SCREEN size
    regardless of zoom (like a map pin), same lettering as the "Start here" list so the
-   two always agree. The selected one gets a bright ring so "where am I starting" reads
-   at a glance even before you've moved. Drawn live rather than baked into the atlas: a
+   two always agree. The selected one gets a bright ring so "which one am I looking at"
+   reads at a glance -- see lastSelectedHead above for why that is not always the same
+   trailhead a walk would actually begin at. Drawn live rather than baked into the atlas: a
    handful of circles is cheap every frame, and it keeps the letters crisp at any zoom
    instead of blurring along with the raster underneath them. */
 function drawTrailheadLabels(g, X, Z, scale, selectedIdx){
@@ -561,7 +575,7 @@ function fitCanvas(cv){
   return true;
 }
 
-function updateMinimap(px, pz, yaw){
+function updateMinimap(px, pz, yaw, selectedHead){
   const at = ensureAtlas();
 
   if(miniCv && miniCtx && miniCv.clientWidth > 0 && fitCanvas(miniCv)){
@@ -611,7 +625,8 @@ function updateMinimap(px, pz, yaw){
       const X = x => ox + (x - at.x0)*at.ppm*s, Z = z => oy + (z - at.z0)*at.ppm*s;
       drawHighlight(g, X, Z, dpr*1.4);
       drawCourse(g, X, Z, dpr*1.4, true);
-      drawTrailheadLabels(g, X, Z, dpr*1.3, getStartHead());
+      lastSelectedHead = (selectedHead == null || selectedHead < 0) ? -1 : selectedHead;
+      drawTrailheadLabels(g, X, Z, dpr*1.3, lastSelectedHead);
       drawSighted(g, X, Z, dpr*1.6);
       drawSpots(g, X, Z, dpr*1.9, true);
       drawPup(g, X(px), Z(pz), yaw, dpr*2.2);
@@ -630,6 +645,6 @@ function updateMinimap(px, pz, yaw){
   }
 }
 
-export { initMinimap, updateMinimap, setBigMapOpen, getBigView,
+export { initMinimap, updateMinimap, setBigMapOpen, getBigView, getSelectedHead,
          setHighlightRoute, getHighlightRoute, highlightEdges, pickSpotAt, pickOnSheet,
          setCourseShown, getCourseShown, setRaceFrac, getRaceFrac };
