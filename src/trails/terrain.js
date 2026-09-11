@@ -419,9 +419,49 @@ function resample(pts,step){
    below), so it stays the same apparent size next to the avatar at any --map-scale. */
 const GROUND_TILE_M = 9;
 
+/* TWO PASSES, STRAIGHT INTO TYPED ARRAYS, and the reason is a tablet crash rather than
+   tidiness.
+
+   This used to accumulate into plain JS arrays and copy to Float32Array at the end. A JS
+   array of numbers holds boxed doubles at 8 bytes each, so the intermediate cost nine
+   times the final buffer -- and it was ALL live at once, because the copy needs both.
+   Measured across the shipped maps at STEP=3:
+
+     world.json      356x428     254k quads    1.0M verts     77 MB of intermediates
+     rrworld.json    514x726     488k quads    2.0M verts    148 MB
+     pikesworld.json 1132x938   2.63M quads   10.5M verts    800 MB  <-- plus 400 MB copy
+
+   1.2 GB peak is nothing on a laptop and instant death on an iPad: the tab is killed and
+   Safari silently reloads it, which is exactly the "error, then the page comes back on
+   the default map" report. Counting first and filling a typed array directly removes the
+   boxing and the copy both, taking pikesworld's build from ~1.2 GB to ~400 MB and
+   world.json's from 77 MB to 39 MB.
+
+   The counting pass duplicates the riser conditions below, which is a real maintenance
+   hazard -- miss one and the fill overruns. countQuads and the fill loop are deliberately
+   written with the same shape and the same comparisons, in the same order, so a change to
+   one reads as obviously needed in the other. tools/smoke.js asserts the two agree.
+
+   Index type: >65535 vertices needs Uint32, which is every map here. Chosen explicitly
+   rather than left to three.js, so a map that happens to fit in 16 bits does not silently
+   get a different code path than the one that has been tested. */
 function buildTerrainMesh(vertScale){
   const W=WORLD;
-  const P=[],N=[],UV=[],idx=[];
+  const yOf=b=>(b*STEP-GROUND_M)*vertScale;
+
+  let quads=0;
+  for(let j=0;j<W.height;j++)for(let i=0;i<W.width;i++){
+    const b=BAND[j*W.width+i];
+    quads++;
+    if(i<W.width-1 && BAND[j*W.width+i+1]!==b) quads++;
+    if(j<W.height-1 && BAND[(j+1)*W.width+i]!==b) quads++;
+  }
+
+  const verts=quads*4;
+  const P=new Float32Array(verts*3), N=new Float32Array(verts*3), UV=new Float32Array(verts*2);
+  const idx=new Uint32Array(quads*6);
+  let vi=0, ii=0;
+
   /* UV from absolute world x/z, not normalised to the map's bounding box. The previous
      formula -- (x-originX)/(full map width) -- gave every vertex a UV in [0,1] across
      the WHOLE terrain in one pass, so one 256x256 canvas got stretched over the entire
@@ -432,9 +472,11 @@ function buildTerrainMesh(vertScale){
      is already seamless across risers and terrace steps since RepeatWrapping is set on
      the texture (groundTexture, below) and x/z vary continuously across them. */
   const put=(x,y,z,nx,ny,nz)=>{
-    P.push(x,y,z);N.push(nx,ny,nz);
-    UV.push(x/GROUND_TILE_M,z/GROUND_TILE_M);
-    return P.length/3-1;
+    const p=vi*3, u=vi*2;
+    P[p]=x; P[p+1]=y; P[p+2]=z;
+    N[p]=nx; N[p+1]=ny; N[p+2]=nz;
+    UV[u]=x/GROUND_TILE_M; UV[u+1]=z/GROUND_TILE_M;
+    return vi++;
   };
   const pushQuad=(p0,p1,p2,p3,dir)=>{
     const e1=[p1[0]-p0[0],p1[1]-p0[1],p1[2]-p0[2]];
@@ -448,9 +490,9 @@ function buildTerrainMesh(vertScale){
           b=put(order[1][0],order[1][1],order[1][2],nx,ny,nz),
           c=put(order[2][0],order[2][1],order[2][2],nx,ny,nz),
           d=put(order[3][0],order[3][1],order[3][2],nx,ny,nz);
-    idx.push(a,b,c,a,c,d);
+    idx[ii++]=a; idx[ii++]=b; idx[ii++]=c; idx[ii++]=a; idx[ii++]=c; idx[ii++]=d;
   };
-  const yOf=b=>(b*STEP-GROUND_M)*vertScale;
+
   for(let j=0;j<W.height;j++)for(let i=0;i<W.width;i++){
     const y=yOf(BAND[j*W.width+i]);
     const x0=W.originX+i*W.cell,x1=x0+W.cell,z0=W.originZ+j*W.cell,z1=z0+W.cell;
@@ -466,11 +508,19 @@ function buildTerrainMesh(vertScale){
       pushQuad([x0,lo,z1],[x1,lo,z1],[x1,hi,z1],[x0,hi,z1],outDir);
     }
   }
+
   const geo=new THREE.BufferGeometry();
-  geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(P),3));
-  geo.setAttribute('normal',new THREE.BufferAttribute(new Float32Array(N),3));
-  geo.setAttribute('uv',new THREE.BufferAttribute(new Float32Array(UV),2));
-  geo.setIndex(idx);
+  geo.setAttribute('position',new THREE.BufferAttribute(P,3));
+  geo.setAttribute('normal',new THREE.BufferAttribute(N,3));
+  geo.setAttribute('uv',new THREE.BufferAttribute(UV,2));
+  geo.setIndex(new THREE.BufferAttribute(idx,1));
+  /* Read by tools/smoke.js to check the counting pass and the fill pass agree: a
+     shortfall here means one of the two riser conditions drifted from the other, which
+     would otherwise show up only as a wedge of black triangles at the map edge. */
+  // guarded: real three.js always has userData, the smoke harness's duck-typed
+  // BufferGeometry does not, and this must not be the thing that breaks a headless run
+  geo.userData = geo.userData || {};
+  geo.userData.terrainFill = {quads, verts, filledVerts: vi, filledIdx: ii};
   return geo;
 }
 

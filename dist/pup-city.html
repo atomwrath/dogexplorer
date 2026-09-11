@@ -1244,13 +1244,33 @@ function startAt(){ return (AC ? AC.currentTime : 0) + LEAD; }
    to destination. Two reasons: a single place to set overall level, and headroom -- three
    barks and a growl all hitting destination at 0.5 each was clipping on the way out. */
 let MASTER = null;
+const MASTER_LEVEL = 0.85;
+let MUTED = false;
+/* Mute at the master gain rather than by suspending the context or guarding every call
+   site. Suspending stops AudioContext.currentTime, which every voice in this file
+   schedules against, so a resume would fire a backlog of stale events all at once; and
+   guarding call sites means the next voice anyone adds is silently unmutable. One gain
+   node at the end of the graph mutes everything that exists now and everything added
+   later, and the graph keeps running so unmuting is instant rather than a fade-in from a
+   cold context.
+
+   Assigning MASTER.gain.value directly (rather than setValueAtTime) is deliberate: this
+   is a settings toggle, not a musical event, and a direct write takes effect on the next
+   render quantum without needing a valid schedule time. */
+function setAudioMuted(on){
+  MUTED = !!on;
+  if(MASTER) MASTER.gain.value = MUTED ? 0 : MASTER_LEVEL;
+  return MUTED;
+}
+function isAudioMuted(){ return MUTED; }
+
 function out(){
   if(!AC) return null;
   /* AC.destination, never out(). MASTER is assigned on the line above, so a recursive
      out() here returns MASTER itself and wires the master gain into a self-loop: every
      voice still builds a correct graph, nothing throws, and not one sample reaches the
      speakers. tools/smoke.js asserts a voice can actually reach the destination. */
-  if(!MASTER){ MASTER = AC.createGain(); MASTER.gain.value = 0.85; MASTER.connect(AC.destination); }
+  if(!MASTER){ MASTER = AC.createGain(); MASTER.gain.value = MUTED ? 0 : MASTER_LEVEL; MASTER.connect(AC.destination); }
   return MASTER;
 }
 

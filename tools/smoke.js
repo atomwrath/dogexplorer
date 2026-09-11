@@ -327,7 +327,7 @@ console.log(`app bundle: ${(app.length / 1024) | 0} KB`);
 const errors = [];
 process.on('unhandledRejection', e => errors.push('unhandledRejection: ' + (e && e.message)));
 const origError = console.error;
-console.error = (...a) => { errors.push('console.error: ' + a.map(String).join(' ')); };
+console.error = (...a) => { errors.push("console.error: " + a.map(String).join(" ")); };
 
 const probe = `
 ;globalThis.__probe = () => ({
@@ -351,7 +351,12 @@ const probe = `
     let critterMeshes=0, critterCasters=0;
     for(const c of CRITTERS) c.g.traverse(o=>{ if(o.isMesh){ critterMeshes++; if(o.castShadow) critterCasters++; } });
     return { meshes, casters, materials: mats.size, textured, critterMeshes, critterCasters,
-             backdropR: backdropRadius(THEME, getMapScale()) };
+             backdropR: backdropRadius(THEME, getMapScale()),
+             terrainFill: (()=>{ let f=null; scene.traverse(o=>{ if(o.isMesh&&o.geometry&&o.geometry.userData&&o.geometry.userData.terrainFill) f=o.geometry.userData.terrainFill; }); return f; })(),
+             demStride: (typeof BUNDLE !== 'undefined' && BUNDLE) ? BUNDLE.demStride : null,
+             soundBtns: document.querySelectorAll('#soundToggle .toggle').length,
+             soundSel: (()=>{ const b=document.querySelector('#soundToggle .toggle.sel'); return b?b.dataset.sound:null; })(),
+             atlasSentinel: (()=>{ try{ return typeof atlasIntact === 'function'; }catch(e){ return false; } })() };
   })(),
   chase: (()=>{ try{
     const out={typical:+typicalSpookRadius().toFixed(2), reach:+catchRadius().toFixed(2), species:[]};
@@ -529,6 +534,38 @@ function assertAll(window, errors, stats) {
   check('critters do not also cast real shadows',
     s.perf.critterMeshes > 0 && s.perf.critterCasters === 0,
     `${s.perf.critterCasters} of ${s.perf.critterMeshes} critter meshes cast`);
+
+  /* ---------- terrain build ----------
+     buildTerrainMesh counts quads in one pass and fills typed arrays in a second, which
+     is what took pikesworld.json's build from ~1.2 GB of intermediates to ~50 MB. The two
+     passes repeat the same riser conditions, so they can drift; if the count comes out
+     high the tail of the buffer stays zeroed (a fan of black triangles at the origin) and
+     if it comes out low the fill overruns. Neither throws. Assert they agree exactly. */
+  check('the terrain counting pass and fill pass agree',
+    !!s.perf.terrainFill &&
+    s.perf.terrainFill.filledVerts === s.perf.terrainFill.verts &&
+    s.perf.terrainFill.filledIdx === s.perf.terrainFill.quads * 6,
+    s.perf.terrainFill
+      ? `${s.perf.terrainFill.filledVerts}/${s.perf.terrainFill.verts} verts, ${s.perf.terrainFill.filledIdx}/${s.perf.terrainFill.quads*6} indices`
+      : 'no terrain geometry found');
+
+  /* The default map is well inside the quad budget, so it must come through at its native
+     resolution. A stride above 1 here means the budget has been tightened to the point
+     where it degrades a map that was always fine -- which is the failure mode that makes
+     a safety limit worse than the problem it guards. pikesworld.json is the map the
+     budget exists for; it is not the map loaded here. */
+  check('the default map loads at native DEM resolution',
+    s.perf.demStride === 1, `stride ${s.perf.demStride}`);
+
+  /* ---------- settings ---------- */
+  check('the settings panel has a sound toggle', s.perf.soundBtns === 2, `${s.perf.soundBtns} buttons`);
+  check('sound defaults to on', s.perf.soundSel === 'on', `selected: ${s.perf.soundSel}`);
+
+  /* The minimap atlas is cached against the world revision, which cannot notice mobile
+     Safari discarding the canvas backing store under memory pressure -- the element
+     survives, the pixels do not, and the map comes up blank except for the live trail
+     overlay. atlasIntact is the pixel-level check that catches it. */
+  check('the minimap can detect a discarded atlas', s.perf.atlasSentinel);
 
   /* THE GAME OPENS ON A WALK, not on a lobby. Finding the 🗺 button and working out that
      tapping a lettered badge is how a game begins was a tutorial step in front of a game

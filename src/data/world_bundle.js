@@ -43,7 +43,7 @@ function decodeInt16LE(b64) {
 }
 
 export class World {
-  constructor(bundle) {
+  constructor(bundle, opts = {}) {
     if (bundle.format !== FORMAT) {
       throw new Error(`Unsupported bundle format: ${bundle.format}`);
     }
@@ -61,9 +61,6 @@ export class World {
     this.mPerDegLat = pr.metresPerDegreeLat;
     this.zSign = pr.zAxis === 'north' ? -1 : 1;
 
-    this.cell = hf.cell;
-    this.width = hf.width;
-    this.height = hf.height;
     this.originX = hf.originX;
     this.originZ = hf.originZ;
     this.minM = hf.minM;
@@ -75,11 +72,84 @@ export class World {
       throw new Error(`Heightfield size mismatch: ${raw.length} vs ${hf.width * hf.height}`);
     }
 
-    // Expand once to Float32 metres. ~200 KB for a 2 km square at 8 m cells.
-    this.heights = new Float32Array(raw.length);
-    for (let i = 0; i < raw.length; i++) {
-      this.heights[i] = hf.baseM + raw[i] / hf.scale;
+    /* GRID BUDGET, and it has to be applied HERE rather than at mesh-build time.
+     *
+     * A DEM cell is not free: buildTerrainMesh emits a quad per cell plus a riser quad
+     * per band change, so pikesworld.json's 1132x938 grid becomes 2.63M quads and 10.5M
+     * vertices. That is a single draw call no tablet GPU wants, and the build allocates
+     * hundreds of megabytes getting there. On an iPad the tab is killed outright and
+     * Safari reloads it on the default map.
+     *
+     * The tempting fix is to decimate only the visible mesh and leave the height lookups
+     * at full resolution. That is wrong, and expensively so: heightAt/cellI/cellJ are
+     * what standingY and every collision query read, so a mesh built at stride 3 over
+     * heights sampled at stride 1 puts the ground the player stands on several metres
+     * away from the ground they can see. Decimating the grid itself keeps the terrain
+     * mesh, the collision surface, the minimap relief and the trail grading all derived
+     * from one array, which is the invariant this whole module exists to hold.
+     *
+     * Integer stride, nearest sample, no averaging: averaging would round off exactly the
+     * terrace edges the band grid is there to find, and a half-cell offset would shift
+     * the whole map against its own projection. `cell` grows by the same factor so world
+     * coordinates are untouched -- the map covers the same ground, in bigger steps.
+     *
+     * BUDGETED ON QUADS, NOT ON CELLS, because cells are a bad proxy. A flat map emits
+     * one quad per cell; a mountainous one emits a riser quad at every terrace band
+     * change too. pikesworld.json has 2.8x the cells of rrworld.json but 5.4x the quads,
+     * so any cell budget that leaves rrworld alone also lets pikesworld through at a size
+     * that still kills the tab. Counting quads for each candidate stride costs a few
+     * passes over the grid -- milliseconds, once, at load -- and is exact.
+     *
+     * Requires terraceStep, since the band grid is what riser count depends on. Without
+     * it there is nothing to count and the budget is skipped; the caller knows the step
+     * because it is the same one it passes to loadWorld. */
+    let W = hf.width, H = hf.height, cell = hf.cell;
+    const maxQuads = Number(opts.maxQuads) || 0;
+    const step = Number(opts.terraceStep) || 0;
+    const sampleAt = (st, i, j) => hf.baseM + raw[(j*st)*hf.width + i*st] / hf.scale;
+    const quadsAt = (st) => {
+      const w = Math.floor(hf.width/st), h = Math.floor(hf.height/st);
+      if(w < 2 || h < 2) return null;
+      let n = w*h;
+      let prevRow = new Int32Array(w);
+      for(let i = 0; i < w; i++) prevRow[i] = Math.floor(sampleAt(st, i, 0)/step);
+      for(let j = 0; j < h; j++){
+        const row = new Int32Array(w);
+        for(let i = 0; i < w; i++) row[i] = Math.floor(sampleAt(st, i, j)/step);
+        for(let i = 0; i < w-1; i++) if(row[i+1] !== row[i]) n++;
+        if(j > 0) for(let i = 0; i < w; i++) if(row[i] !== prevRow[i]) n++;
+        prevRow = row;
+      }
+      return {w, h, quads: n};
+    };
+
+    let stride = 1;
+    if (maxQuads > 0 && step > 0) {
+      for(;;){
+        const m = quadsAt(stride);
+        if(!m) { stride = Math.max(1, stride-1); break; }
+        if(m.quads <= maxQuads) break;
+        const next = quadsAt(stride+1);
+        if(!next) break;          // already as coarse as this grid can usefully go
+        stride++;
+      }
     }
+
+    const w = Math.floor(hf.width/stride), h = Math.floor(hf.height/stride);
+    const heights = new Float32Array(w*h);
+    for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
+      heights[j*w+i] = sampleAt(stride, i, j);
+    }
+    W = w; H = h; cell = hf.cell * stride;
+
+    this.width = W;
+    this.height = H;
+    this.baseCell = cell;
+    this.cell = cell;
+    this.heights = heights;
+    /* Read by world.js for the map note and by tools/smoke.js. 1 means the bundle was
+     * used at its native resolution. */
+    this.demStride = stride;
   }
 
   // --- horizontal scale -------------------------------------------------
@@ -108,7 +178,10 @@ export class World {
     this.mapScale = s;
     this.mPerDegLon = pr.metresPerDegreeLon * s;
     this.mPerDegLat = pr.metresPerDegreeLat * s;
-    this.cell = hf.cell * s;
+    /* baseCell, not hf.cell: the bundle's own cell size is the PRE-decimation one, and
+     * rereading it here would quietly undo the grid budget applied in the constructor
+     * the first time anyone touched the world-scale slider. */
+    this.cell = this.baseCell * s;
     this.originX = hf.originX * s;
     this.originZ = hf.originZ * s;
     return this;
@@ -201,12 +274,12 @@ export class World {
   }
 }
 
-export function loadWorldBundle(bundle) {
-  return new World(bundle);
+export function loadWorldBundle(bundle, opts) {
+  return new World(bundle, opts);
 }
 
-export async function fetchWorldBundle(url) {
+export async function fetchWorldBundle(url, opts) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to load ${url}: ${res.status}`);
-  return new World(await res.json());
+  return new World(await res.json(), opts);
 }

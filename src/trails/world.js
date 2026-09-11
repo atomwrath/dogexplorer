@@ -13,6 +13,7 @@
    separately re-tuned against an arbitrary shrink factor. Only vertical exaggeration
    remains adjustable, since stretching Y alone can't misalign vectors from terrain. */
 import { clamp } from '../core/math.js';
+import { QUALITY } from '../core/quality.js';
 import { buildTerrainMesh, flattenAreaCells, gradeProfile, gradeTrailCells, GROUND_TILE_M, groundTexture, reliefCanvas, resample, setStep, setWorld, terrainY } from './terrain.js';
 
 import { scene, camera, disposeGroup, sun, hemi } from '../core/render.js';
@@ -586,10 +587,39 @@ function buildTrailheads(){
    `extraLayers` are additional raw GeoJSON FeatureCollections the user drops in-session,
    on top of whatever the bundle itself already carries in bundle.layers -- both get
    projected through the SAME World instance, so they can never drift apart. */
+/* HOW BIG A TERRAIN MESH THIS DEVICE WILL ACCEPT, counted in quads.
+ *
+ * Every DEM cell becomes a quad, plus another wherever the terrace band changes, and each
+ * quad is four vertices in the buffer. Measured at the shipped contour step:
+ *
+ *   world.json       356x428  ->   254k quads ->  1.0M verts ->  39 MB of buffers
+ *   rrworld.json     514x726  ->   488k quads ->  2.0M verts ->  74 MB
+ *   pikesworld.json 1132x938  -> 2.63M quads -> 10.5M verts -> 400 MB
+ *
+ * The first two load on a tablet today; the third kills the tab. 600,000 sits just above
+ * rrworld on purpose -- the budget must not touch a map that already works, and rrworld
+ * is the largest grid we have direct evidence for. pikesworld lands on stride 3
+ * (377x312, 45 m cells, 329k quads, 50 MB), comfortably inside the envelope of the two
+ * maps known to be fine, for a map covering 17 km of Pikes Peak where 45 m cells are
+ * proportionate anyway.
+ *
+ * Desktop is not budgeted at all. There is no reason to degrade a map on hardware that
+ * loads it fine, and tying the number to QUALITY.tier means the same watchdog that drops
+ * shadows on a struggling device also decides this.
+ *
+ * Deliberately NOT re-applied on a quality tier change: the grid is baked into BUNDLE at
+ * load, and silently rebuilding the terrain under a player mid-walk to a different shape
+ * of ground is worse than leaving a map at the resolution it was opened with. */
+const TERRAIN_QUAD_BUDGET_MOBILE = 600000;
+function terrainQuadBudget(){
+  return QUALITY.tier === 'high' ? 0 : TERRAIN_QUAD_BUDGET_MOBILE;   // 0 = no limit
+}
+
 async function loadWorld(urlOrBundleObj, extraLayers, stepMetres){
+  const opts = {maxQuads: terrainQuadBudget(), terraceStep: stepMetres || STEP_M};
   BUNDLE = (typeof urlOrBundleObj==='string')
-    ? await fetchWorldBundle(urlOrBundleObj)
-    : loadWorldBundle(urlOrBundleObj);
+    ? await fetchWorldBundle(urlOrBundleObj, opts)
+    : loadWorldBundle(urlOrBundleObj, opts);
   BUNDLE.setMapScale(MAP_SCALE);
   if(extraLayers) EXTRA = extraLayers.slice();
   if(stepMetres) STEP_M = stepMetres;

@@ -360,12 +360,76 @@ function buildAtlas(){
     g.strokeRect(X(h.x)-r, Z(h.z)-r, r*2, r*2);
   }
 
+  /* SENTINEL PIXEL, top-left, opaque, a colour nothing else paints.
+     It sits in the map's padding margin, outside the bbox of anything drawn, so it costs
+     one pixel of blank border and is never visible at any zoom. Its only job is to be
+     readable later -- see atlasIntact. */
+  g.fillStyle = ATLAS_SENTINEL_CSS;
+  g.fillRect(0, 0, 1, 1);
+
   atlas = {canvas: cv, x0, z0, w: wx, h: wz, ppm};
+}
+
+/* ---------- surviving a discarded backing store ----------
+
+   THE BUG: every so often the map would come up blank except for the trail and the
+   trailhead badges, and changing the environment fixed it. That shape is the whole
+   diagnosis. The trail and the badges are the only things drawn LIVE on top each frame;
+   everything else -- relief, contours, roads, POIs -- is baked into the atlas once. So
+   the live layer was fine and the baked layer was gone. Changing the environment bumps
+   the world revision, which rebuilds the atlas, which is why it "fixed" it.
+
+   Mobile Safari discards the backing store of a large offscreen canvas under memory
+   pressure, most often while the tab is backgrounded. The canvas ELEMENT survives with
+   its width and height intact -- so `atlas` is still a perfectly good-looking object and
+   the `!atlas` check in ensureAtlas never fires -- but its pixels come back transparent.
+   A cache keyed only on the world revision has no way to notice.
+
+   So check the pixels, not the object. One getImageData of a single pixel is a trivial
+   readback, and it is rate-limited to twice a second because it is guarding against an
+   OS event, not a code path. A canvas that has been discarded reads back transparent
+   black, which is why the sentinel is opaque: alpha alone is enough to tell them apart,
+   and the colour comparison catches a partial restore too.
+
+   visibilitychange is the belt to that braces: backgrounding is when the discard usually
+   happens, so invalidate on the way back in rather than waiting up to 500 ms for the next
+   probe to notice. Neither path rebuilds anything by itself -- both just clear the cache
+   so the next ensureAtlas does the work, on the frame that actually needs it. */
+const ATLAS_SENTINEL_CSS = '#ff00ff';
+const ATLAS_SENTINEL = [255, 0, 255, 255];
+const ATLAS_PROBE_MS = 500;
+let lastProbe = 0;
+
+function atlasIntact(at){
+  const now = Date.now();
+  if(now - lastProbe < ATLAS_PROBE_MS) return true;
+  lastProbe = now;
+  try{
+    const g = at.canvas.getContext('2d');
+    if(!g || typeof g.getImageData !== 'function') return true;   // headless: nothing to check
+    const d = g.getImageData(0, 0, 1, 1).data;
+    return d[3] === ATLAS_SENTINEL[3] && d[0] === ATLAS_SENTINEL[0] &&
+           d[1] === ATLAS_SENTINEL[1] && d[2] === ATLAS_SENTINEL[2];
+  }catch(err){
+    /* A readback that throws tells us nothing about the pixels, and rebuilding a
+       2000px atlas every frame on a browser that refuses getImageData would be far
+       worse than the bug. Assume intact and let the revision counter do its job. */
+    return true;
+  }
+}
+
+function invalidateAtlas(){ atlas = null; atlasRev = -1; }
+
+if(typeof document !== 'undefined' && document.addEventListener){
+  document.addEventListener('visibilitychange', () => {
+    if(!document.hidden) invalidateAtlas();
+  });
 }
 
 function ensureAtlas(){
   const rev = getWorldRevision();
-  if(rev !== atlasRev || !atlas){ atlasRev = rev; buildAtlas(); }
+  if(rev !== atlasRev || !atlas){ atlasRev = rev; buildAtlas(); return atlas; }
+  if(!atlasIntact(atlas)) buildAtlas();
   return atlas;
 }
 

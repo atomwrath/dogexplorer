@@ -671,6 +671,14 @@ body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
               </div>
             </div>
             <div class="sect">
+              <h2>🔊 Sound</h2>
+              <div class="toggle-row" id="soundToggle">
+                <button class="toggle sel" data-sound="on">🔊 On</button>
+                <button class="toggle" data-sound="off">🔇 Off</button>
+              </div>
+              <p class="hint">Footfalls, barks and the wildlife. Your choice is remembered.</p>
+            </div>
+            <div class="sect">
               <h2>🐾 Who's exploring</h2>
               <div class="toggle-row" id="pupModeToggle">
                 <button class="toggle sel" data-mode="dog">🐕 Dogs</button>
@@ -3279,9 +3287,49 @@ function resample(pts,step){
    below), so it stays the same apparent size next to the avatar at any --map-scale. */
 const GROUND_TILE_M = 9;
 
+/* TWO PASSES, STRAIGHT INTO TYPED ARRAYS, and the reason is a tablet crash rather than
+   tidiness.
+
+   This used to accumulate into plain JS arrays and copy to Float32Array at the end. A JS
+   array of numbers holds boxed doubles at 8 bytes each, so the intermediate cost nine
+   times the final buffer -- and it was ALL live at once, because the copy needs both.
+   Measured across the shipped maps at STEP=3:
+
+     world.json      356x428     254k quads    1.0M verts     77 MB of intermediates
+     rrworld.json    514x726     488k quads    2.0M verts    148 MB
+     pikesworld.json 1132x938   2.63M quads   10.5M verts    800 MB  <-- plus 400 MB copy
+
+   1.2 GB peak is nothing on a laptop and instant death on an iPad: the tab is killed and
+   Safari silently reloads it, which is exactly the "error, then the page comes back on
+   the default map" report. Counting first and filling a typed array directly removes the
+   boxing and the copy both, taking pikesworld's build from ~1.2 GB to ~400 MB and
+   world.json's from 77 MB to 39 MB.
+
+   The counting pass duplicates the riser conditions below, which is a real maintenance
+   hazard -- miss one and the fill overruns. countQuads and the fill loop are deliberately
+   written with the same shape and the same comparisons, in the same order, so a change to
+   one reads as obviously needed in the other. tools/smoke.js asserts the two agree.
+
+   Index type: >65535 vertices needs Uint32, which is every map here. Chosen explicitly
+   rather than left to three.js, so a map that happens to fit in 16 bits does not silently
+   get a different code path than the one that has been tested. */
 function buildTerrainMesh(vertScale){
   const W=WORLD;
-  const P=[],N=[],UV=[],idx=[];
+  const yOf=b=>(b*STEP-GROUND_M)*vertScale;
+
+  let quads=0;
+  for(let j=0;j<W.height;j++)for(let i=0;i<W.width;i++){
+    const b=BAND[j*W.width+i];
+    quads++;
+    if(i<W.width-1 && BAND[j*W.width+i+1]!==b) quads++;
+    if(j<W.height-1 && BAND[(j+1)*W.width+i]!==b) quads++;
+  }
+
+  const verts=quads*4;
+  const P=new Float32Array(verts*3), N=new Float32Array(verts*3), UV=new Float32Array(verts*2);
+  const idx=new Uint32Array(quads*6);
+  let vi=0, ii=0;
+
   /* UV from absolute world x/z, not normalised to the map's bounding box. The previous
      formula -- (x-originX)/(full map width) -- gave every vertex a UV in [0,1] across
      the WHOLE terrain in one pass, so one 256x256 canvas got stretched over the entire
@@ -3292,9 +3340,11 @@ function buildTerrainMesh(vertScale){
      is already seamless across risers and terrace steps since RepeatWrapping is set on
      the texture (groundTexture, below) and x/z vary continuously across them. */
   const put=(x,y,z,nx,ny,nz)=>{
-    P.push(x,y,z);N.push(nx,ny,nz);
-    UV.push(x/GROUND_TILE_M,z/GROUND_TILE_M);
-    return P.length/3-1;
+    const p=vi*3, u=vi*2;
+    P[p]=x; P[p+1]=y; P[p+2]=z;
+    N[p]=nx; N[p+1]=ny; N[p+2]=nz;
+    UV[u]=x/GROUND_TILE_M; UV[u+1]=z/GROUND_TILE_M;
+    return vi++;
   };
   const pushQuad=(p0,p1,p2,p3,dir)=>{
     const e1=[p1[0]-p0[0],p1[1]-p0[1],p1[2]-p0[2]];
@@ -3308,9 +3358,9 @@ function buildTerrainMesh(vertScale){
           b=put(order[1][0],order[1][1],order[1][2],nx,ny,nz),
           c=put(order[2][0],order[2][1],order[2][2],nx,ny,nz),
           d=put(order[3][0],order[3][1],order[3][2],nx,ny,nz);
-    idx.push(a,b,c,a,c,d);
+    idx[ii++]=a; idx[ii++]=b; idx[ii++]=c; idx[ii++]=a; idx[ii++]=c; idx[ii++]=d;
   };
-  const yOf=b=>(b*STEP-GROUND_M)*vertScale;
+
   for(let j=0;j<W.height;j++)for(let i=0;i<W.width;i++){
     const y=yOf(BAND[j*W.width+i]);
     const x0=W.originX+i*W.cell,x1=x0+W.cell,z0=W.originZ+j*W.cell,z1=z0+W.cell;
@@ -3326,11 +3376,19 @@ function buildTerrainMesh(vertScale){
       pushQuad([x0,lo,z1],[x1,lo,z1],[x1,hi,z1],[x0,hi,z1],outDir);
     }
   }
+
   const geo=new THREE.BufferGeometry();
-  geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(P),3));
-  geo.setAttribute('normal',new THREE.BufferAttribute(new Float32Array(N),3));
-  geo.setAttribute('uv',new THREE.BufferAttribute(new Float32Array(UV),2));
-  geo.setIndex(idx);
+  geo.setAttribute('position',new THREE.BufferAttribute(P,3));
+  geo.setAttribute('normal',new THREE.BufferAttribute(N,3));
+  geo.setAttribute('uv',new THREE.BufferAttribute(UV,2));
+  geo.setIndex(new THREE.BufferAttribute(idx,1));
+  /* Read by tools/smoke.js to check the counting pass and the fill pass agree: a
+     shortfall here means one of the two riser conditions drifted from the other, which
+     would otherwise show up only as a wedge of black triangles at the map edge. */
+  // guarded: real three.js always has userData, the smoke harness's duck-typed
+  // BufferGeometry does not, and this must not be the thing that breaks a headless run
+  geo.userData = geo.userData || {};
+  geo.userData.terrainFill = {quads, verts, filledVerts: vi, filledIdx: ii};
   return geo;
 }
 
@@ -3771,13 +3829,33 @@ function startAt(){ return (AC ? AC.currentTime : 0) + LEAD; }
    to destination. Two reasons: a single place to set overall level, and headroom -- three
    barks and a growl all hitting destination at 0.5 each was clipping on the way out. */
 let MASTER = null;
+const MASTER_LEVEL = 0.85;
+let MUTED = false;
+/* Mute at the master gain rather than by suspending the context or guarding every call
+   site. Suspending stops AudioContext.currentTime, which every voice in this file
+   schedules against, so a resume would fire a backlog of stale events all at once; and
+   guarding call sites means the next voice anyone adds is silently unmutable. One gain
+   node at the end of the graph mutes everything that exists now and everything added
+   later, and the graph keeps running so unmuting is instant rather than a fade-in from a
+   cold context.
+
+   Assigning MASTER.gain.value directly (rather than setValueAtTime) is deliberate: this
+   is a settings toggle, not a musical event, and a direct write takes effect on the next
+   render quantum without needing a valid schedule time. */
+function setAudioMuted(on){
+  MUTED = !!on;
+  if(MASTER) MASTER.gain.value = MUTED ? 0 : MASTER_LEVEL;
+  return MUTED;
+}
+function isAudioMuted(){ return MUTED; }
+
 function out(){
   if(!AC) return null;
   /* AC.destination, never out(). MASTER is assigned on the line above, so a recursive
      out() here returns MASTER itself and wires the master gain into a self-loop: every
      voice still builds a correct graph, nothing throws, and not one sample reaches the
      speakers. tools/smoke.js asserts a voice can actually reach the destination. */
-  if(!MASTER){ MASTER = AC.createGain(); MASTER.gain.value = 0.85; MASTER.connect(AC.destination); }
+  if(!MASTER){ MASTER = AC.createGain(); MASTER.gain.value = MUTED ? 0 : MASTER_LEVEL; MASTER.connect(AC.destination); }
   return MASTER;
 }
 
@@ -5306,7 +5384,7 @@ function decodeInt16LE(b64) {
 }
 
 class World {
-  constructor(bundle) {
+  constructor(bundle, opts = {}) {
     if (bundle.format !== FORMAT) {
       throw new Error(`Unsupported bundle format: ${bundle.format}`);
     }
@@ -5324,9 +5402,6 @@ class World {
     this.mPerDegLat = pr.metresPerDegreeLat;
     this.zSign = pr.zAxis === 'north' ? -1 : 1;
 
-    this.cell = hf.cell;
-    this.width = hf.width;
-    this.height = hf.height;
     this.originX = hf.originX;
     this.originZ = hf.originZ;
     this.minM = hf.minM;
@@ -5338,11 +5413,84 @@ class World {
       throw new Error(`Heightfield size mismatch: ${raw.length} vs ${hf.width * hf.height}`);
     }
 
-    // Expand once to Float32 metres. ~200 KB for a 2 km square at 8 m cells.
-    this.heights = new Float32Array(raw.length);
-    for (let i = 0; i < raw.length; i++) {
-      this.heights[i] = hf.baseM + raw[i] / hf.scale;
+    /* GRID BUDGET, and it has to be applied HERE rather than at mesh-build time.
+     *
+     * A DEM cell is not free: buildTerrainMesh emits a quad per cell plus a riser quad
+     * per band change, so pikesworld.json's 1132x938 grid becomes 2.63M quads and 10.5M
+     * vertices. That is a single draw call no tablet GPU wants, and the build allocates
+     * hundreds of megabytes getting there. On an iPad the tab is killed outright and
+     * Safari reloads it on the default map.
+     *
+     * The tempting fix is to decimate only the visible mesh and leave the height lookups
+     * at full resolution. That is wrong, and expensively so: heightAt/cellI/cellJ are
+     * what standingY and every collision query read, so a mesh built at stride 3 over
+     * heights sampled at stride 1 puts the ground the player stands on several metres
+     * away from the ground they can see. Decimating the grid itself keeps the terrain
+     * mesh, the collision surface, the minimap relief and the trail grading all derived
+     * from one array, which is the invariant this whole module exists to hold.
+     *
+     * Integer stride, nearest sample, no averaging: averaging would round off exactly the
+     * terrace edges the band grid is there to find, and a half-cell offset would shift
+     * the whole map against its own projection. `cell` grows by the same factor so world
+     * coordinates are untouched -- the map covers the same ground, in bigger steps.
+     *
+     * BUDGETED ON QUADS, NOT ON CELLS, because cells are a bad proxy. A flat map emits
+     * one quad per cell; a mountainous one emits a riser quad at every terrace band
+     * change too. pikesworld.json has 2.8x the cells of rrworld.json but 5.4x the quads,
+     * so any cell budget that leaves rrworld alone also lets pikesworld through at a size
+     * that still kills the tab. Counting quads for each candidate stride costs a few
+     * passes over the grid -- milliseconds, once, at load -- and is exact.
+     *
+     * Requires terraceStep, since the band grid is what riser count depends on. Without
+     * it there is nothing to count and the budget is skipped; the caller knows the step
+     * because it is the same one it passes to loadWorld. */
+    let W = hf.width, H = hf.height, cell = hf.cell;
+    const maxQuads = Number(opts.maxQuads) || 0;
+    const step = Number(opts.terraceStep) || 0;
+    const sampleAt = (st, i, j) => hf.baseM + raw[(j*st)*hf.width + i*st] / hf.scale;
+    const quadsAt = (st) => {
+      const w = Math.floor(hf.width/st), h = Math.floor(hf.height/st);
+      if(w < 2 || h < 2) return null;
+      let n = w*h;
+      let prevRow = new Int32Array(w);
+      for(let i = 0; i < w; i++) prevRow[i] = Math.floor(sampleAt(st, i, 0)/step);
+      for(let j = 0; j < h; j++){
+        const row = new Int32Array(w);
+        for(let i = 0; i < w; i++) row[i] = Math.floor(sampleAt(st, i, j)/step);
+        for(let i = 0; i < w-1; i++) if(row[i+1] !== row[i]) n++;
+        if(j > 0) for(let i = 0; i < w; i++) if(row[i] !== prevRow[i]) n++;
+        prevRow = row;
+      }
+      return {w, h, quads: n};
+    };
+
+    let stride = 1;
+    if (maxQuads > 0 && step > 0) {
+      for(;;){
+        const m = quadsAt(stride);
+        if(!m) { stride = Math.max(1, stride-1); break; }
+        if(m.quads <= maxQuads) break;
+        const next = quadsAt(stride+1);
+        if(!next) break;          // already as coarse as this grid can usefully go
+        stride++;
+      }
     }
+
+    const w = Math.floor(hf.width/stride), h = Math.floor(hf.height/stride);
+    const heights = new Float32Array(w*h);
+    for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
+      heights[j*w+i] = sampleAt(stride, i, j);
+    }
+    W = w; H = h; cell = hf.cell * stride;
+
+    this.width = W;
+    this.height = H;
+    this.baseCell = cell;
+    this.cell = cell;
+    this.heights = heights;
+    /* Read by world.js for the map note and by tools/smoke.js. 1 means the bundle was
+     * used at its native resolution. */
+    this.demStride = stride;
   }
 
   // --- horizontal scale -------------------------------------------------
@@ -5371,7 +5519,10 @@ class World {
     this.mapScale = s;
     this.mPerDegLon = pr.metresPerDegreeLon * s;
     this.mPerDegLat = pr.metresPerDegreeLat * s;
-    this.cell = hf.cell * s;
+    /* baseCell, not hf.cell: the bundle's own cell size is the PRE-decimation one, and
+     * rereading it here would quietly undo the grid budget applied in the constructor
+     * the first time anyone touched the world-scale slider. */
+    this.cell = this.baseCell * s;
     this.originX = hf.originX * s;
     this.originZ = hf.originZ * s;
     return this;
@@ -5464,14 +5615,14 @@ class World {
   }
 }
 
-function loadWorldBundle(bundle) {
-  return new World(bundle);
+function loadWorldBundle(bundle, opts) {
+  return new World(bundle, opts);
 }
 
-async function fetchWorldBundle(url) {
+async function fetchWorldBundle(url, opts) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to load ${url}: ${res.status}`);
-  return new World(await res.json());
+  return new World(await res.json(), opts);
 }
 
 /* ==== src/trails/geo.js ==== */
@@ -5883,6 +6034,7 @@ function nearestTrail(x,z){
    real m/s for Pup City) is correct here too, unlike the old build where speed had to be
    separately re-tuned against an arbitrary shrink factor. Only vertical exaggeration
    remains adjustable, since stretching Y alone can't misalign vectors from terrain. */
+
 
 
 
@@ -6455,10 +6607,39 @@ function buildTrailheads(){
    `extraLayers` are additional raw GeoJSON FeatureCollections the user drops in-session,
    on top of whatever the bundle itself already carries in bundle.layers -- both get
    projected through the SAME World instance, so they can never drift apart. */
+/* HOW BIG A TERRAIN MESH THIS DEVICE WILL ACCEPT, counted in quads.
+ *
+ * Every DEM cell becomes a quad, plus another wherever the terrace band changes, and each
+ * quad is four vertices in the buffer. Measured at the shipped contour step:
+ *
+ *   world.json       356x428  ->   254k quads ->  1.0M verts ->  39 MB of buffers
+ *   rrworld.json     514x726  ->   488k quads ->  2.0M verts ->  74 MB
+ *   pikesworld.json 1132x938  -> 2.63M quads -> 10.5M verts -> 400 MB
+ *
+ * The first two load on a tablet today; the third kills the tab. 600,000 sits just above
+ * rrworld on purpose -- the budget must not touch a map that already works, and rrworld
+ * is the largest grid we have direct evidence for. pikesworld lands on stride 3
+ * (377x312, 45 m cells, 329k quads, 50 MB), comfortably inside the envelope of the two
+ * maps known to be fine, for a map covering 17 km of Pikes Peak where 45 m cells are
+ * proportionate anyway.
+ *
+ * Desktop is not budgeted at all. There is no reason to degrade a map on hardware that
+ * loads it fine, and tying the number to QUALITY.tier means the same watchdog that drops
+ * shadows on a struggling device also decides this.
+ *
+ * Deliberately NOT re-applied on a quality tier change: the grid is baked into BUNDLE at
+ * load, and silently rebuilding the terrain under a player mid-walk to a different shape
+ * of ground is worse than leaving a map at the resolution it was opened with. */
+const TERRAIN_QUAD_BUDGET_MOBILE = 600000;
+function terrainQuadBudget(){
+  return QUALITY.tier === 'high' ? 0 : TERRAIN_QUAD_BUDGET_MOBILE;   // 0 = no limit
+}
+
 async function loadWorld(urlOrBundleObj, extraLayers, stepMetres){
+  const opts = {maxQuads: terrainQuadBudget(), terraceStep: stepMetres || STEP_M};
   BUNDLE = (typeof urlOrBundleObj==='string')
-    ? await fetchWorldBundle(urlOrBundleObj)
-    : loadWorldBundle(urlOrBundleObj);
+    ? await fetchWorldBundle(urlOrBundleObj, opts)
+    : loadWorldBundle(urlOrBundleObj, opts);
   BUNDLE.setMapScale(MAP_SCALE);
   if(extraLayers) EXTRA = extraLayers.slice();
   if(stepMetres) STEP_M = stepMetres;
@@ -9656,12 +9837,76 @@ function buildAtlas(){
     g.strokeRect(X(h.x)-r, Z(h.z)-r, r*2, r*2);
   }
 
+  /* SENTINEL PIXEL, top-left, opaque, a colour nothing else paints.
+     It sits in the map's padding margin, outside the bbox of anything drawn, so it costs
+     one pixel of blank border and is never visible at any zoom. Its only job is to be
+     readable later -- see atlasIntact. */
+  g.fillStyle = ATLAS_SENTINEL_CSS;
+  g.fillRect(0, 0, 1, 1);
+
   atlas = {canvas: cv, x0, z0, w: wx, h: wz, ppm};
+}
+
+/* ---------- surviving a discarded backing store ----------
+
+   THE BUG: every so often the map would come up blank except for the trail and the
+   trailhead badges, and changing the environment fixed it. That shape is the whole
+   diagnosis. The trail and the badges are the only things drawn LIVE on top each frame;
+   everything else -- relief, contours, roads, POIs -- is baked into the atlas once. So
+   the live layer was fine and the baked layer was gone. Changing the environment bumps
+   the world revision, which rebuilds the atlas, which is why it "fixed" it.
+
+   Mobile Safari discards the backing store of a large offscreen canvas under memory
+   pressure, most often while the tab is backgrounded. The canvas ELEMENT survives with
+   its width and height intact -- so `atlas` is still a perfectly good-looking object and
+   the `!atlas` check in ensureAtlas never fires -- but its pixels come back transparent.
+   A cache keyed only on the world revision has no way to notice.
+
+   So check the pixels, not the object. One getImageData of a single pixel is a trivial
+   readback, and it is rate-limited to twice a second because it is guarding against an
+   OS event, not a code path. A canvas that has been discarded reads back transparent
+   black, which is why the sentinel is opaque: alpha alone is enough to tell them apart,
+   and the colour comparison catches a partial restore too.
+
+   visibilitychange is the belt to that braces: backgrounding is when the discard usually
+   happens, so invalidate on the way back in rather than waiting up to 500 ms for the next
+   probe to notice. Neither path rebuilds anything by itself -- both just clear the cache
+   so the next ensureAtlas does the work, on the frame that actually needs it. */
+const ATLAS_SENTINEL_CSS = '#ff00ff';
+const ATLAS_SENTINEL = [255, 0, 255, 255];
+const ATLAS_PROBE_MS = 500;
+let lastProbe = 0;
+
+function atlasIntact(at){
+  const now = Date.now();
+  if(now - lastProbe < ATLAS_PROBE_MS) return true;
+  lastProbe = now;
+  try{
+    const g = at.canvas.getContext('2d');
+    if(!g || typeof g.getImageData !== 'function') return true;   // headless: nothing to check
+    const d = g.getImageData(0, 0, 1, 1).data;
+    return d[3] === ATLAS_SENTINEL[3] && d[0] === ATLAS_SENTINEL[0] &&
+           d[1] === ATLAS_SENTINEL[1] && d[2] === ATLAS_SENTINEL[2];
+  }catch(err){
+    /* A readback that throws tells us nothing about the pixels, and rebuilding a
+       2000px atlas every frame on a browser that refuses getImageData would be far
+       worse than the bug. Assume intact and let the revision counter do its job. */
+    return true;
+  }
+}
+
+function invalidateAtlas(){ atlas = null; atlasRev = -1; }
+
+if(typeof document !== 'undefined' && document.addEventListener){
+  document.addEventListener('visibilitychange', () => {
+    if(!document.hidden) invalidateAtlas();
+  });
 }
 
 function ensureAtlas(){
   const rev = getWorldRevision();
-  if(rev !== atlasRev || !atlas){ atlasRev = rev; buildAtlas(); }
+  if(rev !== atlasRev || !atlas){ atlasRev = rev; buildAtlas(); return atlas; }
+  if(!atlasIntact(atlas)) buildAtlas();
   return atlas;
 }
 
@@ -12713,6 +12958,40 @@ function renderPupToggle(){
 document.querySelectorAll('#pupModeToggle .toggle').forEach(b=>{
   b.addEventListener('click', ()=>{ browseMode=b.dataset.mode; renderPupToggle(); });
 });
+
+/* ---------- sound on/off ----------
+   Persisted, because a player who turned the sound off did so about the game, not about
+   this tab -- coming back to a silent walk is the expected outcome and having to find the
+   toggle again every session is not.
+
+   setAudioMuted is safe to call before initAudio: it records the intent, and out() reads
+   it when it finally builds the master gain on the first user gesture. That ordering is
+   the whole reason the mute lives at the gain node rather than in a guard around each
+   voice -- restoring a saved preference at boot must not require an AudioContext that
+   browsers will not let us create yet. */
+const SOUND_KEY = 'pupSound';
+let soundOn = true;
+try{ soundOn = localStorage.getItem(SOUND_KEY) !== 'off'; }catch(err){}
+function renderSoundToggle(){
+  document.querySelectorAll('#soundToggle .toggle').forEach(b=>{
+    b.classList.toggle('sel', (b.dataset.sound==='on') === soundOn);
+  });
+}
+function applySound(on){
+  soundOn = !!on;
+  setAudioMuted(!soundOn);
+  try{ localStorage.setItem(SOUND_KEY, soundOn ? 'on' : 'off'); }catch(err){}
+  renderSoundToggle();
+}
+document.querySelectorAll('#soundToggle .toggle').forEach(b=>{
+  b.addEventListener('click', ()=>{
+    applySound(b.dataset.sound==='on');
+    // unmuting is also a user gesture, which is the one moment a browser will let us
+    // start the context -- so take it, or the first sound after unmuting is lost
+    if(soundOn) initAudio();
+  });
+});
+applySound(soundOn);
 
 $('#randomPupBtn')?.addEventListener('click', ()=>{
   const params = randomPupParams();

@@ -2284,6 +2284,40 @@ document.querySelectorAll('#pupModeToggle .toggle').forEach(b=>{
   b.addEventListener('click', ()=>{ browseMode=b.dataset.mode; renderPupToggle(); });
 });
 
+/* ---------- sound on/off ----------
+   Persisted, because a player who turned the sound off did so about the game, not about
+   this tab -- coming back to a silent walk is the expected outcome and having to find the
+   toggle again every session is not.
+
+   setAudioMuted is safe to call before initAudio: it records the intent, and out() reads
+   it when it finally builds the master gain on the first user gesture. That ordering is
+   the whole reason the mute lives at the gain node rather than in a guard around each
+   voice -- restoring a saved preference at boot must not require an AudioContext that
+   browsers will not let us create yet. */
+const SOUND_KEY = 'pupSound';
+let soundOn = true;
+try{ soundOn = localStorage.getItem(SOUND_KEY) !== 'off'; }catch(err){}
+function renderSoundToggle(){
+  document.querySelectorAll('#soundToggle .toggle').forEach(b=>{
+    b.classList.toggle('sel', (b.dataset.sound==='on') === soundOn);
+  });
+}
+function applySound(on){
+  soundOn = !!on;
+  setAudioMuted(!soundOn);
+  try{ localStorage.setItem(SOUND_KEY, soundOn ? 'on' : 'off'); }catch(err){}
+  renderSoundToggle();
+}
+document.querySelectorAll('#soundToggle .toggle').forEach(b=>{
+  b.addEventListener('click', ()=>{
+    applySound(b.dataset.sound==='on');
+    // unmuting is also a user gesture, which is the one moment a browser will let us
+    // start the context -- so take it, or the first sound after unmuting is lost
+    if(soundOn) initAudio();
+  });
+});
+applySound(soundOn);
+
 $('#randomPupBtn')?.addEventListener('click', ()=>{
   const params = randomPupParams();
   mode='dog'; browseMode='dog'; dogChoice={label:'random:'+params.name, params};
