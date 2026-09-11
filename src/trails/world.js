@@ -15,7 +15,7 @@
 import { clamp } from '../core/math.js';
 import { buildTerrainMesh, flattenAreaCells, gradeProfile, gradeTrailCells, GROUND_TILE_M, groundTexture, reliefCanvas, resample, setStep, setWorld, terrainY } from './terrain.js';
 
-import { scene, disposeGroup, sun, hemi } from '../core/render.js';
+import { scene, camera, disposeGroup, sun, hemi } from '../core/render.js';
 import { toon, toonTex } from '../core/materials.js';
 import { loadWorldBundle, fetchWorldBundle } from '../data/world_bundle.js';
 import { parseFeatures, buildGraph, ptSeg } from './geo.js';
@@ -24,7 +24,7 @@ import { resetSpatialHash, hashSeg, nearestTrail } from './spatial.js';
 import { THEME, THEMES, setTheme } from './themes.js';
 import { ribbonGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
          pickTree, buildPOI, buildArea, buildAreaSign, POI_STYLE, AREA_STYLE, shade,
-         buildBackdrop } from './pieces.js';
+         buildBackdrop, backdropRadius } from './pieces.js';
 
 let GRAPH=null, TRAILHEADS=[], POIS=[], AREAS=[], WATER=[];
 /* Every floating area name currently in the scene. Collected at build time so the
@@ -431,10 +431,44 @@ function getTheme(){ return THEME; }
    directly rather than added to the disposable group. Fog distances scale with MAP_SCALE
    (a shrunk map needs fog pulled in to match, or it would see clean across the whole
    thing) and independently with the user's own FOG_MUL on top of that. */
+/* THE FAR PLANE IS A FUNCTION OF THE FOG, not a constant, and that is a performance fix
+   rather than a tidy-up.
+
+   main.js used to pin camera.far at 4000 so a kilometres-wide trail network would not get
+   clipped. But fog goes fully opaque at THEME.fogFar*MAP_SCALE*FOG_MUL -- 192 on the
+   default Garden of the Gods map -- so the frustum was roughly twenty times deeper than
+   anything the player can actually see. Measured on that map: 6,366 meshes in the scene,
+   4,927 of them (77%) more than 200 units from the player. Every one of those sat INSIDE
+   the frustum whenever the camera faced across the valley, and three.js creates a mesh's
+   GPU resources lazily on its first render -- so cresting a ridge meant a few thousand
+   first-time material initialisations and buffer uploads landing inside a single frame.
+   That is what the stutter was. Culling them costs nothing, because fog had already
+   painted them out.
+
+   Two floors under it, both real:
+     - the fog wall itself, with 15% of headroom so nothing pops at the point where it
+       would have been 100% sky-coloured anyway;
+     - the horizon backdrop, which is deliberately exempt from fog (see buildBackdrop) and
+       therefore is the one thing that must survive past it. 1.35x its outer radius covers
+       the skirt corner, which is the furthest vertex on it.
+   FOG_MUL clamps as low as 0.15, so without the backdrop floor a player who pulled fog
+   right in would have clipped the sky dome off.
+
+   Side benefit worth recording, because it fixes a bug the comments in shadow.js are
+   still apologising for: depth-buffer precision is spread across near..far, and hauling
+   far in from 4000 to a couple of hundred is a large precision win at ground level. The
+   polygonOffset hack keeping the pup's blob shadow from strobing is no longer fighting a
+   depth buffer stretched over four kilometres. */
+function applyFarPlane(){
+  const fogFar = THEME.fogFar*MAP_SCALE*FOG_MUL;
+  const far = Math.max(fogFar*1.15, backdropRadius(THEME, MAP_SCALE)*1.35, 60);
+  if(camera.far !== far){ camera.far = far; camera.updateProjectionMatrix(); }
+}
 function applyThemeLighting(){
   scene.background=new THREE.Color(THEME.sky);
   scene.fog=new THREE.Fog(new THREE.Color(THEME.sky).getHex(),
                           THEME.fogNear*MAP_SCALE*FOG_MUL, THEME.fogFar*MAP_SCALE*FOG_MUL);
+  applyFarPlane();
   hemi.color=new THREE.Color(THEME.hemiSky);
   hemi.groundColor=new THREE.Color(THEME.hemiGround);
   hemi.intensity=THEME.hemiInt;

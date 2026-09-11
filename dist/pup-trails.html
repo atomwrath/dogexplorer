@@ -928,9 +928,62 @@ const toonTex = (()=>{
   t.needsUpdate = true;
   return t;
 })();
-function toon(color){
-  return new THREE.MeshToonMaterial({color:new THREE.Color(color), gradientMap:toonTex});
+/* CACHED BY COLOUR, and the cache is the point rather than a micro-optimisation.
+
+   Measured on the default Garden of the Gods map before this existed: 6,360 meshes in
+   the scene holding 6,360 SEPARATE material instances -- but only 85 distinct material
+   configurations between them. Every tree trunk on the map carried its own private copy
+   of the same brown.
+
+   That costs twice. Once at first sight of each mesh, because three.js initialises a
+   material lazily on its first render (program cache key, uniform blocks, the lot) and
+   a fresh instance cannot reuse the one next to it; and again every frame, because the
+   renderer cannot skip a uniform upload between two draws it has no way to know are
+   identical. The first of those is what made walking over a ridge stutter: a few
+   thousand first-time initialisations landing inside one frame.
+
+   Keyed on the colour string exactly as passed. Colours here are literals from the theme
+   and species tables, so equal colours arrive as equal strings and the key is honest.
+
+   SHARED MATERIALS MUST NOT BE DISPOSED, which is what isShared() below is for -- see
+   disposeGroup in core/render.js. resetCritters and rebuildWorld both dispose
+   whole subtrees, and before the flag existed that would have torn down a material the
+   rest of the map was still drawing with. Nothing in this codebase mutates a material
+   returned from here (the four in-place opacity writes -- world.js, critters.js,
+   shadow.js, fx.js -- are all on sprite or ring materials built elsewhere), so sharing
+   is safe; if that ever changes, the fix is a private material at that call site, not
+   an exception here. */
+/* Membership lives in a WeakSet rather than as a flag ON the material, so nothing here
+   depends on three.js's userData existing -- the smoke harness's duck-typed Material has
+   no such field, and a shared-ness marker that a test double can silently drop is a
+   marker that fails exactly where it matters. */
+const SHARED = new WeakSet();
+const CACHE = new Map();
+
+/* The memo behind toon(), exported because toon() is not the only material factory that
+   was handing out thousands of identical instances -- pieces.js's trailMat is the other
+   big one. `key` must capture every constructor argument that can differ, or two
+   different-looking things will end up sharing one material; `make` is only called on a
+   miss.
+
+   THE CONTRACT IS THAT THE RESULT IS IMMUTABLE. Anything that mutates a material in
+   place -- opacity, colour, map.repeat -- must build its own and not come through here.
+   The four in-place writes in this codebase (world.js:609, critters.js:594,
+   shadow.js:102, fx.js:115) are all on sprite and ring materials constructed elsewhere,
+   and the one map.repeat write (pieces.js, paved areas) is on a material deliberately
+   left uncached for exactly this reason. */
+function sharedMat(key, make){
+  let m = CACHE.get(key);
+  if(!m){ m = make(); SHARED.add(m); CACHE.set(key, m); }
+  return m;
 }
+function toon(color){
+  return sharedMat('toon|'+color, () =>
+    new THREE.MeshToonMaterial({color:new THREE.Color(color), gradientMap:toonTex}));
+}
+/* True for any material handed out through sharedMat, i.e. any material more than one
+   mesh in the scene may be pointing at. Disposal sites must ask before disposing. */
+function isShared(m){ return SHARED.has(m); }
 function M(geo, mat, cast=true, recv=false){
   const m = new THREE.Mesh(geo, mat);
   m.castShadow = cast; m.receiveShadow = recv;
@@ -982,12 +1035,61 @@ const sunTarget = new THREE.Object3D();
 scene.add(sunTarget);
 sun.target = sunTarget;
 
+/* Geometry is always private to the mesh that holds it, so it always goes. Materials are
+   not: materials.js hands out one shared MeshToonMaterial per colour, and disposing one
+   of those here would pull it out from under every other mesh on the map still drawing
+   with it -- a black world one rebuildWorld later, with nothing in the stack trace to say
+   why. isShared() is the opt-out, owned by the module that does the sharing.
+
+   The toonTex check below is the same rule one level down and predates it: the gradient
+   ramp has always been a single shared texture. */
+/* PAY THE FIRST-SIGHT COST WHILE THE LOADER IS STILL UP.
+
+   three.js builds a mesh's GPU resources lazily, on its first RENDER: the material's
+   shader program and uniform blocks, then gl.createBuffer/bufferData for position,
+   normal, uv and index. Anything frustum-culled has never been rendered, so it has never
+   paid. Walk over a ridge and a few hundred meshes pay all at once, inside one frame, as
+   synchronous driver calls -- which is a visible hitch on a tablet and the reported "it
+   almost freezes when animals appear".
+
+   Two halves, because renderer.compile only does one of them. compile() walks the scene
+   and initialises MATERIALS, which is the expensive half and the half that shares (one
+   toon material per colour now, so ~85 programs rather than 6,360 initialisations). It
+   does not touch geometry. Buffers only get created when something actually reaches
+   renderBufferDirect, so the second half is one real render with culling switched off --
+   every mesh enters the render list, every buffer gets uploaded, and the frame is thrown
+   away. Vertices beyond the far plane are clipped downstream of the upload, so pulling
+   the far plane in (see world.js applyFarPlane) does not rob this of anything.
+
+   One expensive frame at boot, behind the loader, in exchange for no expensive frames
+   during play. Wrapped in try/catch and feature-tested because the smoke harness runs a
+   duck-typed renderer with neither method. */
+function warmUp(){
+  const flipped = [];
+  try{
+    if(typeof renderer.compile === 'function') renderer.compile(scene, camera);
+    scene.traverse(o=>{
+      if((o.isMesh || o.isSprite) && o.frustumCulled){ o.frustumCulled = false; flipped.push(o); }
+    });
+    renderer.render(scene, camera);
+  }catch(e){
+    /* a warm-up that fails is a slow first minute, not a broken game */
+  }finally{
+    for(const o of flipped) o.frustumCulled = true;
+  }
+}
+
+function disposeMat(m){
+  if(isShared(m)) return;
+  if(m.map && m.map!==toonTex) m.map.dispose();
+  m.dispose();
+}
 function disposeGroup(g){
   g.traverse(o=>{
     if(o.geometry) o.geometry.dispose();
     if(o.material){
-      if(Array.isArray(o.material)) o.material.forEach(m=>{ if(m.map && m.map!==toonTex) m.map.dispose(); m.dispose(); });
-      else { if(o.material.map && o.material.map!==toonTex) o.material.map.dispose(); o.material.dispose(); }
+      if(Array.isArray(o.material)) o.material.forEach(disposeMat);
+      else disposeMat(o.material);
     }
   });
 }
@@ -4469,9 +4571,14 @@ function ribbonGeom(pts,w,y,elevArr){
 function trailMat(color, layer){
   // DoubleSide is a safety net on top of the winding fix — cheap for a ribbon this size,
   // and guarantees the trail can never vanish again from a stray winding edge case.
+  /* Shared per (colour, layer), which is the whole argument list. Every ribbon segment on
+     the map used to get its own copy: 1,272 identical toon materials survived the toon()
+     cache purely through this one function, because it builds its material directly
+     rather than going through it. Nothing mutates a trail material after construction. */
   const L = layer || 0;
-  return new THREE.MeshToonMaterial({color:new THREE.Color(color),gradientMap:toonTex,side:THREE.DoubleSide,
-    polygonOffset:true,polygonOffsetFactor:-2-L*3,polygonOffsetUnits:-2-L*3});
+  return sharedMat('trail|'+color+'|'+L, () =>
+    new THREE.MeshToonMaterial({color:new THREE.Color(color),gradientMap:toonTex,side:THREE.DoubleSide,
+      polygonOffset:true,polygonOffsetFactor:-2-L*3,polygonOffsetUnits:-2-L*3}));
 }
 const INK='#3a2517';
 function signText(label,dist,flip){
@@ -5085,11 +5192,32 @@ function mixHex(a, b, t){
   const ca=new THREE.Color(a), cb=new THREE.Color(b);
   return new THREE.Color(ca.r+(cb.r-ca.r)*t, ca.g+(cb.g-ca.g)*t, ca.b+(cb.b-ca.b)*t);
 }
+/* The outer band's radius, and the single source of truth for how far away the horizon
+   ring sits. world.js sizes the camera's far plane off this, because the backdrop is the
+   only thing in the scene that has to survive out beyond the fog wall -- everything else
+   is fog-coloured mush by the time it gets there. Kept here, next to the geometry it
+   describes, so the two cannot drift apart. */
+function backdropRadius(theme, mapScale=1){
+  const bands = (theme && theme.mountain && theme.mountain.length) || 3;
+  return 900 * mapScale * (1 + (bands-1)*0.07);
+}
+
 function buildBackdrop(theme, rng, mapScale=1){
   const g = new THREE.Group();
   g.name = 'backdrop';
   const mesas = theme.mountainStyle === 'mesas';
-  const BASE_Y = -600;                    // far below any terrain the player can stand on
+  /* PROPORTIONAL TO THE RING, not a flat -600.
+
+     The skirt only has to reach below the horizon line on screen; it was never meant to
+     be a wall six hundred metres tall. The flat value was harmless while the far plane
+     sat at 4000, and became load-bearing the moment the far plane came in to meet the
+     fog: a vertex 600 below the camera is ~628 away from it, so a frustum sized for a
+     192-metre fog wall would have clipped the bottom of the sky dome clean off.
+
+     Tying it to R keeps the skirt the same shape at any map scale AND keeps the whole
+     backdrop inside a sphere of radius ~1.2R, which is exactly what world.js sizes the
+     far plane against. */
+  const BASE_Y = -backdropRadius(theme, mapScale) * 0.55;
   const bands = theme.mountain.length;
   for(let b=0; b<bands; b++){
     const R = 900 * mapScale * (1 + b*0.07);
@@ -6172,10 +6300,44 @@ function getTheme(){ return THEME; }
    directly rather than added to the disposable group. Fog distances scale with MAP_SCALE
    (a shrunk map needs fog pulled in to match, or it would see clean across the whole
    thing) and independently with the user's own FOG_MUL on top of that. */
+/* THE FAR PLANE IS A FUNCTION OF THE FOG, not a constant, and that is a performance fix
+   rather than a tidy-up.
+
+   main.js used to pin camera.far at 4000 so a kilometres-wide trail network would not get
+   clipped. But fog goes fully opaque at THEME.fogFar*MAP_SCALE*FOG_MUL -- 192 on the
+   default Garden of the Gods map -- so the frustum was roughly twenty times deeper than
+   anything the player can actually see. Measured on that map: 6,366 meshes in the scene,
+   4,927 of them (77%) more than 200 units from the player. Every one of those sat INSIDE
+   the frustum whenever the camera faced across the valley, and three.js creates a mesh's
+   GPU resources lazily on its first render -- so cresting a ridge meant a few thousand
+   first-time material initialisations and buffer uploads landing inside a single frame.
+   That is what the stutter was. Culling them costs nothing, because fog had already
+   painted them out.
+
+   Two floors under it, both real:
+     - the fog wall itself, with 15% of headroom so nothing pops at the point where it
+       would have been 100% sky-coloured anyway;
+     - the horizon backdrop, which is deliberately exempt from fog (see buildBackdrop) and
+       therefore is the one thing that must survive past it. 1.35x its outer radius covers
+       the skirt corner, which is the furthest vertex on it.
+   FOG_MUL clamps as low as 0.15, so without the backdrop floor a player who pulled fog
+   right in would have clipped the sky dome off.
+
+   Side benefit worth recording, because it fixes a bug the comments in shadow.js are
+   still apologising for: depth-buffer precision is spread across near..far, and hauling
+   far in from 4000 to a couple of hundred is a large precision win at ground level. The
+   polygonOffset hack keeping the pup's blob shadow from strobing is no longer fighting a
+   depth buffer stretched over four kilometres. */
+function applyFarPlane(){
+  const fogFar = THEME.fogFar*MAP_SCALE*FOG_MUL;
+  const far = Math.max(fogFar*1.15, backdropRadius(THEME, MAP_SCALE)*1.35, 60);
+  if(camera.far !== far){ camera.far = far; camera.updateProjectionMatrix(); }
+}
 function applyThemeLighting(){
   scene.background=new THREE.Color(THEME.sky);
   scene.fog=new THREE.Fog(new THREE.Color(THEME.sky).getHex(),
                           THEME.fogNear*MAP_SCALE*FOG_MUL, THEME.fogFar*MAP_SCALE*FOG_MUL);
+  applyFarPlane();
   hemi.color=new THREE.Color(THEME.hemiSky);
   hemi.groundColor=new THREE.Color(THEME.hemiGround);
   hemi.intensity=THEME.hemiInt;
@@ -8040,6 +8202,18 @@ function placeCritter(key, rnd){
   const shadow = makeShadow(0.55*S.scale);
   shadow.position.y = 0.02;
   model.g.add(shadow);
+  /* AND THEREFORE NO REAL SHADOW. materials.js's M() casts by default, so every animal
+     was being drawn a second time into the shadow map to produce a shadow the blob above
+     is already standing in for -- 162 extra casters across a 14-animal population, for a
+     silhouette nobody can pick out from the disc underneath it. Measured: 3,451 casters
+     in the scene before this.
+
+     The blob wins on merit out here, not just on cost. The sun's shadow camera is a
+     +/-24 unit box around the pup (render.js), so a real critter shadow blinks out the
+     moment the animal leaves that box -- which, at the distances you actually watch
+     wildlife from, is most of the time. A blob that is always there reads better than a
+     real shadow that is usually missing. */
+  model.g.traverse(o=>{ if(o.isMesh) o.castShadow = false; });
   scene.add(model.g);
   CRITTERS.push({
     key, S, g: model.g, refs: model.refs, alert,
@@ -10305,13 +10479,20 @@ function parsePupFile(data){
 
 
 
-/* Trail networks run to real kilometres; Pup City's camera (far=300, tuned for one city
-   block) would clip most of a trail map. Extend it rather than touch the shared file. */
-// far: trail networks run to real kilometres; Pup City's far=300 (tuned for one city
-// block) would clip most of a trail map. fov: Pup City's 38 deg is a tight telephoto,
-// chosen for its small enclosed blocks; trails is wide open country, so a wider,
-// more natural-feeling field of view suits it better.
-camera.far = 4000; camera.fov = 62; camera.updateProjectionMatrix();
+
+/* fov: Pup City's 38 deg is a tight telephoto, chosen for its small enclosed blocks;
+   trails is wide open country, so a wider, more natural-feeling field of view suits it.
+
+   far is NOT set here any more. It used to be pinned at 4000 on the reasoning that trail
+   networks run to real kilometres and Pup City's 300 would clip them -- true about the
+   map, wrong about what needs drawing, because fog closes the view long before the map
+   ends. world.js's applyFarPlane now derives it from the live fog distance every time the
+   theme, the map scale or the user's fog slider changes; see the note there for the
+   measurements. The value below is only what the first frame uses before a world exists. */
+camera.fov = 62; camera.far = 400; camera.updateProjectionMatrix();
+/* A tier change only alters the QUALITY object; resize() is what pushes the new dpr and
+   shadow flags into the renderer. Same wiring city/main.js has had all along. */
+onQualityChange(() => resize());
 camera.position.set(0, 40, 60);
 
 const $ = s => document.querySelector(s);
@@ -11860,6 +12041,12 @@ let lastT=0;
 function loop(t){
   requestAnimationFrame(loop);
   const dt=Math.min(0.05,(t-lastT)/1000||0.016); lastT=t;
+  /* The auto-quality watchdog has existed in core/quality.js since it was written and was
+     only ever called from city/main.js -- so the one game most likely to be played on a
+     tablet was the one game with no safety net under it. It steps the tier down once
+     after ~1.5s below 40fps and never oscillates; onQualityChange re-runs resize(), which
+     is what actually applies the new dpr and shadow settings to the renderer. */
+  watchFrame(dt);
 
   // the horizon ring is a sky dome: keep it centred on the camera so it can't be reached
   const bd=getBackdrop();
@@ -12176,6 +12363,10 @@ function enterPlay(){
   refreshOnTrail();
   renderSpotList();
   renderCourseUI();
+  /* Last, once the world AND the population are both in the scene: upload everything now,
+     behind the loader, rather than a few hundred meshes at a time as the player walks into
+     them. See warmUp in core/render.js. */
+  warmUp();
   syncCourseOverlay();
   updateTrailHud();
 }

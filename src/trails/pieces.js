@@ -9,7 +9,7 @@
    (buildArea, buildAreaSign) rather than imported directly, so this module never has to
    know about World, SEG_HASH, or VERT_SCALE -- those stay owned by world.js. */
 import { clamp } from '../core/math.js';
-import { toon, toonTex, M } from '../core/materials.js';
+import { toon, toonTex, sharedMat, M } from '../core/materials.js';
 import { pointInArea, areaBBox, areaShape } from './geom2d.js';
 import { THEME } from './themes.js';
 
@@ -80,9 +80,14 @@ function ribbonGeom(pts,w,y,elevArr){
 function trailMat(color, layer){
   // DoubleSide is a safety net on top of the winding fix — cheap for a ribbon this size,
   // and guarantees the trail can never vanish again from a stray winding edge case.
+  /* Shared per (colour, layer), which is the whole argument list. Every ribbon segment on
+     the map used to get its own copy: 1,272 identical toon materials survived the toon()
+     cache purely through this one function, because it builds its material directly
+     rather than going through it. Nothing mutates a trail material after construction. */
   const L = layer || 0;
-  return new THREE.MeshToonMaterial({color:new THREE.Color(color),gradientMap:toonTex,side:THREE.DoubleSide,
-    polygonOffset:true,polygonOffsetFactor:-2-L*3,polygonOffsetUnits:-2-L*3});
+  return sharedMat('trail|'+color+'|'+L, () =>
+    new THREE.MeshToonMaterial({color:new THREE.Color(color),gradientMap:toonTex,side:THREE.DoubleSide,
+      polygonOffset:true,polygonOffsetFactor:-2-L*3,polygonOffsetUnits:-2-L*3}));
 }
 const INK='#3a2517';
 function signText(label,dist,flip){
@@ -696,11 +701,32 @@ function mixHex(a, b, t){
   const ca=new THREE.Color(a), cb=new THREE.Color(b);
   return new THREE.Color(ca.r+(cb.r-ca.r)*t, ca.g+(cb.g-ca.g)*t, ca.b+(cb.b-ca.b)*t);
 }
+/* The outer band's radius, and the single source of truth for how far away the horizon
+   ring sits. world.js sizes the camera's far plane off this, because the backdrop is the
+   only thing in the scene that has to survive out beyond the fog wall -- everything else
+   is fog-coloured mush by the time it gets there. Kept here, next to the geometry it
+   describes, so the two cannot drift apart. */
+function backdropRadius(theme, mapScale=1){
+  const bands = (theme && theme.mountain && theme.mountain.length) || 3;
+  return 900 * mapScale * (1 + (bands-1)*0.07);
+}
+
 function buildBackdrop(theme, rng, mapScale=1){
   const g = new THREE.Group();
   g.name = 'backdrop';
   const mesas = theme.mountainStyle === 'mesas';
-  const BASE_Y = -600;                    // far below any terrain the player can stand on
+  /* PROPORTIONAL TO THE RING, not a flat -600.
+
+     The skirt only has to reach below the horizon line on screen; it was never meant to
+     be a wall six hundred metres tall. The flat value was harmless while the far plane
+     sat at 4000, and became load-bearing the moment the far plane came in to meet the
+     fog: a vertex 600 below the camera is ~628 away from it, so a frustum sized for a
+     192-metre fog wall would have clipped the bottom of the sky dome clean off.
+
+     Tying it to R keeps the skirt the same shape at any map scale AND keeps the whole
+     backdrop inside a sphere of radius ~1.2R, which is exactly what world.js sizes the
+     far plane against. */
+  const BASE_Y = -backdropRadius(theme, mapScale) * 0.55;
   const bands = theme.mountain.length;
   for(let b=0; b<bands; b++){
     const R = 900 * mapScale * (1 + b*0.07);
@@ -747,4 +773,4 @@ function buildBackdrop(theme, rng, mapScale=1){
 export { ribbonGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
          POI_STYLE, AREA_STYLE, nameplate, buildPOI, pavementTexture, buildLandform,
          buildFloatingLabel, buildArea, buildAreaSign, makeShadow, pickTree, shade,
-         buildBackdrop };
+         buildBackdrop, backdropRadius };

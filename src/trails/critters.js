@@ -364,6 +364,18 @@ function placeCritter(key, rnd){
   const shadow = makeShadow(0.55*S.scale);
   shadow.position.y = 0.02;
   model.g.add(shadow);
+  /* AND THEREFORE NO REAL SHADOW. materials.js's M() casts by default, so every animal
+     was being drawn a second time into the shadow map to produce a shadow the blob above
+     is already standing in for -- 162 extra casters across a 14-animal population, for a
+     silhouette nobody can pick out from the disc underneath it. Measured: 3,451 casters
+     in the scene before this.
+
+     The blob wins on merit out here, not just on cost. The sun's shadow camera is a
+     +/-24 unit box around the pup (render.js), so a real critter shadow blinks out the
+     moment the animal leaves that box -- which, at the distances you actually watch
+     wildlife from, is most of the time. A blob that is always there reads better than a
+     real shadow that is usually missing. */
+  model.g.traverse(o=>{ if(o.isMesh) o.castShadow = false; });
   scene.add(model.g);
   CRITTERS.push({
     key, S, g: model.g, refs: model.refs, alert,

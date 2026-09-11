@@ -515,9 +515,62 @@ const toonTex = (()=>{
   t.needsUpdate = true;
   return t;
 })();
-function toon(color){
-  return new THREE.MeshToonMaterial({color:new THREE.Color(color), gradientMap:toonTex});
+/* CACHED BY COLOUR, and the cache is the point rather than a micro-optimisation.
+
+   Measured on the default Garden of the Gods map before this existed: 6,360 meshes in
+   the scene holding 6,360 SEPARATE material instances -- but only 85 distinct material
+   configurations between them. Every tree trunk on the map carried its own private copy
+   of the same brown.
+
+   That costs twice. Once at first sight of each mesh, because three.js initialises a
+   material lazily on its first render (program cache key, uniform blocks, the lot) and
+   a fresh instance cannot reuse the one next to it; and again every frame, because the
+   renderer cannot skip a uniform upload between two draws it has no way to know are
+   identical. The first of those is what made walking over a ridge stutter: a few
+   thousand first-time initialisations landing inside one frame.
+
+   Keyed on the colour string exactly as passed. Colours here are literals from the theme
+   and species tables, so equal colours arrive as equal strings and the key is honest.
+
+   SHARED MATERIALS MUST NOT BE DISPOSED, which is what isShared() below is for -- see
+   disposeGroup in core/render.js. resetCritters and rebuildWorld both dispose
+   whole subtrees, and before the flag existed that would have torn down a material the
+   rest of the map was still drawing with. Nothing in this codebase mutates a material
+   returned from here (the four in-place opacity writes -- world.js, critters.js,
+   shadow.js, fx.js -- are all on sprite or ring materials built elsewhere), so sharing
+   is safe; if that ever changes, the fix is a private material at that call site, not
+   an exception here. */
+/* Membership lives in a WeakSet rather than as a flag ON the material, so nothing here
+   depends on three.js's userData existing -- the smoke harness's duck-typed Material has
+   no such field, and a shared-ness marker that a test double can silently drop is a
+   marker that fails exactly where it matters. */
+const SHARED = new WeakSet();
+const CACHE = new Map();
+
+/* The memo behind toon(), exported because toon() is not the only material factory that
+   was handing out thousands of identical instances -- pieces.js's trailMat is the other
+   big one. `key` must capture every constructor argument that can differ, or two
+   different-looking things will end up sharing one material; `make` is only called on a
+   miss.
+
+   THE CONTRACT IS THAT THE RESULT IS IMMUTABLE. Anything that mutates a material in
+   place -- opacity, colour, map.repeat -- must build its own and not come through here.
+   The four in-place writes in this codebase (world.js:609, critters.js:594,
+   shadow.js:102, fx.js:115) are all on sprite and ring materials constructed elsewhere,
+   and the one map.repeat write (pieces.js, paved areas) is on a material deliberately
+   left uncached for exactly this reason. */
+function sharedMat(key, make){
+  let m = CACHE.get(key);
+  if(!m){ m = make(); SHARED.add(m); CACHE.set(key, m); }
+  return m;
 }
+function toon(color){
+  return sharedMat('toon|'+color, () =>
+    new THREE.MeshToonMaterial({color:new THREE.Color(color), gradientMap:toonTex}));
+}
+/* True for any material handed out through sharedMat, i.e. any material more than one
+   mesh in the scene may be pointing at. Disposal sites must ask before disposing. */
+function isShared(m){ return SHARED.has(m); }
 function M(geo, mat, cast=true, recv=false){
   const m = new THREE.Mesh(geo, mat);
   m.castShadow = cast; m.receiveShadow = recv;
@@ -569,12 +622,61 @@ const sunTarget = new THREE.Object3D();
 scene.add(sunTarget);
 sun.target = sunTarget;
 
+/* Geometry is always private to the mesh that holds it, so it always goes. Materials are
+   not: materials.js hands out one shared MeshToonMaterial per colour, and disposing one
+   of those here would pull it out from under every other mesh on the map still drawing
+   with it -- a black world one rebuildWorld later, with nothing in the stack trace to say
+   why. isShared() is the opt-out, owned by the module that does the sharing.
+
+   The toonTex check below is the same rule one level down and predates it: the gradient
+   ramp has always been a single shared texture. */
+/* PAY THE FIRST-SIGHT COST WHILE THE LOADER IS STILL UP.
+
+   three.js builds a mesh's GPU resources lazily, on its first RENDER: the material's
+   shader program and uniform blocks, then gl.createBuffer/bufferData for position,
+   normal, uv and index. Anything frustum-culled has never been rendered, so it has never
+   paid. Walk over a ridge and a few hundred meshes pay all at once, inside one frame, as
+   synchronous driver calls -- which is a visible hitch on a tablet and the reported "it
+   almost freezes when animals appear".
+
+   Two halves, because renderer.compile only does one of them. compile() walks the scene
+   and initialises MATERIALS, which is the expensive half and the half that shares (one
+   toon material per colour now, so ~85 programs rather than 6,360 initialisations). It
+   does not touch geometry. Buffers only get created when something actually reaches
+   renderBufferDirect, so the second half is one real render with culling switched off --
+   every mesh enters the render list, every buffer gets uploaded, and the frame is thrown
+   away. Vertices beyond the far plane are clipped downstream of the upload, so pulling
+   the far plane in (see world.js applyFarPlane) does not rob this of anything.
+
+   One expensive frame at boot, behind the loader, in exchange for no expensive frames
+   during play. Wrapped in try/catch and feature-tested because the smoke harness runs a
+   duck-typed renderer with neither method. */
+function warmUp(){
+  const flipped = [];
+  try{
+    if(typeof renderer.compile === 'function') renderer.compile(scene, camera);
+    scene.traverse(o=>{
+      if((o.isMesh || o.isSprite) && o.frustumCulled){ o.frustumCulled = false; flipped.push(o); }
+    });
+    renderer.render(scene, camera);
+  }catch(e){
+    /* a warm-up that fails is a slow first minute, not a broken game */
+  }finally{
+    for(const o of flipped) o.frustumCulled = true;
+  }
+}
+
+function disposeMat(m){
+  if(isShared(m)) return;
+  if(m.map && m.map!==toonTex) m.map.dispose();
+  m.dispose();
+}
 function disposeGroup(g){
   g.traverse(o=>{
     if(o.geometry) o.geometry.dispose();
     if(o.material){
-      if(Array.isArray(o.material)) o.material.forEach(m=>{ if(m.map && m.map!==toonTex) m.map.dispose(); m.dispose(); });
-      else { if(o.material.map && o.material.map!==toonTex) o.material.map.dispose(); o.material.dispose(); }
+      if(Array.isArray(o.material)) o.material.forEach(disposeMat);
+      else disposeMat(o.material);
     }
   });
 }

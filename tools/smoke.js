@@ -343,6 +343,16 @@ const probe = `
   fogNear: scene.fog ? scene.fog.near : null,
   fogFar: scene.fog ? scene.fog.far : null,
   camFov: camera.fov,
+  camFar: camera.far,
+  perf: (()=>{
+    let meshes=0, casters=0, textured=0; const mats=new Set();
+    scene.traverse(o=>{ if(o.isMesh){ meshes++; if(o.castShadow) casters++;
+      if(o.material){ mats.add(o.material); if(o.material.map) textured++; } } });
+    let critterMeshes=0, critterCasters=0;
+    for(const c of CRITTERS) c.g.traverse(o=>{ if(o.isMesh){ critterMeshes++; if(o.castShadow) critterCasters++; } });
+    return { meshes, casters, materials: mats.size, textured, critterMeshes, critterCasters,
+             backdropR: backdropRadius(THEME, getMapScale()) };
+  })(),
   chase: (()=>{ try{
     const out={typical:+typicalSpookRadius().toFixed(2), reach:+catchRadius().toFixed(2), species:[]};
     for(const k of ['rabbit','squirrel','chipmunk','fox']){
@@ -484,6 +494,41 @@ function assertAll(window, errors, stats) {
       .test(txt('#startNow')), txt('#startNow'));
   check('a dog is selected on boot', !!d.querySelector('#dogGrid button.sel'), txt('#dogGrid button.sel'));
   check('frames render', stats.renders > 0, `${stats.renders} frames`);
+
+  /* ---------- rendering budget ----------
+     All three of these guard the tablet stutter fix, and all three are the kind of thing
+     that decays silently: nothing goes WRONG when a material stops being shared or a far
+     plane creeps back out, the game just gets slower on the device least able to say so. */
+
+  /* The far plane exists to be culled against, so it has to sit near the fog wall rather
+     than out at the old flat 4000 -- past the fog everything is 100% sky colour, and on
+     the default map 77% of the scene's meshes live out there. The lower bound is the
+     other half of the same fix: the horizon backdrop is exempt from fog on purpose, so
+     the frustum must still reach the far corner of its skirt or the sky dome clips. */
+  check('the far plane is sized to the fog, not to the map',
+    s.camFar < s.fogFar * 2,
+    `far=${s.camFar.toFixed(0)}, fog ends at ${s.fogFar.toFixed(0)}`);
+  check('the far plane still contains the horizon backdrop',
+    s.camFar >= s.perf.backdropR * 1.2,
+    `far=${s.camFar.toFixed(0)}, backdrop radius ${s.perf.backdropR.toFixed(0)}`);
+
+  /* Materials are SHARED, not copied per mesh. Before the cache in core/materials.js the
+     default map carried 6,360 material instances for 85 distinct configurations, and
+     three.js initialises each one lazily on its first render -- which is what made
+     cresting a ridge stutter. The bound is generous on purpose: the ~450 legitimately
+     unique materials are the ones carrying their own canvas texture (ground tiles, signs,
+     nameplates), so the test is "untextured materials are shared", not a fixed count. */
+  check('untextured materials are shared between meshes',
+    s.perf.materials - s.perf.textured < 200,
+    `${s.perf.materials} materials over ${s.perf.meshes} meshes (${s.perf.textured} carry their own texture)`);
+
+  /* A critter carries a blob shadow (placeCritter), so real shadow casting on top of it
+     draws every animal a second time into the shadow map for a silhouette nobody can
+     pick out from the disc underneath. M() casts by default, so this stays true only as
+     long as placeCritter keeps clearing it. */
+  check('critters do not also cast real shadows',
+    s.perf.critterMeshes > 0 && s.perf.critterCasters === 0,
+    `${s.perf.critterCasters} of ${s.perf.critterMeshes} critter meshes cast`);
 
   /* THE GAME OPENS ON A WALK, not on a lobby. Finding the 🗺 button and working out that
      tapping a lettered badge is how a game begins was a tutorial step in front of a game

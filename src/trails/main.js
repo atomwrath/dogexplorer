@@ -41,7 +41,8 @@ import { barkSound, cheerBlip, initAudio, thudSound,
 import { addLayers, clearLayers, compass, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapId, getMapScale, getPathMix, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, loadWorld, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY, areaBlocked, areaSolidTop, nearestSolidFace, solidEmbed, distToSolid } from './world.js';
 
 import { THEME, THEMES } from './themes.js';
-import { renderer, scene, camera, resize } from '../core/render.js';
+import { renderer, scene, camera, resize, warmUp } from '../core/render.js';
+import { onQualityChange, watchFrame } from '../core/quality.js';
 import { SPECIES } from '../data/species.js';
 import { PRESETS } from '../creator/presets.js';
 import { DEFAULTS, randomPupParams } from '../dog/params.js';
@@ -49,13 +50,19 @@ import { computeStats } from '../dog/stats.js';
 import { addPups, kennelPups, loadKennel, parsePupFile } from '../data/kennel.js';
 import { nearestTrail } from './spatial.js';
 
-/* Trail networks run to real kilometres; Pup City's camera (far=300, tuned for one city
-   block) would clip most of a trail map. Extend it rather than touch the shared file. */
-// far: trail networks run to real kilometres; Pup City's far=300 (tuned for one city
-// block) would clip most of a trail map. fov: Pup City's 38 deg is a tight telephoto,
-// chosen for its small enclosed blocks; trails is wide open country, so a wider,
-// more natural-feeling field of view suits it better.
-camera.far = 4000; camera.fov = 62; camera.updateProjectionMatrix();
+/* fov: Pup City's 38 deg is a tight telephoto, chosen for its small enclosed blocks;
+   trails is wide open country, so a wider, more natural-feeling field of view suits it.
+
+   far is NOT set here any more. It used to be pinned at 4000 on the reasoning that trail
+   networks run to real kilometres and Pup City's 300 would clip them -- true about the
+   map, wrong about what needs drawing, because fog closes the view long before the map
+   ends. world.js's applyFarPlane now derives it from the live fog distance every time the
+   theme, the map scale or the user's fog slider changes; see the note there for the
+   measurements. The value below is only what the first frame uses before a world exists. */
+camera.fov = 62; camera.far = 400; camera.updateProjectionMatrix();
+/* A tier change only alters the QUALITY object; resize() is what pushes the new dpr and
+   shadow flags into the renderer. Same wiring city/main.js has had all along. */
+onQualityChange(() => resize());
 camera.position.set(0, 40, 60);
 
 const $ = s => document.querySelector(s);
@@ -1604,6 +1611,12 @@ let lastT=0;
 function loop(t){
   requestAnimationFrame(loop);
   const dt=Math.min(0.05,(t-lastT)/1000||0.016); lastT=t;
+  /* The auto-quality watchdog has existed in core/quality.js since it was written and was
+     only ever called from city/main.js -- so the one game most likely to be played on a
+     tablet was the one game with no safety net under it. It steps the tier down once
+     after ~1.5s below 40fps and never oscillates; onQualityChange re-runs resize(), which
+     is what actually applies the new dpr and shadow settings to the renderer. */
+  watchFrame(dt);
 
   // the horizon ring is a sky dome: keep it centred on the camera so it can't be reached
   const bd=getBackdrop();
@@ -1920,6 +1933,10 @@ function enterPlay(){
   refreshOnTrail();
   renderSpotList();
   renderCourseUI();
+  /* Last, once the world AND the population are both in the scene: upload everything now,
+     behind the loader, rather than a few hundred meshes at a time as the player walks into
+     them. See warmUp in core/render.js. */
+  warmUp();
   syncCourseOverlay();
   updateTrailHud();
 }
