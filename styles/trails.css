@@ -101,6 +101,17 @@ body.play #playHud{display:block;}
 
 .io-row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;}
 .io-row .btn{flex:1;text-align:center;}
+/* display:flex above beats the UA's [hidden]{display:none}, exactly as .pup-grid does,
+   so a hidden io-row stays on screen unless this says otherwise. #mapListRow ships
+   hidden and only appears if data/maps.json parsed. */
+.io-row[hidden]{display:none;}
+/* The link box wants the whole row; its button keeps the .btn flex:1 above from
+   stretching it to half the panel. */
+.io-row .url-in{flex:3 1 60%;min-width:0;font:inherit;font-size:11.5px;
+  border:2px solid var(--ink);border-radius:10px;padding:6px 8px;background:var(--cream);}
+.io-row .url-in:focus{outline:none;border-color:var(--orange);background:#fff;}
+.io-row select{flex:2 1 55%;min-width:0;font:inherit;font-size:11.5px;font-weight:bold;
+  border:2px solid var(--ink);border-radius:10px;padding:6px 8px;background:var(--cream);}
 #mapNote{margin:8px 0 0;}
 .ctl{margin-top:10px;}
 .ctl label{display:flex;justify-content:space-between;font-size:12.5px;font-weight:bold;margin-bottom:4px;}

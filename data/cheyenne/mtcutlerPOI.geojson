@@ -1,0 +1,9 @@
+{
+"type": "FeatureCollection",
+"name": "mtcutlerPOI",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:OGC:1.3:CRS84" } },
+"features": [
+{ "type": "Feature", "properties": { "full_id": "n4461974679", "osm_id": "4461974679", "osm_type": "node", "name": "", "kind": "bench" }, "geometry": { "type": "Point", "coordinates": [ -104.8779248, 38.7880141 ] } },
+{ "type": "Feature", "properties": { "full_id": null, "osm_id": null, "osm_type": null, "name": "Mt Cutler Trailhead", "kind": "trailhead" }, "geometry": { "type": "Point", "coordinates": [ -104.887252573573306, 38.791885344847728 ] } }
+]
+}

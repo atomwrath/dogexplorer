@@ -55,10 +55,25 @@
               <h2>🗺️ Trail map</h2>
               <label class="dropzone" id="dropzone" for="worldFile">
                 <span class="dz-main">Drop your <code>.geojson</code> layers here<br>or tap to browse</span>
-                <span class="dz-sub">trails, points &amp; areas</span>
+                <span class="dz-sub">trails, points &amp; areas &mdash; <code>.txt</code> is fine too</span>
               </label>
-              <input type="file" id="worldFile" accept=".geojson,.json,application/geo+json,application/json" multiple hidden>
+              <!-- .txt and text/plain are here for iPadOS, which appends .txt to anything it
+                   downloads and gives you no way to take it off again. The picker filters by
+                   name; loadFiles has never cared about the name, so widening the filter is
+                   the whole fix. If a device still greys the file out, the link box below
+                   skips the download entirely. -->
+              <input type="file" id="worldFile" accept=".geojson,.json,.txt,application/geo+json,application/json,text/plain" multiple hidden>
               <div id="fileChips" class="file-chips"></div>
+              <div class="io-row" id="mapListRow" hidden>
+                <select id="mapList" aria-label="Map list"></select>
+                <button class="btn small" id="mapListBtn">Open map</button>
+              </div>
+              <div class="io-row">
+                <input type="url" id="mapUrl" class="url-in" inputmode="url" autocapitalize="off"
+                       autocorrect="off" spellcheck="false"
+                       placeholder="Paste a GitHub link to a .geojson">
+                <button class="btn small" id="mapUrlBtn">Load link</button>
+              </div>
               <div class="io-row">
                 <button class="btn small" id="saveCombinedBtn">↓ Save combined</button>
                 <button class="btn small" id="clearLayersBtn">Clear map</button>
@@ -88,6 +103,10 @@
               <p class="hint">Garden of the Gods loads by default. Drop a
                 <code>pup-world/1</code> bundle for real elevation, or pass
                 <code>?world=…</code> in the URL.</p>
+              <p class="hint">On a tablet, use the link box rather than downloading: paste the
+                <b>github.com</b> page link for a map file and it is fetched straight from the
+                repo — no file, no renaming. Maps listed in <code>data/maps.json</code> show up
+                in the list above on every device.</p>
             </div>
             <div class="sect">
               <h2>🏞️ Landscape</h2>

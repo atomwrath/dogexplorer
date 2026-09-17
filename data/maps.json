@@ -1,0 +1,22 @@
+{
+  "format": "pup-maps/1",
+  "_comment": [
+    "The list Pup Trails shows in its Trail map panel. Adding a map to the game is a",
+    "commit and one line here -- no code change, and nothing to download on the device",
+    "that plays it.",
+    "",
+    "`url` is resolved against the page, which lives in trails/ or dist/, so a file in",
+    "this folder is ../data/NAME. An absolute https:// URL works too and does not have",
+    "to be in this repo; raw.githubusercontent.com sends the CORS header that makes any",
+    "public repo fetchable.",
+    "",
+    "The file at the other end may be a pup-world/1 bundle from tools/fetch_dem.py (real",
+    "elevation) or a plain GeoJSON FeatureCollection of trails, points and areas (flat",
+    "ground). Pup Trails decides which by looking inside, so the extension is irrelevant."
+  ],
+  "maps": [
+    { "name": "Garden of the Gods", "url": "../data/world.json" },
+    { "name": "Red Rocks",          "url": "../data/rrworld.json" },
+    { "name": "Pikes Peak",         "url": "../data/pikesworld.json" }
+  ]
+}

@@ -2986,6 +2986,8 @@ async function boot(bundleUrl){
      the "load a map" controls in it, and that used to be the one thing a broken boot
      could not open. */
   initPanes({ onChange: () => updateTrailHud() });
+  // fire-and-forget: the list is optional furniture and must never delay the map
+  renderMapList();
   initMinimap({
     onTrailhead: i => showHereHead(i),
     onSpot: sp => { placeAtSpot(sp); if(!playing) enterPlay(); showPane(null); },
@@ -3014,28 +3016,111 @@ async function boot(bundleUrl){
   requestAnimationFrame(loop);
 }
 
-/* One place that loads a map by URL, so the boot path, the reload button and any future
-   map list all report success and failure identically. */
+/* WHAT A BLOB OF JSON TURNED OUT TO BE, decided by content rather than by name.
+   A pup-world/1 bundle, a plain .geojson and a backyard-pups.json are all just JSON, and
+   the name on the file is not evidence of which: QGIS writes .geojson, fetch_dem.py
+   writes .json, iPadOS appends .txt to anything it downloads, and people rename both by
+   hand anyway. Every entry point -- the picker, the drop zone, the link box, the map
+   list and ?world= -- routes through this one function so they can never disagree about
+   what a file is.
+
+   Deliberately pure: it decides, it does not load. loadFiles has to BATCH its layers so
+   dropping trails + areas rebuilds the world once instead of twice, and it can only do
+   that if classification and application are separable. */
+function classifyMapJson(obj){
+  if(obj && obj.format==='pup-world/1') return {kind:'world'};
+  if(obj && obj.type==='FeatureCollection') return {kind:'layer', layer:obj};
+  if(obj && obj.type==='Feature') return {kind:'layer', layer:{type:'FeatureCollection', features:[obj]}};
+  if(obj && (obj.backyardPups || obj.pups || obj.furColor)) return {kind:'pups'};
+  return {kind:null};
+}
+
+/* Text -> JSON, with the two failures a tablet cannot otherwise diagnose named out loud.
+   There is no console on an iPad, so `console.error` is the same as silence: every
+   message thrown here is written for #mapNote to print verbatim to the player.
+
+   The two that actually happen:
+     - a UTF-8 BOM. iPadOS Share-sheet saves and some Windows editors prepend one, and
+       JSON.parse rejects it outright as an unexpected token at position 0 -- which is
+       the whole reason this reads text and calls JSON.parse itself instead of calling
+       res.json() and letting the BOM throw somewhere unprintable.
+       The .trim() below is what removes it: U+FEFF is in ECMAScript's WhiteSpace
+       production, so trim eats a leading BOM. That is not obvious, and it is the only
+       thing standing between a Share-sheet save and a parse error -- do not replace
+       trim here with something narrower without putting the explicit strip back.
+     - HTML. github.com/USER/REPO/blob/... is a PAGE; tapping Download on it, or saving
+       the link, gets you the page and not the data. First character '<' is that. */
+function parseMapText(text, name){
+  const s = String(text == null ? '' : text).trim();
+  if(!s) throw new Error(`${name} is empty`);
+  if(s[0]==='<') throw new Error(`${name} is a web page, not map data — on GitHub use the `
+    + `file's Raw button, or paste the github.com link into the box below and it will be `
+    + `converted for you`);
+  try{ return JSON.parse(s); }
+  catch(err){ throw new Error(`${name} is not valid JSON (${err.message})`); }
+}
+
+/* github.com/USER/REPO/blob/REF/path  ->  raw.githubusercontent.com/USER/REPO/REF/path
+   The blob URL is the one you get by tapping a file on github.com or by using the Share
+   sheet, and it serves an HTML page. The raw host serves the bytes AND sends
+   Access-Control-Allow-Origin:*, which is what makes a file in any public repo fetchable
+   from a page on github.io. Accepting the page URL means nobody has to know any of that.
+   Anything else is passed through untouched. */
+function toRawUrl(url){
+  const s = String(url == null ? '' : url).trim();
+  const m = /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/(?:blob|raw)\/(.+)$/.exec(s);
+  if(!m) return s;
+  return `https://raw.githubusercontent.com/${m[1]}/${m[2]}/${m[3].split('#')[0].split('?')[0]}`;
+}
+
+/* One place that loads a map by URL, so the boot path, the reload button, the link box,
+   the map list and ?world= all report success and failure identically.
+
+   Fetched as text and sniffed, not fetched as a bundle: a link is now something a player
+   types, so it can point at a plain .geojson as easily as at a DEM bundle, and it can
+   just as easily point at the wrong thing entirely. Every outcome has to end in a
+   sentence in #mapNote, because on the device this exists for that is the only place an
+   error can be read. */
 let lastMapUrl = null;
 async function loadMap(url, isDefault){
   const note=$('#mapNote');
   if(note) note.textContent='Loading map…';
+  const target = toRawUrl(url);
+  const name = target.split('/').pop().split('?')[0] || target;
   try{
-    await loadWorld(url, [], 3);
-    lastMapUrl = url; lastMapWasDefault = !!isDefault;
-    /* Say so when a map was coarsened rather than leaving the player to wonder why the
-       ground looks blocky. The detail control is right above this note in the panel, so
-       the answer and the lever are in the same place. */
-    const st = getDemStride();
-    if(note) note.textContent = (isDefault?'Default map: ':'Loaded: ')+url.split('/').pop()
-      + ` · ${getTrailheads().length} trailhead${getTrailheads().length===1?'':'s'}`
-      + (st > 1 ? ` · terrain coarsened ${st}× to fit` : '');
+    const res = await fetch(target);
+    if(!res.ok) throw new Error(`${name} could not be fetched (HTTP ${res.status})`);
+    const obj = parseMapText(await res.text(), name);
+    const got = classifyMapJson(obj);
+    if(got.kind==='world'){
+      await loadWorld(obj, [], 3);
+      lastMapUrl = target; lastMapWasDefault = !!isDefault;
+      /* Say so when a map was coarsened rather than leaving the player to wonder why the
+         ground looks blocky. The detail control is right above this note in the panel, so
+         the answer and the lever are in the same place. */
+      const st = getDemStride();
+      if(note) note.textContent = (isDefault?'Default map: ':'Loaded: ')+name
+        + ` · ${getTrailheads().length} trailhead${getTrailheads().length===1?'':'s'}`
+        + (st > 1 ? ` · terrain coarsened ${st}× to fit` : '');
+    }else if(got.kind==='layer'){
+      const n=(got.layer.features||[]).length;
+      addLayers([got.layer]);
+      loadedFiles.push({name, count:n, layer:got.layer});
+      renderFileChips();
+      if(note) note.textContent = `Loaded: ${name} · ${n} feature${n===1?'':'s'}`;
+    }else if(got.kind==='pups'){
+      const n=addPups(parsePupFile(obj));
+      renderRoster();
+      if(note) note.textContent = `Loaded ${n} pup${n===1?'':'s'} from ${name}`;
+    }else{
+      throw new Error(`${name} is valid JSON, but not a pup-world bundle, GeoJSON or pup file`);
+    }
     return true;
   }catch(err){
-    console.error('could not load world:', url, err);
+    console.error('could not load map:', url, err);
     if(note) note.textContent = isDefault
-      ? 'Default map could not load — serve the repo over http (python3 build.py --serve), or pick a bundle below.'
-      : 'That map could not be loaded — see the console.';
+      ? 'Default map could not load — serve the repo over http (python3 build.py --serve), or pick a map below.'
+      : (err && err.message) || 'That map could not be loaded.';
     return false;
   }
 }
@@ -3142,39 +3227,114 @@ if(dropzone){
   });
 }
 
-/* One picker for everything. A pup-world/1 bundle, a plain .geojson and a
-   backyard-pups.json are all just JSON, so detect by content rather than by extension --
-   QGIS writes .geojson, fetch_dem.py writes .json, and users rename both. Layers are
-   batched so dropping trails + areas together rebuilds once, not twice. */
+/* One picker for everything -- see classifyMapJson for why the name on the file is not
+   consulted. Layers are batched so dropping trails + areas together rebuilds once, not
+   twice.
+
+   Every rejection now ends up in #mapNote as well as the console. That is not tidiness:
+   the picker's main user is on a tablet, where a console.error is indistinguishable from
+   the app doing nothing at all, and "I picked my file and nothing happened" was the
+   entire symptom of a file that iPadOS had saved with a BOM or as a web page. */
 async function loadFiles(files){
   if(!files.length) return;
-  const layers=[];
-  let gotPups=0;
+  const note=$('#mapNote');
+  const layers=[], problems=[];
+  let gotPups=0, gotWorld=0;
   for(const f of files){
     let obj;
-    try{ obj=JSON.parse(await f.text()); }
-    catch(err){ console.error('not valid JSON:',f.name,err); continue; }
-    if(obj && obj.format==='pup-world/1'){
-      try{ await loadWorld(obj, [], 3); }
-      catch(err){ console.error('bad world bundle:',f.name,err); }
-    }else if(obj && (obj.type==='FeatureCollection' || obj.type==='Feature')){
-      const layer = obj.type==='Feature' ? {type:'FeatureCollection',features:[obj]} : obj;
-      layers.push(layer);
+    try{ obj=parseMapText(await f.text(), f.name); }
+    catch(err){ console.error(err); problems.push(err.message); continue; }
+    const got=classifyMapJson(obj);
+    if(got.kind==='world'){
+      try{ await loadWorld(obj, [], 3); gotWorld++; }
+      catch(err){
+        console.error('bad world bundle:',f.name,err);
+        problems.push(`${f.name} is a pup-world bundle, but the world could not be built from it`);
+      }
+    }else if(got.kind==='layer'){
+      layers.push(got.layer);
       // chip tracking is separate from EXTRA (world.js has no per-file memory of what it
       // merged) -- record name+count here purely for the panel's own display
-      loadedFiles.push({name:f.name, count:(layer.features||[]).length, layer});
-    }else if(obj && (obj.backyardPups || obj.pups || obj.furColor)){
+      loadedFiles.push({name:f.name, count:(got.layer.features||[]).length, layer:got.layer});
+    }else if(got.kind==='pups'){
       gotPups += addPups(parsePupFile(obj));
     }else{
-      console.error('unrecognised file (expected a pup-world/1 bundle, GeoJSON or a pup file):', f.name);
+      problems.push(`${f.name} is valid JSON, but not a pup-world bundle, GeoJSON or pup file`);
     }
   }
   if(layers.length){ addLayers(layers); renderFileChips(); }
   if(gotPups) renderRoster();
+  if(note){
+    const won=[];
+    if(gotWorld) won.push(`${gotWorld} map bundle${gotWorld===1?'':'s'}`);
+    if(layers.length) won.push(`${layers.length} layer${layers.length===1?'':'s'}`);
+    if(gotPups) won.push(`${gotPups} pup${gotPups===1?'':'s'}`);
+    const good = won.length ? `Loaded ${won.join(', ')}.` : '';
+    note.textContent = problems.length ? (good ? good+' ' : '')+problems.join(' · ') : good;
+  }
   if(!getGraph()) return;
   refreshMapUI();
   placeAtHead(pickDefaultHead());
 }
+
+/* --- maps that live on the web, so nothing has to be downloaded at all ---------------
+   The download round trip is where map files get damaged: iPadOS renames a .geojson to
+   .geojson.txt on the way to Files, offers no way to rename it back, and the picker
+   would not show it again afterwards. Fetching the URL skips the entire trip -- the
+   bytes go from the repo to the game without ever becoming a file on the device. */
+$('#mapUrlBtn')?.addEventListener('click', async ()=>{
+  const el=$('#mapUrl'), url=(el && el.value || '').trim();
+  const note=$('#mapNote');
+  if(!url){
+    if(note) note.textContent='Paste a link to a .geojson file or a pup-world bundle first.';
+    return;
+  }
+  if(await loadMap(url, false)){
+    refreshMapUI();
+    if(getGraph()) placeAtHead(pickDefaultHead());
+  }
+});
+// a soft keyboard's Go key is the only submit button a tablet player has
+$('#mapUrl')?.addEventListener('keydown', e=>{
+  if(e.key==='Enter'){ e.preventDefault(); $('#mapUrlBtn')?.click(); }
+});
+
+/* THE MAP LIST is a plain JSON index committed next to the maps themselves. Adding a map
+   to the game is then a commit and one line of manifest -- no code change, no download,
+   and it appears in the list on every device that opens the page, which is the part that
+   matters for a tablet that cannot manage files.
+
+   Missing or unreadable, the row simply stays hidden: a manifest is optional furniture,
+   and a repo without one must still play exactly as it did before. */
+const MAP_MANIFEST='../data/maps.json';
+async function renderMapList(){
+  const sel=$('#mapList'), row=$('#mapListRow');
+  if(!sel || !row) return;
+  try{
+    const res=await fetch(MAP_MANIFEST);
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const man=parseMapText(await res.text(), 'maps.json');
+    sel.innerHTML='';
+    for(const m of (man && man.maps) || []){
+      if(!m || !m.url) continue;
+      const o=document.createElement('option');
+      o.value=m.url;
+      o.textContent=m.name || m.url.split('/').pop();
+      sel.appendChild(o);
+    }
+    row.hidden = !sel.options.length;
+  }catch(err){
+    console.warn('no map list:', err && err.message);
+    row.hidden = true;
+  }
+}
+$('#mapListBtn')?.addEventListener('click', async ()=>{
+  const sel=$('#mapList'), url=sel && sel.value;
+  if(!url) return;
+  // a listed map replaces the session's dropped layers, the way the default map does
+  loadedFiles=[]; renderFileChips();
+  if(await loadMap(url, false)){ refreshMapUI(); placeAtHead(pickDefaultHead()); }
+});
 
 /* Test seams. build.py flattens every module into one classic script, where top-level
    `let`/`const` bindings are NOT reachable from outside but function declarations are --
@@ -3186,6 +3346,13 @@ function getTrailPlayer(){ return player; }
 function getTripState(){ return trip; }
 
 function getOnTrail(){ return onTrail; }
+
+/* Test seams for the map-loading front door. classifyMapJson, parseMapText and toRawUrl
+   are the three decisions that stand between a file a player picked and a world, and all
+   three are pure -- so the suite asserts them directly rather than through a fake file
+   picker. build.py makes top-level function declarations reachable from the harness;
+   these are already declarations, so they need no wrapper. */
+function getLastMapUrl(){ return lastMapUrl; }
 
 /* The course machinery gets the same treatment for the same reason: `rec`, `race` and
    `previewCourse` are top-level bindings that vanish into the bundle's one scope, so the
@@ -3202,6 +3369,8 @@ export { boot, enterPlay, exitPlay, placeAtHead, placeAt, placeAtSpot, saveHere,
          avatarName, raceFrozen, isRaceCardOpen, closeRaceCard, syncCourseOverlay,
          getRecState, getRaceState, getPendingRecording, getPreviewCourse,
          getGhostMode, setGhostMode, armGhost, fmtRelief, courseElevAt, worldElevAt,
+         classifyMapJson, parseMapText, toRawUrl, loadMap, loadFiles, renderMapList,
+         getLastMapUrl,
          showHereHead, showHereCourse, showHereIdle, refreshHere, getHereSubject };
 
 // auto-boot from a `?world=` query param, or wait for the panel's own load button
