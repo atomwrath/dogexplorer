@@ -33,7 +33,7 @@
    still built once per world revision, so zooming in doesn't re-render anything, it
    just draws a bigger crop of the same offscreen image. */
 import { clamp } from '../core/math.js';
-import { getAreas, getBBox, getGraph, getMapScale, getPOIs, getTrailheads, getWorldRevision } from './world.js';
+import { getAreas, getBBox, getGraph, getMapScale, getPOIs, getTrailheads, getWaterways, getWorldRevision, styleKey } from './world.js';
 import { getSpots, spotWorld } from './spots.js';
 import { coursePoints } from './courses.js';
 import { reliefCanvas } from './terrain.js';
@@ -41,7 +41,9 @@ import { getCritters } from './critters.js';
 import { THEME } from './themes.js';
 
 const INK_MAP = '#3a2517';
-const TRAIL_INK = {trail:'#9c6a35', track:'#8a6a45', road:'#6f6b62'};
+const TRAIL_INK = {trail:'#9c6a35', track:'#8a6a45', dirtroad:'#a08a68', road:'#6f6b62',
+                   paved_trail:'#9d978b', paved_track:'#8d887e'};
+const WATER_INK = '#3f8fc9';
 // the same magenta course-line.js paints on the ground (0xd94fa0), so the disc in the
 // corner and the strip underfoot are recognisably one object seen two ways
 const COURSE_MAP_INK = '#d94fa0';
@@ -330,6 +332,20 @@ function buildAtlas(){
   }
   g.globalAlpha = 1;
 
+  // creeks under the trails, so a bridge reads as the path passing over the water
+  g.lineCap = 'round'; g.lineJoin = 'round';
+  for(const w of getWaterways()){
+    const pts = (w.prof && w.prof.pts) || w.pts;
+    if(!pts || pts.length < 2) continue;
+    g.beginPath();
+    pts.forEach((p, i) => i ? g.lineTo(X(p[0]), Z(p[1])) : g.moveTo(X(p[0]), Z(p[1])));
+    g.lineWidth = Math.max(1.4, ppm*Math.max(2.2, w.width*1.4));
+    g.strokeStyle = WATER_INK;
+    g.globalAlpha = w.intermittent ? 0.55 : 0.9;
+    g.stroke();
+  }
+  g.globalAlpha = 1;
+
   // trails: ink casing then fill, so crossings read cleanly at any zoom
   const strokeEdges = (width, colorOf) => {
     g.lineCap = 'round'; g.lineJoin = 'round';
@@ -343,7 +359,7 @@ function buildAtlas(){
     }
   };
   strokeEdges(Math.max(2.2, ppm*4.2), () => INK_MAP);
-  strokeEdges(Math.max(1.2, ppm*2.4), e => TRAIL_INK[e.kind] || TRAIL_INK.trail);
+  strokeEdges(Math.max(1.2, ppm*2.4), e => TRAIL_INK[styleKey(e)] || TRAIL_INK.trail);
 
   // points of interest
   for(const p of getPOIs()){

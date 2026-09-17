@@ -3268,70 +3268,124 @@ function gradeProfile(pts, vertScale, stepCells = 0.7, windowCells = 8, minStepM
    The cost is a deeper cut bank beside the tread on coarse grids, since the cut is taken
    over the whole bench radius. That is a step you take once when you leave the trail,
    rather than one you take every cell while following it. */
-function gradeTrailCells(profiles){
+function gradeTrailCells(profiles, channels, zones){
   if(!WORLD || !BAND) return;
   const claim = new Map();
-  for(const {pts, hm, halfWidth} of profiles){
-    /* Reach a cell centre either side, so the bench is wider than the tread it carries --
-       but never more than MAX_BENCH_CELLS of them. Tread widths are true metres and do
-       NOT shrink with world scale (that is the point of the control), so at heavy
-       compaction the ratio of trail width to cell size explodes: at 1:1000 an unclamped
-       radius covers about 240,000 cells per station. The clamp costs nothing at any scale
-       where the trail is narrower than the map, and past that the map is a blob anyway. */
-    const r = Math.min(halfWidth + WORLD.cell*0.5, WORLD.cell*MAX_BENCH_CELLS);
-    for(let i = 0; i < pts.length; i++){
-      const p = pts[i];
-      /* THE CELL THE STATION IS STANDING IN, CLAIMED UNCONDITIONALLY.
-         The radius sweep below tests distance from the CELL CENTRE, and a cell's centre
-         can be up to cell/sqrt(2) from a point inside it -- about 0.707 of a cell --
-         while r only reaches 0.5 of a cell past the tread. So a trail clipping a cell
-         near its corner left that cell ungraded: raw terrain, sitting as much as a whole
-         band above the ribbon running across it, and standingY takes max(terrain, tread).
-         Measured on decimated pikesworld before this line existed: a 13.8-unit cliff at
-         x=1397.7 with the ribbon passing smoothly through it at 143. That is the "steps
-         too large to jump" report, and it is a gap in the corridor rather than a
-         staircase along it -- which is why it got worse with cell size but was never
-         really about cell size.
+  for(const pr of profiles){
+    /* hmGround, when a bridge has raised the deck: the bench under a bridge is the ground
+       the path would have had, not the deck -- otherwise the approach becomes a solid
+       causeway at deck height and the creek runs into a dam. */
+    claimAlong(claim, pr.pts, pr.hmGround || pr.hm, pr.halfWidth);
+  }
+  /* CHANNELS SECOND, AND THEY ONLY TAKE WHAT NO PATH HAS -- except under a bridge.
 
-         Claiming the containing cell directly is exact and costs one map write. */
-      const ci = clamp(WORLD.cellI(p[0]),0,WORLD.width-1), cj = clamp(WORLD.cellJ(p[1]),0,WORLD.height-1);
-      const ck = cj*WORLD.width + ci, cprev = claim.get(ck);
-      if(!cprev || hm[i] < cprev.h) claim.set(ck, {h: hm[i]});
+     A creek and a road share a canyon floor for kilometres on the seven-bridges map, a
+     tread's width apart. Let the channel win there and the road's own bench is dug out
+     from under it for the whole canyon; let the lower height win (the rule between two
+     paths) and the same thing happens, because the bed is by construction lower than
+     the ground. So a path's claim stands, and the creek runs under the verge.
 
-      /* AND EVERY CELL THE SEGMENT CROSSES ON THE WAY TO THE NEXT STATION.
-         Stations sit about 0.7 of a cell apart, so two consecutive ones are in the same
-         cell or in neighbours -- but a diagonal run between them can still clip the
-         corner of a third cell that holds neither. That cell stays raw, and one raw cell
-         under a trail is a full-band cliff across the tread. Stepping along the segment
-         at 0.4 of a cell cannot skip a cell of width 1, and the height is interpolated
-         because the profile between two stations is a straight line by construction. */
-      if(i+1 < pts.length){
-        const q = pts[i+1];
-        const dx = q[0]-p[0], dz = q[1]-p[1];
-        const seg = Math.hypot(dx, dz);
-        const n = Math.ceil(seg/(WORLD.cell*0.4));
-        for(let t = 1; t < n; t++){
-          const u = t/n;
-          const sx = p[0]+dx*u, sz = p[1]+dz*u;
-          const h = hm[i] + (hm[i+1]-hm[i])*u;
-          const si = clamp(WORLD.cellI(sx),0,WORLD.width-1), sj = clamp(WORLD.cellJ(sz),0,WORLD.height-1);
-          const sk = sj*WORLD.width + si, sprev = claim.get(sk);
-          if(!sprev || h < sprev.h) claim.set(sk, {h});
-        }
+     Where a bridge carries a path over the water that answer is exactly backwards: the
+     cells under the deck MUST be the channel, or the water runs into a solid bank that the
+     deck then sits on. `zones` are those spans; inside one the channel overrides. */
+  if(channels && channels.length){
+    const inZone = (x, z) => {
+      if(!zones) return false;
+      for(const zn of zones) if(Math.hypot(x-zn.x, z-zn.z) <= zn.r) return true;
+      return false;
+    };
+    const chan = new Map();
+    for(const pr of channels) claimAlong(chan, pr.pts, pr.hm, pr.halfWidth, 0);
+    /* Outside a bridge, a cell both want goes to whichever centreline is NEARER its
+       centre, the path winning ties. "Path always wins" was the first rule and it buried
+       the creek for ten metres at a time wherever the Seven Bridges Trail runs along the
+       bank, because a path's bench reaches half a cell past its own shoulder -- the cell
+       the water actually runs through was being claimed as verge. Nearest-centreline
+       gives the verge to the path and the water to the creek, and only a path laid
+       directly over the water keeps it. */
+    for(const [key, v] of chan){
+      const prev = claim.get(key);
+      if(prev){
+        const i = key % WORLD.width, j = (key - i)/WORLD.width;
+        const c = WORLD.cellCentre(i, j);
+        if(!inZone(c.x, c.z) && !(v.d < prev.d)) continue;
       }
-
-      const i0 = clamp(WORLD.cellI(p[0]-r),0,WORLD.width-1), i1 = clamp(WORLD.cellI(p[0]+r),0,WORLD.width-1),
-            j0 = clamp(WORLD.cellJ(p[1]-r),0,WORLD.height-1), j1 = clamp(WORLD.cellJ(p[1]+r),0,WORLD.height-1);
-      for(let j = j0; j <= j1; j++) for(let k = i0; k <= i1; k++){
-        const c = WORLD.cellCentre(k, j);
-        const d = Math.hypot(c.x-p[0], c.z-p[1]);
-        if(d > r) continue;
-        const key = j*WORLD.width + k, prev = claim.get(key);
-        if(!prev || hm[i] < prev.h) claim.set(key, {h: hm[i]});
-      }
+      claim.set(key, v);
     }
   }
   for(const [key, v] of claim) BAND[key] = bandOfM(v.h);
+}
+
+/* One profile's claim on the band grid, lowest height wins within `claim`. `pad` is how
+   far past the half-width the bench reaches, in cells (half a cell for a path, so its
+   shoulders are benched too; nothing for a channel, which should be a notch rather than a
+   terrace of its own). */
+function claimAlong(claim, pts, hm, halfWidth, pad = 0.5){
+  /* Reach a cell centre either side, so the bench is wider than the tread it carries --
+     but never more than MAX_BENCH_CELLS of them. Tread widths are true metres and do
+     NOT shrink with world scale (that is the point of the control), so at heavy
+     compaction the ratio of trail width to cell size explodes: at 1:1000 an unclamped
+     radius covers about 240,000 cells per station. The clamp costs nothing at any scale
+     where the trail is narrower than the map, and past that the map is a blob anyway. */
+  const r = Math.min(halfWidth + WORLD.cell*pad, WORLD.cell*MAX_BENCH_CELLS);
+  for(let i = 0; i < pts.length; i++){
+    const p = pts[i];
+    /* THE CELL THE STATION IS STANDING IN, CLAIMED UNCONDITIONALLY.
+       The radius sweep below tests distance from the CELL CENTRE, and a cell's centre
+       can be up to cell/sqrt(2) from a point inside it -- about 0.707 of a cell --
+       while r only reaches 0.5 of a cell past the tread. So a trail clipping a cell
+       near its corner left that cell ungraded: raw terrain, sitting as much as a whole
+       band above the ribbon running across it, and standingY takes max(terrain, tread).
+       Measured on decimated pikesworld before this line existed: a 13.8-unit cliff at
+       x=1397.7 with the ribbon passing smoothly through it at 143. That is the "steps
+       too large to jump" report, and it is a gap in the corridor rather than a
+       staircase along it -- which is why it got worse with cell size but was never
+       really about cell size.
+
+       Claiming the containing cell directly is exact and costs one map write. */
+    const ci = clamp(WORLD.cellI(p[0]),0,WORLD.width-1), cj = clamp(WORLD.cellJ(p[1]),0,WORLD.height-1);
+    claimCell(claim, cj*WORLD.width + ci, hm[i], ci, cj, p[0], p[1]);
+
+    /* AND EVERY CELL THE SEGMENT CROSSES ON THE WAY TO THE NEXT STATION.
+       Stations sit about 0.7 of a cell apart, so two consecutive ones are in the same
+       cell or in neighbours -- but a diagonal run between them can still clip the
+       corner of a third cell that holds neither. That cell stays raw, and one raw cell
+       under a trail is a full-band cliff across the tread. Stepping along the segment
+       at 0.4 of a cell cannot skip a cell of width 1, and the height is interpolated
+       because the profile between two stations is a straight line by construction. */
+    if(i+1 < pts.length){
+      const q = pts[i+1];
+      const dx = q[0]-p[0], dz = q[1]-p[1];
+      const seg = Math.hypot(dx, dz);
+      const n = Math.ceil(seg/(WORLD.cell*0.4));
+      for(let t = 1; t < n; t++){
+        const u = t/n;
+        const sx = p[0]+dx*u, sz = p[1]+dz*u;
+        const h = hm[i] + (hm[i+1]-hm[i])*u;
+        const si = clamp(WORLD.cellI(sx),0,WORLD.width-1), sj = clamp(WORLD.cellJ(sz),0,WORLD.height-1);
+        claimCell(claim, sj*WORLD.width + si, h, si, sj, sx, sz);
+      }
+    }
+
+    const i0 = clamp(WORLD.cellI(p[0]-r),0,WORLD.width-1), i1 = clamp(WORLD.cellI(p[0]+r),0,WORLD.width-1),
+          j0 = clamp(WORLD.cellJ(p[1]-r),0,WORLD.height-1), j1 = clamp(WORLD.cellJ(p[1]+r),0,WORLD.height-1);
+    for(let j = j0; j <= j1; j++) for(let k = i0; k <= i1; k++){
+      const c = WORLD.cellCentre(k, j);
+      const d = Math.hypot(c.x-p[0], c.z-p[1]);
+      if(d > r) continue;
+      claimCell(claim, j*WORLD.width + k, hm[i], k, j, p[0], p[1]);
+    }
+  }
+}
+/* Lowest height wins; `d` separately tracks how close the nearest claiming centreline
+   point came to the cell centre, for gradeTrailCells' path-vs-channel split. */
+function claimCell(claim, key, h, ci, cj, x, z){
+  const c = WORLD.cellCentre(ci, cj);
+  const d = Math.hypot(c.x-x, c.z-z);
+  const prev = claim.get(key);
+  if(!prev){ claim.set(key, {h, d}); return; }
+  if(h < prev.h) prev.h = h;
+  if(d < prev.d) prev.d = d;
 }
 
 /* Smoothed height for camera framing ONLY -- never for placing anything on the ground.
@@ -4339,6 +4393,8 @@ const STEP_SURFACES = {
   rock:  {hz:3100, q:1.7, d:0.068, b:300, be:170, n:0.34, bg:0.12}, // bright, tight, clacky
   wood:  {hz:1150, q:2.4, d:0.090, b:260, be:150, n:0.26, bg:0.18}, // hollow, resonant
   sand:  {hz:1500, q:0.4, d:0.130, b:0,   be:0,   n:0.22, bg:0.00}, // dull, no tail at all
+  paved: {hz:2350, q:1.2, d:0.050, b:240, be:150, n:0.24, bg:0.13}, // tarmac: short, dry tap
+  water: {hz:1050, q:0.5, d:0.160, b:0,   be:0,   n:0.34, bg:0.00}, // splash: low hiss, long tail
 };
 function stepSurface(name){ return STEP_SURFACES[name] || STEP_SURFACES.trail; }
 
@@ -4844,6 +4900,162 @@ function embankmentGeom(pts, halfW, topYs, groundYAt, buriesTreadAt){
   geo.userData = geo.userData || {};
   geo.userData.skirtQuads = idx.length/6;
   return geo;
+}
+
+/* ---------- bridges ----------
+
+   A bridge is drawn from the SAME graded profile the path walks on (world.js raises that
+   profile into a deck over the water, so standingY and the planks agree by construction)
+   and consists of two meshes, however long it is:
+
+     bridgeDeckGeom()   the walking surface -- planks laid across the deck, alternating
+                        two browns through vertex colour, so a hundred planks are one draw
+     bridgeFrameGeom()  everything that stands up: the stringers down each side that give
+                        the deck visible thickness, and the railings (or, for a road, a
+                        concrete parapet)
+
+   Both are merged geometry built by hand rather than one Mesh per plank or post: a seven-
+   bridge walk would otherwise add a few hundred meshes for furniture the eye reads as
+   seven objects. Facade only -- nothing here collides; the deck profile is what you walk.
+
+   `pts`/`ys` are the deck centreline and TOP height at each station, `width` the full
+   deck width in true metres. */
+const PLANK_M = 0.34;
+function bridgeDeckGeom(pts, ys, width, colors){
+  if(!pts || pts.length < 2) return null;
+  const P=[], C=[], idx=[];
+  const cA=new THREE.Color(colors[0]), cB=new THREE.Color(colors[1]);
+  // walk the deck at plank spacing, carrying height and the local direction
+  const arc=[0];
+  for(let i=1;i<pts.length;i++) arc[i]=arc[i-1]+Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1]);
+  const total=arc[arc.length-1];
+  if(!(total>0.05)) return null;
+  const at=(s)=>{
+    let i=1; while(i<pts.length-1 && arc[i]<s) i++;
+    const t=clamp((s-arc[i-1])/Math.max(1e-9, arc[i]-arc[i-1]),0,1);
+    const a=pts[i-1], b=pts[i];
+    let dx=b[0]-a[0], dz=b[1]-a[1]; const L=Math.hypot(dx,dz)||1;
+    return {x:a[0]+dx*t, z:a[1]+dz*t, y:ys[i-1]+(ys[i]-ys[i-1])*t, nx:-dz/L, nz:dx/L};
+  };
+  const n=Math.max(1, Math.round(total/PLANK_M));
+  const hw=width/2, gap=Math.min(0.05, total/n*0.18);
+  for(let k=0;k<n;k++){
+    const s0=total*k/n + (k?gap/2:0), s1=total*(k+1)/n - (k<n-1?gap/2:0);
+    const a=at(s0), b=at(s1);
+    const base=P.length/3;
+    P.push(a.x+a.nx*hw, a.y, a.z+a.nz*hw,  a.x-a.nx*hw, a.y, a.z-a.nz*hw,
+           b.x+b.nx*hw, b.y, b.z+b.nz*hw,  b.x-b.nx*hw, b.y, b.z-b.nz*hw);
+    const c=(k%2)?cA:cB;
+    for(let v=0;v<4;v++) C.push(c.r,c.g,c.b);
+    idx.push(base,base+2,base+1, base+2,base+3,base+1);
+  }
+  const N=new Float32Array(P.length); for(let i=1;i<N.length;i+=3) N[i]=1;
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(P),3));
+  geo.setAttribute('normal',new THREE.BufferAttribute(N,3));
+  geo.setAttribute('color',new THREE.BufferAttribute(new Float32Array(C),3));
+  geo.setIndex(idx);
+  geo.userData = geo.userData || {};
+  geo.userData.planks = n;       // test seam
+  return geo;
+}
+
+/* Boxes into one indexed geometry. A "beam" runs from a to b (each [x,yTop,z]) with a
+   horizontal cross-width `w`, hanging `h` below its top edge -- sheared rather than
+   rotated when a and b differ in height, which is exactly what a rail following a
+   humped deck should be. A "post" is an upright w x w column from y0 to y1. */
+function pushBox(P, N, idx, corners){
+  // corners: 8 [x,y,z], bottom ring 0-3 then top ring 4-7, both counter-clockwise from above
+  const faces=[[0,1,2,3],[4,7,6,5],[0,4,5,1],[1,5,6,2],[2,6,7,3],[3,7,4,0]];
+  let cx=0, cy=0, cz=0;
+  for(const c of corners){ cx+=c[0]/8; cy+=c[1]/8; cz+=c[2]/8; }
+  for(const f of faces){
+    const a=corners[f[0]], b=corners[f[1]], c=corners[f[2]];
+    const e1=[b[0]-a[0],b[1]-a[1],b[2]-a[2]], e2=[c[0]-a[0],c[1]-a[1],c[2]-a[2]];
+    let nx=e1[1]*e2[2]-e1[2]*e2[1], ny=e1[2]*e2[0]-e1[0]*e2[2], nz=e1[0]*e2[1]-e1[1]*e2[0];
+    const L=Math.hypot(nx,ny,nz)||1; nx/=L; ny/=L; nz/=L;
+    /* Outward by measurement, not by trusting the corner order: a sheared beam on a
+       reversed edge flips its own winding, and an inward normal lights a rail black. */
+    let fx=0, fy=0, fz=0;
+    for(const k of f){ fx+=corners[k][0]/4; fy+=corners[k][1]/4; fz+=corners[k][2]/4; }
+    const flip=((fx-cx)*nx + (fy-cy)*ny + (fz-cz)*nz) < 0;
+    if(flip){ nx=-nx; ny=-ny; nz=-nz; }
+    const base=P.length/3;
+    for(const k of f){ P.push(corners[k][0],corners[k][1],corners[k][2]); N.push(nx,ny,nz); }
+    if(flip) idx.push(base,base+2,base+1, base,base+3,base+2);
+    else     idx.push(base,base+1,base+2, base,base+2,base+3);
+  }
+}
+function beamCorners(a, b, w, h){
+  let dx=b[0]-a[0], dz=b[2]-a[2]; const L=Math.hypot(dx,dz)||1;
+  const nx=-dz/L*w/2, nz=dx/L*w/2;
+  const ring=(y0)=>[[a[0]+nx, y0(a), a[2]+nz],[a[0]-nx, y0(a), a[2]-nz],
+                    [b[0]-nx, y0(b), b[2]-nz],[b[0]+nx, y0(b), b[2]+nz]];
+  return [...ring(p=>p[1]-h), ...ring(p=>p[1])];
+}
+function postCorners(x, z, y0, y1, w){
+  const r=w/2;
+  const ring=(y)=>[[x-r,y,z-r],[x+r,y,z-r],[x+r,y,z+r],[x-r,y,z+r]];
+  return [...ring(y0), ...ring(y1)];
+}
+/* style: 'wood' (footbridge: stringers + posts + two rails) or 'concrete' (road bridge:
+   deep slab edges + a solid parapet). Returns {geo, color}. */
+function bridgeFrameGeom(pts, ys, width, style){
+  if(!pts || pts.length < 2) return null;
+  const P=[], N=[], idx=[];
+  const off=(i, side, inset)=>{
+    const q=pts[Math.min(pts.length-1,i+1)], r=pts[Math.max(0,i-1)];
+    let dx=q[0]-r[0], dz=q[1]-r[1]; const L=Math.hypot(dx,dz)||1;
+    const d=width/2 - inset;
+    return [pts[i][0]-dz/L*d*side, ys[i], pts[i][1]+dx/L*d*side];
+  };
+  const concrete = style==='concrete';
+  const slabH = concrete ? 0.7 : 0.36, slabW = concrete ? 0.4 : 0.2;
+  const railTop = concrete ? 0.75 : 0.95;
+  for(const side of [-1,1]){
+    let acc=1e9;
+    for(let i=0;i<pts.length;i++){
+      const here=off(i, side, slabW/2);
+      if(i>0){
+        const prev=off(i-1, side, slabW/2);
+        acc+=Math.hypot(here[0]-prev[0], here[2]-prev[2]);
+        // stringer / slab edge
+        pushBox(P,N,idx, beamCorners(prev, here, slabW, slabH));
+        if(concrete){
+          // parapet: a solid low wall standing on the slab edge
+          pushBox(P,N,idx, beamCorners([prev[0],prev[1]+railTop,prev[2]], [here[0],here[1]+railTop,here[2]], slabW*0.8, railTop));
+        }else{
+          // top and mid rail
+          pushBox(P,N,idx, beamCorners([prev[0],prev[1]+railTop,prev[2]], [here[0],here[1]+railTop,here[2]], 0.1, 0.09));
+          pushBox(P,N,idx, beamCorners([prev[0],prev[1]+railTop*0.52,prev[2]], [here[0],here[1]+railTop*0.52,here[2]], 0.08, 0.07));
+        }
+      }
+      if(!concrete && (acc>=1.3 || i===0 || i===pts.length-1)){
+        pushBox(P,N,idx, postCorners(here[0], here[2], here[1]-slabH, here[1]+railTop+0.04, 0.13));
+        acc=0;
+      }
+    }
+  }
+  if(!idx.length) return null;
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(P),3));
+  geo.setAttribute('normal',new THREE.BufferAttribute(new Float32Array(N),3));
+  geo.setIndex(idx);
+  geo.userData = geo.userData || {};
+  geo.userData.bridgeFrame = style;   // test seam
+  return geo;
+}
+/* Planks need vertex colour, which no other trail material uses, so they get their own
+   shared material rather than a variant of trailMat. Layer 2 bias, like a trail tread:
+   the deck is painted over whatever ribbon it covers. */
+function frameMat(color){
+  return sharedMat('bridgeframe|'+color, () =>
+    new THREE.MeshToonMaterial({color:new THREE.Color(color), gradientMap:toonTex, side:THREE.DoubleSide}));
+}
+function deckMat(){
+  return sharedMat('deck|planks', () =>
+    new THREE.MeshToonMaterial({color:new THREE.Color('#ffffff'), vertexColors:true, gradientMap:toonTex,
+      side:THREE.DoubleSide, polygonOffset:true, polygonOffsetFactor:-9, polygonOffsetUnits:-9}));
 }
 
 /* `layer` is the path's CLASS rank (0 road, 1 track, 2 trail) -- see world.js's
@@ -5842,19 +6054,142 @@ async function fetchWorldBundle(url, opts) {
    through the loaded World bundle so vectors and terrain share one coordinate system. */
 
 
-function pathKind(p){
-  const raw=String(p.kind||p.pathType||p.trailType||'').toLowerCase();
-  // order matters: "single track trail" contains both "track" and "trail" — check the
-  // unambiguous road tokens first, then trail/singletrack phrasing, THEN bare "track" —
-  // otherwise a hiking singletrack gets misread as a vehicle track.
-  if(raw.includes('road')||raw.includes('paved')||raw.includes('service'))return'road';
-  if(raw.includes('trail')||raw.includes('single')||raw.includes('path'))return'trail';
-  if(raw.includes('track')||raw.includes('jeep')||raw.includes('double'))return'track';
-  const hw=String(p.highway||'').toLowerCase();
-  if(hw==='service'||hw==='road'||hw==='residential'||hw==='unclassified')return'road';
-  if(hw==='track')return'track';
+/* ---------- what a line IS: path class, surface, or water ----------
+
+   Three separate questions, answered separately, because the source data answers them
+   separately. OSM (and every QGIS export of it) says what KIND of way something is in
+   `highway`, what it is MADE of in `surface`, and whether it is water at all in
+   `waterway`. The first version folded all of that into one guess from `highway`, which
+   got the seven-bridges map wrong three ways at once:
+
+     - Gold Camp Road is highway=unclassified, surface=dirt. `unclassified` alone said
+       "road", and road meant tarmac, so a dirt road drew grey with a centre line.
+     - North Cheyenne Canyon Road is highway=tertiary. `tertiary` was not in the road
+       list at all, so an asphalt road fell through to the default and drew as a footpath.
+       (So were `secondary` and `primary` -- three roads on the default map were trails.)
+     - North Cheyenne Creek is waterway=stream with no highway tag, and the default was
+       "trail", so the creek was a walkable dirt path with signposts on it.
+
+   So: pathKind decides the CLASS (how wide, what it yields to, whether it gets
+   crosswalks), pathPaved decides the SURFACE, and waterKind catches water before either
+   is asked. `dirtroad` is its own class rather than "road with a flag" because nearly
+   everything world.js does with a road -- kerbs, crosswalks, trimming paths back to the
+   carriageway, sidewalks -- is a statement about tarmac. A dirt road is a wide track. */
+const ROAD_HW = new Set(['motorway','motorway_link','trunk','trunk_link','primary','primary_link',
+  'secondary','secondary_link','tertiary','tertiary_link','residential','unclassified','service',
+  'living_street','road','busway','raceway','escape']);
+const TRACK_HW = new Set(['track']);
+// ways that are for feet/bikes/horses, however they are surfaced
+const PATH_HW = new Set(['path','footway','bridleway','steps','cycleway','pedestrian','corridor','via_ferrata']);
+// what a way is made of when the source does not say, by class. Tarmac for anything
+// built for cars; dirt for tracks and footpaths; cycleways and plazas are nearly always
+// sealed.
+const PAVED_BY_DEFAULT = new Set([...ROAD_HW, 'cycleway', 'pedestrian', 'corridor']);
+const PAVED_SURF = new Set(['paved','asphalt','concrete','concrete:plates','concrete:lanes',
+  'paving_stones','paving_stones:lanes','sett','cobblestone','unhewn_cobblestone','bricks','brick',
+  'metal','metal_grid','chipseal','tartan','rubber','acrylic','wood','boardwalk','tiles']);
+const UNPAVED_SURF = new Set(['unpaved','gravel','fine_gravel','compacted','dirt','earth','ground',
+  'grass','sand','mud','pebblestone','rock','rocks','stone','woodchips','grass_paver','soil',
+  'clay','snow','ice','salt','shells','scree']);
+
+const tag = (p, k) => String(p[k] == null ? '' : p[k]).trim().toLowerCase();
+const rawKindOf = p => String(p.kind||p.pathType||p.trailType||'').toLowerCase();
+
+/* Word tests on a free-text name, for sources that carry no tags at all (the Pikes Peak
+   export is names and ids only). Whole words, so "Roadrunner Trail" is not a road and
+   "Brookside Loop" is not a brook. Only ever a FALLBACK: a highway or waterway tag always
+   outranks what a way happens to be called. */
+const wordIn = (s, words) => new RegExp('\\b(' + words + ')\\b', 'i').test(s);
+const TRAIL_WORDS = 'trail|path|trl|loop|singletrack|walk|incline|steps|stairs|footpath|boardwalk';
+const ROAD_WORDS = 'road|rd|highway|hwy|street|avenue|ave|boulevard|blvd|drive|lane|parkway|pkwy';
+const PAVED_ROAD_WORDS = 'highway|hwy|street|avenue|ave|boulevard|blvd|parkway|pkwy';
+/* Deliberately short. "Run", "Fork" and "Wash" name water in the real world but name
+   trails at least as often ("Deer Run"), and a trail misread as a creek disappears from
+   the walking network -- a far worse failure than a creek drawn as a path. */
+const WATER_WORDS = 'creek|river|brook|stream|canal|ditch';
+
+function pathKind(p, name){
+  const raw=rawKindOf(p);
+  const hw=tag(p,'highway');
+  /* order matters: "single track trail" contains both "track" and "trail" — check the
+     unambiguous road tokens first, then trail/singletrack phrasing, THEN bare "track" —
+     otherwise a hiking singletrack gets misread as a vehicle track. "unpaved" contains
+     "paved", so a road token is only a PAVED road once the surface says so. */
+  if(raw){
+    if(raw.includes('road')||raw.includes('paved')||raw.includes('service')||raw.includes('street'))
+      return pathPaved(p, 'road', name) ? 'road' : 'dirtroad';
+    if(raw.includes('trail')||raw.includes('single')||raw.includes('path'))return'trail';
+    if(raw.includes('track')||raw.includes('jeep')||raw.includes('double'))return'track';
+  }
+  if(ROAD_HW.has(hw)) return pathPaved(p, 'road', name) ? 'road' : 'dirtroad';
+  if(TRACK_HW.has(hw)) return'track';
+  if(PATH_HW.has(hw)) return'trail';
+  /* No usable tag: fall back to the name. "Longs Ranch Road" is a road whether or not
+     anyone tagged it; "Pikes Peak Highway" is a paved one. */
+  if(!hw && name && !wordIn(name, TRAIL_WORDS) && wordIn(name, ROAD_WORDS))
+    return pathPaved(p, 'road', name) ? 'road' : 'dirtroad';
   return'trail';
 }
+/* true = sealed surface (asphalt, concrete, pavers), false = dirt/gravel/ground.
+   `kind` is the class pathKind settled on, used only when nothing says what the surface is. */
+function pathPaved(p, kind, name){
+  const surf=tag(p,'surface').split(';')[0].trim();
+  if(surf.startsWith('unpaved')) return false;
+  if(PAVED_SURF.has(surf)) return true;
+  if(UNPAVED_SURF.has(surf)) return false;
+  const raw=rawKindOf(p);
+  if(raw){
+    if(/unpaved|dirt|gravel|ground|jeep|4wd|primitive/.test(raw)) return false;
+    if(/paved|asphalt|concrete|tarmac/.test(raw)) return true;
+  }
+  const tt=tag(p,'tracktype');
+  if(tt==='grade1') return true;
+  if(/^grade[2-5]$/.test(tt)) return false;
+  const hw=tag(p,'highway');
+  if(hw) return PAVED_BY_DEFAULT.has(hw);
+  // untagged: a named Highway/Street/Avenue is sealed; any other "Road" is assumed dirt,
+  // which is what an untagged road in a trail export almost always is
+  if(kind==='road' && name) return wordIn(name, PAVED_ROAD_WORDS);
+  return false;
+}
+/* Water, or null. Waterway tags first; then, only for a way nobody tagged as a highway,
+   the name. `width` is the channel in true metres -- like a tread it does not compact with
+   world scale, because it is an object the pup has to be the right size next to. */
+const WATER_W = {river:4.5, canal:3.2, stream:1.6, tidal_channel:2.5, brook:1.1, drain:0.9, ditch:0.8};
+const FLOWING = new Set(Object.keys(WATER_W));
+function waterKind(p, name){
+  const ww=tag(p,'waterway');
+  let kind=null;
+  if(ww){
+    if(!FLOWING.has(ww)) return null;          // dams, weirs, fuel points: not a channel
+    kind=ww;
+  }else{
+    const raw=rawKindOf(p);
+    if(raw && /creek|stream|river|brook|canal|ditch|waterway/.test(raw))
+      kind=/river|canal/.test(raw)?'river':'stream';
+    else if(!raw && !tag(p,'highway') && name && wordIn(name, WATER_WORDS) &&
+            !wordIn(name, TRAIL_WORDS) && !wordIn(name, ROAD_WORDS))
+      kind=/\briver\b/i.test(name)?'river':'stream';
+  }
+  if(!kind) return null;
+  /* A culvert carries the stream under whatever is on top: nothing to draw or bridge.
+     Returned as a marker rather than null, because null means "not water" and the
+     caller would then classify the culvert as a trail. */
+  if(tag(p,'tunnel')==='culvert' || tag(p,'tunnel')==='yes' || tag(p,'location')==='underground')
+    return {kind, culvert:true};
+  let width=WATER_W[kind]||WATER_W.stream;
+  const wt=parseFloat(tag(p,'width'));
+  if(wt>0) width=clamp(wt, 0.6, 14);
+  const intermittent = tag(p,'intermittent')==='yes' || tag(p,'seasonal')==='yes';
+  if(intermittent) width*=0.75;
+  return {kind, width, intermittent};
+}
+function isBridge(p){
+  const b=tag(p,'bridge');
+  if(b && b!=='no') return true;
+  return /bridge/.test(rawKindOf(p));
+}
+function isFord(p){ const f=tag(p,'ford'); return !!f && f!=='no'; }
 function poiKind(p){
   const raw=String(p.kind||p.type||p.poi||p.category||p.class||'').toLowerCase();
   const hit=(...k)=>k.some(s=>raw.includes(s));
@@ -5903,7 +6238,7 @@ function areaKind(p){
 /* One parser for every layer type. Drop a points file, a polygons file and a lines file
    and they all land in the right bucket — file naming and drop order don't matter. */
 function parseFeatures(obj){
-  const lines=[],points=[],areas=[];
+  const lines=[],points=[],areas=[],waters=[];
   const feats=obj&&obj.type==='FeatureCollection'?(obj.features||[])
     :(obj&&obj.type==='Feature'?[obj]:[]);
   for(const f of feats){
@@ -5912,8 +6247,22 @@ function parseFeatures(obj){
     const name=String(p.name||p.NAME||p.Name||p.title||p.trail||p.Trail||p.label||'').trim();
     if(g.type==='LineString'||g.type==='MultiLineString'){
       const parts=g.type==='LineString'?[g.coordinates]:g.coordinates;
+      /* Water is a separate bucket, never a line: a creek is not part of the walking
+         network, and putting it in the graph gave it trailheads, signposts and a place
+         in the route list. */
+      const wk=waterKind(p, name);
+      if(wk){
+        if(wk.culvert) continue;
+        for(const part of parts)if(part&&part.length>=2)
+          waters.push({name,kind:wk.kind,width:wk.width,intermittent:wk.intermittent,
+                       pts:part.map(c=>[+c[0],+c[1]])});
+        continue;
+      }
+      const kind=pathKind(p, name);
+      const paved=kind==='road' ? true : kind==='dirtroad' ? false : pathPaved(p, kind, name);
+      const bridge=isBridge(p), ford=isFord(p);
       for(const part of parts)if(part&&part.length>=2)
-        lines.push({name,kind:pathKind(p),pts:part.map(c=>[+c[0],+c[1]])});
+        lines.push({name,kind,paved,bridge,ford,pts:part.map(c=>[+c[0],+c[1]])});
     }else if(g.type==='Point'||g.type==='MultiPoint'){
       const parts=g.type==='Point'?[g.coordinates]:g.coordinates;
       for(const c of parts)if(c&&c.length>=2)
@@ -5926,7 +6275,7 @@ function parseFeatures(obj){
       }
     }
   }
-  return{lines,points,areas};
+  return{lines,points,areas,waters};
 }
 /* projectAll() is intentionally gone. Projection now goes through the loaded World
    (see world.js: worldBundle.project / projectCoords), which shares the DEM's exact
@@ -5996,27 +6345,54 @@ function applyCuts(L, cuts, tol){
   const arc=[0];
   for(let k=1;k<pts.length;k++) arc[k]=arc[k-1]+Math.hypot(pts[k][0]-pts[k-1][0],pts[k][1]-pts[k-1][1]);
   const total=arc[pts.length-1];
-  const cs=cuts.map(c=>({k:c.k, q:c.q,
+  const cs=cuts.map(c=>({k:c.k, q:c.q, x:!!c.x,
                          s:arc[c.k]+Math.hypot(c.q[0]-pts[c.k][0], c.q[1]-pts[c.k][1])}))
                .sort((a,b)=>a.s-b.s);
+  /* An X crossing that lands within `tol` of this line's end cannot be a cut (the stub
+     would be shorter than the snap distance), but DROPPING it -- the old behaviour -- is
+     only safe when the other line's node ends up within snap range of this end. When
+     BOTH lines drop their half of the same crossing, the two ends can sit up to twice
+     the snap distance apart and nothing ever joins them: two paths that cross on the map
+     and have never met in the graph. On the default map one such pair was held together
+     only by an unrelated creek that happened to cross at the same spot, and classifying
+     the creek as water (which it is) exposed it.
+
+     So the line is SHORTENED to end on the crossing instead. The stub past it is under
+     the snap distance, which buildGraph would have spent anyway; and an endpoint lying on
+     the other line is a T junction, which the next splitT round cuts properly. */
+  let head=null, tail=null;
+  for(const c of cs){
+    if(!c.x) continue;
+    if(c.s>1e-9 && c.s<tol) head=c;                         // last one near the start
+    if(!tail && total-c.s>1e-9 && total-c.s<tol) tail=c;    // first one near the end
+  }
+  if(head && tail && tail.s-head.s<tol){ head=null; tail=null; }
+  const s0=head?head.s:0, s1=tail?tail.s:total;
+
   const keep=[];
-  let last=0;
+  let last=s0;
   for(const c of cs){
     if(c.s-last<tol) continue;        // too close to the start, or to the cut before it
-    if(total-c.s<tol) continue;       // too close to the far end
+    if(s1-c.s<tol) continue;          // too close to the far end
     keep.push(c); last=c.s;
   }
-  if(!keep.length) return null;
+  if(!keep.length && !head && !tail) return null;
+
+  const piece=(from, to)=>{
+    // from/to: {k, q} cut records, or null for the (possibly shortened) line ends
+    const a0 = from ? from.q.slice() : pts[0];
+    const k0 = from ? from.k+1 : 1;
+    const k1 = to ? to.k+1 : pts.length-1;
+    const end = to ? to.q.slice() : pts[pts.length-1];
+    // a cut AT a vertex (a shared survey node) would otherwise repeat that vertex
+    const body = pts.slice(k0, k1).filter(p => d2(p, a0) > 1e-12 && d2(p, end) > 1e-12);
+    return {name:L.name, kind:L.kind, paved:L.paved, ford:L.ford, named:L.named, route:L.route,
+            pts:[a0].concat(body, [end])};
+  };
   const out=[];
-  let startK=0, startPt=pts[0];
-  for(const c of keep){
-    const piece=[startPt].concat(pts.slice(startK+1, c.k+1));
-    piece.push(c.q);
-    out.push({name:L.name, kind:L.kind, named:L.named, route:L.route, pts:piece});
-    startK=c.k; startPt=c.q;
-  }
-  out.push({name:L.name, kind:L.kind, named:L.named, route:L.route,
-            pts:[startPt].concat(pts.slice(startK+1))});
+  let prev=head;
+  for(const c of keep){ out.push(piece(prev, c)); prev=c; }
+  out.push(piece(prev, tail));
   return out;
 }
 
@@ -6058,10 +6434,33 @@ function splitT(lines,tol){
           for(let m=0;m<pb.length-1;m++){
             const c=segCross(pa[k],pa[k+1],pb[m],pb[m+1]);
             if(!c) continue;
-            cuts[i].push({k, q:c.q.slice(), d:0});
-            cuts[j].push({k:m, q:c.q.slice(), d:0});
+            cuts[i].push({k, q:c.q.slice(), d:0, x:true});
+            cuts[j].push({k:m, q:c.q.slice(), d:0, x:true});
           }
         }
+        /* --- and meetings AT a vertex. Two OSM ways that share a node mid-way (a trail
+           crossing a road at a surveyed point) touch exactly at a vertex, where
+           segCross's open intervals see nothing and the T test, which only looks at
+           endpoints, sees nothing either. On the default map a trail crossed Garden Drive
+           this way and was joined to it only because a creek happened to share the same
+           node; take the creek out of the network and the crossing had no node at all. */
+        const eps2=(tol*0.02)*(tol*0.02);
+        const touch=(P, Q, into, from, QB)=>{
+          for(let k=1;k<P.length-1;k++){
+            const v=P[k];
+            if(v[0]<QB.x0-tol||v[0]>QB.x1+tol||v[1]<QB.z0-tol||v[1]>QB.z1+tol) continue;
+            for(let m=0;m<Q.length-1;m++){
+              const r=ptSeg(P[k], Q[m], Q[m+1]);
+              if(r.d*r.d>eps2 || r.t<=0 && m===0 || r.t>=1 && m===Q.length-2) continue;
+              // the vertex's own cut sits at the end of the segment arriving at it
+              cuts[from].push({k:k-1, q:P[k].slice(), d:0, x:true});
+              cuts[into].push({k:m, q:P[k].slice(), d:0, x:true});
+              break;
+            }
+          }
+        };
+        touch(pa, pb, j, i, B);
+        touch(pb, pa, i, j, A);
       }
     }
 
@@ -6097,7 +6496,9 @@ const SPUR_NAMES=["Coyote Cutoff","Lizard Spur","Juniper Link","Sandy Wash","Mag
 // "no elevation data" never silently renders as sea level.
 // full pipeline -> {nodes:[{p,deg}], edges:[{a,b,pts,name,lenM,color,kind}]}
 function buildGraph(rawLines,snapTol,simpTol){
-  let lines=rawLines.map(L=>({name:L.name,kind:L.kind||'trail',pts:L.pts.map(p=>p.slice())}));
+  let lines=rawLines.map(L=>({name:L.name,kind:L.kind||'trail',
+                             paved:L.paved==null ? (L.kind==='road') : !!L.paved, ford:!!L.ford,
+                             pts:L.pts.map(p=>p.slice())}));
   lines.forEach(L=>{L.pts=L.pts.filter((p,i)=>i===0||d2(p,L.pts[i-1])>1e-6);});
   lines=lines.filter(L=>L.pts.length>=2&&polyLen(L.pts)>snapTol*0.5);
   /* Two identities per line, and they are NOT the same thing.
@@ -6150,7 +6551,7 @@ function buildGraph(rawLines,snapTol,simpTol){
     if(!nameColor.has(route))nameColor.set(route,palette[nameColor.size%palette.length]);
     nodes[a].deg++;if(b!==a)nodes[b].deg++;
     edges.push({a,b,pts,name,route,named:!!L.named,lenM,
-                color:nameColor.get(route),kind:L.kind||'trail'});
+                color:nameColor.get(route),kind:L.kind||'trail',paved:!!L.paved,ford:!!L.ford});
   });
   /* Per-node census of what actually meets here. Computed once, in the module that owns
      the topology, because every consumer downstream needs the same answer: world.js has
@@ -6200,7 +6601,7 @@ function hashSeg(seg){
       const k=cx+'_'+cz;if(!SEG_HASH.has(k))SEG_HASH.set(k,[]);SEG_HASH.get(k).push(seg);
     }
 }
-/* {d, edge, y, hw, px, pz}: distance to the centreline, the edge it belongs to, the tread
+/* {d, edge, y, hw, px, pz, deck}: distance to the centreline, the edge it belongs to, the tread
    height interpolated along that segment, the corridor half-width, and the point on the
    centreline itself. `y` is null when the segment was hashed without a height profile (the
    flat, no-DEM fallback path), which callers must treat as "no opinion", not as "height
@@ -6211,21 +6612,25 @@ function hashSeg(seg){
    through the same corridor -- two walkers on opposite verges of one trail would otherwise
    trace two courses that never meet. The projection is already computed here to get `d`,
    so handing it back costs nothing and means the recorder and the "am I on a trail" test
-   can never disagree about which point on which trail they are talking about. */
+   can never disagree about which point on which trail they are talking about.
+
+   `deck` is true when that stretch of tread is a bridge (world.js marks the segments it
+   hashes from a deck span), so the footstep voice can hear planks without a second
+   lookup against the bridge list. */
 function nearestTrail(x,z){
   const segs=SEG_HASH.get(hashKey(x,z));
-  let best=1e9,edge=null,y=null,hw=0,px=null,pz=null;
+  let best=1e9,edge=null,y=null,hw=0,px=null,pz=null,deck=false;
   if(segs)for(const s of segs){
     const dx=s.b[0]-s.a[0],dz=s.b[1]-s.a[1],L2=dx*dx+dz*dz;
     let t=L2===0?0:((x-s.a[0])*dx+(z-s.a[1])*dz)/L2;t=t<0?0:(t>1?1:t);
     const qx=s.a[0]+t*dx, qz=s.a[1]+t*dz;
     const d=Math.hypot(x-qx,z-qz);
     if(d<best){
-      best=d;edge=s.edge;hw=s.hw||0;px=qx;pz=qz;
+      best=d;edge=s.edge;hw=s.hw||0;px=qx;pz=qz;deck=!!s.deck;
       y=(s.ya==null||s.yb==null)?null:s.ya+(s.yb-s.ya)*t;
     }
   }
-  return{d:best,edge,y,hw,px,pz};
+  return{d:best,edge,y,hw,px,pz,deck};
 }
 
 /* ==== src/trails/world.js ==== */
@@ -6919,7 +7324,10 @@ function updateAreaLabels(camX, camY, camZ){
    because the terrain-carving pass needs the widths BEFORE the ribbon loop runs (it has
    to cut the bench before buildTerrainMesh bakes the grid), and both must agree on the
    number or the carve and the ribbon end up different widths. */
-const PATH_W = {trail:1.1, track:1.9, road:3.0};
+const PATH_W = {trail:1.1, track:1.9, dirtroad:2.8, road:3.0};
+/* dirtroad is a graded dirt/gravel road (Gold Camp Road, Rampart Range Road): nearly a
+   road's width, but a track in every way that matters to the rest of this file -- no
+   kerb, no crosswalk, nothing trimmed back from it. See geo.js's pathKind. */
 /* True metres, NOT scaled by MAP_SCALE. A tread is an object with a size, and the pup
    has to stay the right size relative to it however compact the network is.
 
@@ -6957,7 +7365,7 @@ function buriesTread(x, z, yTop){
    so the ink outline of the upper path visibly overlaps the lower surface rather than
    fighting it. 4.5 cm is under a twentieth of a tread width -- invisible as float, plenty
    for a depth buffer. */
-const PATH_RANK = {road:0, track:1, trail:2};
+const PATH_RANK = {road:0, dirtroad:1, track:1, trail:2};
 function pathRank(kind){ return PATH_RANK[kind] == null ? PATH_RANK.trail : PATH_RANK[kind]; }
 const KIND_LIFT_M = 0.045;
 function kindLift(kind){ return pathRank(kind)*KIND_LIFT_M; }
@@ -7373,6 +7781,17 @@ function clearOfWiderPaths(){
      that had each been correctly displaced, just in the wrong order. Ranking the walk
      makes each edge final before anything reads it. */
   const order = GRAPH.edges.slice().sort((a,b)=>pathRank(a.kind)-pathRank(b.kind));
+  /* An anchor's box, cached against the exact array it was measured from: anchors are
+     themselves displaced earlier in this same walk (a track moves for a road), which
+     replaces their pts array, and a stale box would then be a wrong one. */
+  const boxCache = new Map();
+  const anchorBox = o => {
+    const c = boxCache.get(o);
+    if(c && c.pts === o.pts) return c.box;
+    const box = polylineBox(o.pts, 0);
+    boxCache.set(o, {pts:o.pts, box});
+    return box;
+  };
 
   for(const e of order){
     /* Buried paths are not drawn as surfaces at all -- they are route markers laid on
@@ -7380,10 +7799,21 @@ function clearOfWiderPaths(){
        where they belong on the verge. Pushing one again would shove a sidewalk off the
        road it is meant to follow. */
     if(e.buried || e.pts.length < 2) continue;
-    const anchors = GRAPH.edges.filter(o =>
-      o !== e && o.pts.length >= 2 && pathRank(o.kind) < pathRank(e.kind));
-    if(!anchors.length) continue;
     const half = pathOutlineWidth(e.kind)/2 + CLEAR_MARGIN;
+    /* Only anchors whose box comes within reach of this edge's box. A push only ever
+       happens inside `clear` of an anchor, so an anchor further than that from every
+       vertex cannot push anything. (It could still have been the nearest anchor for a
+       vertex's frozen side, which only matters for a vertex that is never pushed; the
+       default map's overlap measure moved by one metre in 120 when this went in.) It mattered once real roads appeared on
+       the Pikes Peak map: every trail was being projected onto every road, vertex by
+       vertex, round by round, and the load went from 1.0 s to 7 s. REACH is generous so
+       a vertex nudged a little during the rounds still sees the anchors it could meet. */
+    const REACH = half + pathOutlineWidth('road')/2 + 8;
+    const eb = polylineBox(e.pts, REACH);
+    const anchors = GRAPH.edges.filter(o =>
+      o !== e && o.pts.length >= 2 && pathRank(o.kind) < pathRank(e.kind) &&
+      boxesMeet(eb, anchorBox(o)));
+    if(!anchors.length) continue;
 
     /* RESAMPLE FIRST, and this is the whole reason the pass does anything at all.
 
@@ -7461,6 +7891,8 @@ function clearOfWiderPaths(){
         let worst=null, worstOver=0;
         for(const o of anchors){
           const clear = half + pathOutlineWidth(o.kind)/2;
+          const b = anchorBox(o);
+          if(p[0] < b.x0-clear || p[0] > b.x1+clear || p[1] < b.z0-clear || p[1] > b.z1+clear) continue;
           const pr = projectOnPolyline(o.pts, p[0], p[1]);
           const over = clear - pr.d;
           if(over > worstOver){ worstOver=over; worst={pr, clear}; }
@@ -7570,10 +8002,15 @@ function trimProfile(prof, a, b){
     }
     return [pts[pts.length-1].slice(), ys ? ys[ys.length-1] : 0];
   };
-  let e0=at(lo); outP.push(e0[0]); outY.push(e0[1]);
-  for(let i=0;i<pts.length;i++) if(arc[i]>lo && arc[i]<hi){ outP.push(pts[i]); outY.push(ys?ys[i]:0); }
-  let e1=at(hi); outP.push(e1[0]); outY.push(e1[1]);
-  return {pts:outP, ys:ys?outY:null};
+  /* The deck mask travels with the stations, so a trimmed ribbon still knows which of
+     its stretches are bridge (no skirt under those). A cut end takes the flag of the
+     station it falls just before. */
+  const dk=prof.deck, outD=[];
+  const deckNear=(s)=>{ if(!dk) return false; for(let i=0;i<pts.length;i++) if(arc[i]>=s) return !!dk[i]; return !!dk[pts.length-1]; };
+  let e0=at(lo); outP.push(e0[0]); outY.push(e0[1]); outD.push(deckNear(lo));
+  for(let i=0;i<pts.length;i++) if(arc[i]>lo && arc[i]<hi){ outP.push(pts[i]); outY.push(ys?ys[i]:0); outD.push(dk?!!dk[i]:false); }
+  let e1=at(hi); outP.push(e1[0]); outY.push(e1[1]); outD.push(deckNear(hi));
+  return {pts:outP, ys:ys?outY:null, deck:dk?outD:null};
 }
 
 /* Distinct SIGNABLE routes meeting at a node -- what a walker actually has to choose
@@ -7670,6 +8107,282 @@ function pickArms(arms){
   return post;
 }
 
+/* ---------- water, and the bridges that carry paths over it ----------
+
+   Creeks and rivers come out of geo.js as their own bucket (waterKind), never as lines:
+   they are not part of the walking network, so they have no nodes, no signposts, no
+   place in the route list and no corridor in the spatial hash. What they DO have is
+   ground: each one gets a graded channel profile, written into the band grid by the same
+   pass that benches the trails (terrain.js's gradeTrailCells), so a creek is a notch in
+   the hillside that runs downhill rather than a blue line draped over terrace steps.
+
+   A BRIDGE is wherever a path crosses a channel -- found geometrically, not read off the
+   source, because the source's own bridge ways do not survive into the graph. OSM draws
+   each of the seven bridges on the seven-bridges map as a separate two-point way a few
+   metres long; buildGraph's endpoint snap (16 m of real distance) collapses every one of
+   them into a single node and drops the edge. So the bridge tags are kept aside as HINTS
+   and matched to the geometric crossings afterwards: a hint over a detected crossing
+   lengthens that span to the surveyed bridge, and a hint with no water under it (a dry
+   gully the export did not include) still gets a deck.
+
+   A bridge changes three things, all through data the rest of the file already shares:
+
+     - the path's graded profile rises into a deck over the water (raiseBridgeDecks), so
+       the ribbon, the spatial hash and standingY all walk the deck with no special case;
+     - the ground under the span is the channel, not the path's bench (zones, passed to
+       gradeTrailCells), so the water runs UNDER the deck instead of into a dam;
+     - the ribbon draws no fill embankment along the span -- a skirt there is the dam
+       again, drawn instead of graded -- and a deck and railings go on top.
+
+   Every length here is true metres unless it says otherwise, for the same reason tread
+   widths are: a creek, a plank and a handrail are objects the pup has to be the right
+   size next to at any world scale. Positions compact; these do not. */
+const WATERWAYS = [];            // cleared in place; read by the minimap and the smoke suite
+const BRIDGES = [];              // cleared in place
+let WATER_HASH = new Map();
+const WATER_HASH_CELL = 12;
+/* These four are WORLD UNITS, like the widths, not real metres of elevation. Relief is
+   compacted by VERT_SCALE (0.25 at the default 1:5), so a real 0.9 m creek bank would be a
+   22 cm notch beside a pup-sized pup -- and a deck clearance measured the same way would put
+   the planks on the water. The grading maths works in metres, so each use divides by
+   VERT_SCALE (vm() below). */
+const CHANNEL_DEPTH_U = 0.9;     // bed below the valley floor the channel runs through
+const WATER_U = 0.3;             // water surface above the bed
+const DECK_CLEAR_U = 0.8;        // deck above the water
+const MAX_HUMP_U = 1.4;          // most a path climbs to clear a creek; past that the creek dips
+const vm = u => u/Math.max(1e-6, VERT_SCALE);
+const BRIDGE_MIN_HALF = 2.4;     // shortest half-span
+const BRIDGE_ABUT = 1.1;         // deck reaches this far past each bank
+const WATER_BANK = 0.55;         // exposed bed either side of the water
+const MIN_CROSS_SIN = 0.35;      // an oblique crossing is spanned as if at ~20 degrees, no flatter
+
+function channelHalf(w){ return w.width/2 + WATER_BANK; }
+
+/* Nearest profile station to (x,z), by index. Profiles are dense (stations under a metre
+   apart), so the nearest station is as good as the nearest point for everything here. */
+function nearestStation(pts, x, z){
+  let bi=-1, bd=Infinity;
+  for(let i=0;i<pts.length;i++){
+    const d=Math.hypot(pts[i][0]-x, pts[i][1]-z);
+    if(d<bd){ bd=d; bi=i; }
+  }
+  return {i:bi, d:bd};
+}
+function distToPolyline(pts, x, z){
+  let best=Infinity;
+  for(let i=0;i<pts.length-1;i++){ const d=ptSeg([x,z], pts[i], pts[i+1]).d; if(d<best) best=d; }
+  return best;
+}
+function polylineBox(pts, pad){
+  let x0=Infinity,x1=-Infinity,z0=Infinity,z1=-Infinity;
+  for(const p of pts){ x0=Math.min(x0,p[0]); x1=Math.max(x1,p[0]); z0=Math.min(z0,p[1]); z1=Math.max(z1,p[1]); }
+  return {x0:x0-pad, x1:x1+pad, z0:z0-pad, z1:z1+pad};
+}
+const boxesMeet=(a,b)=>!(a.x1<b.x0||a.x0>b.x1||a.z1<b.z0||a.z0>b.z1);
+
+/* Find every place a path crosses water, fold in the source's own bridge ways, and decide
+   which edges each bridge carries. Runs after every geometry pass (burial, crossings,
+   displacement) because it records positions on the FINAL centrelines. */
+function planBridges(hints){
+  BRIDGES.length=0;
+  if(!GRAPH) return 0;
+  const addOrMerge=(x, z, half, water, e)=>{
+    for(const b of BRIDGES){
+      if(Math.hypot(b.x-x, b.z-z) < Math.max(b.half, half)){
+        if(half>b.half) b.half=half;
+        // a crossing with water beats a dry hint for where the span is centred
+        if(water && !b.water){ b.water=water; b.x=x; b.z=z; }
+        if(e && !b.edges.includes(e)) b.edges.push(e);
+        return b;
+      }
+    }
+    const b={x, z, half, water:water||null, edges:e?[e]:[], hinted:false};
+    BRIDGES.push(b);
+    return b;
+  };
+
+  const wbox=WATERWAYS.map(w=>polylineBox(w.pts, channelHalf(w)));
+  for(const e of GRAPH.edges){
+    if(e.pts.length<2 || e.ford) continue;
+    const eb=polylineBox(e.pts, 0);
+    WATERWAYS.forEach((w, wi)=>{
+      if(!boxesMeet(eb, wbox[wi])) return;
+      for(let i=0;i<e.pts.length-1;i++){
+        for(let k=0;k<w.pts.length-1;k++){
+          const c=segCross(e.pts[i], e.pts[i+1], w.pts[k], w.pts[k+1]);
+          if(!c) continue;
+          const ax=e.pts[i+1][0]-e.pts[i][0], az=e.pts[i+1][1]-e.pts[i][1];
+          const bx=w.pts[k+1][0]-w.pts[k][0], bz=w.pts[k+1][1]-w.pts[k][1];
+          const sin=Math.abs(ax*bz-az*bx)/((Math.hypot(ax,az)*Math.hypot(bx,bz))||1);
+          const half=Math.max(BRIDGE_MIN_HALF,
+            channelHalf(w)/Math.max(MIN_CROSS_SIN, sin) + BRIDGE_ABUT);
+          addOrMerge(c.q[0], c.q[1], half, w, e);
+        }
+      }
+    });
+  }
+
+  /* Hints: the surveyed bridge ways. A hint stretches a detected span to the bridge's
+     real length, or -- if nothing was detected there -- becomes a dry bridge on whichever
+     paths run through it. */
+  for(const h of hints){
+    if(!h || h.length<2) continue;
+    let len=0; for(let i=1;i<h.length;i++) len+=Math.hypot(h[i][0]-h[i-1][0], h[i][1]-h[i-1][1]);
+    const m=h[Math.floor((h.length-1)/2)], m2=h[Math.ceil((h.length-1)/2)];
+    const mx=(m[0]+m2[0])/2, mz=(m[1]+m2[1])/2;
+    const half=Math.max(BRIDGE_MIN_HALF, len/2 + BRIDGE_ABUT*0.5);
+    let near=null;
+    for(const b of BRIDGES) if(Math.hypot(b.x-mx, b.z-mz) < Math.max(b.half, half) + 1.5){ near=b; break; }
+    if(near){ near.half=Math.max(near.half, half); near.hinted=true; continue; }
+    const carriers=GRAPH.edges.filter(e=>!e.ford && e.pts.length>=2 &&
+      distToPolyline(e.pts, mx, mz) <= pathOutlineWidth(e.kind)/2 + 0.6);
+    if(!carriers.length) continue;
+    const b=addOrMerge(mx, mz, half, null, null);
+    b.hinted=true;
+    carriers.forEach(e=>{ if(!b.edges.includes(e)) b.edges.push(e); });
+  }
+
+  /* Every edge that actually passes through a span rides it -- in particular both halves
+     of a trail that buildGraph cut at a node sitting on the bank, and a sidewalk beside a
+     road bridge. Without this only the one edge whose segment happened to straddle the
+     water would rise, and its neighbour would meet it a metre lower at the node. */
+  for(const b of BRIDGES){
+    for(const e of GRAPH.edges){
+      if(b.edges.includes(e) || e.ford || e.pts.length<2) continue;
+      if(distToPolyline(e.pts, b.x, b.z) <= Math.max(0.6, pathWidth(e.kind)*0.5)) b.edges.push(e);
+    }
+  }
+  return BRIDGES.length;
+}
+
+/* Grade each channel: smoothed along its length like a trail, then pushed down into a
+   bed and made to run downhill. The profile stored is the BED (what gradeTrailCells
+   benches), with the water surface kept alongside for drawing. */
+function gradeWaterways(){
+  for(const w of WATERWAYS){
+    w.prof=null;
+    if(w.pts.length<2) continue;
+    const pr=gradeProfile(w.pts, VERT_SCALE, 0.7, 10, Math.max(0.7, w.width*0.5));
+    const n=pr.pts.length;
+    if(n<2) continue;
+    /* never above the ground it runs through, and never uphill. Which end is upstream is
+       read from the profile rather than trusted from the digitising direction: OSM draws
+       waterways downstream, but a QGIS merge or reverse can silently flip one. */
+    const ground=pr.pts.map(p=>terrainY(p[0],p[1],1));
+    const down = pr.hm[0] >= pr.hm[n-1];
+    const bed=new Array(n);
+    let run=Infinity;
+    for(let k=0;k<n;k++){
+      const i = down ? k : n-1-k;
+      const h=Math.min(pr.hm[i], ground[i]) - vm(CHANNEL_DEPTH_U);
+      run=Math.min(run, h);
+      bed[i]=run;
+    }
+    w.prof={pts:pr.pts, hm:bed, halfWidth:channelHalf(w)};
+  }
+}
+
+/* Lift each bridge's paths into a deck, dip the creek if the path cannot climb far
+   enough, and return the zones where the channel owns the ground. Mutates e.prof in
+   place (hm, ys, and the new hmGround / deck arrays) -- the one shared profile every
+   consumer reads, which is what keeps the planks, the tread and standingY agreed. */
+function raiseBridgeDecks(){
+  const zones=[];
+  const smooth=u=>u*u*(3-2*u);
+  for(const b of BRIDGES){
+    const riders=b.edges.filter(e=>e.prof && e.prof.pts && e.prof.pts.length>=2);
+    if(!riders.length) continue;
+    let sum=0, n=0;
+    for(const e of riders){
+      const k=nearestStation(e.prof.pts, b.x, b.z);
+      if(k.i>=0 && k.d<=b.half){ sum+=e.prof.hm[k.i]; n++; }
+    }
+    if(!n) continue;
+    const pathM=sum/n;
+    let deckM=pathM, waterM=null;
+    const w=b.water;
+    if(w && w.prof){
+      const k=nearestStation(w.prof.pts, b.x, b.z);
+      waterM=w.prof.hm[k.i] + vm(WATER_U);
+      const need=waterM + vm(DECK_CLEAR_U);
+      if(need>pathM){
+        deckM=pathM + Math.min(need-pathM, vm(MAX_HUMP_U));
+        const short=need-deckM;
+        if(short>0){
+          /* The path is too far below the water to clear it with a walkable hump -- a
+             creek perched on a terrace above the road. Drop the creek under the deck
+             instead, easing back over a few spans either side. */
+          const R=b.half*2.5;
+          for(let j=0;j<w.prof.pts.length;j++){
+            const d=Math.hypot(w.prof.pts[j][0]-b.x, w.prof.pts[j][1]-b.z);
+            if(d>=R) continue;
+            w.prof.hm[j]-=short*smooth(1-d/R);
+          }
+          waterM-=short;
+        }
+      }
+    }
+    b.deckM=deckM; b.pathM=pathM; b.waterM=waterM;
+    for(const e of riders){
+      const pr=e.prof;
+      if(!pr.hmGround){ pr.hmGround=pr.hm.slice(); pr.deck=new Array(pr.pts.length).fill(false); }
+      for(let i=0;i<pr.pts.length;i++){
+        const d=Math.hypot(pr.pts[i][0]-b.x, pr.pts[i][1]-b.z);
+        if(d>b.half) continue;
+        /* flat across the middle 55% of the span, easing down to the path at each end --
+           a humped footbridge, and a ramp the step-up limit never notices */
+        const u=d/b.half;
+        const wgt = u<=0.55 ? 1 : smooth((1-u)/0.45);
+        const lift=Math.max(0, deckM-pr.hm[i])*wgt;
+        pr.hm[i]+=lift;
+        pr.ys[i]=pr.hm[i]*VERT_SCALE;
+        pr.deck[i]=true;
+      }
+    }
+    /* Only a crossing with water hands its ground to the channel. The zone is the span
+       itself, so the abutments either side stay the path's bench. */
+    if(w && w.prof) zones.push({x:b.x, z:b.z, r:b.half});
+  }
+  return zones;
+}
+
+function hashWater(){
+  WATER_HASH=new Map();
+  for(const w of WATERWAYS){
+    const pts=w.prof ? w.prof.pts : w.pts, hw=w.width/2;
+    for(let i=0;i<pts.length-1;i++){
+      const a=pts[i], b=pts[i+1], seg={a, b, hw};
+      const x0=Math.floor((Math.min(a[0],b[0])-hw)/WATER_HASH_CELL), x1=Math.floor((Math.max(a[0],b[0])+hw)/WATER_HASH_CELL);
+      const z0=Math.floor((Math.min(a[1],b[1])-hw)/WATER_HASH_CELL), z1=Math.floor((Math.max(a[1],b[1])+hw)/WATER_HASH_CELL);
+      for(let cx=x0;cx<=x1;cx++) for(let cz=z0;cz<=z1;cz++){
+        const k=cx+'_'+cz; let arr=WATER_HASH.get(k); if(!arr){ arr=[]; WATER_HASH.set(k,arr); } arr.push(seg);
+      }
+    }
+  }
+}
+/* Distance past the water's edge (negative inside the water) to the nearest channel,
+   or Infinity with none near. `pad` widens the test, for "keep scenery out of the creek". */
+function waterEdgeDist(x, z){
+  const arr=WATER_HASH.get(Math.floor(x/WATER_HASH_CELL)+'_'+Math.floor(z/WATER_HASH_CELL));
+  if(!arr) return Infinity;
+  let best=Infinity;
+  for(const s of arr){ const d=ptSeg([x,z], s.a, s.b).d - s.hw; if(d<best) best=d; }
+  return best;
+}
+/* Standing in a creek? For the footstep voice. Off-tread only -- on a bridge you are on
+   the deck, whatever is underneath. */
+function inWaterway(x, z){ return waterEdgeDist(x, z) <= 0; }
+function getWaterways(){ return WATERWAYS; }
+function getBridges(){ return BRIDGES; }
+
+/* The rendering class of an edge: its kind, refined by surface. A concrete cycleway is a
+   trail to everything else in this file, but it is not brown. */
+function styleKey(e){
+  if(e.paved && (e.kind==='trail' || e.kind==='track')) return 'paved_'+e.kind;
+  return PATH_STYLE_KEYS.has(e.kind) ? e.kind : 'trail';
+}
+const PATH_STYLE_KEYS = new Set(['trail','track','dirtroad','road','paved_trail','paved_track']);
+
 /* Bumped on every rebuildWorld so cached derived data (minimap.js's relief image, the
    critter roster) can tell "same world, new frame" from "whole world replaced" without
    world.js needing to know those consumers exist. */
@@ -7735,12 +8448,21 @@ function rebuildWorld(){
   // merge the bundle's own layers with anything dropped in-session, classify each
   // feature, then project every coordinate through the bundle's own projection so
   // vectors and the heightfield are guaranteed aligned
-  const rawLines=[], rawPoints=[], rawAreas=[];
+  const rawLines=[], rawPoints=[], rawAreas=[], rawWaters=[];
   for(const layer of layers){
     const F=parseFeatures(layer);
     rawLines.push(...F.lines); rawPoints.push(...F.points); rawAreas.push(...F.areas);
+    rawWaters.push(...(F.waters||[]));
   }
-  const lines=rawLines.map(L=>({name:L.name,kind:L.kind,pts:PROJ.projectCoords(L.pts)}));
+  const lines=rawLines.map(L=>({name:L.name,kind:L.kind,paved:L.paved,ford:L.ford,
+                                pts:PROJ.projectCoords(L.pts)}));
+  // the source's own bridge ways, kept aside: buildGraph snaps most of them out of
+  // existence (see planBridges), so they survive only as hints for where spans go
+  const bridgeHints=lines.filter((L,i)=>rawLines[i].bridge).map(L=>L.pts);
+  WATERWAYS.length=0;
+  for(const W of rawWaters)
+    WATERWAYS.push({name:W.name, kind:W.kind, width:W.width, intermittent:!!W.intermittent,
+                    pts:PROJ.projectCoords(W.pts), prof:null});
   const points=rawPoints.map(P=>({name:P.name,kind:P.kind,props:P.props,p:PROJ.project(P.ll[0],P.ll[1])}));
   // projectCoords() already returns plain [x,z] pairs at every leaf (verified against
   // world_bundle.js: it recurses until coords[0] is a number, then returns [p.x,p.z] --
@@ -7777,6 +8499,7 @@ function rebuildWorld(){
      gives: there is one copy of the geometry and it has to be finished being edited
      before the bench, the spatial hash, the ribbons and the minimap all read it. */
   PATH_MIX.displaced = clearOfWiderPaths();
+  PATH_MIX.bridges = planBridges(bridgeHints);
   POIS=points.map(p=>({name:p.name,kind:p.kind,props:p.props,x:p.p.x,z:p.p.z,found:false}));
   AREAS=areasProjected;
   WATER=AREAS.filter(a=>a.kind==='water');
@@ -7857,13 +8580,21 @@ function rebuildWorld(){
     // the ink outline, or the ribbon's edges hang off the corridor onto stepped ground
     e.prof.halfWidth = pathOutlineWidth(e.kind)/2;
   });
-  gradeTrailCells(GRAPH.edges.map(e=>e.prof));
+  /* Channels are graded from the same untouched band grid the paths just read, then the
+     bridges lift their paths over them -- which needs both profiles -- and only then does
+     anything get written back into the grid. */
+  gradeWaterways();
+  const bridgeZones = raiseBridgeDecks();
+  gradeTrailCells(GRAPH.edges.map(e=>e.prof),
+                  WATERWAYS.map(w=>w.prof).filter(Boolean), bridgeZones);
+  hashWater();
   // hash before any geometry: buildArea's ground-cover scatter and buildAreaSign both
   // call nearestTrail, and standingY now needs tread heights too
   GRAPH.edges.forEach(e=>{
     const pr = e.prof, hw = (pathWidth(e.kind)+1.5)/2;
     for(let i=0;i<pr.pts.length-1;i++)
-      hashSeg({a:pr.pts[i], b:pr.pts[i+1], edge:e, ya:pr.ys[i], yb:pr.ys[i+1], hw});
+      hashSeg({a:pr.pts[i], b:pr.pts[i+1], edge:e, ya:pr.ys[i], yb:pr.ys[i+1], hw,
+               deck: !!(pr.deck && pr.deck[i] && pr.deck[i+1])});
   });
 
   if(BUNDLE){
@@ -7912,11 +8643,25 @@ function rebuildWorld(){
   // Path colour/texture follows the source file's own highway/kind tag (pathKind, in
   // geo.js): a footpath stays themed dirt, a service road reads as a distinct paved grey
   // with a dashed centreline, a double-track gets worn wheel ruts instead of one groove.
+  /* Surface decides the palette as much as class does. A dirt road is the theme's own
+     dirt lightened toward gravel, so it belongs to the landscape it runs through; a
+     sealed footpath or cycleway is pale concrete with no ruts, stones or blazes, which is
+     how a paved path in a park actually reads next to a singletrack. */
+  const gravel = (hex, f) => {
+    const c = new THREE.Color(hex), g = new THREE.Color('#a39a8a');
+    const mix = (a, b) => clamp((a + (b-a)*0.45)*f, 0, 1);
+    return '#'+new THREE.Color(mix(c.r,g.r), mix(c.g,g.g), mix(c.b,g.b)).getHexString();
+  };
   const PATH_STYLE={
     trail:{deco:true, tread:THEME.tread, inner:THEME.inner, shoulder:THEME.shoulder},
     track:{deco:true, ruts:true, tread:shade(THEME.tread,0.86), inner:shade(THEME.tread,0.6), shoulder:THEME.shoulder},
+    dirtroad:{deco:false, ruts:true, tread:gravel(THEME.tread,1.0), inner:gravel(THEME.inner,1.0),
+              rut:gravel(THEME.tread,0.72), shoulder:shade(THEME.shoulder,0.95)},
     road:{deco:false, dashes:true, tread:'#716d64', inner:'#8a867a', shoulder:'#4a473f'},
+    paved_trail:{deco:false, tread:'#b4aea2', inner:'#c3bdb1', shoulder:'#6e695f'},
+    paved_track:{deco:false, tread:'#9a958b', inner:'#aca79c', shoulder:'#5c584f'},
   };
+  const styleOf = e => PATH_STYLE[styleKey(e)] || PATH_STYLE.trail;
   // one ink material per class rank, so the outline of a path sitting on top of another
   // carries the same depth bias as the surface it belongs to
   const inkMats=[0,1,2].map(L=>trailMat(INK,L));
@@ -7924,8 +8669,38 @@ function rebuildWorld(){
      decides who wins, but painter's order costs nothing and makes the result stable even
      where two surfaces are exactly coplanar and the bias ties. */
   const drawOrder=GRAPH.edges.slice().sort((a,b)=>pathRank(a.kind)-pathRank(b.kind));
+  /* Deck and railings over every run of bridge stations on this edge. Built from the
+     (possibly trimmed) profile the ribbon itself was drawn from, so the planks sit exactly
+     on the tread they cover. A paved road gets a concrete slab and parapet and keeps its
+     own tarmac as the surface; everything else gets planks. */
+  const PLANKS=['#9b6b3e','#86593a'];
+  function buildDecks(e, pr, W, lift){
+    if(!pr || !pr.deck || !pr.ys) return;
+    const concrete = e.kind==='road';
+    let i=0;
+    while(i<pr.pts.length){
+      if(!pr.deck[i]){ i++; continue; }
+      let j=i;
+      while(j+1<pr.pts.length && pr.deck[j+1]) j++;
+      if(j>i){
+        const pts=pr.pts.slice(i, j+1), ys=pr.ys.slice(i, j+1);
+        const width=W*OUTLINE_MUL*1.08;
+        if(!concrete){
+          const dg=bridgeDeckGeom(pts, ys.map(y=>y+lift+0.1), width, PLANKS);
+          if(dg){ const m=new THREE.Mesh(dg, deckMat()); m.name='bridge-deck'; worldG.add(m); }
+        }
+        const fg=bridgeFrameGeom(pts, ys.map(y=>y+lift+(concrete?0.06:0.1)), width,
+                                 concrete?'concrete':'wood');
+        if(fg){
+          const m=new THREE.Mesh(fg, frameMat(concrete?'#b1aba0':'#6f4726'));
+          m.name='bridge-frame'; worldG.add(m);
+        }
+      }
+      i=j+1;
+    }
+  }
   drawOrder.forEach(e=>{
-    const st=PATH_STYLE[e.kind]||PATH_STYLE.trail;
+    const st=styleOf(e);
     /* Layer widths are MULTIPLES of the tread, not the tread plus a constant. The old
        +2.3 m outline was invisible on a 4.6 m road and overwhelming on a footpath, and it
        is why narrowing the tread alone wouldn't have fixed the pancakes. */
@@ -7939,6 +8714,10 @@ function rebuildWorld(){
        the spatial hash and the graph are all untouched -- you still walk straight over --
        but the marked crossing is the only surface drawn on the carriageway. */
     let prof=e.prof;
+    /* Top heights for a fill embankment, with every bridge station knocked out: NaN
+       fails embankmentGeom's drop test, which ends the strip there. A skirt under a deck
+       is a dam across the creek. */
+    const skirtTops = (pr, add) => pr.ys.map((v,i)=> (pr.deck && pr.deck[i]) ? NaN : v+add);
     if(e.trimA || e.trimB){
       prof = trimProfile(e.prof, e.trimA, e.trimB);
       if(!prof) return;          // the whole edge was crossing; the crosswalk covers it
@@ -7965,13 +8744,16 @@ function rebuildWorld(){
       });
       // a footway beside a road floats over a drop exactly as a trail does; skirt it too
       if(hs){
-        const sk = embankmentGeom(rpts, fw*1.35*0.5, hs.map(v=>v+lift+0.01),
+        const sk = embankmentGeom(rpts, fw*1.35*0.5, skirtTops(prof, lift+0.01),
                                   (x,z)=>terrainY(x,z,VERT_SCALE), buriesTread);
         if(sk) worldG.add(new THREE.Mesh(sk, trailMat(shade(st.shoulder,0.86),rank)));
       }
-      worldG.add(new THREE.Mesh(ribbonGeom(kerbPts,kerb,lift+0.03,hs),trailMat('#cdc3ad',rank)));
+      // a kerb belongs to tarmac; a path beside a dirt road just runs along its edge
+      if(e.buried.kind==='road')
+        worldG.add(new THREE.Mesh(ribbonGeom(kerbPts,kerb,lift+0.03,hs),trailMat('#cdc3ad',rank)));
       worldG.add(new THREE.Mesh(ribbonGeom(rpts,fw*1.35,lift+0.012,hs),inkMats[rank]));
       worldG.add(new THREE.Mesh(ribbonGeom(rpts,fw,lift+0.05,hs),trailMat(st.tread,rank)));
+      buildDecks(e, prof, fw, lift);
       return;
     }
 
@@ -7979,7 +8761,7 @@ function rebuildWorld(){
        painted on top of ground. Built from the outline width so the fill starts where the
        ink ends and no ribbon layer overhangs it. */
     if(hs){
-      const skirt = embankmentGeom(rpts, W*OUTLINE_MUL*0.5, hs.map(v=>v+lift+0.01),
+      const skirt = embankmentGeom(rpts, W*OUTLINE_MUL*0.5, skirtTops(prof, lift+0.01),
                                    (x,z)=>terrainY(x,z,VERT_SCALE), buriesTread);
       if(skirt) worldG.add(new THREE.Mesh(skirt, trailMat(shade(st.shoulder,0.86),rank)));
     }
@@ -7987,7 +8769,7 @@ function rebuildWorld(){
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*SHOULDER_MUL,lift+0.02,hs),trailMat(st.shoulder,rank)));
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W,lift+0.05,hs),trailMat(st.tread,rank)));
     if(st.ruts){
-      const rutMat=trailMat(shade(st.tread,0.55),rank);
+      const rutMat=trailMat(st.rut || shade(st.tread,0.55),rank);
       [-1,1].forEach(sd=>{
         const off=rpts.map((p,i)=>{
           const q=rpts[Math.min(rpts.length-1,i+1)],pr=rpts[Math.max(0,i-1)];
@@ -8005,7 +8787,28 @@ function rebuildWorld(){
         worldG.add(new THREE.Mesh(ribbonGeom([rpts[i-1],rpts[i]],0.22,lift+0.09,hs?[hs[i-1],hs[i]]:null),dashMat));
       }
     }
+    buildDecks(e, prof, W, lift);
   });
+
+  /* Creeks. Bed first (wet gravel, the full channel width, lying in the notch the bench
+     cut), then the water, then a narrow pale band down the middle -- the toon shader's
+     answer to a glint. Rank 0 bias, below every path: where a creek runs under a verge the
+     verge wins, and under a bridge there is nothing at path level to fight. */
+  const WATER_COL = AREA_STYLE.water ? AREA_STYLE.water.fill : '#5c9fd6';
+  for(const w of WATERWAYS){
+    const pr=w.prof;
+    if(!pr || pr.pts.length<2) continue;
+    const bedY=pr.hm.map(h=>h*VERT_SCALE);
+    const wetY=bedY.map(y=>y+WATER_U);
+    const col = w.intermittent ? '#7fa9bf' : WATER_COL;
+    const bed = new THREE.Mesh(ribbonGeom(pr.pts, channelHalf(w)*2, 0.03, bedY), trailMat(shade(THEME.shoulder,0.8),0));
+    bed.name='water-bed';
+    worldG.add(bed);
+    const water = new THREE.Mesh(ribbonGeom(pr.pts, w.width, 0.0, wetY), trailMat(col,0));
+    water.name='water';
+    worldG.add(water);
+    worldG.add(new THREE.Mesh(ribbonGeom(pr.pts, w.width*0.28, 0.03, wetY), trailMat(shade(col,1.35),0)));
+  }
 
   /* Crossings go on AFTER every ribbon, because they are markings painted on a finished
      road: standingY (not terrainY) so the stripes sit on the tread the road actually
@@ -8062,11 +8865,14 @@ function rebuildWorld(){
            the crosswalk and its two landings are the junction here. The ROAD still gets
            its pad: its own ribbons really do meet at this node. */
         if(xing && e.kind!=='road') continue;
-        byKind.set(e.kind, Math.max(byKind.get(e.kind)||0, pathOutlineWidth(e.kind)/2));
+        // keyed by drawn style, not class: a paved and a dirt trail meeting here are two
+        // treads in two colours, and each needs its seam covered in its own
+        const key=styleKey(e), prev=byKind.get(key);
+        byKind.set(key, {kind:e.kind, hw:Math.max(prev?prev.hw:0, pathOutlineWidth(e.kind)/2)});
       }
-      for(const [kind, hw] of byKind){
+      for(const [key, {kind, hw}] of byKind){
         const rank=pathRank(kind), lift=kindLift(kind);
-        const st=PATH_STYLE[kind]||PATH_STYLE.trail;
+        const st=PATH_STYLE[key]||PATH_STYLE.trail;
         const r=Math.max(hw*1.2,0.4);
         const oDisc=new THREE.Mesh(new THREE.CircleGeometry(r,20),inkMats[rank]);
         oDisc.rotation.x=-Math.PI/2; oDisc.position.set(n.p[0],y+lift+0.045,n.p[1]); worldG.add(oDisc);
@@ -8187,8 +8993,11 @@ function rebuildWorld(){
   // decorative edge stones + blaze posts
   const stoneMat=toon(THEME.rocks[0]);
   GRAPH.edges.forEach(e=>{
-    const st=PATH_STYLE[e.kind]||PATH_STYLE.trail;
+    const st=styleOf(e);
     if(!st.deco) return;
+    // no edge stones on a deck, and no blaze post planted in the creek below it
+    const spans=BRIDGES.filter(b=>b.edges.includes(e));
+    const onSpan=(x,z)=>spans.some(b=>Math.hypot(b.x-x, b.z-z) < b.half+0.8);
     // A route sharing a road's ground has no verge to line with stones and no post to
     // plant a blaze beside -- it is paint on tarmac. Its marker line carries the colour.
     if(e.buried) return;
@@ -8206,6 +9015,7 @@ function rebuildWorld(){
         acc=0;
         const sx=(a[0]+b[0])/2, sz=(a[1]+b[1])/2;
         const nx=-(b[1]-a[1])/L, nz=(b[0]-a[0])/L, sy=terrainY(sx,sz,VERT_SCALE);
+        if(onSpan(sx,sz)) continue;
         for(const sd of[-1,1]){
           if(rng()<0.45) continue;
           const s=new THREE.Mesh(new THREE.DodecahedronGeometry(0.16+rng()*0.2,0),stoneMat);
@@ -8219,6 +9029,7 @@ function rebuildWorld(){
         const nx=-(b[1]-a[1])/L, nz=(b[0]-a[0])/L;
         const bo=halfW+0.45;
         const bx=a[0]+nx*bo, bz=a[1]+nz*bo;
+        if(onSpan(bx,bz) || waterEdgeDist(bx,bz) < 0.4){ blazeAcc=30; continue; }
         const bz3=buildBlaze(bx,bz,e.color); bz3.position.y=terrainY(bx,bz,VERT_SCALE); worldG.add(bz3);
       }
     }
@@ -8235,7 +9046,8 @@ function rebuildWorld(){
   // scenery
   const clearOfPOI=(x,z,r)=>!POIS.some(p=>Math.hypot(p.x-x,p.z-z)<r);
   const inWater=(x,z)=>WATER.some(a=>pointInArea(x,z,a));
-  const offTrail=(x,z,r)=>nearestTrail(x,z).d>r&&clearOfPOI(x,z,7)&&!inWater(x,z);
+  const offTrail=(x,z,r)=>nearestTrail(x,z).d>r&&clearOfPOI(x,z,7)&&!inWater(x,z)
+                          &&waterEdgeDist(x,z)>Math.min(r,2.5);
   const pad=70, W=Mx-mx+pad*2, H=Mz-mz+pad*2;
   let placed=0,tries=0;
   const targetTrees=Math.min(560,W*H/450*THEME.treeDensity);
@@ -8261,6 +9073,7 @@ function rebuildWorld(){
     const x=mx+rng()*(Mx-mx), z=mz+rng()*(Mz-mz);
     const nd=nearestTrail(x,z).d;
     if(nd<2.4||nd>10) continue;
+    if(waterEdgeDist(x,z)<0.3) continue;
     const tuft=new THREE.Mesh(new THREE.ConeGeometry(0.16,0.5,5),tuftMat);
     tuft.position.set(x,terrainY(x,z,VERT_SCALE)+0.22,z);
     worldG.add(tuft); placed++;
@@ -9783,7 +10596,9 @@ function fmtCourseLen(m){
 
 
 const INK_MAP = '#3a2517';
-const TRAIL_INK = {trail:'#9c6a35', track:'#8a6a45', road:'#6f6b62'};
+const TRAIL_INK = {trail:'#9c6a35', track:'#8a6a45', dirtroad:'#a08a68', road:'#6f6b62',
+                   paved_trail:'#9d978b', paved_track:'#8d887e'};
+const WATER_INK = '#3f8fc9';
 // the same magenta course-line.js paints on the ground (0xd94fa0), so the disc in the
 // corner and the strip underfoot are recognisably one object seen two ways
 const COURSE_MAP_INK = '#d94fa0';
@@ -10072,6 +10887,20 @@ function buildAtlas(){
   }
   g.globalAlpha = 1;
 
+  // creeks under the trails, so a bridge reads as the path passing over the water
+  g.lineCap = 'round'; g.lineJoin = 'round';
+  for(const w of getWaterways()){
+    const pts = (w.prof && w.prof.pts) || w.pts;
+    if(!pts || pts.length < 2) continue;
+    g.beginPath();
+    pts.forEach((p, i) => i ? g.lineTo(X(p[0]), Z(p[1])) : g.moveTo(X(p[0]), Z(p[1])));
+    g.lineWidth = Math.max(1.4, ppm*Math.max(2.2, w.width*1.4));
+    g.strokeStyle = WATER_INK;
+    g.globalAlpha = w.intermittent ? 0.55 : 0.9;
+    g.stroke();
+  }
+  g.globalAlpha = 1;
+
   // trails: ink casing then fill, so crossings read cleanly at any zoom
   const strokeEdges = (width, colorOf) => {
     g.lineCap = 'round'; g.lineJoin = 'round';
@@ -10085,7 +10914,7 @@ function buildAtlas(){
     }
   };
   strokeEdges(Math.max(2.2, ppm*4.2), () => INK_MAP);
-  strokeEdges(Math.max(1.2, ppm*2.4), e => TRAIL_INK[e.kind] || TRAIL_INK.trail);
+  strokeEdges(Math.max(1.2, ppm*2.4), e => TRAIL_INK[styleKey(e)] || TRAIL_INK.trail);
 
   // points of interest
   for(const p of getPOIs()){
@@ -12696,8 +13525,12 @@ function loop(t){
      Rock is the scramble case rather than a place: a kerb or a face is stone whichever
      side of the trail edge it sits on, and it is the one surface you hear before you can
      see why. */
+  /* On the tread, the tread's own material: planks on a bridge deck, a dry tap on a
+     sealed road or path, dirt otherwise. Off it, a creek splashes -- asked of the same
+     channel geometry the water is drawn from, so the sound starts where the blue does. */
   player.surface = (player.climbT > 0 || player.wall) ? 'rock'
-                 : (inCorridor ? 'trail' : 'grass');
+                 : inCorridor ? (nt.deck ? 'wood' : (nt.edge && nt.edge.paved) ? 'paved' : 'trail')
+                 : (inWaterway(player.x, player.z) ? 'water' : 'grass');
   const surf = nearTrail ? 1 : 0.6;
   refreshOnTrail(nt);          // reuse the lookup above rather than hashing twice a frame
   if(rec.on) sampleRecording(nt, dt);   // same lookup again: the trail named in the HUD
@@ -13926,8 +14759,6 @@ async function boot(bundleUrl){
      the "load a map" controls in it, and that used to be the one thing a broken boot
      could not open. */
   initPanes({ onChange: () => updateTrailHud() });
-  // fire-and-forget: the list is optional furniture and must never delay the map
-  renderMapList();
   initMinimap({
     onTrailhead: i => showHereHead(i),
     onSpot: sp => { placeAtSpot(sp); if(!playing) enterPlay(); showPane(null); },
@@ -13956,111 +14787,28 @@ async function boot(bundleUrl){
   requestAnimationFrame(loop);
 }
 
-/* WHAT A BLOB OF JSON TURNED OUT TO BE, decided by content rather than by name.
-   A pup-world/1 bundle, a plain .geojson and a backyard-pups.json are all just JSON, and
-   the name on the file is not evidence of which: QGIS writes .geojson, fetch_dem.py
-   writes .json, iPadOS appends .txt to anything it downloads, and people rename both by
-   hand anyway. Every entry point -- the picker, the drop zone, the link box, the map
-   list and ?world= -- routes through this one function so they can never disagree about
-   what a file is.
-
-   Deliberately pure: it decides, it does not load. loadFiles has to BATCH its layers so
-   dropping trails + areas rebuilds the world once instead of twice, and it can only do
-   that if classification and application are separable. */
-function classifyMapJson(obj){
-  if(obj && obj.format==='pup-world/1') return {kind:'world'};
-  if(obj && obj.type==='FeatureCollection') return {kind:'layer', layer:obj};
-  if(obj && obj.type==='Feature') return {kind:'layer', layer:{type:'FeatureCollection', features:[obj]}};
-  if(obj && (obj.backyardPups || obj.pups || obj.furColor)) return {kind:'pups'};
-  return {kind:null};
-}
-
-/* Text -> JSON, with the two failures a tablet cannot otherwise diagnose named out loud.
-   There is no console on an iPad, so `console.error` is the same as silence: every
-   message thrown here is written for #mapNote to print verbatim to the player.
-
-   The two that actually happen:
-     - a UTF-8 BOM. iPadOS Share-sheet saves and some Windows editors prepend one, and
-       JSON.parse rejects it outright as an unexpected token at position 0 -- which is
-       the whole reason this reads text and calls JSON.parse itself instead of calling
-       res.json() and letting the BOM throw somewhere unprintable.
-       The .trim() below is what removes it: U+FEFF is in ECMAScript's WhiteSpace
-       production, so trim eats a leading BOM. That is not obvious, and it is the only
-       thing standing between a Share-sheet save and a parse error -- do not replace
-       trim here with something narrower without putting the explicit strip back.
-     - HTML. github.com/USER/REPO/blob/... is a PAGE; tapping Download on it, or saving
-       the link, gets you the page and not the data. First character '<' is that. */
-function parseMapText(text, name){
-  const s = String(text == null ? '' : text).trim();
-  if(!s) throw new Error(`${name} is empty`);
-  if(s[0]==='<') throw new Error(`${name} is a web page, not map data — on GitHub use the `
-    + `file's Raw button, or paste the github.com link into the box below and it will be `
-    + `converted for you`);
-  try{ return JSON.parse(s); }
-  catch(err){ throw new Error(`${name} is not valid JSON (${err.message})`); }
-}
-
-/* github.com/USER/REPO/blob/REF/path  ->  raw.githubusercontent.com/USER/REPO/REF/path
-   The blob URL is the one you get by tapping a file on github.com or by using the Share
-   sheet, and it serves an HTML page. The raw host serves the bytes AND sends
-   Access-Control-Allow-Origin:*, which is what makes a file in any public repo fetchable
-   from a page on github.io. Accepting the page URL means nobody has to know any of that.
-   Anything else is passed through untouched. */
-function toRawUrl(url){
-  const s = String(url == null ? '' : url).trim();
-  const m = /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/(?:blob|raw)\/(.+)$/.exec(s);
-  if(!m) return s;
-  return `https://raw.githubusercontent.com/${m[1]}/${m[2]}/${m[3].split('#')[0].split('?')[0]}`;
-}
-
-/* One place that loads a map by URL, so the boot path, the reload button, the link box,
-   the map list and ?world= all report success and failure identically.
-
-   Fetched as text and sniffed, not fetched as a bundle: a link is now something a player
-   types, so it can point at a plain .geojson as easily as at a DEM bundle, and it can
-   just as easily point at the wrong thing entirely. Every outcome has to end in a
-   sentence in #mapNote, because on the device this exists for that is the only place an
-   error can be read. */
+/* One place that loads a map by URL, so the boot path, the reload button and any future
+   map list all report success and failure identically. */
 let lastMapUrl = null;
 async function loadMap(url, isDefault){
   const note=$('#mapNote');
   if(note) note.textContent='Loading map…';
-  const target = toRawUrl(url);
-  const name = target.split('/').pop().split('?')[0] || target;
   try{
-    const res = await fetch(target);
-    if(!res.ok) throw new Error(`${name} could not be fetched (HTTP ${res.status})`);
-    const obj = parseMapText(await res.text(), name);
-    const got = classifyMapJson(obj);
-    if(got.kind==='world'){
-      await loadWorld(obj, [], 3);
-      lastMapUrl = target; lastMapWasDefault = !!isDefault;
-      /* Say so when a map was coarsened rather than leaving the player to wonder why the
-         ground looks blocky. The detail control is right above this note in the panel, so
-         the answer and the lever are in the same place. */
-      const st = getDemStride();
-      if(note) note.textContent = (isDefault?'Default map: ':'Loaded: ')+name
-        + ` · ${getTrailheads().length} trailhead${getTrailheads().length===1?'':'s'}`
-        + (st > 1 ? ` · terrain coarsened ${st}× to fit` : '');
-    }else if(got.kind==='layer'){
-      const n=(got.layer.features||[]).length;
-      addLayers([got.layer]);
-      loadedFiles.push({name, count:n, layer:got.layer});
-      renderFileChips();
-      if(note) note.textContent = `Loaded: ${name} · ${n} feature${n===1?'':'s'}`;
-    }else if(got.kind==='pups'){
-      const n=addPups(parsePupFile(obj));
-      renderRoster();
-      if(note) note.textContent = `Loaded ${n} pup${n===1?'':'s'} from ${name}`;
-    }else{
-      throw new Error(`${name} is valid JSON, but not a pup-world bundle, GeoJSON or pup file`);
-    }
+    await loadWorld(url, [], 3);
+    lastMapUrl = url; lastMapWasDefault = !!isDefault;
+    /* Say so when a map was coarsened rather than leaving the player to wonder why the
+       ground looks blocky. The detail control is right above this note in the panel, so
+       the answer and the lever are in the same place. */
+    const st = getDemStride();
+    if(note) note.textContent = (isDefault?'Default map: ':'Loaded: ')+url.split('/').pop()
+      + ` · ${getTrailheads().length} trailhead${getTrailheads().length===1?'':'s'}`
+      + (st > 1 ? ` · terrain coarsened ${st}× to fit` : '');
     return true;
   }catch(err){
-    console.error('could not load map:', url, err);
+    console.error('could not load world:', url, err);
     if(note) note.textContent = isDefault
-      ? 'Default map could not load — serve the repo over http (python3 build.py --serve), or pick a map below.'
-      : (err && err.message) || 'That map could not be loaded.';
+      ? 'Default map could not load — serve the repo over http (python3 build.py --serve), or pick a bundle below.'
+      : 'That map could not be loaded — see the console.';
     return false;
   }
 }
@@ -14167,114 +14915,39 @@ if(dropzone){
   });
 }
 
-/* One picker for everything -- see classifyMapJson for why the name on the file is not
-   consulted. Layers are batched so dropping trails + areas together rebuilds once, not
-   twice.
-
-   Every rejection now ends up in #mapNote as well as the console. That is not tidiness:
-   the picker's main user is on a tablet, where a console.error is indistinguishable from
-   the app doing nothing at all, and "I picked my file and nothing happened" was the
-   entire symptom of a file that iPadOS had saved with a BOM or as a web page. */
+/* One picker for everything. A pup-world/1 bundle, a plain .geojson and a
+   backyard-pups.json are all just JSON, so detect by content rather than by extension --
+   QGIS writes .geojson, fetch_dem.py writes .json, and users rename both. Layers are
+   batched so dropping trails + areas together rebuilds once, not twice. */
 async function loadFiles(files){
   if(!files.length) return;
-  const note=$('#mapNote');
-  const layers=[], problems=[];
-  let gotPups=0, gotWorld=0;
+  const layers=[];
+  let gotPups=0;
   for(const f of files){
     let obj;
-    try{ obj=parseMapText(await f.text(), f.name); }
-    catch(err){ console.error(err); problems.push(err.message); continue; }
-    const got=classifyMapJson(obj);
-    if(got.kind==='world'){
-      try{ await loadWorld(obj, [], 3); gotWorld++; }
-      catch(err){
-        console.error('bad world bundle:',f.name,err);
-        problems.push(`${f.name} is a pup-world bundle, but the world could not be built from it`);
-      }
-    }else if(got.kind==='layer'){
-      layers.push(got.layer);
+    try{ obj=JSON.parse(await f.text()); }
+    catch(err){ console.error('not valid JSON:',f.name,err); continue; }
+    if(obj && obj.format==='pup-world/1'){
+      try{ await loadWorld(obj, [], 3); }
+      catch(err){ console.error('bad world bundle:',f.name,err); }
+    }else if(obj && (obj.type==='FeatureCollection' || obj.type==='Feature')){
+      const layer = obj.type==='Feature' ? {type:'FeatureCollection',features:[obj]} : obj;
+      layers.push(layer);
       // chip tracking is separate from EXTRA (world.js has no per-file memory of what it
       // merged) -- record name+count here purely for the panel's own display
-      loadedFiles.push({name:f.name, count:(got.layer.features||[]).length, layer:got.layer});
-    }else if(got.kind==='pups'){
+      loadedFiles.push({name:f.name, count:(layer.features||[]).length, layer});
+    }else if(obj && (obj.backyardPups || obj.pups || obj.furColor)){
       gotPups += addPups(parsePupFile(obj));
     }else{
-      problems.push(`${f.name} is valid JSON, but not a pup-world bundle, GeoJSON or pup file`);
+      console.error('unrecognised file (expected a pup-world/1 bundle, GeoJSON or a pup file):', f.name);
     }
   }
   if(layers.length){ addLayers(layers); renderFileChips(); }
   if(gotPups) renderRoster();
-  if(note){
-    const won=[];
-    if(gotWorld) won.push(`${gotWorld} map bundle${gotWorld===1?'':'s'}`);
-    if(layers.length) won.push(`${layers.length} layer${layers.length===1?'':'s'}`);
-    if(gotPups) won.push(`${gotPups} pup${gotPups===1?'':'s'}`);
-    const good = won.length ? `Loaded ${won.join(', ')}.` : '';
-    note.textContent = problems.length ? (good ? good+' ' : '')+problems.join(' · ') : good;
-  }
   if(!getGraph()) return;
   refreshMapUI();
   placeAtHead(pickDefaultHead());
 }
-
-/* --- maps that live on the web, so nothing has to be downloaded at all ---------------
-   The download round trip is where map files get damaged: iPadOS renames a .geojson to
-   .geojson.txt on the way to Files, offers no way to rename it back, and the picker
-   would not show it again afterwards. Fetching the URL skips the entire trip -- the
-   bytes go from the repo to the game without ever becoming a file on the device. */
-$('#mapUrlBtn')?.addEventListener('click', async ()=>{
-  const el=$('#mapUrl'), url=(el && el.value || '').trim();
-  const note=$('#mapNote');
-  if(!url){
-    if(note) note.textContent='Paste a link to a .geojson file or a pup-world bundle first.';
-    return;
-  }
-  if(await loadMap(url, false)){
-    refreshMapUI();
-    if(getGraph()) placeAtHead(pickDefaultHead());
-  }
-});
-// a soft keyboard's Go key is the only submit button a tablet player has
-$('#mapUrl')?.addEventListener('keydown', e=>{
-  if(e.key==='Enter'){ e.preventDefault(); $('#mapUrlBtn')?.click(); }
-});
-
-/* THE MAP LIST is a plain JSON index committed next to the maps themselves. Adding a map
-   to the game is then a commit and one line of manifest -- no code change, no download,
-   and it appears in the list on every device that opens the page, which is the part that
-   matters for a tablet that cannot manage files.
-
-   Missing or unreadable, the row simply stays hidden: a manifest is optional furniture,
-   and a repo without one must still play exactly as it did before. */
-const MAP_MANIFEST='../data/maps.json';
-async function renderMapList(){
-  const sel=$('#mapList'), row=$('#mapListRow');
-  if(!sel || !row) return;
-  try{
-    const res=await fetch(MAP_MANIFEST);
-    if(!res.ok) throw new Error(`HTTP ${res.status}`);
-    const man=parseMapText(await res.text(), 'maps.json');
-    sel.innerHTML='';
-    for(const m of (man && man.maps) || []){
-      if(!m || !m.url) continue;
-      const o=document.createElement('option');
-      o.value=m.url;
-      o.textContent=m.name || m.url.split('/').pop();
-      sel.appendChild(o);
-    }
-    row.hidden = !sel.options.length;
-  }catch(err){
-    console.warn('no map list:', err && err.message);
-    row.hidden = true;
-  }
-}
-$('#mapListBtn')?.addEventListener('click', async ()=>{
-  const sel=$('#mapList'), url=sel && sel.value;
-  if(!url) return;
-  // a listed map replaces the session's dropped layers, the way the default map does
-  loadedFiles=[]; renderFileChips();
-  if(await loadMap(url, false)){ refreshMapUI(); placeAtHead(pickDefaultHead()); }
-});
 
 /* Test seams. build.py flattens every module into one classic script, where top-level
    `let`/`const` bindings are NOT reachable from outside but function declarations are --
@@ -14286,13 +14959,6 @@ function getTrailPlayer(){ return player; }
 function getTripState(){ return trip; }
 
 function getOnTrail(){ return onTrail; }
-
-/* Test seams for the map-loading front door. classifyMapJson, parseMapText and toRawUrl
-   are the three decisions that stand between a file a player picked and a world, and all
-   three are pure -- so the suite asserts them directly rather than through a fake file
-   picker. build.py makes top-level function declarations reachable from the harness;
-   these are already declarations, so they need no wrapper. */
-function getLastMapUrl(){ return lastMapUrl; }
 
 /* The course machinery gets the same treatment for the same reason: `rec`, `race` and
    `previewCourse` are top-level bindings that vanish into the bundle's one scope, so the

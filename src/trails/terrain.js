@@ -361,70 +361,124 @@ function gradeProfile(pts, vertScale, stepCells = 0.7, windowCells = 8, minStepM
    The cost is a deeper cut bank beside the tread on coarse grids, since the cut is taken
    over the whole bench radius. That is a step you take once when you leave the trail,
    rather than one you take every cell while following it. */
-function gradeTrailCells(profiles){
+function gradeTrailCells(profiles, channels, zones){
   if(!WORLD || !BAND) return;
   const claim = new Map();
-  for(const {pts, hm, halfWidth} of profiles){
-    /* Reach a cell centre either side, so the bench is wider than the tread it carries --
-       but never more than MAX_BENCH_CELLS of them. Tread widths are true metres and do
-       NOT shrink with world scale (that is the point of the control), so at heavy
-       compaction the ratio of trail width to cell size explodes: at 1:1000 an unclamped
-       radius covers about 240,000 cells per station. The clamp costs nothing at any scale
-       where the trail is narrower than the map, and past that the map is a blob anyway. */
-    const r = Math.min(halfWidth + WORLD.cell*0.5, WORLD.cell*MAX_BENCH_CELLS);
-    for(let i = 0; i < pts.length; i++){
-      const p = pts[i];
-      /* THE CELL THE STATION IS STANDING IN, CLAIMED UNCONDITIONALLY.
-         The radius sweep below tests distance from the CELL CENTRE, and a cell's centre
-         can be up to cell/sqrt(2) from a point inside it -- about 0.707 of a cell --
-         while r only reaches 0.5 of a cell past the tread. So a trail clipping a cell
-         near its corner left that cell ungraded: raw terrain, sitting as much as a whole
-         band above the ribbon running across it, and standingY takes max(terrain, tread).
-         Measured on decimated pikesworld before this line existed: a 13.8-unit cliff at
-         x=1397.7 with the ribbon passing smoothly through it at 143. That is the "steps
-         too large to jump" report, and it is a gap in the corridor rather than a
-         staircase along it -- which is why it got worse with cell size but was never
-         really about cell size.
+  for(const pr of profiles){
+    /* hmGround, when a bridge has raised the deck: the bench under a bridge is the ground
+       the path would have had, not the deck -- otherwise the approach becomes a solid
+       causeway at deck height and the creek runs into a dam. */
+    claimAlong(claim, pr.pts, pr.hmGround || pr.hm, pr.halfWidth);
+  }
+  /* CHANNELS SECOND, AND THEY ONLY TAKE WHAT NO PATH HAS -- except under a bridge.
 
-         Claiming the containing cell directly is exact and costs one map write. */
-      const ci = clamp(WORLD.cellI(p[0]),0,WORLD.width-1), cj = clamp(WORLD.cellJ(p[1]),0,WORLD.height-1);
-      const ck = cj*WORLD.width + ci, cprev = claim.get(ck);
-      if(!cprev || hm[i] < cprev.h) claim.set(ck, {h: hm[i]});
+     A creek and a road share a canyon floor for kilometres on the seven-bridges map, a
+     tread's width apart. Let the channel win there and the road's own bench is dug out
+     from under it for the whole canyon; let the lower height win (the rule between two
+     paths) and the same thing happens, because the bed is by construction lower than
+     the ground. So a path's claim stands, and the creek runs under the verge.
 
-      /* AND EVERY CELL THE SEGMENT CROSSES ON THE WAY TO THE NEXT STATION.
-         Stations sit about 0.7 of a cell apart, so two consecutive ones are in the same
-         cell or in neighbours -- but a diagonal run between them can still clip the
-         corner of a third cell that holds neither. That cell stays raw, and one raw cell
-         under a trail is a full-band cliff across the tread. Stepping along the segment
-         at 0.4 of a cell cannot skip a cell of width 1, and the height is interpolated
-         because the profile between two stations is a straight line by construction. */
-      if(i+1 < pts.length){
-        const q = pts[i+1];
-        const dx = q[0]-p[0], dz = q[1]-p[1];
-        const seg = Math.hypot(dx, dz);
-        const n = Math.ceil(seg/(WORLD.cell*0.4));
-        for(let t = 1; t < n; t++){
-          const u = t/n;
-          const sx = p[0]+dx*u, sz = p[1]+dz*u;
-          const h = hm[i] + (hm[i+1]-hm[i])*u;
-          const si = clamp(WORLD.cellI(sx),0,WORLD.width-1), sj = clamp(WORLD.cellJ(sz),0,WORLD.height-1);
-          const sk = sj*WORLD.width + si, sprev = claim.get(sk);
-          if(!sprev || h < sprev.h) claim.set(sk, {h});
-        }
+     Where a bridge carries a path over the water that answer is exactly backwards: the
+     cells under the deck MUST be the channel, or the water runs into a solid bank that the
+     deck then sits on. `zones` are those spans; inside one the channel overrides. */
+  if(channels && channels.length){
+    const inZone = (x, z) => {
+      if(!zones) return false;
+      for(const zn of zones) if(Math.hypot(x-zn.x, z-zn.z) <= zn.r) return true;
+      return false;
+    };
+    const chan = new Map();
+    for(const pr of channels) claimAlong(chan, pr.pts, pr.hm, pr.halfWidth, 0);
+    /* Outside a bridge, a cell both want goes to whichever centreline is NEARER its
+       centre, the path winning ties. "Path always wins" was the first rule and it buried
+       the creek for ten metres at a time wherever the Seven Bridges Trail runs along the
+       bank, because a path's bench reaches half a cell past its own shoulder -- the cell
+       the water actually runs through was being claimed as verge. Nearest-centreline
+       gives the verge to the path and the water to the creek, and only a path laid
+       directly over the water keeps it. */
+    for(const [key, v] of chan){
+      const prev = claim.get(key);
+      if(prev){
+        const i = key % WORLD.width, j = (key - i)/WORLD.width;
+        const c = WORLD.cellCentre(i, j);
+        if(!inZone(c.x, c.z) && !(v.d < prev.d)) continue;
       }
-
-      const i0 = clamp(WORLD.cellI(p[0]-r),0,WORLD.width-1), i1 = clamp(WORLD.cellI(p[0]+r),0,WORLD.width-1),
-            j0 = clamp(WORLD.cellJ(p[1]-r),0,WORLD.height-1), j1 = clamp(WORLD.cellJ(p[1]+r),0,WORLD.height-1);
-      for(let j = j0; j <= j1; j++) for(let k = i0; k <= i1; k++){
-        const c = WORLD.cellCentre(k, j);
-        const d = Math.hypot(c.x-p[0], c.z-p[1]);
-        if(d > r) continue;
-        const key = j*WORLD.width + k, prev = claim.get(key);
-        if(!prev || hm[i] < prev.h) claim.set(key, {h: hm[i]});
-      }
+      claim.set(key, v);
     }
   }
   for(const [key, v] of claim) BAND[key] = bandOfM(v.h);
+}
+
+/* One profile's claim on the band grid, lowest height wins within `claim`. `pad` is how
+   far past the half-width the bench reaches, in cells (half a cell for a path, so its
+   shoulders are benched too; nothing for a channel, which should be a notch rather than a
+   terrace of its own). */
+function claimAlong(claim, pts, hm, halfWidth, pad = 0.5){
+  /* Reach a cell centre either side, so the bench is wider than the tread it carries --
+     but never more than MAX_BENCH_CELLS of them. Tread widths are true metres and do
+     NOT shrink with world scale (that is the point of the control), so at heavy
+     compaction the ratio of trail width to cell size explodes: at 1:1000 an unclamped
+     radius covers about 240,000 cells per station. The clamp costs nothing at any scale
+     where the trail is narrower than the map, and past that the map is a blob anyway. */
+  const r = Math.min(halfWidth + WORLD.cell*pad, WORLD.cell*MAX_BENCH_CELLS);
+  for(let i = 0; i < pts.length; i++){
+    const p = pts[i];
+    /* THE CELL THE STATION IS STANDING IN, CLAIMED UNCONDITIONALLY.
+       The radius sweep below tests distance from the CELL CENTRE, and a cell's centre
+       can be up to cell/sqrt(2) from a point inside it -- about 0.707 of a cell --
+       while r only reaches 0.5 of a cell past the tread. So a trail clipping a cell
+       near its corner left that cell ungraded: raw terrain, sitting as much as a whole
+       band above the ribbon running across it, and standingY takes max(terrain, tread).
+       Measured on decimated pikesworld before this line existed: a 13.8-unit cliff at
+       x=1397.7 with the ribbon passing smoothly through it at 143. That is the "steps
+       too large to jump" report, and it is a gap in the corridor rather than a
+       staircase along it -- which is why it got worse with cell size but was never
+       really about cell size.
+
+       Claiming the containing cell directly is exact and costs one map write. */
+    const ci = clamp(WORLD.cellI(p[0]),0,WORLD.width-1), cj = clamp(WORLD.cellJ(p[1]),0,WORLD.height-1);
+    claimCell(claim, cj*WORLD.width + ci, hm[i], ci, cj, p[0], p[1]);
+
+    /* AND EVERY CELL THE SEGMENT CROSSES ON THE WAY TO THE NEXT STATION.
+       Stations sit about 0.7 of a cell apart, so two consecutive ones are in the same
+       cell or in neighbours -- but a diagonal run between them can still clip the
+       corner of a third cell that holds neither. That cell stays raw, and one raw cell
+       under a trail is a full-band cliff across the tread. Stepping along the segment
+       at 0.4 of a cell cannot skip a cell of width 1, and the height is interpolated
+       because the profile between two stations is a straight line by construction. */
+    if(i+1 < pts.length){
+      const q = pts[i+1];
+      const dx = q[0]-p[0], dz = q[1]-p[1];
+      const seg = Math.hypot(dx, dz);
+      const n = Math.ceil(seg/(WORLD.cell*0.4));
+      for(let t = 1; t < n; t++){
+        const u = t/n;
+        const sx = p[0]+dx*u, sz = p[1]+dz*u;
+        const h = hm[i] + (hm[i+1]-hm[i])*u;
+        const si = clamp(WORLD.cellI(sx),0,WORLD.width-1), sj = clamp(WORLD.cellJ(sz),0,WORLD.height-1);
+        claimCell(claim, sj*WORLD.width + si, h, si, sj, sx, sz);
+      }
+    }
+
+    const i0 = clamp(WORLD.cellI(p[0]-r),0,WORLD.width-1), i1 = clamp(WORLD.cellI(p[0]+r),0,WORLD.width-1),
+          j0 = clamp(WORLD.cellJ(p[1]-r),0,WORLD.height-1), j1 = clamp(WORLD.cellJ(p[1]+r),0,WORLD.height-1);
+    for(let j = j0; j <= j1; j++) for(let k = i0; k <= i1; k++){
+      const c = WORLD.cellCentre(k, j);
+      const d = Math.hypot(c.x-p[0], c.z-p[1]);
+      if(d > r) continue;
+      claimCell(claim, j*WORLD.width + k, hm[i], k, j, p[0], p[1]);
+    }
+  }
+}
+/* Lowest height wins; `d` separately tracks how close the nearest claiming centreline
+   point came to the cell centre, for gradeTrailCells' path-vs-channel split. */
+function claimCell(claim, key, h, ci, cj, x, z){
+  const c = WORLD.cellCentre(ci, cj);
+  const d = Math.hypot(c.x-x, c.z-z);
+  const prev = claim.get(key);
+  if(!prev){ claim.set(key, {h, d}); return; }
+  if(h < prev.h) prev.h = h;
+  if(d < prev.d) prev.d = d;
 }
 
 /* Smoothed height for camera framing ONLY -- never for placing anything on the ground.

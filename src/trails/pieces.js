@@ -179,6 +179,162 @@ function embankmentGeom(pts, halfW, topYs, groundYAt, buriesTreadAt){
   return geo;
 }
 
+/* ---------- bridges ----------
+
+   A bridge is drawn from the SAME graded profile the path walks on (world.js raises that
+   profile into a deck over the water, so standingY and the planks agree by construction)
+   and consists of two meshes, however long it is:
+
+     bridgeDeckGeom()   the walking surface -- planks laid across the deck, alternating
+                        two browns through vertex colour, so a hundred planks are one draw
+     bridgeFrameGeom()  everything that stands up: the stringers down each side that give
+                        the deck visible thickness, and the railings (or, for a road, a
+                        concrete parapet)
+
+   Both are merged geometry built by hand rather than one Mesh per plank or post: a seven-
+   bridge walk would otherwise add a few hundred meshes for furniture the eye reads as
+   seven objects. Facade only -- nothing here collides; the deck profile is what you walk.
+
+   `pts`/`ys` are the deck centreline and TOP height at each station, `width` the full
+   deck width in true metres. */
+const PLANK_M = 0.34;
+function bridgeDeckGeom(pts, ys, width, colors){
+  if(!pts || pts.length < 2) return null;
+  const P=[], C=[], idx=[];
+  const cA=new THREE.Color(colors[0]), cB=new THREE.Color(colors[1]);
+  // walk the deck at plank spacing, carrying height and the local direction
+  const arc=[0];
+  for(let i=1;i<pts.length;i++) arc[i]=arc[i-1]+Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1]);
+  const total=arc[arc.length-1];
+  if(!(total>0.05)) return null;
+  const at=(s)=>{
+    let i=1; while(i<pts.length-1 && arc[i]<s) i++;
+    const t=clamp((s-arc[i-1])/Math.max(1e-9, arc[i]-arc[i-1]),0,1);
+    const a=pts[i-1], b=pts[i];
+    let dx=b[0]-a[0], dz=b[1]-a[1]; const L=Math.hypot(dx,dz)||1;
+    return {x:a[0]+dx*t, z:a[1]+dz*t, y:ys[i-1]+(ys[i]-ys[i-1])*t, nx:-dz/L, nz:dx/L};
+  };
+  const n=Math.max(1, Math.round(total/PLANK_M));
+  const hw=width/2, gap=Math.min(0.05, total/n*0.18);
+  for(let k=0;k<n;k++){
+    const s0=total*k/n + (k?gap/2:0), s1=total*(k+1)/n - (k<n-1?gap/2:0);
+    const a=at(s0), b=at(s1);
+    const base=P.length/3;
+    P.push(a.x+a.nx*hw, a.y, a.z+a.nz*hw,  a.x-a.nx*hw, a.y, a.z-a.nz*hw,
+           b.x+b.nx*hw, b.y, b.z+b.nz*hw,  b.x-b.nx*hw, b.y, b.z-b.nz*hw);
+    const c=(k%2)?cA:cB;
+    for(let v=0;v<4;v++) C.push(c.r,c.g,c.b);
+    idx.push(base,base+2,base+1, base+2,base+3,base+1);
+  }
+  const N=new Float32Array(P.length); for(let i=1;i<N.length;i+=3) N[i]=1;
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(P),3));
+  geo.setAttribute('normal',new THREE.BufferAttribute(N,3));
+  geo.setAttribute('color',new THREE.BufferAttribute(new Float32Array(C),3));
+  geo.setIndex(idx);
+  geo.userData = geo.userData || {};
+  geo.userData.planks = n;       // test seam
+  return geo;
+}
+
+/* Boxes into one indexed geometry. A "beam" runs from a to b (each [x,yTop,z]) with a
+   horizontal cross-width `w`, hanging `h` below its top edge -- sheared rather than
+   rotated when a and b differ in height, which is exactly what a rail following a
+   humped deck should be. A "post" is an upright w x w column from y0 to y1. */
+function pushBox(P, N, idx, corners){
+  // corners: 8 [x,y,z], bottom ring 0-3 then top ring 4-7, both counter-clockwise from above
+  const faces=[[0,1,2,3],[4,7,6,5],[0,4,5,1],[1,5,6,2],[2,6,7,3],[3,7,4,0]];
+  let cx=0, cy=0, cz=0;
+  for(const c of corners){ cx+=c[0]/8; cy+=c[1]/8; cz+=c[2]/8; }
+  for(const f of faces){
+    const a=corners[f[0]], b=corners[f[1]], c=corners[f[2]];
+    const e1=[b[0]-a[0],b[1]-a[1],b[2]-a[2]], e2=[c[0]-a[0],c[1]-a[1],c[2]-a[2]];
+    let nx=e1[1]*e2[2]-e1[2]*e2[1], ny=e1[2]*e2[0]-e1[0]*e2[2], nz=e1[0]*e2[1]-e1[1]*e2[0];
+    const L=Math.hypot(nx,ny,nz)||1; nx/=L; ny/=L; nz/=L;
+    /* Outward by measurement, not by trusting the corner order: a sheared beam on a
+       reversed edge flips its own winding, and an inward normal lights a rail black. */
+    let fx=0, fy=0, fz=0;
+    for(const k of f){ fx+=corners[k][0]/4; fy+=corners[k][1]/4; fz+=corners[k][2]/4; }
+    const flip=((fx-cx)*nx + (fy-cy)*ny + (fz-cz)*nz) < 0;
+    if(flip){ nx=-nx; ny=-ny; nz=-nz; }
+    const base=P.length/3;
+    for(const k of f){ P.push(corners[k][0],corners[k][1],corners[k][2]); N.push(nx,ny,nz); }
+    if(flip) idx.push(base,base+2,base+1, base,base+3,base+2);
+    else     idx.push(base,base+1,base+2, base,base+2,base+3);
+  }
+}
+function beamCorners(a, b, w, h){
+  let dx=b[0]-a[0], dz=b[2]-a[2]; const L=Math.hypot(dx,dz)||1;
+  const nx=-dz/L*w/2, nz=dx/L*w/2;
+  const ring=(y0)=>[[a[0]+nx, y0(a), a[2]+nz],[a[0]-nx, y0(a), a[2]-nz],
+                    [b[0]-nx, y0(b), b[2]-nz],[b[0]+nx, y0(b), b[2]+nz]];
+  return [...ring(p=>p[1]-h), ...ring(p=>p[1])];
+}
+function postCorners(x, z, y0, y1, w){
+  const r=w/2;
+  const ring=(y)=>[[x-r,y,z-r],[x+r,y,z-r],[x+r,y,z+r],[x-r,y,z+r]];
+  return [...ring(y0), ...ring(y1)];
+}
+/* style: 'wood' (footbridge: stringers + posts + two rails) or 'concrete' (road bridge:
+   deep slab edges + a solid parapet). Returns {geo, color}. */
+function bridgeFrameGeom(pts, ys, width, style){
+  if(!pts || pts.length < 2) return null;
+  const P=[], N=[], idx=[];
+  const off=(i, side, inset)=>{
+    const q=pts[Math.min(pts.length-1,i+1)], r=pts[Math.max(0,i-1)];
+    let dx=q[0]-r[0], dz=q[1]-r[1]; const L=Math.hypot(dx,dz)||1;
+    const d=width/2 - inset;
+    return [pts[i][0]-dz/L*d*side, ys[i], pts[i][1]+dx/L*d*side];
+  };
+  const concrete = style==='concrete';
+  const slabH = concrete ? 0.7 : 0.36, slabW = concrete ? 0.4 : 0.2;
+  const railTop = concrete ? 0.75 : 0.95;
+  for(const side of [-1,1]){
+    let acc=1e9;
+    for(let i=0;i<pts.length;i++){
+      const here=off(i, side, slabW/2);
+      if(i>0){
+        const prev=off(i-1, side, slabW/2);
+        acc+=Math.hypot(here[0]-prev[0], here[2]-prev[2]);
+        // stringer / slab edge
+        pushBox(P,N,idx, beamCorners(prev, here, slabW, slabH));
+        if(concrete){
+          // parapet: a solid low wall standing on the slab edge
+          pushBox(P,N,idx, beamCorners([prev[0],prev[1]+railTop,prev[2]], [here[0],here[1]+railTop,here[2]], slabW*0.8, railTop));
+        }else{
+          // top and mid rail
+          pushBox(P,N,idx, beamCorners([prev[0],prev[1]+railTop,prev[2]], [here[0],here[1]+railTop,here[2]], 0.1, 0.09));
+          pushBox(P,N,idx, beamCorners([prev[0],prev[1]+railTop*0.52,prev[2]], [here[0],here[1]+railTop*0.52,here[2]], 0.08, 0.07));
+        }
+      }
+      if(!concrete && (acc>=1.3 || i===0 || i===pts.length-1)){
+        pushBox(P,N,idx, postCorners(here[0], here[2], here[1]-slabH, here[1]+railTop+0.04, 0.13));
+        acc=0;
+      }
+    }
+  }
+  if(!idx.length) return null;
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(P),3));
+  geo.setAttribute('normal',new THREE.BufferAttribute(new Float32Array(N),3));
+  geo.setIndex(idx);
+  geo.userData = geo.userData || {};
+  geo.userData.bridgeFrame = style;   // test seam
+  return geo;
+}
+/* Planks need vertex colour, which no other trail material uses, so they get their own
+   shared material rather than a variant of trailMat. Layer 2 bias, like a trail tread:
+   the deck is painted over whatever ribbon it covers. */
+function frameMat(color){
+  return sharedMat('bridgeframe|'+color, () =>
+    new THREE.MeshToonMaterial({color:new THREE.Color(color), gradientMap:toonTex, side:THREE.DoubleSide}));
+}
+function deckMat(){
+  return sharedMat('deck|planks', () =>
+    new THREE.MeshToonMaterial({color:new THREE.Color('#ffffff'), vertexColors:true, gradientMap:toonTex,
+      side:THREE.DoubleSide, polygonOffset:true, polygonOffsetFactor:-9, polygonOffsetUnits:-9}));
+}
+
 /* `layer` is the path's CLASS rank (0 road, 1 track, 2 trail) -- see world.js's
    PATH_RANK. Every ribbon used to share one polygon offset, which is fine while nothing
    overlaps but is exactly wrong where a footpath crosses a service road: the two ribbons
@@ -884,4 +1040,4 @@ function buildBackdrop(theme, rng, mapScale=1){
 export { ribbonGeom, embankmentGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
          POI_STYLE, AREA_STYLE, nameplate, buildPOI, pavementTexture, buildLandform,
          buildFloatingLabel, buildArea, buildAreaSign, makeShadow, pickTree, shade,
-         buildBackdrop, backdropRadius };
+         buildBackdrop, backdropRadius, bridgeDeckGeom, bridgeFrameGeom, deckMat, frameMat };

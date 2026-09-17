@@ -25,7 +25,7 @@ function hashSeg(seg){
       const k=cx+'_'+cz;if(!SEG_HASH.has(k))SEG_HASH.set(k,[]);SEG_HASH.get(k).push(seg);
     }
 }
-/* {d, edge, y, hw, px, pz}: distance to the centreline, the edge it belongs to, the tread
+/* {d, edge, y, hw, px, pz, deck}: distance to the centreline, the edge it belongs to, the tread
    height interpolated along that segment, the corridor half-width, and the point on the
    centreline itself. `y` is null when the segment was hashed without a height profile (the
    flat, no-DEM fallback path), which callers must treat as "no opinion", not as "height
@@ -36,21 +36,25 @@ function hashSeg(seg){
    through the same corridor -- two walkers on opposite verges of one trail would otherwise
    trace two courses that never meet. The projection is already computed here to get `d`,
    so handing it back costs nothing and means the recorder and the "am I on a trail" test
-   can never disagree about which point on which trail they are talking about. */
+   can never disagree about which point on which trail they are talking about.
+
+   `deck` is true when that stretch of tread is a bridge (world.js marks the segments it
+   hashes from a deck span), so the footstep voice can hear planks without a second
+   lookup against the bridge list. */
 function nearestTrail(x,z){
   const segs=SEG_HASH.get(hashKey(x,z));
-  let best=1e9,edge=null,y=null,hw=0,px=null,pz=null;
+  let best=1e9,edge=null,y=null,hw=0,px=null,pz=null,deck=false;
   if(segs)for(const s of segs){
     const dx=s.b[0]-s.a[0],dz=s.b[1]-s.a[1],L2=dx*dx+dz*dz;
     let t=L2===0?0:((x-s.a[0])*dx+(z-s.a[1])*dz)/L2;t=t<0?0:(t>1?1:t);
     const qx=s.a[0]+t*dx, qz=s.a[1]+t*dz;
     const d=Math.hypot(x-qx,z-qz);
     if(d<best){
-      best=d;edge=s.edge;hw=s.hw||0;px=qx;pz=qz;
+      best=d;edge=s.edge;hw=s.hw||0;px=qx;pz=qz;deck=!!s.deck;
       y=(s.ya==null||s.yb==null)?null:s.ya+(s.yb-s.ya)*t;
     }
   }
-  return{d:best,edge,y,hw,px,pz};
+  return{d:best,edge,y,hw,px,pz,deck};
 }
 
 export { resetSpatialHash, hashKey, hashSeg, nearestTrail };

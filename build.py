@@ -2,7 +2,8 @@
 """
 Bundle the ES modules into standalone single-file HTML builds.
 
-    python3 build.py            # -> dist/pup-city.html, dist/backyard-pups.html
+    python3 build.py            # -> dist/pup-city.html, dist/backyard-pups.html,
+                                #    dist/pup-trails.html, dist/neon-pups.html
     python3 build.py --serve    # build, then serve the repo at :8000
 
 Why this exists: the source is ES modules (clean to edit, works on GitHub Pages),
@@ -103,6 +104,7 @@ def main():
     inline(ROOT / 'city' / 'index.html', 'pup-city.html')
     inline(ROOT / 'creator' / 'index.html', 'backyard-pups.html')
     inline(ROOT / 'trails' / 'index.html', 'pup-trails.html')
+    inline(ROOT / 'neon' / 'index.html', 'neon-pups.html')
     print('done -> dist/')
     if '--serve' in sys.argv:
         os.chdir(ROOT)

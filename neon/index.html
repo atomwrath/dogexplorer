@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Neon Pups">
+<meta name="theme-color" content="#04050d">
+<meta name="description" content="Hoverboard racing on real trail maps, in neon.">
+<link rel="manifest" href="../manifest.webmanifest">
+<link rel="apple-touch-icon" href="../icons/icon-192.png">
+<title>Neon Pups</title>
+<link rel="stylesheet" href="../styles/neon.css">
+</head>
+<body data-screen="menu">
+<canvas id="c"></canvas>
+
+<!-- MENU: pick a course, pick a rider, go. Everything the race needs is on this one
+     screen; there is no settings drawer to find. -->
+<div id="menu" class="overlay">
+  <div id="menuCard">
+    <header>
+      <h1>NEON <span>PUPS</span></h1>
+      <p id="mapLine">Loading map…</p>
+    </header>
+    <div id="menuCols">
+      <section id="colCourses">
+        <h2>Courses</h2>
+        <div id="courseList" role="listbox" aria-label="Courses"></div>
+      </section>
+      <section id="colSetup">
+        <canvas id="preview"></canvas>
+        <div id="courseInfo">—</div>
+        <label class="row">Rider
+          <select id="riderSel"></select>
+        </label>
+        <div class="row">Rivals
+          <span class="stepper"><button class="btn" id="rivalsDn" aria-label="Fewer rivals">−</button>
+          <b id="rivalsVal">5</b><button class="btn" id="rivalsUp" aria-label="More rivals">+</button></span>
+        </div>
+        <div class="row">Pace
+          <span class="seg" id="skillSeg">
+            <button class="btn" data-skill="chill">Chill</button>
+            <button class="btn on" data-skill="fair">Fair</button>
+            <button class="btn" data-skill="fierce">Fierce</button>
+          </span>
+        </div>
+        <div class="row">Gravity
+          <span class="seg" id="gravSeg">
+            <button class="btn on" data-grav="1">On</button>
+            <button class="btn" data-grav="0">Off</button>
+          </span>
+        </div>
+        <label class="row">Map
+          <select id="mapSel">
+            <option value="../data/world.json">Garden of the Gods</option>
+            <option value="../data/rrworld.json">Red Rock Canyon</option>
+            <option value="../data/pikesworld.json">Pikes Peak</option>
+          </select>
+        </label>
+        <label class="row filerow" for="worldFile">…or drop your own
+          <span class="btn">Browse</span>
+        </label>
+        <input type="file" id="worldFile" accept=".geojson,.json,application/geo+json,application/json" multiple hidden>
+        <button class="btn go" id="startBtn" disabled>START</button>
+        <p class="hint">W/↑ go · S/↓ brake · A D steer · Shift boost · G gravity · R restart · Esc quit</p>
+      </section>
+    </div>
+  </div>
+</div>
+
+<!-- RACE HUD -->
+<div id="hud">
+  <div id="hudL">
+    <div id="hudPlace"><b id="placeVal">1</b><span id="placeOf">/1</span></div>
+    <div id="hudLap">LAP <b id="lapVal">1/1</b></div>
+    <div id="hudClock">0:00.0</div>
+    <div id="hudBest">BEST —</div>
+  </div>
+  <div id="hudTop">
+    <button class="btn" id="gravBtn" title="Gravity (G)">GRAVITY ON</button>
+    <button class="btn" id="quitBtn" title="Quit (Esc)">✕</button>
+  </div>
+  <div id="hudR"><canvas id="minimap"></canvas></div>
+  <div id="hudB">
+    <div id="speedVal">0</div><div id="speedUnit">km/h</div>
+    <div id="batt"><i id="battFill"></i></div>
+    <div id="slopeVal"></div>
+  </div>
+  <div id="touchCtl">
+    <div class="tgrp"><button class="tbtn" id="tLeft">◀</button><button class="tbtn" id="tRight">▶</button></div>
+    <div class="tgrp"><button class="tbtn" id="tBrake">BRAKE</button><button class="tbtn hot" id="tBoost">BOOST</button></div>
+  </div>
+</div>
+<div id="count"></div>
+
+<!-- FINISH -->
+<div id="finish" class="overlay">
+  <div id="finishCard">
+    <h2 id="finTitle">FINISHED</h2>
+    <div id="finTime">0:00.0</div>
+    <p id="finNote"></p>
+    <ol id="finBoard"></ol>
+    <div class="actions">
+      <button class="btn" id="againBtn">↻ Again</button>
+      <button class="btn go" id="menuBtn">Courses</button>
+    </div>
+  </div>
+</div>
+
+<script src="../vendor/three.min.js"></script>
+<script type="module" src="../src/neon/main.js"></script>
+</body>
+</html>

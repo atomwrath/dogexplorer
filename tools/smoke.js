@@ -228,32 +228,12 @@ for (const id of ['minimap', 'bigmap']) {
   });
 }
 
-/* fetch straight off disk, the way a static server would serve it.
-   text() as well as json(): the map loader reads text so it can strip a BOM and
-   recognise an HTML page before JSON.parse gets a chance to throw something
-   unprintable, and a stub without it would fail the default map for a reason no
-   browser has. FETCH_OVERRIDE lets an assertion serve arbitrary bytes from a
-   pretend URL without touching the disk. */
-let FETCH_OVERRIDE = null;
-function setFetchOverride(fn) { FETCH_OVERRIDE = fn; }
+// fetch straight off disk, the way a static server would serve it
 global.fetch = async (url) => {
-  if (FETCH_OVERRIDE) {
-    const r = await FETCH_OVERRIDE(String(url));
-    if (r) return r;
-  }
   const rel = String(url).replace(/^.*?\/trails\//, '').replace(/^\.\.\//, '');
   const file = path.join(ROOT, rel);
-  if (!fs.existsSync(file)) return {
-    ok: false, status: 404,
-    async text() { return 'Not Found'; },
-    async json() { throw new Error('404'); },
-  };
-  const body = fs.readFileSync(file, 'utf8');
-  return {
-    ok: true, status: 200,
-    async text() { return body; },
-    async json() { return JSON.parse(body); },
-  };
+  if (!fs.existsSync(file)) return { ok: false, status: 404, async json() { throw new Error('404'); } };
+  return { ok: true, status: 200, async json() { return JSON.parse(fs.readFileSync(file, 'utf8')); } };
 };
 window.fetch = global.fetch;
 
@@ -598,7 +578,6 @@ async function assertAll(window, errors, stats) {
      budget exists for; it is not the map loaded here. */
   check('the default map loads at native DEM resolution',
     s.perf.demStride === 1, `stride ${s.perf.demStride}`);
-
 
   /* ---------- settings ---------- */
   check('the settings panel has a terrain-detail control', s.perf.detailBtns === 3, `${s.perf.detailBtns} buttons`);
@@ -4600,147 +4579,146 @@ async function assertAll(window, errors, stats) {
     })());
   }
 
+  /* ---------- line classification: class, surface, water ----------
+     Each of these is one of the three things the seven-bridges map got wrong, asserted
+     on the tags exactly as the map carries them, so a regression in pathKind names the
+     way it broke rather than showing up as a colour in a screenshot. */
+  {
+    const cls = (0, eval)(`(()=>{
+      const one = props => parseFeatures({type:'Feature', properties:props,
+        geometry:{type:'LineString', coordinates:[[0,0],[0.001,0.001]]}});
+      const gold = one({highway:'unclassified', surface:'dirt', name:'Gold Camp Road'});
+      const chey = one({highway:'tertiary', surface:'asphalt', name:'North Cheyenne Canyon Road'});
+      const sec  = one({highway:'secondary', name:'Garden of the Gods Road'});
+      const creek = one({waterway:'stream', name:'North Cheyenne Creek'});
+      const cyc  = one({highway:'cycleway', surface:'concrete'});
+      const culvert = one({waterway:'stream', tunnel:'culvert'});
+      const deerRun = one({name:'Deer Run'});
+      return {
+        gold: gold.lines[0] && gold.lines[0].kind, goldPaved: gold.lines[0] && gold.lines[0].paved,
+        chey: chey.lines[0] && chey.lines[0].kind, sec: sec.lines[0] && sec.lines[0].kind,
+        creekLines: creek.lines.length, creekWater: creek.waters.length,
+        cyc: cyc.lines[0] && [cyc.lines[0].kind, cyc.lines[0].paved],
+        culvert: culvert.lines.length + culvert.waters.length,
+        deerRun: deerRun.lines[0] && deerRun.lines[0].kind,
+      };
+    })()`);
+    check('a dirt road is classed as a dirt road, not tarmac',
+      cls.gold === 'dirtroad' && cls.goldPaved === false, `Gold Camp Road -> ${cls.gold}`);
+    check('every class of motor road is a road, whatever its rank',
+      cls.chey === 'road' && cls.sec === 'road', `tertiary -> ${cls.chey}, secondary -> ${cls.sec}`);
+    check('a creek is water, not a trail',
+      cls.creekLines === 0 && cls.creekWater === 1, `${cls.creekLines} lines, ${cls.creekWater} waterways`);
+    check('a sealed path keeps its class and gets a paved surface',
+      !!cls.cyc && cls.cyc[0] === 'trail' && cls.cyc[1] === true, JSON.stringify(cls.cyc));
+    check('a culverted stream is neither a path nor drawn water', cls.culvert === 0);
+    check('a trail named like water is still a trail', cls.deerRun === 'trail', `Deer Run -> ${cls.deerRun}`);
+  }
 
-  /* ---------- getting a map onto a tablet ----------
-     The download route is where map files get damaged. iPadOS renames a .geojson to
-     .geojson.txt on the way to Files and offers no way to take it off again; a file
-     saved through the Share sheet can arrive with a BOM; and tapping Download on a
-     github.com file page saves the PAGE. All three end as "I picked my file and nothing
-     happened", because the only report was a console.error and a tablet has no console.
-     These assert the three repairs: the picker admits the name, the parser survives or
-     explains the bytes, and a link is fetched instead of downloaded at all. */
-  check('the map picker admits the .txt files iPadOS produces',
-    /(^|,)\s*\.txt\s*(,|$)/.test(d.querySelector('#worldFile')?.getAttribute('accept') || ''),
-    d.querySelector('#worldFile')?.getAttribute('accept'));
+  /* ---------- topology: meetings the graph used to miss ---------- */
+  {
+    const topo = (0, eval)(`(()=>{
+      // a trail crossing a road at a SHARED survey vertex -- no segment interiors cross
+      const g1 = buildGraph([{name:'R', kind:'road', pts:[[0,0],[10,0],[20,0]]},
+                             {name:'T', pts:[[10,-10],[10,0],[10,10]]}], 2, 0.1);
+      const shared = g1.edges.filter(e=>e.name==='R').some(r=>
+        g1.edges.filter(e=>e.name==='T').some(t=>[t.a,t.b].some(n=>n===r.a||n===r.b)));
+      // two lines crossing near BOTH their ends, ends further apart than the snap
+      const g2 = buildGraph([{name:'A', pts:[[-20,0],[3.9,0]]},{name:'B', pts:[[0,-3.9],[0,30]]}], 4, 0.5);
+      const met = g2.edges.filter(e=>e.name==='A').some(a=>
+        g2.edges.filter(e=>e.name==='B').some(b=>[b.a,b.b].some(n=>n===a.a||n===a.b)));
+      return {shared, met};
+    })()`);
+    check('paths sharing a survey vertex meet at a node', topo.shared);
+    check('a crossing near both lines\' ends still joins them', topo.met);
+  }
 
-  let __sniffNote = '';
-  check('map data is recognised by what is inside it, not by its name', (() => {
-    const k = o => (classifyMapJson(o) || {}).kind;
-    const got = {
-      bundle: k({ format: 'pup-world/1' }),
-      fc:     k({ type: 'FeatureCollection', features: [] }),
-      feat:   k({ type: 'Feature', geometry: null }),
-      pups:   k({ backyardPups: [] }),
-      junk:   k({ hello: 'world' }),
+  /* ---------- the seven-bridges map: water, bridges, decks ----------
+     Loaded here, measured, and the default map put back, like the coarse-DEM block. */
+  const sb = await (0,eval)(`(async()=>{
+    await loadWorld('../data/sevenbridgesworld.json', [], 3);
+    const G=getGraph(), W=getWaterways(), B=getBridges(), VS=getVertScale();
+    const named = n => G.edges.filter(e=>e.name===n);
+    const out = {
+      gold: named('Gold Camp Road').map(e=>e.kind+(e.paved?'/paved':'')),
+      chey: named('North Cheyenne Canyon Road').map(e=>e.kind+(e.paved?'/paved':'')),
+      creekEdges: named('North Cheyenne Creek').length,
+      creek: W.filter(w=>w.name==='North Cheyenne Creek').length,
+      bridges: B.length, hinted: B.filter(b=>b.hinted && b.water).length,
+      decks: [], skirtUnderDeck: 0, stations: 0, buried: 0, steps: {n:0, over:0, worst:0},
+      deckMeshes: 0, frameMeshes: 0, waterMeshes: 0,
     };
-    // a bare Feature has to become a one-feature collection, or addLayers gets a shape
-    // it cannot merge
-    const wrapped = classifyMapJson({ type: 'Feature', geometry: null });
-    __sniffNote = JSON.stringify(got);
-    return got.bundle === 'world' && got.fc === 'layer' && got.feat === 'layer'
-      && got.pups === 'pups' && got.junk == null
-      && wrapped.layer && wrapped.layer.type === 'FeatureCollection'
-      && wrapped.layer.features.length === 1;
-  })(), () => __sniffNote);
-
-  check('a GeoJSON saved with a byte-order mark still parses', (() => {
-    try { return parseMapText('\uFEFF{"type":"FeatureCollection","features":[]}', 'x.txt').type === 'FeatureCollection'; }
-    catch (e) { return false; }
-  })());
-
-  let __htmlNote = '';
-  check('a downloaded GitHub page is reported as a page, not as broken JSON', (() => {
-    try { parseMapText('<!DOCTYPE html>\n<html><body>hi</body></html>', 'world.json.txt'); return false; }
-    catch (e) { __htmlNote = e.message; return /web page/i.test(e.message) && /raw/i.test(e.message); }
-  })(), () => __htmlNote);
-
-  let __rawNote = '';
-  check('a github.com file link is rewritten to the raw host', (() => {
-    const a = toRawUrl('https://github.com/atomwrath/dogexplorer/blob/main/data/world.json');
-    const b = toRawUrl('https://github.com/atomwrath/dogexplorer/blob/main/data/world.json?plain=1#L3');
-    const c = toRawUrl('https://example.com/some/trails.geojson');
-    const e = toRawUrl('../data/world.json');
-    __rawNote = a;
-    return a === 'https://raw.githubusercontent.com/atomwrath/dogexplorer/main/data/world.json'
-      && b === a                                  // query and fragment dropped
-      && c === 'https://example.com/some/trails.geojson'   // not ours, untouched
-      && e === '../data/world.json';                       // relative paths untouched
-  })(), () => __rawNote);
-
-  /* END TO END, over the wire, with the name the iPad would have given it. A layer
-     fetched from a link has to reach the map and the chip list exactly as a dropped file
-     would -- this is the whole point of the link box, and it is the one path no unit
-     assertion above actually walks. */
-  /* Serve the link test's file from memory rather than the disk, deliberately with the
-     name and the byte-order mark an iPad download would give it. The real raw host is
-     not reachable from a test run and should not be. */
-  setFetchOverride(async (u) => {
-    if (!/smoke-link\.geojson\.txt$/.test(u)) return null;
-    if (!/^https:\/\/raw\.githubusercontent\.com\//.test(u)) return null;  // must be rewritten first
-    // deliberately NOT BOM'd: the BOM has its own check above, and a guard that two
-    // assertions share cannot be proved load-bearing by reverting it
-    const body = JSON.stringify({
-      type: 'FeatureCollection',
-      features: [{ type: 'Feature', properties: { name: 'Smoke Loop', highway: 'path' },
-                   geometry: { type: 'LineString', coordinates: [[-104.87, 38.87], [-104.869, 38.871]] } }],
-    });
-    return { ok: true, status: 200, async text() { return body; }, async json() { return JSON.parse(body); } };
-  });
-  const __link = await (0, eval)(`(async()=>{
-    const before = document.querySelectorAll('#fileChips .file-chip').length;
-    document.querySelector('#mapUrl').value =
-      'https://github.com/atomwrath/dogexplorer/blob/main/data/smoke-link.geojson.txt';
-    document.querySelector('#mapUrlBtn').click();
-    for(let i=0;i<80 && document.querySelectorAll('#fileChips .file-chip').length===before;i++)
-      await new Promise(r=>setTimeout(r,5));
-    return {
-      chips: document.querySelectorAll('#fileChips .file-chip').length - before,
-      note: (document.querySelector('#mapNote').textContent||'').trim(),
-    };
-  })()`);
-  check('a .geojson.txt fetched from a GitHub link lands on the map',
-    __link.chips === 1 && /Loaded/.test(__link.note), __link.note);
-
-  /* The panel is the only error channel a tablet player has. A link that fails has to
-     SAY so where they are looking, not into a console they cannot open. */
-  /* A deliberate failure. Trim anything it logs so it cannot count against the suite's
-     runtime-error tally. */
-  const __errMark = errors.length;
-  const __bad = await (0, eval)(`(async()=>{
-    document.querySelector('#mapUrl').value = 'https://example.com/nope/missing.geojson';
-    document.querySelector('#mapUrlBtn').click();
-    for(let i=0;i<80;i++){
-      await new Promise(r=>setTimeout(r,5));
-      const t=(document.querySelector('#mapNote').textContent||'');
-      if(!/Loading/.test(t)) return t.trim();
+    for(const b of B){
+      if(!b.water) continue;
+      const nt = nearestTrail(b.x, b.z);
+      out.decks.push({deckY: nt.y, deck: nt.deck, waterY: b.waterM*VS,
+                      groundY: terrainY(b.x, b.z, VS), halfWidth: b.water.width/2});
     }
-    return (document.querySelector('#mapNote').textContent||'').trim();
+    const wg = getWorldGroup();
+    wg.traverse(o=>{
+      if(!o.isMesh) return;
+      if(o.name==='bridge-deck') out.deckMeshes++;
+      if(o.name==='bridge-frame') out.frameMeshes++;
+      if(o.name==='water') out.waterMeshes++;
+      const ud = o.geometry && o.geometry.userData;
+      if(!ud || !ud.skirtQuads) return;
+      const pos = o.geometry.getAttribute('position'), arr = pos.array || pos;
+      for(let i=0;i<arr.length;i+=3)
+        for(const b of B) if(b.water && Math.hypot(arr[i]-b.x, arr[i+2]-b.z) < b.water.width/2 + 0.3){
+          out.skirtUnderDeck++; break;
+        }
+    });
+    for(const w of W){
+      if(!w.prof) continue;
+      for(let i=0;i<w.prof.pts.length;i++){
+        const p=w.prof.pts[i]; out.stations++;
+        if(terrainY(p[0],p[1],VS) > w.prof.hm[i]*VS + 0.05) out.buried++;
+      }
+    }
+    const lim = stepUpLimit();
+    for(const b of B) for(const e of b.edges){
+      const pts=(e.prof&&e.prof.pts)||e.pts;
+      for(let i=1;i<pts.length;i++){
+        const ax=pts[i-1][0],az=pts[i-1][1],bx=pts[i][0],bz=pts[i][1];
+        if(Math.min(Math.hypot(ax-b.x,az-b.z), Math.hypot(bx-b.x,bz-b.z)) > b.half*2) continue;
+        const st=Math.max(1,Math.ceil(Math.hypot(bx-ax,bz-az)/0.25));
+        let prev=standingY(ax,az);
+        for(let k=1;k<=st;k++){
+          const y=standingY(ax+(bx-ax)*k/st, az+(bz-az)*k/st), d=Math.abs(y-prev);
+          out.steps.n++; if(d>lim) out.steps.over++; if(d>out.steps.worst) out.steps.worst=+d.toFixed(3);
+          prev=y;
+        }
+      }
+    }
+    out.lim = +lim.toFixed(2);
+    await loadWorld('../data/world.json', [], 3);
+    return out;
   })()`);
-  errors.length = __errMark;
-  check('a link that fails says why in the panel, not only in the console',
-    /missing\.geojson/.test(__bad) && !/Loading/.test(__bad), __bad);
-  setFetchOverride(null);
-
-  /* The map list is how a map gets onto a device that cannot manage files at all: commit
-     it, name it in data/maps.json, and it is in the list next time the page opens. The
-     row ships hidden, so both halves matter -- it has to fill AND it has to become
-     visible, and .io-row's display:flex beats [hidden] unless the CSS says otherwise. */
-  /* Read the DOM as boot left it rather than calling renderMapList here, so that wiring
-     it into boot is part of what this asserts. Visibility is the next check's job --
-     kept separate so each revert has exactly one guard to trip. */
-  const __listRow = d.querySelector('#mapListRow');
-  const __listOpts = [...d.querySelectorAll('#mapList option')];
-  check('the map list is built from data/maps.json at boot, and unhidden',
-    __listOpts.length >= 2 && !__listRow.hasAttribute('hidden')
-      && /world\.json$/.test(__listOpts[0]?.value || ''),
-    `${__listOpts.length} maps, first ${__listOpts[0]?.value || '-'}`);
-
-  /* The reported symptom was the PICKER, not the link box: pick a file, nothing happens.
-     loadFiles takes anything with .name and .text(), so drive it with the bytes iPadOS
-     actually hands over -- a page saved under a .json.txt name. */
-  const __pick = await (0, eval)(`(async()=>{
-    await loadFiles([{ name:'notes.json.txt', async text(){ return '{\"hello\":\"world\"}'; } }]);
-    return (document.querySelector('#mapNote').textContent||'').trim();
-  })()`);
-  check('a file the picker cannot use says so in the panel',
-    /notes\.json\.txt/.test(__pick) && /not a pup-world bundle/i.test(__pick), __pick);
-
-  /* NOT ASSERTED HERE: that .io-row[hidden]{display:none} actually hides the row.
-     The rule is needed -- .io-row's display:flex beats the UA's [hidden]{display:none}
-     exactly as .pup-grid's display:grid does -- but jsdom resolves the two against each
-     other differently from a browser, and a probe element came back display:none with
-     the rule deleted as well as with it. A check that passes either way is not evidence,
-     so it is left out rather than shipped looking like a guard. Real-device check. */
+  check('Gold Camp Road is a dirt road on the seven-bridges map',
+    sb.gold.length > 0 && sb.gold.every(k => k === 'dirtroad'), sb.gold.join(','));
+  check('North Cheyenne Canyon Road is paved on the seven-bridges map',
+    sb.chey.length > 0 && sb.chey.every(k => k === 'road/paved'), sb.chey.join(','));
+  check('North Cheyenne Creek is a creek, not a walkable edge',
+    sb.creek === 1 && sb.creekEdges === 0 && sb.waterMeshes > 0,
+    `${sb.creek} waterway, ${sb.creekEdges} graph edges, ${sb.waterMeshes} water meshes`);
+  check('every surveyed bridge over the creek becomes a span',
+    sb.hinted >= 7, `${sb.hinted} surveyed spans over water, ${sb.bridges} bridges in all`);
+  check('a bridge deck is walkable and clears the water under it',
+    sb.decks.length >= 7 && sb.decks.every(d => d.deck && d.deckY != null && d.deckY - d.waterY >= 0.75),
+    sb.decks.map(d => (d.deckY - d.waterY).toFixed(2)).join(' '));
+  check('the ground under a deck is the creek bed, not a causeway',
+    sb.decks.length >= 7 && sb.decks.every(d => d.groundY <= d.waterY),
+    sb.decks.map(d => (d.groundY - d.waterY).toFixed(2)).join(' '));
+  check('no fill embankment is built across the water under a deck',
+    sb.skirtUnderDeck === 0, `${sb.skirtUnderDeck} skirt vertices over bridged water`);
+  check('a creek running beside a path is not buried under its bench',
+    sb.stations > 100 && sb.buried / sb.stations < 0.02, `${sb.buried} of ${sb.stations} creek stations under ground`);
+  check('walking onto and over a bridge never meets an un-walkable step',
+    sb.steps.n > 100 && sb.steps.over === 0,
+    `worst ${sb.steps.worst}u vs limit ${sb.lim}u over ${sb.steps.n} samples`);
+  check('bridges are drawn: planks and railings',
+    sb.deckMeshes >= 7 && sb.frameMeshes >= sb.deckMeshes,
+    `${sb.deckMeshes} decks, ${sb.frameMeshes} frames`);
 
   const failed = results.filter(r => !r.ok);
   console.log('\n---------------- smoke test ----------------');

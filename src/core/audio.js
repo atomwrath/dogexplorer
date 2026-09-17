@@ -460,6 +460,8 @@ const STEP_SURFACES = {
   rock:  {hz:3100, q:1.7, d:0.068, b:300, be:170, n:0.34, bg:0.12}, // bright, tight, clacky
   wood:  {hz:1150, q:2.4, d:0.090, b:260, be:150, n:0.26, bg:0.18}, // hollow, resonant
   sand:  {hz:1500, q:0.4, d:0.130, b:0,   be:0,   n:0.22, bg:0.00}, // dull, no tail at all
+  paved: {hz:2350, q:1.2, d:0.050, b:240, be:150, n:0.24, bg:0.13}, // tarmac: short, dry tap
+  water: {hz:1050, q:0.5, d:0.160, b:0,   be:0,   n:0.34, bg:0.00}, // splash: low hiss, long tail
 };
 function stepSurface(name){ return STEP_SURFACES[name] || STEP_SURFACES.trail; }
 

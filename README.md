@@ -6,6 +6,15 @@ Two cartoon 3D dog games that run in any browser — no install, no build step r
 - **Backyard Pups** — design a pup from the paws up, save favorites, export them as JSON.
 - **Pup City** — downtown dash. Sneak the block, scare the strays, dodge traffic, chomp the golden bone, and don't startle the neighbors.
 
+- **Neon Pups** — hoverboard racing on the Pup Trails maps. `src/neon/`: `routes.js` builds the
+  courses automatically from the trail graph (circuits first, sprints to mop up, long roads in
+  stages; deterministic, because best times key off a course's edge signature), `track.js` turns a
+  course into a smoothed centreline, `racer.js` is the physics. Racers live in TRACK SPACE
+  (`s` along, `d` across), which is what keeps them on the path: `|d|` cannot exceed the half-width,
+  so there is no junction or switchback to leak through. The centreline is relaxed until its radius
+  is never tighter than half-width + `minRadiusPad`, or the ribbon's inside edge would fold.
+  Verify with `node tools/smoke-neon.js`; `tools/revert-neon.py` proves each check load-bearing.
+
 Both games share the same dog builder, so a pup you design in the creator is the pup you run with in the city.
 
 ## Playing
