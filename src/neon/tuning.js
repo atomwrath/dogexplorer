@@ -37,11 +37,25 @@ const NEON = {
   bodyWide:   1.5,
 };
 
-/* Rival pace as a fraction of what the player's board can do. */
+/* Rival pace as a fraction of what the player's board can do on the flat, and how much
+   of the grip the corner-speed sum thinks it has.
+
+   The whole ladder moved up one rung: what used to be the hardest setting is now the
+   easiest, because rivals that lose ground on every straight are not opponents, they are
+   scenery. `pace` above 1 means a rival out-runs the player's unboosted top speed, so on
+   Fair and Fierce the boost battery is not a treat -- it is how you stay in touch, and
+   picking where to spend it is the race. */
 const NEON_SKILL = {
-  chill:  {pace: 0.84, corner: 0.80, wobble: 0.55, label: 'Chill'},
-  fair:   {pace: 0.93, corner: 0.92, wobble: 0.35, label: 'Fair'},
-  fierce: {pace: 1.00, corner: 1.04, wobble: 0.18, label: 'Fierce'},
+  chill:  {pace: 1.00, corner: 1.04, wobble: 0.18, label: 'Chill'},
+  fair:   {pace: 1.07, corner: 1.16, wobble: 0.10, label: 'Fair'},
+  fierce: {pace: 1.14, corner: 1.28, wobble: 0.05, label: 'Fierce'},
 };
 
-export { NEON, NEON_SKILL };
+/* Imperial display. Everything inside the game is metres and seconds; these are used at
+   the last moment, on the way to the screen. */
+const M_PER_MILE = 1609.344, FT_PER_M = 3.280839895;
+const miles = m => m/M_PER_MILE;
+const feet  = m => m*FT_PER_M;
+const mph   = ms => ms*3600/M_PER_MILE;
+
+export { NEON, NEON_SKILL, miles, feet, mph, M_PER_MILE, FT_PER_M };

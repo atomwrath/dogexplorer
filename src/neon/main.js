@@ -17,9 +17,9 @@ import { SPECIES } from '../data/species.js';
 import { kennelPups, loadKennel } from '../data/kennel.js';
 import { PRESETS } from '../creator/presets.js';
 import { parseFeatures, buildGraph } from '../trails/geo.js';
-import { NEON, NEON_SKILL } from './tuning.js';
+import { NEON, NEON_SKILL, miles, feet, mph } from './tuning.js';
 import { buildCourses } from './routes.js';
-import { buildTrack, trackFrame, trackToWorld, deckY, calmestStart, rotateTrack, assembleLine } from './track.js';
+import { buildTrack, reverseTrack, widthFactor, trackFrame, trackToWorld, deckY, calmestStart, rotateTrack, assembleLine } from './track.js';
 import { makeRacer, stepRacer, rivalInput, resolveContacts, rankRacers, raceDistance } from './racer.js';
 import { buildEnvironment, buildTrackMesh, clearTrackMesh, bumperPulse, updateScene } from './neon-scene.js';
 import { makeRider, poseRider, disposeRider } from './riders.js';
@@ -38,15 +38,18 @@ const hex = n => '#' + n.toString(16).padStart(6, '0');
 
 /* ---------- state ---------- */
 let dem = null;                 // World (has heights) or null for plain GeoJSON
-let graph = null, mapBox = null, mapId = '', courses = [], coverInfo = null;
+let graph = null, mapAreas = [], mapBox = null, mapId = '', courses = [], coverInfo = null;
 let selCourse = 0;
 const trackCache = new Map();
+const trackMeta = new Map();    // sig|scale -> {L, climb, ok}: filled in by the menu scan
+let scanQueue = [];
 let activeTrack = null;         // the ribbon currently in the scene
-const settings = {rivals: 5, skill: 'fair', gravity: true, rider: 'p:0', map: DEFAULT_NEON_WORLD};
+const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale: 1, rider: 'p:0', map: DEFAULT_NEON_WORLD};
 let bests = {};
-let race = null;                // {T, racers, riders, me, phase, countT, t, mixed, shownFinish}
+let race = null;                // {T, racers, riders, me, phase, t, grav, scale, reverse, ...}
 let neonScreen = 'menu';   // NOT `screen`: the bundle is one classic script, and a
                             // top-level `let screen` would shadow window.screen for core/quality.js
+let mapLabel = '';
 let menuS = 0, camYaw = 0, shake = 0, lastT = 0, physAcc = 0, clockT = 0;
 const camPos = {x:0, y:30, z:0};
 
@@ -67,7 +70,12 @@ function fmtTime(t){
   return m + ':' + (s < 10 ? '0' : '') + s.toFixed(1);
 }
 function strHash(s){ let h = 2166136261; for(let i = 0; i < s.length; i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
-const bestKey = (c, grav) => mapId + '|' + c.sig + '|g' + (grav ? 1 : 0);
+/* A best time belongs to one way round one course at one scale with gravity one way, so
+   all four are in the key. Changing any of them is a different race, not a slower lap. */
+const bestKey = (c, st) => mapId + '|' + c.sig + '|g' + (st.gravity ? 1 : 0)
+  + '|s' + st.scale + (st.reverse ? '|rev' : '');
+const fmtMi = m => miles(m).toFixed(m < 1609 ? 2 : 2) + ' mi';
+const fmtFt = m => Math.round(feet(m)).toLocaleString() + ' ft';
 
 /* ---------- map loading ---------- */
 /* A plain GeoJSON drop has no DEM and no projection constants, so make the simplest
@@ -101,8 +109,11 @@ async function loadNeonMap(src, label){
   else{ dem = null; proj = flatProjector(docs.filter(d => d && (d.type === 'FeatureCollection' || d.type === 'Feature'))); }
 
   const lines = [];
+  mapAreas = [];
   for(const layer of proj.layers){
-    for(const l of parseFeatures(layer).lines) lines.push({name: l.name, kind: l.kind, pts: proj.projectCoords(l.pts)});
+    const p = parseFeatures(layer);
+    for(const l of p.lines) lines.push({name: l.name, kind: l.kind, pts: proj.projectCoords(l.pts)});
+    for(const a of p.areas) mapAreas.push({kind: a.kind, name: a.name, rings: a.rings.map(r => proj.projectCoords(r))});
   }
   if(!lines.length) throw new Error('No trail lines in that file.');
   graph = buildGraph(lines, 16, 6);
@@ -111,31 +122,96 @@ async function loadNeonMap(src, label){
     mapBox.x0 = Math.min(mapBox.x0, p[0]); mapBox.x1 = Math.max(mapBox.x1, p[0]);
     mapBox.z0 = Math.min(mapBox.z0, p[1]); mapBox.z1 = Math.max(mapBox.z1, p[1]);
   }
-  const made = buildCourses(graph, dem ? (x, z) => dem.heightAt(x, z) : null);
+  const made = buildCourses(graph, dem ? (x, z) => dem.heightAt(x, z) : null, {scale: settings.scale});
   courses = made.courses; coverInfo = made;
   trackCache.clear();
-  buildEnvironment(dem, graph, mapBox);
-  $('mapLine').textContent = (label || mapId) + ' · ' + courses.length + ' courses covering '
-    + Math.round(made.coverage*100) + '% of ' + (made.totalM/1000).toFixed(1) + ' km'
-    + (dem ? '' : ' · no elevation data: flat');
+  rebuildEnvironment();
+  mapLabel = label || mapId;
+  syncMapLine();
   selCourse = clamp(selCourse, 0, Math.max(0, courses.length-1));
+  trackMeta.clear();
   renderCourseList();
+  startScan();
   selectCourse(selCourse);
-  $('startBtn').disabled = !courses.length;
+  if(!courses.length) $('startBtn').disabled = true;
 }
 
-function trackFor(course){
-  let T = trackCache.get(course.sig);
+/* Cached per course AND per (scale, direction): those are three different racetracks that
+   happen to share a route. Reversal is derived from the forward track rather than built
+   from scratch, so the two directions are guaranteed the same line. */
+function trackFor(course, opt){
+  const sc = (opt && opt.scale) || settings.scale;
+  const rev = opt && 'reverse' in opt ? opt.reverse : settings.reverse;
+  const key = course.sig + '|s' + sc + (rev ? '|rev' : '');
+  let T = trackCache.get(key);
   if(!T){
-    T = buildTrack(graph, course, dem);
-    rotateTrack(T, calmestStart(T, 70));
-    trackCache.set(course.sig, T);
+    const fwdKey = course.sig + '|s' + sc;
+    let F = trackCache.get(fwdKey);
+    if(!F){
+      F = buildTrack(graph, course, dem, sc);
+      rotateTrack(F, calmestStart(F, 70/Math.sqrt(sc)));
+      trackCache.set(fwdKey, F);
+    }
+    T = rev ? reverseTrack(F) : F;
+    trackCache.set(key, T);
   }
   return T;
 }
-const baseM = () => dem ? dem.minM : 0;
+const baseM = () => dem ? dem.minM/settings.scale : 0;
+function rebuildEnvironment(){
+  if(!graph) return;
+  const sc = settings.scale;
+  buildEnvironment(dem, graph, mapAreas, {x0: mapBox.x0/sc, x1: mapBox.x1/sc, z0: mapBox.z0/sc, z1: mapBox.z1/sc}, sc);
+}
+function syncMapLine(){
+  if(!coverInfo) return;
+  $('mapLine').textContent = mapLabel + ' · ' + courses.length + ' courses covering '
+    + Math.round(coverInfo.coverage*100) + '% of ' + fmtMi(coverInfo.totalM) + ' of trail'
+    + (settings.scale > 1 ? ' · scaled 1:' + settings.scale : '')
+    + (dem ? '' : ' · no elevation data: flat');
+}
 
 /* ---------- menu ---------- */
+const metaKey = c => c.sig + '|s' + settings.scale;
+/* THE MENU SCAN. A course's real length, climb and even whether it can be raced at all
+   are only known once its ribbon has been built, and building every ribbon on a big map
+   at 1:4 is seconds of work -- far too long to hold the menu for. So the list goes up
+   immediately with lengths estimated from the route, and one course per frame is built in
+   the background; each row corrects itself as its turn comes, and anything that turns out
+   unraceable at this scale is struck out. Clicking a row jumps its build to the front,
+   so the course you actually chose is never the one you are waiting for. */
+function scanStep(){
+  while(scanQueue.length){
+    const i = scanQueue.shift();
+    const c = courses[i];
+    if(!c || trackMeta.has(metaKey(c))) continue;
+    const T = trackFor(c, {reverse: false});
+    trackMeta.set(metaKey(c), {L: T.L, climb: T.climb, ok: T.ok});
+    paintRow(i);
+    return;
+  }
+}
+function startScan(){
+  scanQueue = courses.map((_, i) => i);
+}
+function paintRow(i){
+  const el = document.querySelectorAll('#courseList .course')[i];
+  const c = courses[i];
+  if(!el || !c) return;
+  const m = trackMeta.get(metaKey(c));
+  const meta = el.querySelector('.meta'), best = el.querySelector('.best');
+  el.classList.toggle('off', !!m && !m.ok);
+  if(m && !m.ok){
+    meta.textContent = 'too tight to race at 1:' + settings.scale;
+  }else{
+    meta.textContent = fmtMi(m ? m.L : c.lenM/settings.scale)
+      + (c.laps > 1 ? ' × ' + c.laps + ' laps' : '')
+      + (c.kind === 'circuit' ? ' · circuit' : ' · sprint')
+      + (m && dem ? ' · ↗ ' + fmtFt(m.climb) : '');
+  }
+  const b = bests[bestKey(c, settings)];
+  best.textContent = b ? '★ ' + fmtTime(b) : '';
+}
 function renderCourseList(){
   const box = $('courseList');
   box.textContent = '';
@@ -144,19 +220,16 @@ function renderCourseList(){
     b.className = 'btn course' + (i === selCourse ? ' on' : '');
     b.setAttribute('role', 'option');
     b.dataset.course = String(i);
-    const best = bests[bestKey(c, settings.gravity)];
     const nm = document.createElement('span'); nm.className = 'nm';
     const tag = document.createElement('span'); tag.className = 'tag';
     tag.textContent = c.kind === 'circuit' ? '◯' : '→';
     nm.append(tag, c.name);
     const meta = document.createElement('span'); meta.className = 'meta';
-    meta.textContent = (c.lenM/1000).toFixed(2) + ' km' + (c.laps > 1 ? ' × ' + c.laps + ' laps' : '')
-      + (c.kind === 'circuit' ? ' · circuit' : ' · sprint');
     const bt = document.createElement('span'); bt.className = 'best';
-    bt.textContent = best ? '★ ' + fmtTime(best) : '';
     b.append(nm, meta, bt);
     b.addEventListener('click', () => selectCourse(i));
     box.appendChild(b);
+    paintRow(i);
   });
 }
 function selectCourse(i){
@@ -164,14 +237,21 @@ function selectCourse(i){
   selCourse = i;
   document.querySelectorAll('#courseList .course').forEach((el, k) => el.classList.toggle('on', k === i));
   const c = courses[i], T = trackFor(c);
+  if(!trackMeta.has(metaKey(c))){
+    trackMeta.set(metaKey(c), {L: T.L, climb: T.climb, ok: T.ok});
+    paintRow(i);
+  }
+  $('startBtn').disabled = !T.ok;
   showTrack(T);
   menuS = 0;
-  $('courseInfo').textContent = (T.L/1000).toFixed(2) + ' km' + (T.laps > 1 ? ' × ' + T.laps : '')
-    + (dem ? ' · ↗ ' + Math.round(T.climb) + ' m climb' + (T.closed ? '' : ' · ' + (T.elev[T.n-1] < T.elev[0] ? '▼ ' : '▲ ')
-        + Math.abs(Math.round(T.elev[T.n-1]-T.elev[0])) + ' m net') : '')
-    + ' · ' + (T.twistPerKm > 9 ? 'twisty' : T.twistPerKm > 5 ? 'flowing' : 'fast');
+  $('courseInfo').textContent = !T.ok ? 'Too tight to race at 1:' + settings.scale + ' — try a bigger scale.' : fmtMi(T.L) + (T.laps > 1 ? ' × ' + T.laps + ' laps' : '')
+    + (dem ? ' · ↗ ' + fmtFt(T.climb) + ' climb' + (T.closed ? '' : ' · ' + (T.elev[T.n-1] < T.elev[0] ? '▼ ' : '▲ ')
+        + fmtFt(Math.abs(T.elev[T.n-1]-T.elev[0])) + ' net') : '')
+    + ' · ' + (T.twistPerKm > 9 ? 'twisty' : T.twistPerKm > 5 ? 'flowing' : 'fast')
+    + (settings.reverse ? ' · reverse' : '');
   const line = assembleLine(graph, c).pts;
-  paintMap($('preview'), graph, mapBox, line, T.closed, 'pv|' + mapId + '|' + c.sig, false);
+  if(settings.reverse) line.reverse();
+  paintMap($('preview'), graph, mapBox, line, T.closed, 'pv|' + mapId + '|' + c.sig + (settings.reverse ? '|r' : ''), false);
 }
 function showTrack(T){
   if(activeTrack === T) return;
@@ -201,18 +281,44 @@ function syncMenu(){
   $('rivalsVal').textContent = String(settings.rivals);
   document.querySelectorAll('#skillSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.skill === settings.skill));
   document.querySelectorAll('#gravSeg .btn').forEach(b => b.classList.toggle('on', (b.dataset.grav === '1') === settings.gravity));
-  const gb = $('gravBtn');
-  gb.textContent = 'GRAVITY ' + (settings.gravity ? 'ON' : 'OFF');
-  gb.classList.toggle('off', !settings.gravity);
+  document.querySelectorAll('#dirSeg .btn').forEach(b => b.classList.toggle('on', (b.dataset.dir === 'rev') === settings.reverse));
+  $('scaleSel').value = String(settings.scale);
 }
+/* Gravity, direction and scale are set BEFORE the lights go out and hold for the whole
+   race. They change what the course is, not how you are driving it, so mid-race they
+   would just invalidate the run against everyone else's -- which is why the old in-race
+   toggle is gone and the HUD only reports what was chosen. */
 function setGravity(on){
   if(settings.gravity === !!on) return;
   settings.gravity = !!on;
-  /* Flipping it mid-race is allowed -- that is half the fun on a long climb -- but a run
-     that used both is not comparable with either leaderboard, so it sets no record. */
-  if(race && race.phase === 'go' && !race.racers[race.me].done) race.mixed = true;
+  syncMenu(); neonWriteStore(); renderCourseList();
+}
+function setReverse(on){
+  if(settings.reverse === !!on) return;
+  settings.reverse = !!on;
+  syncMenu(); neonWriteStore(); renderCourseList(); selectCourse(selCourse);
+}
+function setScale(n){
+  const sc = clamp(Math.round(n), 1, 6);
+  if(settings.scale === sc) return;
+  settings.scale = sc;
+  /* Every track in the cache is in the old scene metres, and so is the scenery. */
+  trackCache.clear(); trackMeta.clear(); activeTrack = null;
   syncMenu(); neonWriteStore();
-  if(neonScreen === 'menu') renderCourseList();
+  /* The course set itself depends on the scale: a good race is a few minutes long
+     whatever the map is doing, so at 1:4 the generator looks for routes four times as
+     long in real metres (see routeTargetM). */
+  const made = buildCourses(graph, dem ? (x, z) => dem.heightAt(x, z) : null, {scale: sc});
+  courses = made.courses; coverInfo = made;
+  selCourse = clamp(selCourse, 0, Math.max(0, courses.length-1));
+  syncMapLine(); rebuildEnvironment(); renderCourseList(); startScan(); selectCourse(selCourse);
+}
+function modeChip(){
+  const bits = [];
+  if(settings.scale > 1) bits.push('1:' + settings.scale);
+  if(settings.reverse) bits.push('REVERSE');
+  bits.push(settings.gravity ? 'GRAVITY' : 'NO GRAVITY');
+  return bits.join(' · ');
 }
 
 /* ---------- race ---------- */
@@ -236,42 +342,49 @@ function endRace(){
   stopHum();
 }
 function startRace(){
-  if(!courses.length) return;
+  if(!courses.length || !trackFor(courses[selCourse]).ok) return;
   initAudio();
   endRace();
   const course = courses[selCourse], T = trackFor(course);
   showTrack(T);
   const choice = riderChoices().find(c => c.v === settings.rider) || riderChoices()[0];
   const cast = pickRivals(settings.rivals, course, choice.who);
+  // riders shrink with the ribbon, so a six-board pack fills the same share of it at 1:6
+  const sizeK = 1/widthFactor(settings.scale);
   const racers = [], riders = [];
   const total = cast.length + 1;
   // grid: two columns, rows 7 m apart. Rivals fill from the front; you start at the back.
   const place = (k, o) => {
     /* circuits line up BEHIND the line: row 0 is nearest it */
     const row = Math.floor(k/2), col = k % 2 ? -1 : 1;
-    const s = T.closed ? T.L - 5 - row*7 : 5 + (Math.ceil(total/2) - 1 - row)*7;
+    const gap = 7/Math.sqrt(settings.scale);          // rows closer together on a small map
+    const s = T.closed ? T.L - 5 - row*gap : 5 + (Math.ceil(total/2) - 1 - row)*gap;
     const f = trackFrame(T, s, {});
-    return makeRacer(Object.assign({s, d: col*(f.halfW - NEON.bodyWide)*0.5, yaw: f.yaw,
+    return makeRacer(Object.assign({s, d: col*(f.halfW - T.bodyWide)*0.5, yaw: f.yaw,
       lap: T.closed ? -1 : 0}, o));
   };
   cast.forEach((c, i) => {
     racers.push(place(i, {name: c.name, skill: NEON_SKILL[settings.skill], paceMul: c.paceMul,
       lane: ((i % 4) - 1.5)/2.2, seed: c.seed % 1000, color: c.color, emo: SPECIES[c.key].emo}));
-    riders.push(makeRider({kind: 'wild', key: c.key}, c.color, c.seed));
+    riders.push(makeRider({kind: 'wild', key: c.key}, c.color, c.seed, sizeK));
   });
   racers.push(place(cast.length, {name: choice.label, isPlayer: true, color: PLAYER_COLOR}));
-  riders.push(makeRider(choice.who, PLAYER_COLOR, 7));
+  riders.push(makeRider(choice.who, PLAYER_COLOR, 7, sizeK));
   riders[riders.length-1].tag.visible = false;
   for(const r of racers) r.prog = (r.lap|0)*T.L + r.s;
+  const line = assembleLine(graph, course).pts;
+  if(settings.reverse) line.reverse();
   race = {T, course, racers, riders, me: racers.length-1, phase: 'count', countT: 3.4, lastPip: 4,
-          t: 0, mixed: false, finishShown: false, doneCount: 0, line: assembleLine(graph, course).pts};
+          t: 0, finishShown: false, doneCount: 0, line,
+          gravity: settings.gravity, scale: settings.scale, reverse: settings.reverse, sizeK};
   rankRacers(racers);
   resetNeonInput();
   camYaw = racers[race.me].yaw;
   physAcc = 0;
   $('placeOf').textContent = '/' + racers.length;
-  const best = bests[bestKey(course, settings.gravity)];
+  const best = bests[bestKey(course, settings)];
   $('hudBest').textContent = 'BEST ' + fmtTime(best);
+  $('hudMode').textContent = modeChip();
   $('count').textContent = '3';
   setScreen('count');
   snapCamera();
@@ -285,7 +398,7 @@ function quitToMenu(){
 }
 
 function stepRace(dt){
-  const R = race, T = R.T, env = {gravity: settings.gravity};
+  const R = race, T = R.T, env = {gravity: R.gravity};
   if(R.phase === 'count'){
     R.countT -= dt;
     const n = Math.ceil(R.countT - 0.4);
@@ -323,15 +436,14 @@ function onBump(r, ev){
 }
 
 function finishPlayer(){
-  const R = race, me = R.racers[R.me], key = bestKey(R.course, settings.gravity);
+  const R = race, me = R.racers[R.me], key = bestKey(R.course, R);
   const old = bests[key];
   let note = '';
-  if(R.mixed) note = 'Gravity was switched mid-race — no record set.';
-  else if(!old || me.finishT < old){ bests[key] = +me.finishT.toFixed(2); neonWriteStore(); note = old ? '★ New best! (was ' + fmtTime(old) + ')' : '★ First time on the board.'; }
+  if(!old || me.finishT < old){ bests[key] = +me.finishT.toFixed(2); neonWriteStore(); note = old ? '★ New best! (was ' + fmtTime(old) + ')' : '★ First time on the board.'; }
   else note = 'Best ' + fmtTime(old) + ' · +' + (me.finishT - old).toFixed(1) + ' s';
   $('finTitle').textContent = me.place === 1 ? '🏁 YOU WIN' : '🏁 P' + me.place + ' OF ' + R.racers.length;
   $('finTime').textContent = fmtTime(me.finishT);
-  $('finNote').textContent = note + ' · gravity ' + (settings.gravity ? 'on' : 'off');
+  $('finNote').textContent = note + ' · ' + modeChip().toLowerCase();
   if(me.place === 1) cheerSound(); else thudSound();
   renderBoard();
   setScreen('finish');
@@ -358,11 +470,14 @@ function chaseTarget(){
   const R = race, T = R.T, me = R.racers[R.me];
   const f = trackToWorld(T, me.s, me.d, _cf);
   const y = deckY(T, f.elev, baseM());
-  const dist = 7.5 + me.v*0.13, high = 3.1 + me.v*0.035;
+  /* The part of the chase distance that frames the BOARD scales with the board; the part
+     that buys you a view of the corner ahead is about speed, and speed does not scale. */
+  const K = R.sizeK || 1;
+  const dist = 7.5*K + me.v*0.13, high = 3.1*K + me.v*0.035;
   const x = f.wx - Math.cos(camYaw)*dist, z = f.wz + Math.sin(camYaw)*dist;
   // never let a crest come between the lens and the board
   const behind = trackFrame(T, T.closed ? me.s - dist : Math.max(0, me.s - dist), _cb);
-  const floorY = deckY(T, behind.elev, baseM()) + 1.6;
+  const floorY = deckY(T, behind.elev, baseM()) + 1.6*K;
   return {x, y: Math.max(y + high, floorY), z, px: f.wx, py: y, pz: f.wz};
 }
 function snapCamera(){
@@ -381,7 +496,7 @@ function updateCamera(dt){
     shake = Math.max(0, shake - dt*2.2);
     const sx = (Math.random()-0.5)*shake*0.7, sy = (Math.random()-0.5)*shake*0.7;
     camera.position.set(camPos.x + sx, camPos.y + sy, camPos.z);
-    camera.lookAt(c.px + Math.cos(camYaw)*9, c.py + 1.3, c.pz - Math.sin(camYaw)*9);
+    camera.lookAt(c.px + Math.cos(camYaw)*9, c.py + 1.3*(race.sizeK || 1), c.pz - Math.sin(camYaw)*9);
     const want = 60 + 18*clamp(me.v/28, 0, 1) + (me.boosting ? 6 : 0);
     camera.fov = lerp(camera.fov, want, Math.min(1, dt*4));
   }else if(activeTrack){
@@ -418,17 +533,20 @@ function drawRace(dt){
     poseRider(R.riders[i], r, f.wx, deckY(T, f.elev, b), f.wz, pitch, clockT, dt);
   });
   const me = R.racers[R.me];
+  const f = trackFrame(T, me.s, _pf);
   $('placeVal').textContent = String(me.place);
   $('lapVal').textContent = T.closed ? Math.min(T.laps, Math.max(1, me.lap+1)) + '/' + T.laps
                                      : Math.round(100*clamp(me.s/T.L, 0, 1)) + '%';
   $('hudClock').textContent = fmtTime(me.done ? me.finishT : me.time);
-  $('speedVal').textContent = String(Math.round(me.v*3.6));
+  $('speedVal').textContent = String(Math.round(mph(me.v)));
   $('battFill').style.width = Math.round(me.battery*100) + '%';
   const pct = Math.round(me.slope*100);
-  $('slopeVal').textContent = !settings.gravity ? 'gravity off' : pct > 1 ? '▲ ' + pct + '%' : pct < -1 ? '▼ ' + (-pct) + '%' : '';
+  $('slopeVal').textContent = !R.gravity ? '' : pct > 1 ? '▲ ' + pct + '%' : pct < -1 ? '▼ ' + (-pct) + '%'
+    : (dem ? Math.round(feet(f.elev)) + ' ft' : '');
   setHum(me.v, me.boosting);
   const fit = paintMap($('minimap'), graph, mapBox, R.line, T.closed, 'mm|' + mapId + '|' + R.course.sig, true);
-  const dots = R.racers.map(r => { const f = trackToWorld(T, r.s, r.d, {}); return {x: f.wx, z: f.wz, color: hex(r.color), big: r.isPlayer}; });
+  const sc = R.scale;
+  const dots = R.racers.map(r => { const w = trackToWorld(T, r.s, r.d, {}); return {x: w.wx*sc, z: w.wz*sc, color: hex(r.color), big: r.isPlayer}; });
   dots.sort((p, q) => (p.big ? 1 : 0) - (q.big ? 1 : 0));
   paintDots($('minimap'), fit, dots);
 }
@@ -437,6 +555,7 @@ function frame(ms){
   const now = ms/1000;
   const dt = Math.min(0.05, Math.max(0, now - lastT)); lastT = now;
   clockT += dt;
+  if(!race && scanQueue.length) scanStep();
   if(race){
     physAcc += dt;
     let guard = 0;
@@ -459,11 +578,12 @@ function wireUI(){
   $('againBtn').addEventListener('click', startRace);
   $('menuBtn').addEventListener('click', quitToMenu);
   $('quitBtn').addEventListener('click', quitToMenu);
-  $('gravBtn').addEventListener('click', () => setGravity(!settings.gravity));
   $('rivalsDn').addEventListener('click', () => { settings.rivals = clamp(settings.rivals-1, 0, 7); syncMenu(); neonWriteStore(); });
   $('rivalsUp').addEventListener('click', () => { settings.rivals = clamp(settings.rivals+1, 0, 7); syncMenu(); neonWriteStore(); });
   document.querySelectorAll('#skillSeg .btn').forEach(b => b.addEventListener('click', () => { settings.skill = b.dataset.skill; syncMenu(); neonWriteStore(); }));
   document.querySelectorAll('#gravSeg .btn').forEach(b => b.addEventListener('click', () => setGravity(b.dataset.grav === '1')));
+  document.querySelectorAll('#dirSeg .btn').forEach(b => b.addEventListener('click', () => setReverse(b.dataset.dir === 'rev')));
+  $('scaleSel').addEventListener('change', e => setScale(+e.target.value));
   $('riderSel').addEventListener('change', e => { settings.rider = e.target.value; neonWriteStore(); });
   $('mapSel').addEventListener('change', e => {
     settings.map = e.target.value; neonWriteStore(); selCourse = 0;
@@ -480,7 +600,9 @@ function wireUI(){
     }catch(err){ showLoadError(err); }
   });
   initNeonInput({
-    gravity: () => setGravity(!settings.gravity),
+    // only on the menu: a race is run at the settings it started with
+    gravity: () => { if(neonScreen === 'menu') setGravity(!settings.gravity); },
+    reverse: () => { if(neonScreen === 'menu') setReverse(!settings.reverse); },
     restart: () => { if(race) startRace(); },
     quit: () => { if(neonScreen !== 'menu') quitToMenu(); },
     confirm: () => { if(neonScreen === 'menu' && !$('startBtn').disabled) startRace(); else if(neonScreen === 'finish') startRace(); },
@@ -511,8 +633,9 @@ async function bootNeon(){
 /* test seam (tools/smoke-neon.js reads the bundle's globals directly, but one tidy
    snapshot keeps the assertions short) */
 function neonState(){
-  return {screen: neonScreen, tuning: NEON, graph, mapId, courses, coverInfo, selCourse, settings, race, activeTrack, bests, hasDem: !!dem};
+  return {screen: neonScreen, tuning: NEON, graph, areas: mapAreas, mapId, courses, trackMeta, scanLeft: scanQueue.length, coverInfo, selCourse, settings, race, activeTrack, bests, hasDem: !!dem};
 }
 bootNeon();
 
-export { bootNeon, loadNeonMap, startRace, quitToMenu, setGravity, selectCourse, neonState, stepRace, trackFor };
+export { bootNeon, loadNeonMap, startRace, quitToMenu, setGravity, setReverse, setScale,
+         selectCourse, neonState, stepRace, trackFor, modeChip };

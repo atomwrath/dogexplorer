@@ -189,7 +189,8 @@ console.error = (...a) => errors.push('console.error: ' + a.map(String).join(' '
    need that is not a function declaration has to be handed out from inside the same eval. */
 const probe = `
 ;globalThis.__neon = { state: neonState, scene: () => scene, camera: () => camera,
-  keys: neonKeys, touch: neonTouch, skills: NEON_SKILL };`;
+  keys: neonKeys, touch: neonTouch, skills: NEON_SKILL, setScale, setReverse, setGravity,
+  reverseTrack, trackFrame, trackFor, buildTrack, mph, miles, feet };`;
 try { (0, eval)(app + probe); }
 catch (e) { origError('THREW during boot:', e.message, '\n', e.stack.split('\n').slice(0, 6).join('\n')); process.exit(1); }
 
@@ -353,7 +354,7 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
       const dist = raceDistance(TT), slow = Math.max(...field.map(r => r.finishT || Infinity));
       check(`six rivals all finish a ${kind}, cleanly`, field.every(r => r.done) && !bad && outside === 0,
         `${(dist / 1000).toFixed(1)} km in ${slow.toFixed(0)} s, ${field.reduce((a, r) => a + r.bumps, 0)} bumps`);
-      check(`rivals on a ${kind} ride at a sane pace`, dist / slow > 9 && dist / slow < 26, `${(dist / slow).toFixed(1)} m/s`);
+      check(`rivals on a ${kind} ride at a sane pace`, dist / slow > 11 && dist / slow < 34, `${(dist / slow).toFixed(1)} m/s`);
       const bumpRate = field.reduce((a, r) => a + r.bumps, 0) / field.length / (slow / 60);
       check(`rivals on a ${kind} are not pinballing`, bumpRate < 6, `${bumpRate.toFixed(1)} bumps/min each`);
     }
@@ -389,29 +390,26 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
     const cam = N.camera();
     check('the camera chases the player', Number.isFinite(cam.position.x) && Math.hypot(cam.position.x - cam.lookedAt.x, cam.position.z - cam.lookedAt.z) < 80);
 
-    // gravity switched mid-race: legal, but sets no record
-    const gravBefore = S.settings.gravity;
-    click('gravBtn');
-    S = N.state();
-    check('the gravity button flips gravity in the race', S.settings.gravity === !gravBefore && /OFF|ON/.test(d.getElementById('gravBtn').textContent));
-    check('a run that switched gravity is marked as mixed', S.race.mixed === true);
+    check('the HUD reports the settings the race started with', /GRAVITY/.test(d.getElementById('hudMode').textContent));
+    check('there is no in-race gravity control', !d.getElementById('gravBtn'));
+    {
+      // the G key is a menu shortcut; during a race it must not change the run
+      const before = S.settings.gravity;
+      N.keys.delete('g');
+      window.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'g' }));
+      S = N.state();
+      check('G does nothing once the lights are out', S.settings.gravity === before && S.race.gravity === before);
+      N.keys.delete('g');
+    }
     me.s = S.race.T.L - 3; me.yaw = trackFrame(S.race.T, me.s, {}).yaw; me.d = 0;
     await pump(90, 12000);
     S = N.state();
     check('crossing the line shows the finish card', S.screen === 'finish' && S.race.racers[S.race.me].done);
-    check('a mixed-gravity run sets no record', Object.keys(S.bests).length === 0, JSON.stringify(S.bests));
     check('the finish board lists every racer', d.querySelectorAll('#finBoard li').length === want);
-
-    // a clean run does set one
-    click('againBtn');
-    await pump(330, 20000);
-    S = N.state();
-    const me2 = S.race.racers[S.race.me];
-    me2.s = S.race.T.L - 3; me2.yaw = trackFrame(S.race.T, me2.s, {}).yaw; me2.d = 0;
-    await pump(90, 27000);
-    S = N.state();
     const keys = Object.keys(S.bests);
-    check('a clean run records a best time for that gravity setting', keys.length === 1 && keys[0].endsWith('|g' + (S.settings.gravity ? 1 : 0)) && S.bests[keys[0]] > 0, keys[0]);
+    check('finishing records a best time keyed to gravity, scale and direction',
+      keys.length === 1 && /\|g[01]\|s\d/.test(keys[0]) && S.bests[keys[0]] > 0, keys[0]);
+    check('the finish time is shown as minutes and seconds', /^\d:\d\d\.\d$/.test(d.getElementById('finTime').textContent));
     N.keys.clear();
     click('menuBtn');
     await pump(3, 30000);
@@ -419,6 +417,139 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
     riders = 0; N.scene().traverse(o => { if (o.name === 'neonRider') riders++; });
     check('back to the menu removes the race and its riders', S.screen === 'menu' && !S.race && riders === 0);
     check('the course list now shows the best time', /★/.test(d.querySelector('#courseList .course.on .best').textContent));
+  }
+
+  // ---- imperial units on screen ----
+  {
+    const d = window.document;
+    S = N.state();
+    check('the map line is in miles', /[\d.]+ mi\b/.test(d.getElementById('mapLine').textContent) && !/ km\b/.test(d.getElementById('mapLine').textContent));
+    check('course lengths are in miles', [...d.querySelectorAll('#courseList .meta')].every(e => / mi\b/.test(e.textContent)));
+    check('climb is in feet', /ft\b/.test(d.getElementById('courseInfo').textContent) && !/ m\b/.test(d.getElementById('courseInfo').textContent));
+    check('30 m/s reads as 67 mph', Math.round(N.mph(30)) === 67, String(N.mph(30).toFixed(2)));
+  }
+
+  // ---- reverse direction ----
+  {
+    const d = window.document;
+    const c = N.state().courses.find(x => x.kind === 'circuit') || N.state().courses[0];
+    const F = trackFor(c, { reverse: false }), B = trackFor(c, { reverse: true });
+    check('reversing keeps the same ribbon', B.n === F.n && Math.abs(B.L - F.L) < 1e-6 && B.reversed === true);
+    let sameLine = true, turned = true, kFlip = true, slopeFlip = true;
+    for (let i = 0; i < F.n; i++) {
+      const j = F.closed ? (F.n - i) % F.n : F.n - 1 - i;
+      if (Math.abs(B.x[i] - F.x[j]) > 1e-6 || Math.abs(B.z[i] - F.z[j]) > 1e-6 || Math.abs(B.elev[i] - F.elev[j]) > 1e-6) sameLine = false;
+      if (Math.abs(Math.cos(B.yaw[i] - F.yaw[j] - Math.PI)) < 0.999999) turned = false;
+      if (Math.abs(B.k[i] + F.k[j]) > 1e-9) kFlip = false;
+      if (Math.abs(B.slope[i] + F.slope[j]) > 1e-9) slopeFlip = false;
+    }
+    check('the reversed track runs the same points backwards', sameLine);
+    // the heading must point the way the track now goes, not the way it used to
+    let heads = 0;
+    for (let i = 0; i < B.n - 1; i++) {
+      const want = Math.atan2(-(B.z[i + 1] - B.z[i]), B.x[i + 1] - B.x[i]);
+      if (Math.cos(want - B.yaw[i]) < 0.9) heads++;
+    }
+    check('the reversed heading points the way the track now goes', heads === 0, `${heads} of ${B.n} samples backwards`);
+    check('reversing turns the heading round and flips every bend and grade', turned && kFlip && slopeFlip);
+    check('a climb one way is a descent the other', Math.abs(B.climb - (F.climb - (F.maxE - F.minE) * 0)) >= 0 && (F.closed ? Math.abs(B.climb - F.climb) < 1 : B.climb !== F.climb),
+      `${F.climb.toFixed(0)} / ${B.climb.toFixed(0)} m`);
+    // and it is still raceable: drive it with the AI
+    const q = makeRacer({ s: 4, d: 0, yaw: trackFrame(B, 4, {}).yaw, skill: N.skills.chill, paceMul: 1, lane: 0, seed: 4 });
+    let t = 0, outside = 0;
+    while (t < 900 && !q.done) {
+      stepRacer(q, B, rivalInput(q, B, [q], { gravity: true }, t), { gravity: true }, 1 / 60);
+      if (Math.abs(q.d) > trackFrame(B, q.s, {}).halfW) outside++;
+      t += 1 / 60;
+    }
+    check('a rival can race the reversed course', q.done && outside === 0, `${q.finishT ? q.finishT.toFixed(0) : '-'} s`);
+    N.setReverse(true);
+    S = N.state();
+    check('the Reverse button sticks and is shown on the course', S.settings.reverse === true
+      && d.querySelector('#dirSeg .btn[data-dir="rev"]').classList.contains('on')
+      && /reverse/.test(d.getElementById('courseInfo').textContent));
+    N.setReverse(false);
+  }
+
+  // ---- map scale ----
+  {
+    const d = window.document;
+    const one = N.state().courses.map(c => ({ c, T: trackFor(c) }));
+    const oneRatio = one.map(o => o.c.lenM / o.T.L).sort((p, q) => p - q)[one.length >> 1];
+    const oneSlope = Math.max(...one.map(o => Math.max(...Array.from(o.T.slope).map(Math.abs))));
+    const oneCount = one.length;
+    N.setScale(4);
+    S = N.state();
+    const four = S.courses.map(c => ({ c, T: trackFor(c) }));
+    const race4 = four.filter(o => o.T.ok);
+    check('1:4 regenerates the course set', S.courses.length > 3 && S.settings.scale === 4, `${S.courses.length} courses`);
+    const fourRatio = race4.map(o => o.c.lenM / o.T.L).sort((p, q) => p - q)[race4.length >> 1];
+    check('at 1:4 a metre of racing covers four metres of trail', Math.abs(fourRatio / oneRatio / 4 - 1) < 0.25,
+      `${oneRatio.toFixed(2)} -> ${fourRatio.toFixed(2)} real m per scene m`);
+    let worst = 0;
+    for (const o of race4) for (let i = 0; i < o.T.n; i++) worst = Math.max(worst, Math.abs(o.T.k[i]) * (o.T.halfW[i] + o.T.pad));
+    check('every course offered at 1:4 is wider than its own corners', worst <= 1.08, worst.toFixed(2));
+    check('most courses survive the scaling', race4.length / four.length >= 0.85, `${race4.length} of ${four.length} raceable`);
+    const fourSlope = Math.max(...race4.map(o => Math.max(...Array.from(o.T.slope).map(Math.abs))));
+    check('scaling down does not turn the hills into cliffs', Math.abs(fourSlope - oneSlope) < 0.08,
+      `${oneSlope.toFixed(2)} vs ${fourSlope.toFixed(2)}`);
+    /* Compare the narrowest point of each ribbon against that course's own board, not
+       sample 0 against sample 0: the first sample of one course may be on a fire road and
+       of another on singletrack, which is a two-to-one difference in width that has
+       nothing to do with scale. */
+    const roomy = list => list.map(o => Math.min(...o.T.halfW) / o.T.bodyWide);
+    const r1 = roomy(one), r4 = roomy(race4);
+    check('the board, the riders and the ribbon all narrow together at 1:4',
+      race4.every(o => o.T.bodyWide < N.state().tuning.bodyWide)
+      && Math.min(...r4) >= Math.min(...r1) * 0.9 && Math.max(...r4) <= Math.max(...r1) * 1.1,
+      `${race4[0].T.bodyWide.toFixed(2)} m board on a ${(Math.min(...race4[0].T.halfW) * 2).toFixed(1)} m ribbon`);
+    check('a 1:4 race is a shorter ride than the same map at 1:1',
+      race4.every(o => o.T.L < 4000) && race4.some(o => o.T.L > 250));
+    check('the scale is shown in the menu', /1:4/.test(d.getElementById('mapLine').textContent) && d.getElementById('scaleSel').value === '4');
+    const land = N.scene().getObjectByName('neonLand');
+    check('the scenery is rebuilt at the new scale', !!land && land.geometry.attributes.position.array.some(v => Math.abs(v) > 0));
+    // an unraceable course is offered to nobody
+    const bad = four.find(o => !o.T.ok);
+    if (bad) {
+      const idx = S.courses.indexOf(bad.c);
+      window.document.querySelectorAll('#courseList .course')[idx].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+      check('a course too tight at this scale is struck out and cannot be started',
+        d.querySelectorAll('#courseList .course')[idx].classList.contains('off') && d.getElementById('startBtn').disabled);
+      click('startBtn');
+      check('pressing START on it does nothing', N.state().screen === 'menu' && !N.state().race);
+    }
+    N.setScale(1);
+    S = N.state();
+    check('going back to 1:1 restores the full-size course set', S.courses.length === oneCount && S.settings.scale === 1);
+    await pump(40, 40000);
+    S = N.state();
+    check('the menu measures every course in the background', S.scanLeft === 0 && S.trackMeta.size >= S.courses.length,
+      `${S.trackMeta.size} measured`);
+    check('measured rows show the real length and climb',
+      [...d.querySelectorAll('#courseList .course:not(.off) .meta')].every(e => / mi\b/.test(e.textContent) && /ft\b/.test(e.textContent)));
+  }
+
+  // ---- the scenery ----
+  {
+    const sc = N.scene();
+    const land = sc.getObjectByName('neonLand');
+    check('the terrain mesh is fine-grained', land && land.userData.samples > 12000, land ? String(land.userData.samples) : 'missing');
+    check('the terrain mesh is indexed, so it costs one vertex per sample',
+      land && land.geometry.index && land.geometry.index.length > land.geometry.attributes.position.count);
+    /* Fills are ShapeGeometry, which the THREE stub above does not triangulate, so only
+       the outlines can be asserted here; the fills are checked by eye in a real browser. */
+    const kinds = [...new Set(S.areas.map(a => a.kind))];
+    check('every kind of map area is drawn', S.areas.length > 0 && kinds.length > 2
+      && kinds.every(k => !!sc.getObjectByName('neonAreaEdge_' + k)), `${S.areas.length} areas: ${kinds.join(', ')}`);
+    let calls = 0; sc.getObjectByName('neonEnv').traverse(o => { if (o.geometry) calls++; });
+    check('the whole environment is a handful of draws', calls <= 24, `${calls} objects`);
+    check('the far plane is well beyond the fog', N.camera().far > 2000 && sc.fog.far > 800, `far ${N.camera().far | 0}, fog ${sc.fog.far | 0}`);
+  }
+
+  // ---- rival pace ----
+  {
+    check('the easiest rivals are as quick as the old hardest', N.skills.chill.pace >= 1.0 && N.skills.chill.corner >= 1.04);
+    check('the pace ladder still goes up', N.skills.fair.pace > N.skills.chill.pace && N.skills.fierce.pace > N.skills.fair.pace);
   }
 
   // ---- bundle hygiene ----

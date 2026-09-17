@@ -91,40 +91,102 @@ function curvatureAt(pts, i, closed){
 }
 
 /* Laplacian relaxation, applied only where (and around where) the line is too tight, and
-   repeated until nothing is. Sprint endpoints are pinned. Returns worst |k| remaining. */
-function relaxCurvature(pts, halfW, closed){
+   repeated until nothing is. Sprint endpoints are pinned. Returns worst |k| remaining.
+
+   THE SHRINK GUARD IS NOT OPTIONAL. Laplacian smoothing pulls a closed curve towards its
+   own centre, so a loop whose every corner is too tight for the ribbon does not get
+   rounded -- it converges on a point, and the "track" that comes out is a few metres of
+   vertical curvature spikes. That never happened at 1:1, where only the odd switchback is
+   over the limit; it happens readily at 1:6, where the whole course is. Below 65% of the
+   length we started with, stop and hand back what we have: a course with one corner too
+   tight for the ribbon is a rendering blemish, a course collapsed to a dot is not a
+   course at all, and buildTrack rejects what comes back anyway. */
+function relaxCurvature(pts, halfW, closed, ds, pad){
   const n = pts.length;
+  /* Flat typed arrays, and ONE scratch buffer reused across iterations. The obvious
+     version -- an array of [x,z] pairs, copied with pts.map(p => p.slice()) every pass --
+     allocates a few thousand little arrays per iteration and hundreds of thousands per
+     track, which is most of what a build used to cost. */
+  const X = new Float64Array(n), Z = new Float64Array(n);
+  for(let i = 0; i < n; i++){ X[i] = pts[i][0]; Z[i] = pts[i][1]; }
+  const NX = new Float64Array(n), NZ = new Float64Array(n);
+  const hot = new Uint8Array(n);
+  const span = () => {
+    let L = 0;
+    for(let i = closed ? 0 : 1; i < n; i++){ const j = (i-1+n)%n; L += Math.hypot(X[i]-X[j], Z[i]-Z[j]); }
+    return L;
+  };
+  const kAt = i => {
+    const a = closed ? (i-1+n)%n : Math.max(0, i-1);
+    const b = i;
+    const c = closed ? (i+1)%n : Math.min(n-1, i+1);
+    const ux = X[b]-X[a], uz = Z[b]-Z[a], vx = X[c]-X[b], vz = Z[c]-Z[b];
+    const lu = Math.hypot(ux, uz), lv = Math.hypot(vx, vz), lw = Math.hypot(X[c]-X[a], Z[c]-Z[a]);
+    if(lu < 1e-6 || lv < 1e-6 || lw < 1e-6) return 0;
+    return -2*(ux*vz - uz*vx)/(lu*lv*lw);
+  };
+  const L0 = span();
   let worst = 0;
   for(let iter = 0; iter < 2500; iter++){
-    const hot = new Uint8Array(n);
+    hot.fill(0);
     worst = 0;
     let any = false;
     for(let i = 0; i < n; i++){
-      const k = Math.abs(curvatureAt(pts, i, closed));
-      const lim = 1/(halfW[i] + NEON.minRadiusPad);
+      const k = Math.abs(kAt(i));
+      const lim = 1/(halfW[i] + (pad == null ? NEON.minRadiusPad : pad));
       if(k > worst) worst = k;
       if(k > lim){
         any = true;
-        for(let o = -6; o <= 6; o++){
+        /* The window is a DISTANCE, not a sample count. A corner that needs an 8 m radius
+           cannot be opened out by nudging 6 samples either side when the samples are 1.2 m
+           apart -- it converges, eventually, after thousands of passes. Sized in metres it
+           takes tens, which is the difference between a menu that appears and one you wait
+           for. */
+        const w = Math.max(3, Math.min(60, Math.round((1/lim)/(ds || 4))));
+        for(let o = -w; o <= w; o++){
           const j = closed ? (i+o+n)%n : i+o;
           if(j >= 0 && j < n) hot[j] = 1;
         }
       }
     }
     if(!any) break;
-    const nx = pts.map(p => p.slice());
+    if((iter & 15) === 15 && span() < L0*0.65) break;
+    NX.set(X); NZ.set(Z);
     for(let i = 0; i < n; i++){
       if(!hot[i]) continue;
       if(!closed && (i === 0 || i === n-1)) continue;
-      const a = pts[(i-1+n)%n], c = pts[(i+1)%n];
-      nx[i][0] = pts[i][0]*0.5 + (a[0]+c[0])*0.25;
-      nx[i][1] = pts[i][1]*0.5 + (a[1]+c[1])*0.25;
+      const a = (i-1+n)%n, c = (i+1)%n;
+      NX[i] = X[i]*0.5 + (X[a]+X[c])*0.25;
+      NZ[i] = Z[i]*0.5 + (Z[a]+Z[c])*0.25;
     }
-    for(let i = 0; i < n; i++){ pts[i][0] = nx[i][0]; pts[i][1] = nx[i][1]; }
+    X.set(NX); Z.set(NZ);
   }
+  for(let i = 0; i < n; i++){ pts[i][0] = X[i]; pts[i][1] = Z[i]; }
   return worst;
 }
 
+/* Gaussian-ish smoothing in O(n) per pass regardless of width: three box blurs make a
+   good enough bell. The [1,2,1] version this replaces needed passes proportional to
+   sigma SQUARED -- at 1:6, where samples are 1.2 m apart, that was ~670 passes over a few
+   thousand samples per track, and it was most of the cost of opening the menu. */
+function smoothSigma(arr, sigma, closed){
+  const n = arr.length;
+  if(!(sigma > 0) || n < 3) return arr;
+  const r = Math.max(1, Math.round(sigma*1.2));      // 3 boxes of half-width r ~ sigma
+  let a = Float64Array.from(arr), b = new Float64Array(n);
+  const at = i => closed ? a[((i % n) + n) % n] : a[i < 0 ? 0 : i >= n ? n-1 : i];
+  for(let pass = 0; pass < 3; pass++){
+    let acc = 0;
+    for(let i = -r; i <= r; i++) acc += at(i);
+    const inv = 1/(2*r+1);
+    for(let i = 0; i < n; i++){
+      b[i] = acc*inv;
+      acc += at(i+r+1) - at(i-r);
+    }
+    const t = a; a = b; b = t;
+  }
+  return a;
+}
 function blur1(arr, passes, closed){
   const n = arr.length;
   let a = arr;
@@ -141,16 +203,48 @@ function blur1(arr, passes, closed){
 }
 
 /* -> track. `closed` tracks have n samples over length L with sample n wrapping to 0;
-   open tracks have samples at 0..L inclusive. */
-function buildTrack(graph, course, W){
+   open tracks have samples at 0..L inclusive.
+
+   MAP SCALE. The graph is always real metres; a track is SCENE metres, real/scale. The
+   division happens here, on the assembled line, and once it has happened every number
+   downstream -- sample spacing, curvature limits, ribbon width, speed, the clock -- is
+   already in the units the race is run in. Elevation is divided by the same factor, so a
+   grade is a grade at any scale: 1:4 is the same trail as a model of itself, not a
+   flatter one. What does NOT scale is the ribbon's width or the board on it, which is
+   the whole point -- at 1:4 a park that took twelve minutes to cross is a circuit you can
+   see the far side of, with corners four times tighter for a board that stayed the same
+   size. relaxCurvature then rounds what is left untakeable. */
+/* How much narrower everything across the track gets at 1:`sc` -- the ribbon, the board,
+   the rider and the contact box, all by the same factor, so the field looks and behaves
+   the same however small the map is. Distances ALONG the track scale by the full `sc`;
+   that asymmetry is the setting's whole effect. */
+function widthFactor(sc){ return Math.pow(sc > 0 ? sc : 1, 0.45); }
+
+function buildTrack(graph, course, W, scale){
+  const sc = scale > 0 ? scale : 1;
   const closed = course.kind === 'circuit';
   const raw = assembleLine(graph, course);
+  if(sc !== 1) raw.pts = raw.pts.map(p => [p[0]/sc, p[1]/sc]);
   if(closed && raw.pts.length > 2){
     const f = raw.pts[0], l = raw.pts[raw.pts.length-1];
     if(Math.hypot(f[0]-l[0], f[1]-l[1]) < 1e-6){ raw.pts.pop(); raw.kinds.pop(); }
   }
-  const hwOf = k => NEON.halfWidth[k] || NEON.halfWidth.trail;
-  let r = resampleLine(raw.pts, raw.kinds.map(hwOf), NEON.sampleM, closed);
+  /* WIDTH FOLLOWS THE SCALE, part of the way. A scaled-down map brings its corners down
+     with it, and a ribbon that stayed 8.4 m wide could not be laid through a switchback
+     that is now 3 m across without folding through itself -- relaxCurvature would round
+     the whole course away trying. Narrowing by s^0.45 keeps most of the real trail shape
+     at 1:4 and 1:6, and the floor keeps the ribbon comfortably wider than the board that
+     has to fit on it (NEON.bodyWide). The board and the riders do NOT scale: that is the
+     point of the setting -- the same board on a smaller map. */
+  const widthK = widthFactor(sc);
+  const minHalf = NEON.bodyWide/widthK + 1.3/Math.sqrt(widthK);
+  const pad = Math.max(1.2, NEON.minRadiusPad/widthK);
+  const hwOf = k => Math.max(minHalf, (NEON.halfWidth[k] || NEON.halfWidth.trail)/widthK);
+  /* Sample spacing follows the scale: a scaled-down map has the same trail detail packed
+     into fewer scene metres, and 4 m samples would step straight over it. Floored, because
+     curvature from near-touching samples is noise, not shape. */
+  const sampleM = Math.max(1.2, Math.min(NEON.sampleM, NEON.sampleM/sc));
+  let r = resampleLine(raw.pts, raw.kinds.map(hwOf), sampleM, closed);
   let pts = r.pts;
   let halfW = Array.from(blur1(Float64Array.from(r.vals), 6, closed));
   // take the Douglas-Peucker corners off everywhere, then fix what is still too tight
@@ -163,23 +257,24 @@ function buildTrack(graph, course, W){
     }
     pts = nx;
   }
-  relaxCurvature(pts, halfW, closed);
+  relaxCurvature(pts, halfW, closed, sampleM, pad);
   // relaxing shortens and bunches the samples; make them uniform again
-  r = resampleLine(pts, halfW, NEON.sampleM, closed);
+  r = resampleLine(pts, halfW, sampleM, closed);
   pts = r.pts; halfW = r.vals;
-  const worstK = relaxCurvature(pts, halfW, closed);
+  const worstK = relaxCurvature(pts, halfW, closed, sampleM, pad);
   const n = pts.length, ds = r.ds;
   const L = closed ? n*ds : (n-1)*ds;
 
   const x = new Float64Array(n), z = new Float64Array(n);
   for(let i = 0; i < n; i++){ x[i] = pts[i][0]; z[i] = pts[i][1]; }
-  /* True elevation, smoothed along the line. sigma ~ 22 m: a [1,2,1]/4 pass has variance
-     0.5 samples^2, so p passes give sigma = ds*sqrt(p/2). That is much more than terrace
-     removal needs, and deliberately so -- the DEM sees the rock fins a trail runs BESIDE,
-     and an 8 m cell next to a 40 m wall reads as a 35% grade the real tread never has. */
+  /* True elevation, smoothed along the line over about 22 REAL metres. Deliberately much
+     more than terrace removal needs: the DEM sees the rock fins a trail runs BESIDE, and
+     an 8 m cell next to a 40 m wall reads as a 35% grade the real tread never has. The
+     window is real metres at every map scale, so 1:6 is the same hill in miniature rather
+     than a smoothed-out ramp. */
   let elev = new Float64Array(n);
-  for(let i = 0; i < n; i++) elev[i] = W ? demSmooth(W, x[i], z[i]) : 0;
-  elev = blur1(elev, Math.round(2*(22/ds)*(22/ds)), closed);
+  for(let i = 0; i < n; i++) elev[i] = W ? demSmooth(W, x[i]*sc, z[i]*sc)/sc : 0;
+  elev = smoothSigma(elev, (22/sc)/ds, closed);
   const yaw = new Float64Array(n), k = new Float64Array(n), slope = new Float64Array(n);
   for(let i = 0; i < n; i++){
     const a = closed ? (i-1+n)%n : Math.max(0, i-1);
@@ -198,9 +293,45 @@ function buildTrack(graph, course, W){
   if(closed && elev[0] > elev[n-1]) climb += elev[0]-elev[n-1];
   let twist = 0;
   for(let i = 0; i < n; i++) twist += Math.abs(k[i])*ds;
-  return {closed, n, ds, L, x, z, elev, yaw, k, slope, halfW: Float64Array.from(halfW),
-          worstK, minE, maxE, climb, twistPerKm: twist/(L/1000),
+  /* Raceable at this scale? The ribbon has to fit its own corners and enough of the course
+     has to survive the rounding. A real trail scaled to 1:6 can have a switchback that no
+     amount of smoothing opens out without eating the course, and the menu's background
+     scan (main.js) quietly drops whatever comes back with ok false rather than offering a
+     race that folds through itself. */
+  let minHW = Infinity;
+  for(let i = 0; i < n; i++) minHW = Math.min(minHW, halfW[i]);
+  const ok = worstK*(minHW + pad) <= 1.05 && L >= 300
+    && L >= (course.lenM/sc)*0.6 && isFinite(L);
+  return {ok, pad, widthK, bodyLen: NEON.bodyLen/widthK, bodyWide: NEON.bodyWide/widthK,
+          closed, n, ds, L, x, z, elev, yaw, k, slope, halfW: Float64Array.from(halfW),
+          worstK, minE, maxE, climb, twistPerKm: twist/(L/1000), scale: sc, reversed: false,
           laps: course.laps || 1, course};
+}
+
+/* The same ribbon, raced the other way. Everything a track holds is either a value along
+   the line (reversed in order) or a direction along it (reversed in order AND turned
+   round): heading by half a turn, curvature and slope by sign. Sample 0 stays where it
+   was, so a circuit keeps its start line and a sprint swaps its two gates.
+
+   Done as an array transform rather than by re-running buildTrack on a flipped course,
+   because relaxCurvature is not symmetric -- smoothing a line backwards gives a slightly
+   different line, and then the two directions would not be the same racetrack. */
+function reverseTrack(T){
+  const n = T.n;
+  const src = i => T.closed ? (n - i) % n : n-1-i;
+  const map = (a, f) => { const b = new Float64Array(n); for(let i = 0; i < n; i++) b[i] = f(a[src(i)]); return b; };
+  const R = Object.assign({}, T);
+  R.x = map(T.x, v => v); R.z = map(T.z, v => v);
+  R.elev = map(T.elev, v => v); R.halfW = map(T.halfW, v => v);
+  R.yaw = map(T.yaw, v => { let a = v + Math.PI; while(a > Math.PI) a -= 2*Math.PI; return a; });
+  R.k = map(T.k, v => -v);
+  R.slope = map(T.slope, v => -v);
+  let climb = 0;
+  for(let i = 1; i < n; i++) if(R.elev[i] > R.elev[i-1]) climb += R.elev[i]-R.elev[i-1];
+  if(T.closed && R.elev[0] > R.elev[n-1]) climb += R.elev[0]-R.elev[n-1];
+  R.climb = climb;
+  R.reversed = !T.reversed;
+  return R;
 }
 
 /* Interpolated frame at arc position s. `out` is reused by hot callers. */
@@ -265,5 +396,5 @@ function rotateTrack(T, s0){
   return T;
 }
 
-export { demSmooth, assembleLine, resampleLine, curvatureAt, relaxCurvature, buildTrack,
+export { widthFactor, demSmooth, smoothSigma, assembleLine, resampleLine, curvatureAt, relaxCurvature, buildTrack, reverseTrack,
          trackFrame, trackToWorld, deckY, bendAhead, calmestStart, rotateTrack };

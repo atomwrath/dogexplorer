@@ -7,6 +7,7 @@
    things in the scene are the riders, which keep their toon materials so a pup you built
    in the creator still looks like your pup. */
 import { scene, camera, disposeGroup } from '../core/render.js';
+import { QUALITY } from '../core/quality.js';
 import { NEON } from './tuning.js';
 import { demSmooth, deckY, trackFrame } from './track.js';
 
@@ -17,9 +18,24 @@ const NEON_COL = {
   right:  0xff2bd6,
   dash:   0x4458b8,
   pylon:  0x1a2a6a,
-  grid:   0x121840,
-  ghost:  0x1c3f7a,
+  grid:   0x0e1436,
+  ghost:  0x2f6ec8,
   gate:   0xb6ff3c,
+};
+/* The map's own furniture, by the kinds geo.js already sorts features into. */
+const NEON_PATH_COL = {road: 0x6a5cff, track: 0x2f6ec8, trail: 0x1f7fa8};
+const NEON_PATH_W   = {road: 2.6, track: 1.9, trail: 1.3};
+/* Deliberately NOT cyan or magenta: those two belong to the left and right bumpers, and
+   a lake the colour of a wall is a lake you try to steer away from. */
+const NEON_AREA = {
+  water:     {line: 0x2f7bff, fill: 0x123a78, a: 0.30},
+  forest:    {line: 0x1fd07a, fill: 0x0a3a24, a: 0.18},
+  meadow:    {line: 0x3f9e5e, fill: 0x0a2a18, a: 0.13},
+  redrock:   {line: 0xff7a3c, fill: 0x3a1608, a: 0.16},
+  lightrock: {line: 0xffc14a, fill: 0x33260c, a: 0.14},
+  rock:      {line: 0x9a86e0, fill: 0x1c1640, a: 0.14},
+  building:  {line: 0xffe14a, fill: 0x2a2408, a: 0.22},
+  parking:   {line: 0x5f7ab8, fill: 0x101838, a: 0.14},
 };
 
 let envGroup = null, trackGroup = null, starField = null;
@@ -51,73 +67,197 @@ function lineMat(color, opacity, vertexColors){
 }
 
 /* ---------- environment: built once per MAP ---------- */
-function buildEnvironment(W, graph, bbox){
+/* Everything here is static, unlit and merged: the whole world is about half a dozen
+   draw calls, which is what buys the draw distance. Nothing is per-frame except the star
+   shell riding along with the camera.
+
+   `scale` is the map scale divisor -- the graph and the DEM arrive in real metres and are
+   divided by it here, exactly as track.js does for the ribbon, so the scenery lands on
+   the racing line at every setting. */
+function demDetail(){
+  return QUALITY.tier === 'low' ? 170 : QUALITY.tier === 'medium' ? 240 : 300;
+}
+
+/* A polyline drawn as a flat ribbon draped on the terrain. Lines cannot be made thicker
+   than a pixel in WebGL (linewidth is ignored on every desktop driver), and a network of
+   hairlines vanishes at distance -- a 1.5 m quad strip is both visible from a kilometre
+   up and, at a few thousand triangles for an entire map, cheaper than caring about. */
+function ribbonInto(pos, col, pts, width, yOf, c, fade){
+  const n = pts.length;
+  if(n < 2) return;
+  for(let i = 1; i < n; i++){
+    const a = pts[i-1], b = pts[i];
+    let dx = b[0]-a[0], dz = b[1]-a[1];
+    const L = Math.hypot(dx, dz);
+    if(L < 1e-6) continue;
+    dx /= L; dz /= L;
+    const nx = -dz*width*0.5, nz = dx*width*0.5;
+    const ya = yOf(a[0], a[1]), yb = yOf(b[0], b[1]);
+    const quad = [
+      a[0]+nx, ya, a[1]+nz,  a[0]-nx, ya, a[1]-nz,  b[0]+nx, yb, b[1]+nz,
+      a[0]-nx, ya, a[1]-nz,  b[0]-nx, yb, b[1]-nz,  b[0]+nx, yb, b[1]+nz,
+    ];
+    for(let q = 0; q < 18; q++) pos.push(quad[q]);
+    for(let q = 0; q < 6; q++) col.push(c.r*fade, c.g*fade, c.b*fade);
+  }
+}
+
+function buildEnvironment(W, graph, areas, bbox, scale){
   if(envGroup){ scene.remove(envGroup); disposeGroup(envGroup); }
   envGroup = new THREE.Group(); envGroup.name = 'neonEnv';
   scene.background = new THREE.Color(NEON_COL.bg);
-  scene.fog = new THREE.Fog(NEON_COL.bg, 120, 1500);
-  camera.near = 0.3; camera.far = 7000; camera.updateProjectionMatrix();
-
-  const baseM = W ? W.minM : 0;
-  const pad = 400;
-  const x0 = bbox.x0-pad, x1 = bbox.x1+pad, z0 = bbox.z0-pad, z1 = bbox.z1+pad;
+  const sc = scale > 0 ? scale : 1;
+  const baseM = W ? W.minM/sc : 0;
+  const span = Math.max(bbox.x1-bbox.x0, bbox.z1-bbox.z0);
+  /* Draw distance is the point of all the merging above: fog reaches most of the way
+     across the map, and the far plane past the far rim, so a ridge two kilometres off is
+     still a shape on the horizon rather than a hard edge in mid-air. */
+  const far = Math.max(900, span*0.85);
+  scene.fog = new THREE.Fog(NEON_COL.bg, far*0.10, far);
+  camera.near = 0.3; camera.far = Math.max(8000, far*2.2); camera.updateProjectionMatrix();
+  const floorY = -18/Math.sqrt(sc);
+  const yAt = W ? (x, z) => (demSmooth(W, x*sc, z*sc)/sc - baseM)*NEON.vertScale : () => 0;
 
   // floor grid, well under the lowest ground so nothing ever dips through it
   {
-    const span = Math.max(x1-x0, z1-z0);
-    const nice = [25, 50, 100, 200, 250, 500];
+    const nice = [25, 50, 100, 200, 250, 500, 1000];
     let cell = nice[nice.length-1];
     for(const c of nice){ if(span/c <= 90){ cell = c; break; } }
+    const pad = span*0.35;
+    const x0 = bbox.x0-pad, x1 = bbox.x1+pad, z0 = bbox.z0-pad, z1 = bbox.z1+pad;
     const pos = [];
-    const gx0 = Math.floor(x0/cell)*cell, gz0 = Math.floor(z0/cell)*cell;
-    for(let x = gx0; x <= x1; x += cell) pos.push(x, -18, z0, x, -18, z1);
-    for(let z = gz0; z <= z1; z += cell) pos.push(x0, -18, z, x1, -18, z);
+    for(let x = Math.floor(x0/cell)*cell; x <= x1; x += cell) pos.push(x, floorY, z0, x, floorY, z1);
+    for(let z = Math.floor(z0/cell)*cell; z <= z1; z += cell) pos.push(x0, floorY, z, x1, floorY, z);
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    const grid = new THREE.LineSegments(geo, lineMat(NEON_COL.grid, 0.9));
+    const grid = new THREE.LineSegments(geo, lineMat(NEON_COL.grid, 0.8));
     grid.name = 'neonGrid';
     envGroup.add(grid);
   }
 
-  // the land itself, as a coarse wire sheet coloured by height
+  /* The land, as a wire sheet. INDEXED, so each sample is one vertex shared by up to four
+     segments instead of four copies of itself -- that is what makes a 260-across grid
+     affordable where the old 110-across unindexed one was not.
+
+     Colour carries the terrain reading: a height ramp, plus a brighter band every
+     contour interval. The bands are what make relief legible at a distance; computing
+     them per vertex costs nothing at run time because they are baked into the colours. */
   if(W){
-    const stride = Math.max(1, Math.ceil(Math.max(W.width, W.height)/110));
+    const target = demDetail();
+    const stride = Math.max(1, Math.ceil(Math.max(W.width, W.height)/target));
     const w = Math.floor(W.width/stride), h = Math.floor(W.height/stride);
-    const pos = [], col = [];
-    const lo = new THREE.Color(0x0e1440), hi = new THREE.Color(0x6a2aa8), tmp = new THREE.Color();
-    const range = Math.max(1, W.maxM - W.minM);
-    const vert = (i, j) => {
-      const hh = W.heights[(j*stride)*W.width + i*stride];
-      pos.push(W.originX + (i*stride+0.5)*W.cell, (hh-baseM)*NEON.vertScale, W.originZ + (j*stride+0.5)*W.cell);
-      tmp.copy(lo).lerp(hi, (hh-W.minM)/range);
-      col.push(tmp.r, tmp.g, tmp.b);
-    };
+    const cellS = W.cell/sc;
+    const pos = new Float32Array(w*h*3), col = new Float32Array(w*h*3);
+    const lo = new THREE.Color(0x0c2a5e), mid = new THREE.Color(0x4a2ea0), hi = new THREE.Color(0xe04aff);
+    const tmp = new THREE.Color();
+    const range = Math.max(1, (W.maxM - W.minM)/sc);
+    const interval = range/14;
     for(let j = 0; j < h; j++) for(let i = 0; i < w; i++){
-      if(i+1 < w){ vert(i, j); vert(i+1, j); }
-      if(j+1 < h){ vert(i, j); vert(i, j+1); }
+      const k = j*w + i;
+      const hm = W.heights[(j*stride)*W.width + i*stride]/sc;
+      pos[k*3]   = W.originX/sc + (i*stride+0.5)*cellS;
+      pos[k*3+1] = (hm-baseM)*NEON.vertScale;
+      pos[k*3+2] = W.originZ/sc + (j*stride+0.5)*cellS;
+      const t = (hm - W.minM/sc)/range;
+      tmp.copy(t < 0.5 ? lo : mid).lerp(t < 0.5 ? mid : hi, t < 0.5 ? t*2 : (t-0.5)*2);
+      // distance to the nearest contour line, 0 (on it) .. 1 (half an interval away)
+      const band = Math.abs(((hm/interval) % 1) - 0.5)*2;
+      /* Dim between contours, bright on them: the bands are what make relief readable at
+         a kilometre, while the fill between them stays quiet enough not to fight the
+         racing line for attention. */
+      const lift = 0.22 + 1.25*Math.pow(1-band, 8);
+      col[k*3] = tmp.r*lift; col[k*3+1] = tmp.g*lift; col[k*3+2] = tmp.b*lift;
+    }
+    const idx = [];
+    for(let j = 0; j < h; j++) for(let i = 0; i < w; i++){
+      const k = j*w + i;
+      if(i+1 < w){ idx.push(k, k+1); }
+      if(j+1 < h){ idx.push(k, k+w); }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    geo.setIndex(idx);
+    const land = new THREE.LineSegments(geo, lineMat(0xffffff, 0.62, true));
+    land.name = 'neonLand';
+    land.userData.samples = w*h;
+    envGroup.add(land);
+  }
+
+  /* Ground cover: water, rock formations, meadows, buildings, car parks. Each polygon is
+     triangulated by THREE.Shape (ring vertices only, no interior points), so every vertex
+     it produces can be dropped straight onto the terrain and the fill drapes instead of
+     hovering. Outlines and fills are each merged into one mesh per kind. */
+  if(areas && areas.length){
+    const byKind = new Map();
+    for(const a of areas){
+      const spec = NEON_AREA[a.kind];
+      if(!spec || !a.rings || !a.rings.length) continue;
+      if(!byKind.has(a.kind)) byKind.set(a.kind, []);
+      byKind.get(a.kind).push(a);
+    }
+    for(const [kind, list] of byKind){
+      const spec = NEON_AREA[kind];
+      const fillPos = [], linePos = [], lineCol = [];
+      const c = new THREE.Color(spec.line);
+      for(const a of list){
+        const rings = a.rings.map(r => r.map(p => [p[0]/sc, p[1]/sc]));
+        // outline every ring, including the holes
+        for(const r of rings) ribbonInto(linePos, lineCol, r.concat([r[0]]), Math.max(1.2, 2.2/Math.sqrt(sc)),
+          (x, z) => yAt(x, z) + 0.5, c, 1);
+        const outer = rings[0];
+        if(outer.length < 4 || typeof THREE.Shape !== 'function') continue;
+        const shape = new THREE.Shape(outer.map(p => new THREE.Vector2(p[0], p[1])));
+        for(let i = 1; i < rings.length; i++)
+          shape.holes.push(new THREE.Path(rings[i].map(p => new THREE.Vector2(p[0], p[1]))));
+        let geo;
+        try{ geo = new THREE.ShapeGeometry(shape); }catch(e){ continue; }
+        const pa = geo.getAttribute && geo.getAttribute('position');
+        const index = geo.index;
+        if(!pa || !index) continue;
+        // ShapeGeometry lays the shape out in XY; here XY was (x, z), so lift it into Y
+        for(let q = 0; q < index.count; q++){
+          const v = index.array[q];
+          const px = pa.array[v*3], pz = pa.array[v*3+1];
+          fillPos.push(px, yAt(px, pz) + 0.25, pz);
+        }
+        geo.dispose();
+      }
+      if(fillPos.length){
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.Float32BufferAttribute(fillPos, 3));
+        const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({color: spec.fill, transparent:true,
+          opacity: spec.a, blending: THREE.AdditiveBlending, depthWrite:false, side: THREE.DoubleSide}));
+        m.name = 'neonArea_' + kind;
+        envGroup.add(m);
+      }
+      if(linePos.length){
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.Float32BufferAttribute(linePos, 3));
+        g.setAttribute('color', new THREE.Float32BufferAttribute(lineCol, 3));
+        const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({vertexColors:true, transparent:true,
+          opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite:false, side: THREE.DoubleSide}));
+        m.name = 'neonAreaEdge_' + kind;
+        envGroup.add(m);
+      }
+    }
+  }
+
+  // every path on the map, as a faint ribbon: roads widest, singletrack thinnest
+  if(graph){
+    const pos = [], col = [];
+    const cols = {}; for(const k in NEON_PATH_COL) cols[k] = new THREE.Color(NEON_PATH_COL[k]);
+    for(const e of graph.edges){
+      const kind = NEON_PATH_COL[e.kind] ? e.kind : 'trail';
+      const pts = e.pts.map(p => [p[0]/sc, p[1]/sc]);
+      ribbonInto(pos, col, pts, Math.max(0.9, NEON_PATH_W[kind]/Math.sqrt(sc)),
+        (x, z) => yAt(x, z) + 0.35, cols[kind], 1);
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
     geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-    const land = new THREE.LineSegments(geo, lineMat(0xffffff, 0.55, true));
-    land.name = 'neonLand';
-    envGroup.add(land);
-  }
-
-  // every trail on the map, faintly: the courses you are NOT racing right now
-  if(graph){
-    const pos = [];
-    for(const e of graph.edges){
-      for(let i = 1; i < e.pts.length; i++){
-        const a = e.pts[i-1], b = e.pts[i];
-        const ya = W ? deckY(null, demSmooth(W, a[0], a[1]), baseM) - 0.6 : NEON.lift-0.6;
-        const yb = W ? deckY(null, demSmooth(W, b[0], b[1]), baseM) - 0.6 : NEON.lift-0.6;
-        pos.push(a[0], ya, a[1], b[0], yb, b[1]);
-      }
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    const ghost = new THREE.LineSegments(geo, lineMat(NEON_COL.ghost, 0.8));
+    const ghost = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({vertexColors:true, transparent:true,
+      opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite:false, side: THREE.DoubleSide}));
     ghost.name = 'neonGhost';
     envGroup.add(ghost);
   }
@@ -128,7 +268,7 @@ function buildEnvironment(W, graph, bbox){
     let seed = 7;
     const rnd = () => { seed = (seed*16807) % 2147483647; return seed/2147483647; };
     for(let i = 0; i < 420; i++){
-      const th = rnd()*Math.PI*2, ph = Math.acos(rnd()*0.92 + 0.04), R = 5200;
+      const th = rnd()*Math.PI*2, ph = Math.acos(rnd()*0.92 + 0.04), R = camera.far*0.8;
       pos.push(Math.cos(th)*Math.sin(ph)*R, Math.cos(ph)*R, Math.sin(th)*Math.sin(ph)*R);
     }
     const geo = new THREE.BufferGeometry();
@@ -182,24 +322,25 @@ function offsetLine(T, baseM, dOf, dy){
   return out;
 }
 
-function gateAt(T, baseM, s, color){
+function gateAt(T, baseM, s, color, K){
+  const k = K > 0 ? K : 1;
   const f = trackFrame(T, s, {});
   const g = new THREE.Group();
-  const hw = f.halfW + 0.6, tall = 6.5;
+  const hw = f.halfW + 0.6*k, tall = 6.5*k;
   const mat = new THREE.MeshBasicMaterial({color});
   const glow = addMat(color, 0.25);
   for(const side of [-1, 1]){
-    const post = new THREE.Mesh(new THREE.BoxGeometry(0.35, tall, 0.35), mat);
+    const post = new THREE.Mesh(new THREE.BoxGeometry(0.35*k, tall, 0.35*k), mat);
     post.position.set(0, tall/2, side*hw);
     g.add(post);
-    const halo = new THREE.Mesh(new THREE.BoxGeometry(1.1, tall, 1.1), glow);
+    const halo = new THREE.Mesh(new THREE.BoxGeometry(1.1*k, tall, 1.1*k), glow);
     halo.position.copy(post.position);
     g.add(halo);
   }
-  const beam = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.35, hw*2+0.35), mat);
+  const beam = new THREE.Mesh(new THREE.BoxGeometry(0.35*k, 0.35*k, hw*2+0.35*k), mat);
   beam.position.set(0, tall, 0);
   g.add(beam);
-  const line = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.04, hw*2), addMat(color, 0.7));
+  const line = new THREE.Mesh(new THREE.BoxGeometry(1.2*k, 0.04, hw*2), addMat(color, 0.7));
   line.position.set(0, 0.06, 0);
   g.add(line);
   // local +X is "down the track", the same convention every rider model uses
@@ -212,6 +353,10 @@ function gateAt(T, baseM, s, color){
 function buildTrackMesh(T, baseM){
   clearTrackMesh();
   trackGroup = new THREE.Group(); trackGroup.name = 'neonTrack';
+  /* Everything measured ACROSS or ABOVE the ribbon shrinks with it on a scaled-down map --
+     the edge lines, the height of the bumper walls, the gates. A 1.15 m wall beside a
+     0.8 m board reads as a canyon; the same wall beside a 1.5 m board reads as a kerb. */
+  const K = 1/(T.widthK || 1);
   const hw = i => T.halfW[i];
   const L0 = offsetLine(T, baseM, i =>  hw(i), 0),  R0 = offsetLine(T, baseM, i => -hw(i), 0);
 
@@ -224,8 +369,8 @@ function buildTrackMesh(T, baseM){
   // edge lines: a crisp one and a wide faint one under it
   const edge = (sign, color) => {
     const o = offsetLine(T, baseM, i => sign*hw(i), 0.03);
-    const i1 = offsetLine(T, baseM, i => sign*(hw(i)-0.30), 0.03);
-    const i2 = offsetLine(T, baseM, i => sign*(hw(i)-1.1), 0.02);
+    const i1 = offsetLine(T, baseM, i => sign*(hw(i)-0.30*K), 0.03);
+    const i2 = offsetLine(T, baseM, i => sign*(hw(i)-1.1*K), 0.02);
     const crisp = new THREE.Mesh(stripGeometry(o, i1, T.closed), addMat(color, 1));
     const soft  = new THREE.Mesh(stripGeometry(o, i2, T.closed), addMat(color, 0.09));
     crisp.renderOrder = 3; soft.renderOrder = 2;
@@ -241,7 +386,7 @@ function buildTrackMesh(T, baseM){
   const wall = (sign, color) => {
     const c = new THREE.Color(color);
     const bot = offsetLine(T, baseM, i => sign*hw(i), 0.0);
-    const top = offsetLine(T, baseM, i => sign*(hw(i)+0.25), 1.15);
+    const top = offsetLine(T, baseM, i => sign*(hw(i)+0.25*K), 1.15*K);
     const cb = new Float32Array(T.n*3), ct = new Float32Array(T.n*3);
     for(let i = 0; i < T.n; i++){
       const band = (Math.floor(i*T.ds/6) % 2) ? 0.85 : 0.4;
@@ -251,8 +396,8 @@ function buildTrackMesh(T, baseM){
       new THREE.MeshBasicMaterial({vertexColors:true, transparent:true, blending:THREE.AdditiveBlending,
         depthWrite:false, side:THREE.DoubleSide}));
     m.name = sign > 0 ? 'neonBumperL' : 'neonBumperR'; m.renderOrder = 4;
-    const r0 = offsetLine(T, baseM, i => sign*(hw(i)+0.12), 1.15);
-    const r1 = offsetLine(T, baseM, i => sign*(hw(i)+0.38), 1.15);
+    const r0 = offsetLine(T, baseM, i => sign*(hw(i)+0.12*K), 1.15*K);
+    const r1 = offsetLine(T, baseM, i => sign*(hw(i)+0.38*K), 1.15*K);
     const rail = new THREE.Mesh(stripGeometry(r0, r1, T.closed), addMat(color, 0.9));
     rail.renderOrder = 4;
     trackGroup.add(m, rail);
@@ -280,13 +425,13 @@ function buildTrackMesh(T, baseM){
     trackGroup.add(dashes, new THREE.LineSegments(pg, lineMat(NEON_COL.pylon, 0.8)));
   }
 
-  trackGroup.add(gateAt(T, baseM, 0, NEON_COL.gate));
-  if(!T.closed) trackGroup.add(gateAt(T, baseM, T.L, NEON_COL.gate));
+  trackGroup.add(gateAt(T, baseM, 0, NEON_COL.gate, K));
+  if(!T.closed) trackGroup.add(gateAt(T, baseM, T.L, NEON_COL.gate, K));
 
   // bumper flash pool
   PULSES.length = 0;
   for(let i = 0; i < 8; i++){
-    const m = new THREE.Mesh(new THREE.PlaneGeometry(7, 2.6), addMat(0xffffff, 0));
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(7*K, 2.6*K), addMat(0xffffff, 0));
     m.visible = false; m.renderOrder = 6;
     trackGroup.add(m);
     PULSES.push({m, t: 0});

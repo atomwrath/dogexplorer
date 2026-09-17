@@ -4,6 +4,11 @@
 import { NEON } from './tuning.js';
 import { trackFrame, bendAhead } from './track.js';
 
+/* Board dimensions come from the TRACK, not the tuning table: a scaled-down map narrows
+   the ribbon and everything on it together (see track.js widthFactor). */
+const bodyWideOf = T => T.bodyWide || NEON.bodyWide;
+const bodyLenOf  = T => T.bodyLen  || NEON.bodyLen;
+
 const angNorm = a => { while(a > Math.PI) a -= 2*Math.PI; while(a < -Math.PI) a += 2*Math.PI; return a; };
 
 function makeRacer(o){
@@ -58,7 +63,7 @@ function stepRacer(r, T, input, env, dt){
 
   // --- bumpers ---
   let ev = null;
-  const lim = g.halfW - NEON.bodyWide*0.5;
+  const lim = g.halfW - bodyWideOf(T)*0.5;
   if(Math.abs(r.d) > lim){
     const side = r.d > 0 ? 1 : -1;
     r.d = side*lim;
@@ -106,7 +111,7 @@ function rivalInput(r, T, others, env, t){
   let vWant = Math.min(vTop, vCorner);
   // lane: own lane on the straights, inside of the bend when one is coming
   // the narrower of here and where we are about to be: a road necks down into a trail
-  const lim = Math.min(f.halfW, trackFrame(T, r.s + look, {}).halfW) - NEON.bodyWide*0.5 - 0.6;
+  const lim = Math.min(f.halfW, trackFrame(T, r.s + look, {}).halfW) - bodyWideOf(T)*0.5 - 0.6/(T.widthK || 1);
   const apex = Math.min(1, bend.k*28);
   let dWant = r.lane*lim*(1-apex) + bend.sign*lim*0.55*apex;
   // a slow wobble so they do not all trace one perfect line
@@ -118,8 +123,8 @@ function rivalInput(r, T, others, env, t){
     if(q === r || q.done) continue;
     let gap = q.prog - r.prog;
     if(T.closed){ gap = ((q.s - r.s) % T.L + T.L) % T.L; if(gap > T.L/2) gap -= T.L; }
-    if(gap > 0 && gap < 5 + r.v*0.6 && Math.abs(q.d - r.d) < NEON.bodyWide*1.3 && q.v < r.v + 1){
-      dWant = q.d + (q.d > 0 ? -1 : 1)*NEON.bodyWide*1.8;
+    if(gap > 0 && gap < 5 + r.v*0.6 && Math.abs(q.d - r.d) < bodyWideOf(T)*1.3 && q.v < r.v + 1){
+      dWant = q.d + (q.d > 0 ? -1 : 1)*bodyWideOf(T)*1.8;
       if(gap < 4) vWant = Math.min(vWant, q.v + 0.5);
     }
   }
@@ -152,8 +157,8 @@ function resolveContacts(racers, T){
     let ds = b.s - a.s;
     if(T.closed){ ds = ((ds % T.L) + T.L) % T.L; if(ds > T.L/2) ds -= T.L; }
     const dd = b.d - a.d;
-    if(Math.abs(ds) >= NEON.bodyLen || Math.abs(dd) >= NEON.bodyWide) continue;
-    const push = (NEON.bodyWide - Math.abs(dd))*0.5 + 0.01;
+    if(Math.abs(ds) >= bodyLenOf(T) || Math.abs(dd) >= bodyWideOf(T)) continue;
+    const push = (bodyWideOf(T) - Math.abs(dd))*0.5 + 0.01;
     const sgn = dd >= 0 ? 1 : -1;
     a.d -= sgn*push; b.d += sgn*push;
     a.yaw += -sgn*0.04; b.yaw += sgn*0.04;

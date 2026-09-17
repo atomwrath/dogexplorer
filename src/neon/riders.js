@@ -5,7 +5,7 @@
    their feet at y = 0, which is all this file relies on. Neither rig is metric (see the
    README's note on TRAIL_DOG_SCALE); the scales below are chosen for how a rider reads
    from a chase camera 8 m back on a 9 m wide ribbon, which is a bit bigger than life. */
-import { scene, disposeGroup } from '../core/render.js';
+import { scene, camera, disposeGroup } from '../core/render.js';
 import { clamp, mulberry32 } from '../core/math.js';
 import { buildDog } from '../dog/build.js';
 import { DEFAULTS } from '../dog/params.js';
@@ -60,19 +60,20 @@ function makeBoard(len, wide, color){
 }
 
 /* who: {kind:'dog', params} | {kind:'wild', key} */
-function makeRider(who, color, seed){
+function makeRider(who, color, seed, sizeK){
   const root = new THREE.Group(); root.name = 'neonRider';
+  const K = sizeK > 0 ? sizeK : 1;      // 1 at 1:1, smaller on a scaled-down map
   const tilt = new THREE.Group(); root.add(tilt);
   let model, refs, tail = null, head = null;
   if(who.kind === 'wild' && SPECIES[who.key]){
     const built = makeAnimalModel(who.key, mulberry32((seed|0) || 1));
     model = built.g; refs = built.refs;
-    model.scale.multiplyScalar(Math.pow(SPECIES[who.key].scale || 1, 0.5)*NEON_WILD_SCALE);
+    model.scale.multiplyScalar(Math.pow(SPECIES[who.key].scale || 1, 0.5)*NEON_WILD_SCALE*K);
     tail = refs.tailG || null; head = refs.headG || null;
   }else{
     const built = buildDog(Object.assign({}, DEFAULTS, who.params || {}));
     model = built.group; refs = built.refs;
-    model.scale.multiplyScalar(NEON_DOG_SCALE);
+    model.scale.multiplyScalar(NEON_DOG_SCALE*K);
     tail = refs.tail || null; head = refs.head || null;
     if(refs.bubble) refs.bubble.visible = false;
   }
@@ -84,28 +85,28 @@ function makeRider(who, color, seed){
     zMax = Math.max(zMax, Math.abs(leg.position.z));
   }
   const span = (xMax - xMin)*sc;
-  const len = clamp(span*1.55 + 0.5, 1.0, 3.4);
-  const wide = clamp(zMax*sc*2 + 0.45, 0.5, 1.5);
+  const len = clamp(span*1.55 + 0.5*K, 1.0*K, 3.4*K);
+  const wide = clamp(zMax*sc*2 + 0.45*K, 0.5*K, 1.5*K);
   const board = makeBoard(len, wide, color);
-  board.g.position.y = HOVER_M;
+  board.g.position.y = HOVER_M*K;
   tilt.add(board.g);
-  model.position.set((xMax + xMin)*-0.5*sc, HOVER_M + 0.05, 0);
+  model.position.set((xMax + xMin)*-0.5*sc, HOVER_M*K + 0.05*K, 0);
   tilt.add(model);
   // a marker overhead, so a rival 150 m up the road is still a dot you can chase
   const tag = new THREE.Sprite(new THREE.SpriteMaterial({map: glowTexture(), color, transparent:true,
     blending: THREE.AdditiveBlending, depthWrite:false, fog:false}));
   tag.scale.set(0.9, 0.9, 1);
-  tag.position.y = HOVER_M + 3.2*Math.max(0.7, sc/NEON_DOG_SCALE*0.5 + 0.4);
+  tag.position.y = (HOVER_M + 3.2*Math.max(0.7, sc/(NEON_DOG_SCALE*K)*0.5 + 0.4))*K;
   root.add(tag);
   scene.add(root);
   const legBase = (refs.legs || []).map(l => l.rotation.z || 0);
   const bodyBaseY = refs.bodyG ? refs.bodyG.position.y : 0;
-  return {root, tilt, model, refs, tail, head, board, tag, legBase, bodyBaseY, color, seed: seed || 1};
+  return {root, tilt, model, refs, tail, head, board, tag, legBase, bodyBaseY, color, K, seed: seed || 1};
 }
 
 /* x,y,z: deck point under the board. pitch: track pitch along heading (rad, nose up +). */
 function poseRider(R, racer, x, y, z, pitch, t, dt){
-  const hover = Math.sin(t*3.1 + R.seed)*0.035 + Math.sin(t*7.7 + R.seed*2)*0.012;
+  const hover = (Math.sin(t*3.1 + R.seed)*0.035 + Math.sin(t*7.7 + R.seed*2)*0.012)*R.K;
   R.root.position.set(x, y + hover, z);
   R.root.rotation.y = racer.yaw;
   R.tilt.rotation.z = pitch;
@@ -128,6 +129,14 @@ function poseRider(R, racer, x, y, z, pitch, t, dt){
   }
   if(R.tail) R.tail.rotation.y = Math.sin(t*(4 + 9*v01) + R.seed)*(0.25 + 0.35*v01);
   if(R.head) R.head.rotation.z = 0.06*v01;
+  /* The overhead marker is there to find a rival 150 m up the road. Close up it is a
+     dinner-plate-sized blob of additive light sitting over the rider, so it fades out
+     well before it can get in the way. */
+  if(R.tag.visible !== false){
+    const dx = camera.position.x - x, dy = camera.position.y - y, dz = camera.position.z - z;
+    const far = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    R.tag.material.opacity = Math.max(0, Math.min(1, (far - 18)/22));
+  }
   R.board.jet.material.opacity = R.tuckAmt*(0.55 + 0.25*Math.sin(t*40));
   R.board.jet.scale.set(1, 0.6 + R.tuckAmt*0.8, 1);
   R.board.glowMat.opacity = 0.55 + 0.25*v01 + 0.2*R.tuckAmt;

@@ -19,6 +19,7 @@ function initNeonInput(handlers){
     if(!neonKeys.has(k)){
       if(k === 'g' && neonHandlers.gravity) neonHandlers.gravity();
       if(k === 'r' && neonHandlers.restart) neonHandlers.restart();
+      if(k === 'v' && neonHandlers.reverse) neonHandlers.reverse();
       if(k === 'Escape' && neonHandlers.quit) neonHandlers.quit();
       if(k === 'Enter' && neonHandlers.confirm) neonHandlers.confirm();
     }

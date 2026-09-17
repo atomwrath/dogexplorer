@@ -28,8 +28,15 @@ const ROUTE_COVERED_X  = 2.6;    // cost multiplier for re-using already covered
 const ROUTE_MAX_LAPS   = 5;
 const ROUTE_MAX        = 40;     // hard stop; a map needing more than this is mis-scaled
 
-function routeTargetM(totalM){
-  return Math.max(1500, Math.min(5000, totalM/12));
+/* Target course length, in REAL metres, for a map of `totalM` real metres raced at 1:`scale`.
+   The judgement ("a good race is a few minutes long") is about the SCENE, because that is
+   what the board drives, so it is made in scene metres and converted back. At 1:4 that
+   means longer real routes -- four times the trail for the same length of race -- which is
+   exactly what makes a scaled-down map worth racing: you cover ground you could not
+   otherwise reach in one run. */
+function routeTargetM(totalM, scale){
+  const sc = scale > 0 ? scale : 1;
+  return Math.max(450, Math.min(5000, (totalM/sc)/12))*sc;
 }
 
 /* Direction a traveller is facing as they LEAVE edge e going `fwd`, and as they ENTER it.
@@ -135,11 +142,11 @@ function unwind(prev, s, stopAt){
 const stateLen = (ctx, states) => states.reduce((a, s) => a + ctx.edges[s>>1].lenM, 0);
 
 /* Circuit through seed edge `si`: out along one path to a far node, home along another. */
-function findCircuit(ctx, si, target){
+function findCircuit(ctx, si, target, minLen){
   const {edges, nodes, cover} = ctx;
   const seed = edges[si];
   if(seed.a === seed.b){
-    return seed.lenM >= ROUTE_MIN_M*0.6 ? [si*2] : null;
+    return seed.lenM >= minLen*0.6 ? [si*2] : null;
   }
   const s0 = si*2;                                    // traverse the seed a -> b
   const banned = new Uint8Array(edges.length);
@@ -189,7 +196,7 @@ function findCircuit(ctx, si, target){
     const back = unwind(B.prev, home, last);
     const loop = [s0].concat(c.out, back);
     const len = stateLen(ctx, loop);
-    if(len < ROUTE_MIN_M || len > target*1.7) continue;
+    if(len < minLen || len > target*1.7) continue;
     let fresh = 0, touch = 0, twice = false;
     const seen = new Uint8Array(nodes.length);
     const seenE = new Uint8Array(edges.length);
@@ -297,7 +304,11 @@ function buildCourses(graph, heightAt, opts){
   const cover = new Uint16Array(edges.length);
   const ctx = {edges, nodes, adj, cover, skip};
   const totalM = edges.reduce((a, e, i) => a + (skip[i] ? 0 : e.lenM), 0);
-  const target = o.targetM || routeTargetM(totalM);
+  const scale = o.scale > 0 ? o.scale : 1;
+  const target = o.targetM || routeTargetM(totalM, scale);
+  // "long enough to be a race" is a SCENE judgement, and on a small map raced in
+  // miniature even 450 scene metres is a third of everything there is.
+  const minLen = Math.min(ROUTE_MIN_M*scale, target*0.6);
   const courses = [], taken = new Set();
   const order = edges.map((_, i) => i).filter(i => !skip[i])
     .sort((p, q) => edges[q].lenM - edges[p].lenM || p - q);
@@ -341,7 +352,7 @@ function buildCourses(graph, heightAt, opts){
   for(const si of order){
     if(courses.length >= ROUTE_MAX) break;
     if(cover[si]) continue;
-    const loop = findCircuit(ctx, si, target);
+    const loop = findCircuit(ctx, si, target, minLen);
     if(loop) commit(loop, true);
   }
   for(const si of order){
@@ -354,7 +365,7 @@ function buildCourses(graph, heightAt, opts){
     /* The last few seeds are scraps between courses already laid. A "new" sprint that is
        mostly old ground is list clutter, not coverage -- leave the scrap uncovered and
        say so in `coverage` instead. */
-    if(len >= ROUTE_MIN_M && fresh >= Math.max(300, len*0.4)) commit(path, false);
+    if(len >= minLen && fresh >= Math.max(Math.min(300*scale, target*0.25), len*0.35)) commit(path, false);
   }
   let covered = 0;
   edges.forEach((e, i) => { if(!skip[i] && cover[i]) covered += e.lenM; });
