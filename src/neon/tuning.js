@@ -9,14 +9,26 @@ const NEON = {
   vertScale:  1.5,      // how much taller the hills LOOK. Physics uses true slope.
   lift:       2.2,      // deck height above the wireframe ground
 
-  // --- the board ---
-  thrust:     7.2,      // m/s^2 at full throttle
-  boostThrust:6.5,      // extra, while boosting
-  dragK:      0.0145,   // v^2 drag: flat-ground top speed = sqrt(thrust/dragK) ~ 22 m/s
+  /* --- the board ---
+     TOP SPEED, THE ONE NUMBER PEOPLE ASK ABOUT: flat ground, no boost, Standard class, is
+         sqrt(thrust / dragK)
+     because that is where thrust stops winning and drag catches up (drag grows with v^2,
+     thrust does not). Raise thrust or lower dragK to make the whole game faster -- every
+     other speed in the file rides on this one: Cruiser/Turbo are multiples of it
+     (NEON_CLASS below), a burn adds boostThrust on top of it, and gradeTopSpeed() in
+     racer.js solves the same equation with gravity added in for a hill. At the numbers
+     below, flat-ground Standard tops out at 60 mph (26.8 m/s); Turbo, at 1.26x, reaches
+     75.6 mph. The steering and bumper numbers were tuned against this range -- push it
+     much further and a full-lock turn at top speed starts to feel unrecoverable, which is
+     the next thing to retune if you do. */
+  thrust:     9.0,      // m/s^2 at full throttle -- RAISE THIS to make the game faster
+  boostThrust:8.2,      // extra, while a burn is running
+  dragK:      0.0125,   // v^2 drag -- LOWER THIS to make the game faster (same effect, opposite knob)
   rollK:      0.05,     // linear rolling loss
-  brake:      14,
+  brake:      15,
   steerRate:  2.1,      // rad/s at full lock, low speed
-  steerFade:  0.022,    // lock shrinks with speed: rate / (1 + v*steerFade)
+  steerFade:  0.026,    // lock shrinks with speed: rate / (1 + v*steerFade) -- raised alongside
+                         // the speed increase, so full lock at 75 mph is still a turn and not a spin
   railAssist: 0.55,     // share of the track's own bend the board follows unprompted
   maxSlip:    1.15,     // rad; you can carve, you cannot turn round
   // --- gravity ---
@@ -28,17 +40,18 @@ const NEON = {
   bumpRestitution: 0.65,// how much of the into-wall angle comes back out
   bumpKick:   0.16,     // rad, minimum angle you leave the wall at
   bumpLock:   0.18,     // s of reduced steering after a hit, so it reads as a bounce
-  // --- boost: one burn per press, not a held button ---
+  /* --- boost: a rack of rockets, one burn each ---
+     Nothing recharges. You start with a couple and everything after that is picked up off
+     the track, which is what makes the cells worth going out of your way for and a burn
+     worth saving for the straight that matters. */
   burnS:      1.6,      // how long a burn lasts
-  burnCost:   0.34,     // battery per burn, so a full pack is three of them
   burnLock:   0.45,     // dead time after a burn, so it reads as a discrete shove
-  boostCharge:0.055,    // per second, always
-  regenGain:  0.9,      // extra charge per second per unit of downhill slope, gravity on
-  // --- boost cells sitting on the course ---
+  fuelStart:  2,        // rockets on the rack at the lights
+  fuelMax:    5,
+  // --- rocket pickups sitting on the course ---
   cellEveryM: 240,      // one every so many metres of track
   cellGrab:   1.5,      // how close across the track you have to pass
-  cellGive:   0.40,     // battery per cell
-  cellBackS:  9,        // seconds before a taken cell comes back
+  cellBackS:  9,        // seconds before a taken rocket comes back
   // --- racers bumping each other ---
   bodyLen:    2.6,
   bodyWide:   1.5,
@@ -50,12 +63,12 @@ const NEON = {
    The whole ladder moved up one rung: what used to be the hardest setting is now the
    easiest, because rivals that lose ground on every straight are not opponents, they are
    scenery. `pace` above 1 means a rival out-runs the player's unboosted top speed, so on
-   Fair and Fierce the boost battery is not a treat -- it is how you stay in touch, and
-   picking where to spend it is the race. */
+   Fair and Fierce a rocket is not a treat -- it is how you stay in touch, and picking
+   where to spend it is the race. */
 const NEON_SKILL = {
-  chill:  {pace: 1.00, corner: 1.04, wobble: 0.18, label: 'Chill'},
-  fair:   {pace: 1.07, corner: 1.16, wobble: 0.10, label: 'Fair'},
-  fierce: {pace: 1.14, corner: 1.28, wobble: 0.05, label: 'Fierce'},
+  chill:  {pace: 1.06, corner: 1.10, wobble: 0.16, label: 'Chill'},
+  fair:   {pace: 1.14, corner: 1.22, wobble: 0.09, label: 'Fair'},
+  fierce: {pace: 1.22, corner: 1.34, wobble: 0.04, label: 'Fierce'},
 };
 
 /* Speed classes. The multiplier is on TOP SPEED; thrust goes as its square so the class

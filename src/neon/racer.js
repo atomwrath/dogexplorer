@@ -13,7 +13,7 @@ const angNorm = a => { while(a > Math.PI) a -= 2*Math.PI; while(a < -Math.PI) a 
 
 function makeRacer(o){
   return Object.assign({
-    s: 0, d: 0, yaw: 0, v: 0, lap: 0, prog: 0, battery: 1, boosting: false,
+    s: 0, d: 0, yaw: 0, v: 0, lap: 0, prog: 0, fuel: NEON.fuelStart, boosting: false,
     bumpT: 0, bumpSide: 0, bumps: 0, lean: 0, time: 0, done: false, finishT: null,
     place: 0, isPlayer: false, name: '?', skill: null, lane: 0, seed: 1, wob: 0,
     steerIn: 0, slope: 0, speedK: 1, burnT: 0, lockT: 0, boostWasDown: false, cells: 0,
@@ -22,6 +22,37 @@ function makeRacer(o){
 
 /* Top speed on the flat for this board: sqrt(thrust/drag), with the class multiplier.  */
 function topSpeed(r){ return Math.sqrt(NEON.thrust/NEON.dragK)*(r.speedK || 1); }
+
+/* Top speed ON A GRADE, which is a different number and the one a rider actually needs.
+   Terminal speed is where thrust and gravity balance drag, so a 10% descent does not just
+   accelerate you -- it RAISES the ceiling you accelerate towards, and a climb lowers it.
+   The physics in stepRacer has always worked this way; this is the same sum solved for v,
+   so that a rival aims at the speed the hill allows instead of holding its flat-ground
+   number and braking down every descent. */
+function gradeTopSpeed(r, slope, gravity){
+  const k2 = (r.speedK || 1)*(r.speedK || 1);
+  let a = NEON.thrust*k2;
+  if(gravity){
+    const g = Math.max(-NEON.slopeClamp, Math.min(NEON.slopeClamp, slope || 0));
+    a -= NEON.gravity*NEON.gravityGain*g/Math.sqrt(1 + g*g);
+  }
+  if(a <= 0) return 0;                       // steeper than the board can climb
+  // a = dragK v^2 + rollK v, solved for v
+  const disc = NEON.rollK*NEON.rollK + 4*NEON.dragK*a;
+  return (-NEON.rollK + Math.sqrt(disc))/(2*NEON.dragK);
+}
+
+/* The grade a rider is about to be on, averaged over the next few seconds of travel. */
+function slopeAhead(T, s, ahead){
+  let sum = 0, n = 0;
+  const steps = Math.max(1, Math.ceil(ahead/T.ds));
+  for(let q = 0; q <= steps; q++){
+    let i = Math.floor(s/T.ds) + q;
+    if(T.closed) i = ((i % T.n) + T.n) % T.n; else if(i >= T.n) break;
+    sum += T.slope[i]; n++;
+  }
+  return n ? sum/n : 0;
+}
 
 /* input: {steer -1..1 (left +), throttle 0..1, brake 0..1, boost bool}
    env:   {gravity bool}
@@ -43,10 +74,10 @@ function stepRacer(r, T, input, env, dt){
   r.burnT = Math.max(0, r.burnT - dt);
   r.lockT = Math.max(0, r.lockT - dt);
   const wants = !!input.boost;
-  if(wants && !r.boostWasDown && !r.done && r.burnT <= 0 && r.lockT <= 0 && r.battery >= NEON.burnCost){
+  if(wants && !r.boostWasDown && !r.done && r.burnT <= 0 && r.lockT <= 0 && r.fuel >= 1){
     r.burnT = NEON.burnS;
     r.lockT = NEON.burnS + NEON.burnLock;
-    r.battery -= NEON.burnCost;
+    r.fuel--;
     r.burns = (r.burns || 0) + 1;
     r.burnFired = true;                     // one frame's flag, for the sound and the flame
   }else r.burnFired = false;
@@ -58,8 +89,6 @@ function stepRacer(r, T, input, env, dt){
   if(env.gravity) a -= NEON.gravity*NEON.gravityGain*slopeAlong/Math.sqrt(1+slopeAlong*slopeAlong);
   r.v = Math.max(0, r.v + a*dt);
   r.boosting = boosting;
-  r.battery = Math.max(0, Math.min(1, r.battery + NEON.boostCharge*dt
-    + (env.gravity && slopeAlong < 0 ? -slopeAlong*NEON.regenGain*dt : 0)));
 
   // --- heading ---
   r.bumpT = Math.max(0, r.bumpT - dt);
@@ -126,7 +155,9 @@ function rivalInput(r, T, others, env, t){
      one arrives too hot and meets the bumper, which is the whole reason bumpers exist. */
   const nerve = 1 + sk.wobble*0.45*Math.sin(t*0.23 + r.seed*2.1);
   const vCorner = Math.sqrt((15*sk.corner*nerve)/Math.max(bend.k, 1e-4));
-  const vTop = topSpeed(r)*sk.pace*r.paceMul;
+  /* The ceiling the hill allows, not the flat-ground one -- otherwise a rival brakes all
+     the way down a descent to hold a number that gravity has already made meaningless. */
+  const vTop = gradeTopSpeed(r, slopeAhead(T, r.s, look*1.5), env.gravity)*sk.pace*r.paceMul;
   let vWant = Math.min(vTop, vCorner);
   // lane: own lane on the straights, inside of the bend when one is coming
   // the narrower of here and where we are about to be: a road necks down into a trail
@@ -160,7 +191,7 @@ function rivalInput(r, T, others, env, t){
   const steer = Math.max(-1, Math.min(1, need/rate));
   /* Boost cells: worth a metre or two of lane, never worth a corner. A rival with a full
      pack drives its line and leaves the cells for whoever needs them. */
-  if(env.cells && r.battery < 0.75){
+  if(env.cells && r.fuel < NEON.fuelMax){
     for(const c of env.cells){
       if(!c.live) continue;
       let gap = c.s - r.s;
@@ -177,8 +208,7 @@ function rivalInput(r, T, others, env, t){
     throttle: dv > -0.5 ? 1 : 0,
     brake: dv < -2.5 ? Math.min(1, (-dv-2.5)/6) : 0,
     // one press, and only where it pays: out of a corner onto something straight
-    boost: r.burnT <= 0 && r.lockT <= 0 && r.battery >= NEON.burnCost + 0.05
-      && dv > 2 && bend.k < 0.012,
+    boost: r.burnT <= 0 && r.lockT <= 0 && r.fuel >= 1 && dv > 2 && bend.k < 0.012,
   };
 }
 
@@ -215,4 +245,4 @@ function rankRacers(racers){
   return order;
 }
 
-export { angNorm, makeRacer, stepRacer, topSpeed, raceDistance, rivalInput, resolveContacts, rankRacers };
+export { angNorm, makeRacer, stepRacer, topSpeed, gradeTopSpeed, slopeAhead, raceDistance, rivalInput, resolveContacts, rankRacers };

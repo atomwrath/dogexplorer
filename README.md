@@ -13,6 +13,22 @@ Two cartoon 3D dog games that run in any browser — no install, no build step r
   (`s` along, `d` across), which is what keeps them on the path: `|d|` cannot exceed the half-width,
   so there is no junction or switchback to leak through. The centreline is relaxed until its radius
   is never tighter than half-width + `minRadiusPad`, or the ribbon's inside edge would fold.
+  Gravity, direction and map scale are chosen in the menu and fixed for the race, and each is
+  part of a best time's key. MAP SCALE (1:1 to 1:6) divides distances ALONG the trail by the
+  scale but only `s^0.45` ACROSS it -- ribbon, board, rider and contact box together -- because
+  a full-width ribbon cannot be laid through a switchback that scaled down with the map. The
+  course generator retargets with the scale, so a race stays a few minutes long; anything still
+  too tight is marked unraceable and struck out in the menu by the background scan.
+  Boost is ONE BURN PER PRESS from a rack of rockets that NEVER refills itself -- everything
+  after the first two is picked up off the course. The exhaust is angled down at the deck on
+  purpose: the chase camera looks along the board's own axis, so a plume fired dead astern
+  renders as a dot, and what sells a burn is the scorch it throws on the track behind.
+  Rival pace is set from the top speed THE GRADE ALLOWS (gradeTopSpeed), not the flat-ground
+  one, or the field brakes all the way down every descent; speed class scales top speed, rivals with it. At Fierce, every
+  stored ghost for that exact course setting lines up with the field -- a ghost is the recorded
+  line that set the time, replayed, so it cannot be blocked or shoved. Scenery draped on the
+  terrain is subdivided (RIBBON_STEP_M): a simplified trail segment that spans a rock fin
+  instead of following it renders as a sheet of light hanging in the sky.
   Verify with `node tools/smoke-neon.js`; `tools/revert-neon.py` proves each check load-bearing.
 
 Both games share the same dog builder, so a pup you design in the creator is the pup you run with in the city.

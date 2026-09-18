@@ -21,7 +21,7 @@ import { NEON, NEON_SKILL, NEON_CLASS, NEON_CAM, miles, feet, mph } from './tuni
 import { buildCourses } from './routes.js';
 import { buildTrack, reverseTrack, widthFactor, trackFrame, trackToWorld, deckY, calmestStart, rotateTrack, assembleLine } from './track.js';
 import { makeRacer, stepRacer, rivalInput, resolveContacts, rankRacers, raceDistance, topSpeed } from './racer.js';
-import { buildEnvironment, buildTrackMesh, clearTrackMesh, bumperPulse, updateScene } from './neon-scene.js';
+import { buildEnvironment, buildTrackMesh, clearTrackMesh, bumperPulse, updateScene, clearSmoke } from './neon-scene.js';
 import { makeRider, poseRider, disposeRider } from './riders.js';
 import { initNeonInput, readNeonInput, resetNeonInput } from './neon-input.js';
 import { startHum, setHum, stopHum, burnSound, cellSound } from './neon-sound.js';
@@ -49,7 +49,7 @@ const trackMeta = new Map();    // sig|scale -> {L, climb, ok}: filled in by the
 let scanQueue = [];
 let activeTrack = null;         // the ribbon currently in the scene
 const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale: 1,
-                  cls: 'standard', cam: 'normal', rider: 'p:0', course: '', map: DEFAULT_NEON_WORLD};
+                  cls: 'standard', cam: 'normal', ghosts: true, rider: 'p:0', course: '', map: DEFAULT_NEON_WORLD};
 let bests = {}, ghostStore = {};
 let race = null;                // {T, racers, riders, me, phase, t, grav, scale, reverse, ...}
 let neonScreen = 'menu';   // NOT `screen`: the bundle is one classic script, and a
@@ -290,21 +290,46 @@ function riderChoices(){
   return out;
 }
 const riderWho = id => (riderChoices().find(c => c.v === id) || {}).who;
-/* A ghost is a recording, so it is drawn as one: the same rider, lit down to a memory. */
-function fadeRider(R){
+/* A ghost is a recording, so it is drawn as one: the same rider, cooled to a pale trace of
+   itself in its own colour.
+
+   TWO THINGS HERE ARE LOAD-BEARING. The single-material case must stay a single material:
+   an earlier version wrapped every mesh's material in an array and then failed to unwrap
+   it (the Array.isArray check it used was testing the array it had just built), and a mesh
+   with an array material but no geometry groups draws NOTHING -- which is why the ghosts
+   were invisible except for the marker sprite hanging over the track, the "tiny orb" they
+   were reported as. And the opacity has to stay well up: at 0.3 a toon-shaded pup on a
+   dark deck is a smudge. 0.62, tinted towards the ghost's colour, reads clearly as a
+   rider you can chase without being mistaken for a solid one. */
+function fadeRider(R, color){
+  const tint = new THREE.Color(color);
   R.root.traverse(o => {
     if(!o.material || o.isSprite) return;
-    const mats = Array.isArray(o.material) ? o.material : [o.material];
-    o.material = mats.map(m => {
+    const one = !Array.isArray(o.material);
+    const mats = (one ? [o.material] : o.material).map(m => {
       const c = m.clone ? m.clone() : m;
+      // the rocket flame and its glow are animated from zero; fading them means nothing
+      if(m.opacity != null && m.opacity < 0.05) return c;
       c.transparent = true;
-      c.opacity = (m.opacity == null ? 1 : m.opacity)*0.3;
-      c.depthWrite = false;
+      c.opacity = (m.opacity == null ? 1 : m.opacity)*0.62;
+      /* DEPTH WRITE STAYS ON. A rider is dozens of separate meshes -- legs, body, board
+         deck, kicks, hover pads -- and Three.js sorts transparent objects only by their
+         centroid distance to the camera, not per pixel. With depthWrite off, that sort is
+         unstable across a model with this many overlapping parts: a leg drawn before the
+         belly it sits in front of gets painted over by it, and the parts near the board
+         end up reading faint while the parts near the head don't. At 0.62 opacity a ghost
+         is mostly-opaque anyway, so writing depth lets each part occlude the ghost's OWN
+         farther parts correctly -- which is what actually fixed the top-bright,
+         bottom-faint look -- at the minor cost of a ghost no longer softly blending with
+         something directly behind it (it sits over open track, so that never shows). */
+      c.depthWrite = true;
+      if(c.color) c.color.lerp(tint, 0.4);
+      if(c.emissive) c.emissive.lerp(tint, 0.4);
       return c;
     });
-    if(!Array.isArray(o.material)) o.material = o.material[0];
+    o.material = one ? mats[0] : mats;
   });
-  if(R.tag) R.tag.material.opacity = 0.35;
+  if(R.tag) R.tag.material.opacity = 0.7;
 }
 function fillRiderSelect(){
   const sel = $('riderSel');
@@ -326,8 +351,9 @@ function syncMenu(){
   document.querySelectorAll('#classSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.cls === settings.cls));
   document.querySelectorAll('#camSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.cam === settings.cam));
   $('scaleSel').value = String(settings.scale);
-  $('ghostNote').textContent = settings.skill === 'fierce'
-    ? 'Fierce also lines up the fastest ghost of every rider who has raced this course.'
+  document.querySelectorAll('#ghostSeg .btn').forEach(b => b.classList.toggle('on', (b.dataset.ghost === '1') === settings.ghosts));
+  $('ghostNote').textContent = settings.ghosts
+    ? 'The fastest ghost of every rider who has raced this course lines up with the field.'
     : '';
 }
 /* Gravity, direction and scale are set BEFORE the lights go out and hold for the whole
@@ -366,6 +392,11 @@ function setClass(name){
   settings.cls = name;
   syncMenu(); neonWriteStore(); renderCourseList();
 }
+function setGhosts(on){
+  if(settings.ghosts === !!on) return;
+  settings.ghosts = !!on;
+  syncMenu(); neonWriteStore();
+}
 function setCam(name){
   if(!NEON_CAM[name] || settings.cam === name) return;
   settings.cam = name;
@@ -401,6 +432,7 @@ function endRace(){
   if(!race) return;
   for(const R of race.riders) disposeRider(R);
   clearCells();
+  clearSmoke();
   race = null;
   stopHum();
 }
@@ -440,12 +472,13 @@ function startRace(){
      time on exactly this course, in this class, this way round, at this scale, with this
      gravity, lines up as the run that set it. They replay, so they cannot be blocked or
      shoved, but they are ranked with everyone else -- beating a ghost is beating the time. */
-  const ghosts = settings.skill === 'fierce' ? bestGhosts(ghostStore, bestKey(course, settings)) : [];
+  const ghosts = settings.ghosts ? bestGhosts(ghostStore, bestKey(course, settings)) : [];
   ghosts.forEach((g, i) => {
     const gr = makeGhostRacer(g, T, GHOST_COLORS[i % GHOST_COLORS.length]);
     racers.push(gr);
     const R = makeRider(riderWho(g.rider) || choice.who, gr.color, 40 + i, sizeK);
-    fadeRider(R);
+    R.isGhost = true;
+    fadeRider(R, gr.color);
     riders.push(R);
   });
   const line = assembleLine(graph, course).pts;
@@ -499,9 +532,11 @@ function stepRace(dt){
     // rubber band, gently: nobody should be a dot on the horizon either way
     if(!r.isPlayer && !r.done){
       const gap = me.prog - r.prog;
-      r.paceBand = clamp(gap/400, -0.06, 0.08);
+      /* Only a long way clear does a rival ease off, and only a little: the band is here
+         so a runaway leader stays on screen, not to hand the race back. */
+      r.paceBand = clamp(gap/700, -0.03, 0.08);
       if(inp.throttle && r.paceBand < 0 && r.v > 8) inp.throttle = 1 + r.paceBand*2;
-      if(r.paceBand > 0.02) inp.boost = inp.boost || (gap > 60 && r.battery > 0.3);
+      if(r.paceBand > 0.02) inp.boost = inp.boost || (gap > 60 && r.fuel >= 1);
     }
     const ev = stepRacer(r, T, inp, env, dt);
     if(ev) onBump(r, ev);
@@ -551,6 +586,30 @@ function renderBoard(){
     li.append(a, b);
     ol.appendChild(li);
   }
+}
+
+/* THE ROCKET RACK. One icon per rocket on board, spent ones left as empty outlines so the
+   rack reads as "two of five used" at a glance rather than a bar that could be anything.
+   Rebuilt only when the count changes -- this runs every frame. */
+function paintFuel(me){
+  const box = $('fuelRack');
+  const lit = me.fuel, max = NEON.fuelMax;
+  if(box.childElementCount !== max){
+    box.textContent = '';
+    for(let i = 0; i < max; i++){
+      const el = document.createElement('i');
+      el.className = 'rocket';
+      box.appendChild(el);
+    }
+    box.dataset.lit = '';
+  }
+  const key = lit + (me.burnT > 0 ? 'b' : '');
+  if(box.dataset.lit === key) return;
+  box.dataset.lit = key;
+  [...box.children].forEach((el, i) => {
+    el.classList.toggle('on', i < lit);
+    el.classList.toggle('firing', me.burnT > 0 && i === lit);
+  });
 }
 
 /* ---------- camera ---------- */
@@ -629,14 +688,12 @@ function drawRace(dt){
                                      : Math.round(100*clamp(me.s/T.L, 0, 1)) + '%';
   $('hudClock').textContent = fmtTime(me.done ? me.finishT : me.time);
   $('speedVal').textContent = String(Math.round(mph(me.v)));
-  $('battFill').style.width = Math.round(me.battery*100) + '%';
+  paintFuel(me);
   const pct = Math.round(me.slope*100);
   $('slopeVal').textContent = !R.gravity ? '' : pct > 1 ? '▲ ' + pct + '%' : pct < -1 ? '▼ ' + (-pct) + '%'
     : (dem ? Math.round(feet(f.elev)) + ' ft' : '');
   setHum(me.v, me.burnT > 0 ? Math.min(1, me.burnT/NEON.burnS + 0.35) : 0);
-  $('burnPip').textContent = me.burnT > 0 ? 'BURN'
-    : me.battery >= NEON.burnCost ? Math.floor(me.battery/NEON.burnCost) + ' BURN' + (me.battery >= NEON.burnCost*2 ? 'S' : '')
-    : 'CHARGING';
+  $('burnPip').textContent = me.burnT > 0 ? 'BURNING' : me.fuel ? '' : 'OUT OF ROCKETS';
   $('burnPip').classList.toggle('hot', me.burnT > 0);
   const fit = paintMap($('minimap'), graph, mapBox, R.line, T.closed, 'mm|' + mapId + '|' + R.course.sig, true);
   const sc = R.scale;
@@ -684,6 +741,7 @@ function wireUI(){
   document.querySelectorAll('#gravSeg .btn').forEach(b => b.addEventListener('click', () => setGravity(b.dataset.grav === '1')));
   document.querySelectorAll('#classSeg .btn').forEach(b => b.addEventListener('click', () => setClass(b.dataset.cls)));
   document.querySelectorAll('#camSeg .btn').forEach(b => b.addEventListener('click', () => setCam(b.dataset.cam)));
+  document.querySelectorAll('#ghostSeg .btn').forEach(b => b.addEventListener('click', () => setGhosts(b.dataset.ghost === '1')));
   document.querySelectorAll('#dirSeg .btn').forEach(b => b.addEventListener('click', () => setReverse(b.dataset.dir === 'rev')));
   $('scaleSel').addEventListener('change', e => setScale(+e.target.value));
   $('riderSel').addEventListener('change', e => { settings.rider = e.target.value; neonWriteStore(); });
@@ -740,5 +798,5 @@ function neonState(){
 }
 bootNeon();
 
-export { bootNeon, loadNeonMap, startRace, quitToMenu, setGravity, setReverse, setScale, setClass, setCam, cycleCam,
+export { bootNeon, loadNeonMap, startRace, quitToMenu, setGravity, setReverse, setScale, setClass, setCam, setGhosts, cycleCam,
          selectCourse, neonState, stepRace, trackFor, modeChip };

@@ -58,12 +58,17 @@ h2{margin:0 0 8px; font-size:12px; letter-spacing:.2em; color:var(--dim); font-w
 #colSetup{display:flex; flex-direction:column; gap:8px; min-height:0; overflow-y:auto;}
 #preview{width:100%; height:170px; border:1px solid var(--line); border-radius:4px; background:#05081a;}
 #courseInfo{color:var(--dim); font-size:13px; min-height:1.4em;}
+/* START sits right after the preview, ahead of every setting row, and STAYS at the top of
+   the scrolling column: a plain background at least as dark as the panel behind it, or a
+   row scrolling underneath shows through the gap the border-radius leaves at the corners. */
+#startBtn{position:sticky; top:0; z-index:2; width:100%; margin:2px 0 4px; font-size:17px;
+  letter-spacing:.28em; background:var(--panel);}
 .row{display:flex; align-items:center; justify-content:space-between; gap:10px;}
 .seg{display:inline-flex; gap:4px;}
 .stepper{display:inline-flex; align-items:center; gap:10px;}
 .stepper b{min-width:1.5em; text-align:center; color:var(--cyan);}
 .filerow{cursor:pointer; color:var(--dim);}
-#startBtn{margin-top:4px; font-size:18px; letter-spacing:.3em;}
+
 @media (max-width:720px){
   #menuCols{grid-template-columns:1fr; overflow-y:auto;}
   #courseList{max-height:34vh;}
@@ -89,8 +94,24 @@ body[data-screen="race"] #hud, body[data-screen="count"] #hud, body[data-screen=
 #hudB{left:50%; bottom:calc(14px + var(--safe-b)); transform:translateX(-50%); text-align:center; text-shadow:0 0 8px #000;}
 #speedVal{font-size:44px; line-height:1; color:var(--text);}
 #speedUnit{font-size:11px; letter-spacing:.3em; color:var(--dim);}
-#batt{width:180px; height:6px; margin:6px auto 0; border:1px solid var(--line); border-radius:3px; overflow:hidden;}
-#battFill{display:block; height:100%; width:100%; background:var(--mag); box-shadow:0 0 10px var(--mag);}
+/* THE ROCKET RACK. Each rocket is one element: a body, a nose (the ::before triangle) and
+   fins (::after), drawn in CSS so the HUD stays a DOM overlay with no canvas of its own.
+   Spent ones keep their outline, so the rack shows what you had as well as what is left. */
+#fuelRack{display:flex; gap:14px; justify-content:center; margin:12px 0 4px; height:30px;}
+.rocket{position:relative; width:11px; height:21px; border-radius:3px 3px 1px 1px;
+  border:1.5px solid var(--line); background:transparent; opacity:.55;}
+.rocket::before{content:""; position:absolute; left:50%; top:-9px; transform:translateX(-50%);
+  border-left:5.5px solid transparent; border-right:5.5px solid transparent; border-bottom:9px solid var(--line);}
+.rocket::after{content:""; position:absolute; left:-5px; right:-5px; bottom:0; height:7px;
+  border-left:1.5px solid var(--line); border-right:1.5px solid var(--line);
+  clip-path:polygon(0 100%, 30% 0, 70% 0, 100% 100%);}
+.rocket.on{opacity:1; border-color:var(--lime); background:rgba(182,255,60,.22);
+  box-shadow:0 0 8px rgba(182,255,60,.5);}
+.rocket.on::before{border-bottom-color:var(--lime);}
+.rocket.on::after{border-color:var(--lime);}
+.rocket.firing{opacity:1; border-color:var(--mag); box-shadow:0 0 12px var(--mag);
+  animation:rocketFire .28s linear infinite;}
+@keyframes rocketFire{ 50%{ box-shadow:0 0 4px var(--mag); } }
 #burnPip{font-size:11px; letter-spacing:.2em; color:var(--dim); margin-top:4px; min-height:1.2em;}
 #burnPip.hot{color:var(--lime);}
 #slopeVal{font-size:12px; color:var(--dim); min-height:1.3em; margin-top:3px;}
@@ -104,7 +125,7 @@ body.touch #touchCtl{display:flex;}
    the bottom edge is free; the readout just gets smaller and sits between them. */
 body.touch #hudB{bottom:calc(10px + var(--safe-b)); z-index:1;}
 body.touch #speedVal{font-size:30px;}
-body.touch #batt{width:120px;}
+body.touch #fuelRack{gap:10px; height:24px; transform:scale(.8);}
 body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
 .tgrp{display:flex; gap:12px; pointer-events:auto;}
 /* The steering pad is ONE control: where the thumb is across it sets the lock, and

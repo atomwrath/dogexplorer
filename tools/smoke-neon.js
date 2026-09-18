@@ -75,6 +75,8 @@ class Color {
     return this;
   }
   setHex(h) { return this.set(h); } copy(c) { return this.set(c); } clone() { return new Color(this); }
+  setRGB(r, g, b) { this.r = r; this.g = g; this.b = b; return this; }
+  setStyle(s) { return this.set(s); } getHexString() { return this.getHex().toString(16).padStart(6, '0'); }
   getHex() { return (Math.round(this.r * 255) << 16) | (Math.round(this.g * 255) << 8) | Math.round(this.b * 255); }
   lerp(c, t) { this.r += (c.r - this.r) * t; this.g += (c.g - this.g) * t; this.b += (c.b - this.b) * t; return this; }
 }
@@ -206,8 +208,10 @@ const probe = `
 ;globalThis.__neon = { state: neonState, scene: () => scene, camera: () => camera,
   keys: neonKeys, touch: neonTouch, skills: NEON_SKILL, setScale, setReverse, setGravity,
   reverseTrack, trackFrame, trackFor, buildTrack, mph, miles, feet,
-  setClass, setCam, cycleCam, topSpeed, placeCells, stepCells, classes: NEON_CLASS, cams: NEON_CAM,
-  makeRecorder, recordFrame, finishRecording, bestGhosts, keepGhost, ghostDt: GHOST_DT };`;
+  setClass, setCam, setGhosts, cycleCam, topSpeed, gradeTopSpeed, placeCells, stepCells,
+  classes: NEON_CLASS, cams: NEON_CAM,
+  makeRecorder, recordFrame, finishRecording, bestGhosts, keepGhost, ghostDt: GHOST_DT, poseRider,
+  buildCellMeshes, clearSmoke };`;
 try { (0, eval)(app + probe); }
 catch (e) { origError('THREW during boot:', e.message, '\n', e.stack.split('\n').slice(0, 6).join('\n')); process.exit(1); }
 
@@ -405,6 +409,69 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
     check('holding W drives the board', me.v > 8 && me.s > s0[S.race.me] + 20, `${me.v.toFixed(1)} m/s`);
     check('the HUD shows speed and place', +d.getElementById('speedVal').textContent > 20 && /^\d+$/.test(d.getElementById('placeVal').textContent));
     const cam = N.camera();
+    /* The burn has to be VISIBLE, and specifically visible from behind: the plume points at
+       the chase camera, so what sells it is the light on the deck and the smoke streaming
+       back past the lens. */
+    {
+      S = N.state();
+      const R = S.race && S.race.riders[S.race.me];
+      if (R) {
+        const me2 = S.race.racers[S.race.me];
+        /* Wipe any smoke a boost EARLIER in this suite left behind -- otherwise puffs from
+           a different rider on a different course, still fading, get scanned alongside
+           this rider's fresh ones and the height comparison below is comparing apples to a
+           cloud from an unrelated race. */
+        N.clearSmoke();
+        me2.burnT = N.state().tuning.burnS;
+        /* A FIXED deck point for every call, not the previous call's rootposition fed back
+           in: root also carries a small hover bob (see poseRider), and feeding it back each
+           iteration compounds that bob into the emission height, which swamps the ~0.16 m
+           gap this check exists to catch. The real game passes a fresh deck point every
+           frame (from trackToWorld), so freezing it here is the fair, low-noise stand-in. */
+        const y0 = R.root.position.y, x0 = R.root.position.x, z0 = R.root.position.z;
+        for (let i = 0; i < 30; i++) poseRider(R, me2, x0, y0, z0, 0, i / 30, 1 / 60);
+        let puffs = 0;
+        N.scene().traverse(o => { if (o.parent && o.parent.name === 'neonSmoke' && o.visible) puffs++; });
+          check('a burn lights the deck and lays a smoke trail',
+          R.board.scorchMat.opacity > 0.3 && R.board.flame.material.opacity > 0.3 && puffs > 3,
+          `scorch ${R.board.scorchMat.opacity.toFixed(2)}, flame ${R.board.flame.material.opacity.toFixed(2)}, ${puffs} puffs`);
+        /* THE BUG THAT MADE THE SMOKE INVISIBLE: puffs were emitted at the deck's own
+           elevation, but the board floats HOVER_M*K above that -- so every puff appeared
+           roughly half a board-height below the rocket, low enough against the dark deck
+           to read as nothing. A puff has to come out somewhere near the nozzle, not the
+           ground under it. */
+        /* Compared against the BOARD's own rendered height (root + board.g.position.y,
+           i.e. root + HOVER_M*K), not the loose root position -- root sits at deck level
+           itself, so a bound relative to root alone is satisfied by almost any positive
+           offset and would not have caught the original bug (puffs at deck+0.18*K passed
+           a "root - 0.05" bound easily, despite sitting far below the visible board). */
+        /* puffSmoke() itself adds a further lift on top of whatever height its caller
+           passes in (see p.m.position.set in neon-scene.js) -- so "puff height equals
+           board height" was never the right target; the design deliberately spawns a
+           little ABOVE the board so a puff never sinks behind the deck a frame after it
+           is made. The property actually worth guarding is the one the bug broke: a puff
+           clearly above the board, not down near the deck it floats over. The old,
+           buggy call site (y+0.18*R.K) landed about 0.21 m above the board once that same
+           lift is added; the fixed one lands about 0.37 m above it -- close enough
+           together that pinning an exact height is fragile, but a margin between them
+           discriminates cleanly. */
+        const boardY = y0 + R.board.g.position.y;
+        let nearNozzle = 0, tot = 0;
+        N.scene().traverse(o => {
+          if (!(o.parent && o.parent.name === 'neonSmoke' && o.visible)) return;
+          tot++;
+          if (o.position.y - boardY > 0.28*(R.K || 1)) nearNozzle++;
+        });
+        /* The old bug was not a huge height error in absolute terms (about 0.16 m on a
+           board that floats 0.42 m up) -- it was that 0.16 m put every puff inside or
+           under the board's own opaque parts, self-occluding a couple of hundred triangles
+           it should have been streaming out behind. A loose bound does not catch that; a
+           tight one (0.15 m either side of the board's own height) does. */
+        check('smoke comes out near the rocket, not from the deck under it',
+          tot > 0 && nearNozzle / tot > 0.8, `${nearNozzle} of ${tot} puffs clear of the deck (board height ${boardY.toFixed(2)})`);
+        me2.burnT = 0;
+      }
+    }
     check('the camera chases the player', Number.isFinite(cam.position.x) && Math.hypot(cam.position.x - cam.lookedAt.x, cam.position.z - cam.lookedAt.z) < 80);
 
     check('the HUD reports the settings the race started with', /GRAVITY/.test(d.getElementById('hudMode').textContent));
@@ -435,6 +502,22 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
     riders = 0; N.scene().traverse(o => { if (o.name === 'neonRider') riders++; });
     check('back to the menu removes the race and its riders', S.screen === 'menu' && !S.race && riders === 0);
     check('the course list now shows the best time', /★/.test(d.querySelector('#courseList .course.on .best').textContent));
+  }
+
+  // ---- the START button sits near the top ----
+  {
+    const d = window.document;
+    const html = fs.readFileSync(path.join(ROOT, 'neon/index.html'), 'utf8');
+    const setup = html.slice(html.indexOf('id="colSetup"'), html.indexOf('id="finish"'));
+    const startAt = setup.indexOf('id="startBtn"');
+    const riderAt = setup.indexOf('id="riderSel"');
+    const scaleAt = setup.indexOf('id="scaleSel"');
+    check('START sits above the setting rows, not after all of them',
+      startAt > 0 && riderAt > startAt && scaleAt > startAt,
+      `start at ${startAt}, rider at ${riderAt}, scale at ${scaleAt}`);
+    const css = fs.readFileSync(path.join(ROOT, 'styles/neon.css'), 'utf8');
+    check('START stays visible while the settings column scrolls',
+      /#startBtn\{[^}]*position:sticky/.test(css));
   }
 
   // ---- imperial units on screen ----
@@ -557,6 +640,14 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
       S.settings.course === S.courses[pick].sig && S.selCourse === pick, S.settings.course);
   }
 
+  // ---- top speed, and where to change it ----
+  {
+    const flat = N.topSpeed({ speedK: 1 });
+    check('flat-ground Standard tops out around 60 mph', Math.abs(N.mph(flat) - 60) < 3, `${N.mph(flat).toFixed(1)} mph`);
+    check('the knob is exactly sqrt(thrust/dragK), so raising thrust or lowering dragK speeds up the whole game',
+      Math.abs(flat - Math.sqrt(N.state().tuning.thrust / N.state().tuning.dragK)) < 1e-9);
+  }
+
   // ---- speed classes ----
   {
     N.setScale(1);
@@ -586,22 +677,89 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
     N.setClass('standard');
   }
 
+  // ---- gravity raises the ceiling, it does not just nudge ----
+  {
+    /* On Pikes Peak, because the Garden's descents top out around 5% and the flat and
+       downhill ceilings are then close enough together that a rival aiming at the wrong
+       one still looks about right. A mountain road makes the difference obvious. */
+    await loadNeonMap('../data/pikesworld.json', 'Pikes Peak');
+    await pump(30, 44000);
+    const flat = N.gradeTopSpeed({ speedK: 1 }, 0, true);
+    const down = N.gradeTopSpeed({ speedK: 1 }, -0.10, true);
+    const up = N.gradeTopSpeed({ speedK: 1 }, 0.10, true);
+    check('a descent raises top speed and a climb lowers it', down > flat + 2 && up < flat - 2,
+      `${N.mph(up) | 0} / ${N.mph(flat) | 0} / ${N.mph(down) | 0} mph on ±10%`);
+    check('with gravity off the grade means nothing',
+      Math.abs(N.gradeTopSpeed({ speedK: 1 }, -0.1, false) - flat) < 1e-9);
+    // and the physics actually gets there: coast a long descent and see where it settles
+    // a descent that is also STRAIGHT, or the corner speed is what limits the rival and
+    // the braking under test is the right answer for the wrong reason
+    let spot = null, spotScore = 0;
+    for (const cc of N.state().courses) {
+      const TT = trackFor(cc);
+      for (let i = 10; i < TT.n - 60; i++) {
+        let mx = -Infinity, bend = 0;
+        for (let q = 0; q < 50; q++) { mx = Math.max(mx, TT.slope[i + q]); bend = Math.max(bend, Math.abs(TT.k[i + q])); }
+        // steepest sustained descent that is also straight enough not to be corner-limited
+        const score = mx < -0.035 && bend < 0.02 ? -mx / (1 + bend * 60) : 0;
+        if (score > spotScore) { spotScore = score; spot = { T: TT, s: i * TT.ds }; }
+      }
+    }
+    check('the map has a straight descent to test the pace on', !!spot);
+    if (spot) {
+      const q = makeRacer({ s: spot.s, d: 0, yaw: trackFrame(spot.T, spot.s, {}).yaw, v: 10 });
+      for (let i = 0; i < 120 * 8; i++) {
+        const f = trackFrame(spot.T, q.s, {});
+        q.yaw = f.yaw; q.d = 0;
+        stepRacer(q, spot.T, { steer: 0, throttle: 1, brake: 0, boost: false }, { gravity: true }, 1 / 120);
+      }
+      check('a board run downhill settles above its flat-ground top speed', q.v > flat + 1,
+        `${N.mph(q.v) | 0} mph vs ${N.mph(flat) | 0} flat`);
+    }
+    /* A rival on a straight descent should settle at the ceiling THE HILL gives it. Aiming
+       at the flat-ground number instead is not a small error: it brakes all the way down,
+       which is exactly how the field used to fall behind. Chill is used because it has the
+       least headroom over the flat ceiling, so the two targets are furthest apart. */
+    if (spot) {
+      const sk = N.skills.chill;
+      const grade = spot.T.slope[Math.round(spot.s / spot.T.ds) + 20];
+      const hillTop = N.gradeTopSpeed({ speedK: 1 }, grade, true) * sk.pace;
+      const flatTop = flat * sk.pace;
+      const r = makeRacer({ s: spot.s, d: 0, yaw: trackFrame(spot.T, spot.s, {}).yaw, v: flatTop,
+        skill: sk, paceMul: 1, lane: 0, seed: 2 });
+      let braked = 0;
+      for (let i = 0; i < 120 * 4; i++) {
+        const f = trackFrame(spot.T, r.s, {});
+        r.yaw = f.yaw; r.d = 0;
+        const inp = rivalInput(r, spot.T, [r], { gravity: true }, 3 + i / 120);
+        braked += inp.brake > 0.02 ? 1 : 0;
+        stepRacer(r, spot.T, inp, { gravity: true }, 1 / 120);
+      }
+      check('a rival does not brake down a hill to hold its flat-ground speed',
+        braked === 0 && r.v > flatTop + (hillTop - flatTop)*0.5 && hillTop > flatTop + 3,
+        `${N.mph(r.v) | 0} mph on a ${(grade * 100).toFixed(0)}% grade; flat ceiling ${N.mph(flatTop) | 0}, hill ceiling ${N.mph(hillTop) | 0}`);
+    }
+    await loadNeonMap('../data/world.json', 'Garden of the Gods');
+    await pump(40, 46000);
+  }
+
   // ---- boost is one burn per press ----
+  // (back to the map the rest of the suite expects)
   {
     const T = trackFor(N.state().courses[0]);
     const tune = N.state().tuning;
-    const r = makeRacer({ s: 5, d: 0, yaw: trackFrame(T, 5, {}).yaw, v: 14, battery: 1 });
+    const r = makeRacer({ s: 5, d: 0, yaw: trackFrame(T, 5, {}).yaw, v: 14, fuel: 3 });
     let burns = 0, boostFrames = 0, battAtFire = null;
     const drive = (boost, secs) => {
       for (let i = 0; i < 120 * secs; i++) {
         const f = trackFrame(T, r.s, {});
         r.yaw = f.yaw; r.d = 0;
         stepRacer(r, T, { steer: 0, throttle: 1, brake: 0, boost }, { gravity: false }, 1 / 120);
-        if (r.burnFired) { burns++; if (battAtFire == null) battAtFire = r.battery; }
+        if (r.burnFired) { burns++; if (battAtFire == null) battAtFire = r.fuel; }
         if (r.burnT > 0) boostFrames++;
       }
     };
-    const batt0 = r.battery;
+    const batt0 = r.fuel;
     drive(true, 6);                                  // held down for six seconds
     check('holding boost lights exactly one burn', burns === 1, `${burns} burns`);
     /* Measured by THRUST, not by the timer that is supposed to drive it: two identical
@@ -609,7 +767,7 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
        one out-accelerates its twin. A version that simply reports r.burnT would pass even
        if the timer were wired to nothing. */
     {
-      const seat = v => makeRacer({ s: 5, d: 0, yaw: trackFrame(T, 5, {}).yaw, v, battery: 1 });
+      const seat = v => makeRacer({ s: 5, d: 0, yaw: trackFrame(T, 5, {}).yaw, v, fuel: 3 });
       const hot = seat(14), cold = seat(14);
       let boostSecs = 0;
       for (let i = 0; i < 120 * 6; i++) {
@@ -624,15 +782,17 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
       check('the burn is a fixed length', Math.abs(boostSecs - tune.burnS) < 0.15,
         `${boostSecs.toFixed(2)} s of extra thrust vs ${tune.burnS} s`);
     }
-    check('a burn spends a fixed slice of the pack', battAtFire != null
-      && Math.abs((batt0 - battAtFire) - tune.burnCost) < 0.02,
-      `${battAtFire == null ? 'never fired' : (batt0 - battAtFire).toFixed(3) + ' of ' + tune.burnCost}`);
+    check('a burn spends exactly one rocket', battAtFire != null && batt0 - battAtFire === 1,
+      `${battAtFire == null ? 'never fired' : batt0 + ' -> ' + battAtFire}`);
+    /* The rack does not refill itself: six seconds of driving after the burn, and the
+       rocket that was spent is still spent. */
+    check('rockets do not come back on their own', r.fuel === batt0 - 1, `${r.fuel} left of ${batt0}`);
     drive(false, 0.1); burns = 0;
     drive(true, 3);
     check('releasing and pressing again lights another', burns === 1);
     // a burn actually accelerates
-    const a = makeRacer({ s: 5, d: 0, yaw: trackFrame(T, 5, {}).yaw, v: 14, battery: 1 });
-    const b = makeRacer({ s: 5, d: 0, yaw: trackFrame(T, 5, {}).yaw, v: 14, battery: 1 });
+    const a = makeRacer({ s: 5, d: 0, yaw: trackFrame(T, 5, {}).yaw, v: 14, fuel: 3 });
+    const b = makeRacer({ s: 5, d: 0, yaw: trackFrame(T, 5, {}).yaw, v: 14, fuel: 3 });
     for (let i = 0; i < 120 * 1.5; i++) {
       for (const [q, boost] of [[a, true], [b, false]]) {
         const f = trackFrame(T, q.s, {});
@@ -641,13 +801,58 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
       }
     }
     check('a burn is worth having', a.v > b.v + 2, `${a.v.toFixed(1)} vs ${b.v.toFixed(1)} m/s`);
-    const flat = makeRacer({ s: 5, d: 0, yaw: trackFrame(T, 5, {}).yaw, v: 14, battery: 0.05 });
+    const flat = makeRacer({ s: 5, d: 0, yaw: trackFrame(T, 5, {}).yaw, v: 14, fuel: 0 });
     let fired = false;
     for (let i = 0; i < 120; i++) {
       stepRacer(flat, T, { steer: 0, throttle: 1, brake: 0, boost: i % 2 === 0 }, { gravity: false }, 1 / 120);
       if (flat.burnFired) fired = true;
     }
-    check('an empty pack cannot burn', !fired);
+    check('an empty rack cannot burn', !fired);
+  }
+
+  // ---- ghost and pickup opacity: easy to see, not just present ----
+  {
+    N.setGhosts(true);
+    const withGhost = N.state().courses.findIndex(c => Object.keys(N.state().ghostStore).some(k => k.indexOf(c.sig) >= 0));
+    if (withGhost >= 0) {
+      const d = window.document;
+      d.querySelectorAll('#courseList .course')[withGhost].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+      click('startBtn');
+      await pump(3, 80000);
+      S = N.state();
+      const gi = S.race.racers.findIndex(x => x.isGhost);
+      if (gi >= 0) {
+        /* Some parts of a rig are deliberately semi-transparent before a ghost ever touches
+           them (a nose highlight, a shading layer) -- comparing against THE SAME RIDER
+           un-ghosted is the fair test, not an absolute floor that a legitimately faint part
+           would fail. What matters is that fading did not crush everything towards zero. */
+        const ops = [];
+        S.race.riders[gi].root.traverse(o => {
+          if (!o.material || o.isSprite || o.material.opacity <= 0.01) return;
+          ops.push(o.material.opacity);
+        });
+        ops.sort((a, b) => a - b);
+        const median = ops[ops.length >> 1] || 0;
+        check('a ghost is bright enough to read as a rider, not a smudge', median >= 0.55, `median opacity ${median.toFixed(2)} over ${ops.length} materials`);
+      }
+      click('quitBtn');
+      await pump(2, 81000);
+    }
+    // pickups: the halo ring is the part meant to catch the eye from a distance
+    const c0 = N.state().courses[0];
+    const T0 = trackFor(c0);
+    const cellsForTest = N.placeCells(T0);
+    const grp = N.buildCellMeshes(T0, cellsForTest, 0, 0xffe14a);
+    let haloOp = 0, coreOp = 0;
+    if (grp && grp.children[0]) {
+      grp.children[0].traverse(o => {
+        if (!o.geometry || !o.material) return;
+        if (o.geometry.args && o.geometry.args[0] > 1) haloOp = o.material.opacity;   // the wide torus is the halo
+        else if (o.material.opacity > coreOp) coreOp = o.material.opacity;
+      });
+    }
+    check('a rocket pickup\'s halo is bright enough to spot from a distance',
+      haloOp >= 0.3 && coreOp >= 0.8, `halo ${haloOp}, core ${coreOp}`);
   }
 
   // ---- boost cells on the course ----
@@ -663,7 +868,7 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
       N.placeCells(T).map(c => c.s.toFixed(2) + ':' + c.d.toFixed(2)).join() === cells.map(c => c.s.toFixed(2) + ':' + c.d.toFixed(2)).join());
     // drive through one
     const c0 = cells[1];
-    const r = makeRacer({ s: c0.s - 30, d: c0.d, yaw: trackFrame(T, c0.s - 30, {}).yaw, v: 18, battery: 0.2 });
+    const r = makeRacer({ s: c0.s - 30, d: c0.d, yaw: trackFrame(T, c0.s - 30, {}).yaw, v: 18, fuel: 0 });
     let took = 0;
     for (let i = 0; i < 120 * 5; i++) {
       const f = trackFrame(T, r.s, {});
@@ -671,8 +876,8 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
       stepRacer(r, T, { steer: 0, throttle: 1, brake: 0, boost: false }, { gravity: false }, 1 / 120);
       took += N.stepCells(cells, [r], T, 1 / 120).length;
     }
-    check('driving through a cell takes it', took === 1 && r.cells === 1 && r.battery > 0.2 + tune.cellGive * 0.8,
-      `battery ${r.battery.toFixed(2)}`);
+    check('driving through a rocket picks it up', took === 1 && r.cells === 1 && r.fuel === 1,
+      `${r.fuel} on the rack`);
     check('a taken cell goes away and comes back', !c0.live && c0.backT > 0);
     N.stepCells(cells, [], T, tune.cellBackS + 0.1);
     check('it is back after its timer', c0.live);
@@ -716,27 +921,51 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
       && N.bestGhosts(store, 'K')[0].time === g.time);
     check('a faster run does', N.keepGhost(store, 'K', { ...g, time: g.time - 5 })
       && N.bestGhosts(store, 'K')[0].time === g.time - 5);
-    // and in the race itself: Fierce lines them up, Fair does not.
+    // and in the race itself: the toggle decides, at any pace.
     // The stored ghost belongs to one course, so race that one.
     const haveKey = Object.keys(N.state().ghostStore)[0] || '';
     const withGhost = N.state().courses.findIndex(c => haveKey.indexOf(c.sig) >= 0);
     check('the run raced earlier left a ghost behind', withGhost >= 0, haveKey);
     d.querySelectorAll('#courseList .course')[Math.max(0, withGhost)].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-    d.querySelectorAll('#skillSeg .btn')[1].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    N.setGhosts(false);
     click('startBtn');
     await pump(3, 50000);
-    const fairField = N.state().race.racers.length;
-    check('a ghost only appears at Fierce', N.state().race.racers.every(x => !x.isGhost));
+    const plainField = N.state().race.racers.length;
+    check('ghosts off means no ghost on the grid', N.state().race.racers.every(x => !x.isGhost));
     click('quitBtn');
     await pump(2, 51000);
-    d.querySelectorAll('#skillSeg .btn')[2].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-    check('the menu says what Fierce adds', /ghost/i.test(d.getElementById('ghostNote').textContent));
+    N.setGhosts(true);
+    check('the ghost toggle sticks and says what it does', N.state().settings.ghosts === true
+      && d.querySelector('#ghostSeg .btn[data-ghost="1"]').classList.contains('on')
+      && /ghost/i.test(d.getElementById('ghostNote').textContent));
     click('startBtn');
     await pump(3, 52000);
     S = N.state();
     const ghosts = S.race.racers.filter(x => x.isGhost);
-    check('at Fierce the stored ghost lines up with the field', ghosts.length >= 1
-      && S.race.racers.length === fairField + ghosts.length, `${ghosts.length} ghost(s)`);
+    check('ghosts on lines the stored ghost up with the field', ghosts.length >= 1
+      && S.race.racers.length === plainField + ghosts.length, `${ghosts.length} ghost(s)`);
+    /* THE BUG THAT MADE GHOSTS INVISIBLE: a mesh handed an array material with no geometry
+       groups draws nothing at all, and all that was left on screen was the marker sprite
+       hanging over the track. Every ghost mesh must keep a single material, and be faint
+       without being a smudge. */
+    {
+      const ghostRider = S.race.riders[S.race.racers.indexOf(ghosts[0])];
+      let meshes = 0, arrays = 0, tooFaint = 0, opaque = 0;
+      ghostRider.root.traverse(o => {
+        if (!o.material || o.isSprite) return;
+        meshes++;
+        if (Array.isArray(o.material)) { arrays++; return; }
+        if (!o.material.transparent) opaque++;
+        // materials animated from zero (the rocket flame) are not part of the body
+        if (o.material.opacity > 0.01 && o.material.opacity < 0.35) tooFaint++;
+      });
+      check('a ghost is drawn as a whole rider, not an array-material no-op',
+        meshes > 4 && arrays === 0, `${meshes} meshes, ${arrays} with array materials`);
+      check('a ghost is see-through but still visible', opaque === 0 && tooFaint === 0,
+        `${opaque} opaque, ${tooFaint} under 0.35`);
+      check('a ghost rider is positioned on the deck, not floating',
+        Math.abs(ghostRider.root.position.y - S.race.riders[S.race.me].root.position.y) < 30);
+    }
     check('a ghost gets a rider in the scene', S.race.riders.length === S.race.racers.length);
     // it replays rather than driving
     await pump(300, 53000);
@@ -752,7 +981,6 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
     check('ghosts are ranked with everyone else', S.race.racers.every(x => x.place >= 1));
     click('quitBtn');
     await pump(2, 54000);
-    d.querySelectorAll('#skillSeg .btn')[1].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   }
 
   // ---- camera distance ----

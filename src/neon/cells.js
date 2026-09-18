@@ -51,7 +51,8 @@ function stepCells(cells, racers, T, dt){
       // the window has to cover a whole frame of travel or a fast board steps over it
       if(Math.abs(gap) > Math.max(2.5, r.v*dt*1.2)) continue;
       if(Math.abs(r.d - c.d) > NEON.cellGrab + (T.bodyWide || NEON.bodyWide)*0.5) continue;
-      r.battery = Math.min(1, r.battery + NEON.cellGive);
+      if(r.fuel >= NEON.fuelMax) continue;         // a full rack leaves it for someone else
+      r.fuel++;
       r.cells = (r.cells || 0) + 1;
       c.live = false; c.backT = NEON.cellBackS;
       took.push({cell: c, racer: r});
@@ -69,24 +70,46 @@ function buildCellMeshes(T, cells, baseM, color){
   if(typeof THREE === 'undefined') return null;
   cellGroup = new THREE.Group(); cellGroup.name = 'neonCells';
   const K = 1/(T.widthK || 1);
-  const ringGeo = new THREE.TorusGeometry(1.15*K, 0.12*K, 6, 18);
-  const coreGeo = new THREE.OctahedronGeometry(0.42*K);
+  /* A PICKUP LOOKS LIKE WHAT IT GIVES YOU: the same rocket that sits on the HUD rack and
+     lights under the board. A ring would have been cheaper to draw and told you nothing
+     about what was in it. */
+  const bodyGeo = new THREE.CylinderGeometry(0.22*K, 0.26*K, 1.0*K, 10);
+  const noseGeo = new THREE.ConeGeometry(0.22*K, 0.45*K, 10);
+  const finGeo  = new THREE.BoxGeometry(0.06*K, 0.3*K, 0.34*K);
+  const flameGeo = new THREE.ConeGeometry(0.17*K, 0.5*K, 8);
+  const haloGeo = new THREE.TorusGeometry(1.25*K, 0.11*K, 6, 16);
   const mat = new THREE.MeshBasicMaterial({color, transparent:true, opacity:0.95,
     blending: THREE.AdditiveBlending, depthWrite:false});
-  const softMat = new THREE.MeshBasicMaterial({color, transparent:true, opacity:0.18,
+  const softMat = new THREE.MeshBasicMaterial({color, transparent:true, opacity:0.38,
+    blending: THREE.AdditiveBlending, depthWrite:false});
+  const flameMat = new THREE.MeshBasicMaterial({color: 0xff7a3c, transparent:true, opacity:0.8,
     blending: THREE.AdditiveBlending, depthWrite:false});
   for(const c of cells){
     const f = trackFrame(T, c.s, {});
     const g = new THREE.Group();
-    const ring = new THREE.Mesh(ringGeo, mat);
-    const halo = new THREE.Mesh(ringGeo, softMat);
-    halo.scale.setScalar(1.7);
-    const core = new THREE.Mesh(coreGeo, mat);
-    g.add(ring, halo, core);
+    const core = new THREE.Group();
+    const body = new THREE.Mesh(bodyGeo, mat);
+    const nose = new THREE.Mesh(noseGeo, mat);
+    nose.position.y = 0.72*K;
+    const flame = new THREE.Mesh(flameGeo, flameMat);
+    flame.position.y = -0.72*K; flame.rotation.z = Math.PI;
+    core.add(body, nose, flame);
+    for(let q = 0; q < 3; q++){
+      const fin = new THREE.Mesh(finGeo, mat);
+      fin.position.y = -0.42*K;
+      fin.position.x = Math.cos(q*2.094)*0.2*K;
+      fin.position.z = Math.sin(q*2.094)*0.2*K;
+      fin.rotation.y = -q*2.094;
+      core.add(fin);
+    }
+    const halo = new THREE.Mesh(haloGeo, softMat);
+    halo.rotation.x = Math.PI/2;
+    g.add(core, halo);
     g.position.set(f.x - Math.sin(f.yaw)*c.d, deckY(T, f.elev, baseM) + 1.25*K, f.z - Math.cos(f.yaw)*c.d);
-    g.rotation.y = f.yaw + Math.PI/2;       // the torus faces down the track
+    g.rotation.y = f.yaw + Math.PI/2;
     g.userData.cell = c;
     g.userData.core = core;
+    g.userData.flame = flame;
     cellGroup.add(g);
     cellMeshes.push(g);
   }
@@ -101,8 +124,9 @@ function updateCellMeshes(t){
     if(!g.visible) continue;
     const coming = c.live ? 1 : 1 - c.backT/(NEON.cellBackS*0.35);
     g.scale.setScalar(0.35 + 0.65*coming);
-    g.userData.core.rotation.y = t*2.2;
-    g.userData.core.rotation.x = t*1.4;
+    g.userData.core.rotation.y = t*1.6;
+    g.userData.core.rotation.z = Math.sin(t*1.1 + c.i)*0.18;
+    g.userData.flame.scale.set(1, 0.7 + 0.5*Math.abs(Math.sin(t*14 + c.i)), 1);
     g.position.y += Math.sin(t*2 + c.i)*0.004;
   }
 }

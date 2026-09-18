@@ -72,12 +72,17 @@ h2{margin:0 0 8px; font-size:12px; letter-spacing:.2em; color:var(--dim); font-w
 #colSetup{display:flex; flex-direction:column; gap:8px; min-height:0; overflow-y:auto;}
 #preview{width:100%; height:170px; border:1px solid var(--line); border-radius:4px; background:#05081a;}
 #courseInfo{color:var(--dim); font-size:13px; min-height:1.4em;}
+/* START sits right after the preview, ahead of every setting row, and STAYS at the top of
+   the scrolling column: a plain background at least as dark as the panel behind it, or a
+   row scrolling underneath shows through the gap the border-radius leaves at the corners. */
+#startBtn{position:sticky; top:0; z-index:2; width:100%; margin:2px 0 4px; font-size:17px;
+  letter-spacing:.28em; background:var(--panel);}
 .row{display:flex; align-items:center; justify-content:space-between; gap:10px;}
 .seg{display:inline-flex; gap:4px;}
 .stepper{display:inline-flex; align-items:center; gap:10px;}
 .stepper b{min-width:1.5em; text-align:center; color:var(--cyan);}
 .filerow{cursor:pointer; color:var(--dim);}
-#startBtn{margin-top:4px; font-size:18px; letter-spacing:.3em;}
+
 @media (max-width:720px){
   #menuCols{grid-template-columns:1fr; overflow-y:auto;}
   #courseList{max-height:34vh;}
@@ -103,8 +108,24 @@ body[data-screen="race"] #hud, body[data-screen="count"] #hud, body[data-screen=
 #hudB{left:50%; bottom:calc(14px + var(--safe-b)); transform:translateX(-50%); text-align:center; text-shadow:0 0 8px #000;}
 #speedVal{font-size:44px; line-height:1; color:var(--text);}
 #speedUnit{font-size:11px; letter-spacing:.3em; color:var(--dim);}
-#batt{width:180px; height:6px; margin:6px auto 0; border:1px solid var(--line); border-radius:3px; overflow:hidden;}
-#battFill{display:block; height:100%; width:100%; background:var(--mag); box-shadow:0 0 10px var(--mag);}
+/* THE ROCKET RACK. Each rocket is one element: a body, a nose (the ::before triangle) and
+   fins (::after), drawn in CSS so the HUD stays a DOM overlay with no canvas of its own.
+   Spent ones keep their outline, so the rack shows what you had as well as what is left. */
+#fuelRack{display:flex; gap:14px; justify-content:center; margin:12px 0 4px; height:30px;}
+.rocket{position:relative; width:11px; height:21px; border-radius:3px 3px 1px 1px;
+  border:1.5px solid var(--line); background:transparent; opacity:.55;}
+.rocket::before{content:""; position:absolute; left:50%; top:-9px; transform:translateX(-50%);
+  border-left:5.5px solid transparent; border-right:5.5px solid transparent; border-bottom:9px solid var(--line);}
+.rocket::after{content:""; position:absolute; left:-5px; right:-5px; bottom:0; height:7px;
+  border-left:1.5px solid var(--line); border-right:1.5px solid var(--line);
+  clip-path:polygon(0 100%, 30% 0, 70% 0, 100% 100%);}
+.rocket.on{opacity:1; border-color:var(--lime); background:rgba(182,255,60,.22);
+  box-shadow:0 0 8px rgba(182,255,60,.5);}
+.rocket.on::before{border-bottom-color:var(--lime);}
+.rocket.on::after{border-color:var(--lime);}
+.rocket.firing{opacity:1; border-color:var(--mag); box-shadow:0 0 12px var(--mag);
+  animation:rocketFire .28s linear infinite;}
+@keyframes rocketFire{ 50%{ box-shadow:0 0 4px var(--mag); } }
 #burnPip{font-size:11px; letter-spacing:.2em; color:var(--dim); margin-top:4px; min-height:1.2em;}
 #burnPip.hot{color:var(--lime);}
 #slopeVal{font-size:12px; color:var(--dim); min-height:1.3em; margin-top:3px;}
@@ -118,7 +139,7 @@ body.touch #touchCtl{display:flex;}
    the bottom edge is free; the readout just gets smaller and sits between them. */
 body.touch #hudB{bottom:calc(10px + var(--safe-b)); z-index:1;}
 body.touch #speedVal{font-size:30px;}
-body.touch #batt{width:120px;}
+body.touch #fuelRack{gap:10px; height:24px; transform:scale(.8);}
 body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
 .tgrp{display:flex; gap:12px; pointer-events:auto;}
 /* The steering pad is ONE control: where the thumb is across it sets the lock, and
@@ -176,6 +197,11 @@ body[data-screen="count"] #count{display:flex;}
       <section id="colSetup">
         <canvas id="preview"></canvas>
         <div id="courseInfo">—</div>
+        <!-- START lives right under the preview, not after every setting row. Every field
+             below it has a sane default, so nothing stops a first-time player racing
+             immediately; it stays reachable without scrolling past class, pace, gravity,
+             direction, camera, ghosts, scale and the map picker to find it. -->
+        <button class="btn go" id="startBtn" disabled>START</button>
         <label class="row">Rider
           <select id="riderSel"></select>
         </label>
@@ -201,6 +227,12 @@ body[data-screen="count"] #count{display:flex;}
           <span class="seg" id="gravSeg">
             <button class="btn on" data-grav="1">On</button>
             <button class="btn" data-grav="0">Off</button>
+          </span>
+        </div>
+        <div class="row">Ghosts
+          <span class="seg" id="ghostSeg">
+            <button class="btn on" data-ghost="1">On</button>
+            <button class="btn" data-ghost="0">Off</button>
           </span>
         </div>
         <div class="row">Camera
@@ -237,8 +269,7 @@ body[data-screen="count"] #count{display:flex;}
         </label>
         <input type="file" id="worldFile" accept=".geojson,.json,.txt,application/geo+json,application/json,text/plain" multiple hidden>
         <p class="hint" id="ghostNote"></p>
-        <button class="btn go" id="startBtn" disabled>START</button>
-        <p class="hint">W/↑ go · S/↓ brake · A D steer · Shift boost (one burn per press) · C camera · R restart · Esc quit<br>
+        <p class="hint">W/↑ go · S/↓ brake · A D steer · Shift fire a rocket (one burn per press) · C camera · R restart · Esc quit<br>
       In the menu: G gravity · V reverse. Class, gravity, direction and scale are fixed once a race starts.</p>
       </section>
     </div>
@@ -260,7 +291,7 @@ body[data-screen="count"] #count{display:flex;}
   <div id="hudR"><canvas id="minimap"></canvas></div>
   <div id="hudB">
     <div id="speedVal">0</div><div id="speedUnit">mph</div>
-    <div id="batt"><i id="battFill"></i></div>
+    <div id="fuelRack" aria-label="Rockets"></div>
     <div id="burnPip"></div>
     <div id="slopeVal"></div>
   </div>
@@ -2705,14 +2736,26 @@ const NEON = {
   vertScale:  1.5,      // how much taller the hills LOOK. Physics uses true slope.
   lift:       2.2,      // deck height above the wireframe ground
 
-  // --- the board ---
-  thrust:     7.2,      // m/s^2 at full throttle
-  boostThrust:6.5,      // extra, while boosting
-  dragK:      0.0145,   // v^2 drag: flat-ground top speed = sqrt(thrust/dragK) ~ 22 m/s
+  /* --- the board ---
+     TOP SPEED, THE ONE NUMBER PEOPLE ASK ABOUT: flat ground, no boost, Standard class, is
+         sqrt(thrust / dragK)
+     because that is where thrust stops winning and drag catches up (drag grows with v^2,
+     thrust does not). Raise thrust or lower dragK to make the whole game faster -- every
+     other speed in the file rides on this one: Cruiser/Turbo are multiples of it
+     (NEON_CLASS below), a burn adds boostThrust on top of it, and gradeTopSpeed() in
+     racer.js solves the same equation with gravity added in for a hill. At the numbers
+     below, flat-ground Standard tops out at 60 mph (26.8 m/s); Turbo, at 1.26x, reaches
+     75.6 mph. The steering and bumper numbers were tuned against this range -- push it
+     much further and a full-lock turn at top speed starts to feel unrecoverable, which is
+     the next thing to retune if you do. */
+  thrust:     9.0,      // m/s^2 at full throttle -- RAISE THIS to make the game faster
+  boostThrust:8.2,      // extra, while a burn is running
+  dragK:      0.0125,   // v^2 drag -- LOWER THIS to make the game faster (same effect, opposite knob)
   rollK:      0.05,     // linear rolling loss
-  brake:      14,
+  brake:      15,
   steerRate:  2.1,      // rad/s at full lock, low speed
-  steerFade:  0.022,    // lock shrinks with speed: rate / (1 + v*steerFade)
+  steerFade:  0.026,    // lock shrinks with speed: rate / (1 + v*steerFade) -- raised alongside
+                         // the speed increase, so full lock at 75 mph is still a turn and not a spin
   railAssist: 0.55,     // share of the track's own bend the board follows unprompted
   maxSlip:    1.15,     // rad; you can carve, you cannot turn round
   // --- gravity ---
@@ -2724,17 +2767,18 @@ const NEON = {
   bumpRestitution: 0.65,// how much of the into-wall angle comes back out
   bumpKick:   0.16,     // rad, minimum angle you leave the wall at
   bumpLock:   0.18,     // s of reduced steering after a hit, so it reads as a bounce
-  // --- boost: one burn per press, not a held button ---
+  /* --- boost: a rack of rockets, one burn each ---
+     Nothing recharges. You start with a couple and everything after that is picked up off
+     the track, which is what makes the cells worth going out of your way for and a burn
+     worth saving for the straight that matters. */
   burnS:      1.6,      // how long a burn lasts
-  burnCost:   0.34,     // battery per burn, so a full pack is three of them
   burnLock:   0.45,     // dead time after a burn, so it reads as a discrete shove
-  boostCharge:0.055,    // per second, always
-  regenGain:  0.9,      // extra charge per second per unit of downhill slope, gravity on
-  // --- boost cells sitting on the course ---
+  fuelStart:  2,        // rockets on the rack at the lights
+  fuelMax:    5,
+  // --- rocket pickups sitting on the course ---
   cellEveryM: 240,      // one every so many metres of track
   cellGrab:   1.5,      // how close across the track you have to pass
-  cellGive:   0.40,     // battery per cell
-  cellBackS:  9,        // seconds before a taken cell comes back
+  cellBackS:  9,        // seconds before a taken rocket comes back
   // --- racers bumping each other ---
   bodyLen:    2.6,
   bodyWide:   1.5,
@@ -2746,12 +2790,12 @@ const NEON = {
    The whole ladder moved up one rung: what used to be the hardest setting is now the
    easiest, because rivals that lose ground on every straight are not opponents, they are
    scenery. `pace` above 1 means a rival out-runs the player's unboosted top speed, so on
-   Fair and Fierce the boost battery is not a treat -- it is how you stay in touch, and
-   picking where to spend it is the race. */
+   Fair and Fierce a rocket is not a treat -- it is how you stay in touch, and picking
+   where to spend it is the race. */
 const NEON_SKILL = {
-  chill:  {pace: 1.00, corner: 1.04, wobble: 0.18, label: 'Chill'},
-  fair:   {pace: 1.07, corner: 1.16, wobble: 0.10, label: 'Fair'},
-  fierce: {pace: 1.14, corner: 1.28, wobble: 0.05, label: 'Fierce'},
+  chill:  {pace: 1.06, corner: 1.10, wobble: 0.16, label: 'Chill'},
+  fair:   {pace: 1.14, corner: 1.22, wobble: 0.09, label: 'Fair'},
+  fierce: {pace: 1.22, corner: 1.34, wobble: 0.04, label: 'Fierce'},
 };
 
 /* Speed classes. The multiplier is on TOP SPEED; thrust goes as its square so the class
@@ -3570,7 +3614,7 @@ const angNorm = a => { while(a > Math.PI) a -= 2*Math.PI; while(a < -Math.PI) a 
 
 function makeRacer(o){
   return Object.assign({
-    s: 0, d: 0, yaw: 0, v: 0, lap: 0, prog: 0, battery: 1, boosting: false,
+    s: 0, d: 0, yaw: 0, v: 0, lap: 0, prog: 0, fuel: NEON.fuelStart, boosting: false,
     bumpT: 0, bumpSide: 0, bumps: 0, lean: 0, time: 0, done: false, finishT: null,
     place: 0, isPlayer: false, name: '?', skill: null, lane: 0, seed: 1, wob: 0,
     steerIn: 0, slope: 0, speedK: 1, burnT: 0, lockT: 0, boostWasDown: false, cells: 0,
@@ -3579,6 +3623,37 @@ function makeRacer(o){
 
 /* Top speed on the flat for this board: sqrt(thrust/drag), with the class multiplier.  */
 function topSpeed(r){ return Math.sqrt(NEON.thrust/NEON.dragK)*(r.speedK || 1); }
+
+/* Top speed ON A GRADE, which is a different number and the one a rider actually needs.
+   Terminal speed is where thrust and gravity balance drag, so a 10% descent does not just
+   accelerate you -- it RAISES the ceiling you accelerate towards, and a climb lowers it.
+   The physics in stepRacer has always worked this way; this is the same sum solved for v,
+   so that a rival aims at the speed the hill allows instead of holding its flat-ground
+   number and braking down every descent. */
+function gradeTopSpeed(r, slope, gravity){
+  const k2 = (r.speedK || 1)*(r.speedK || 1);
+  let a = NEON.thrust*k2;
+  if(gravity){
+    const g = Math.max(-NEON.slopeClamp, Math.min(NEON.slopeClamp, slope || 0));
+    a -= NEON.gravity*NEON.gravityGain*g/Math.sqrt(1 + g*g);
+  }
+  if(a <= 0) return 0;                       // steeper than the board can climb
+  // a = dragK v^2 + rollK v, solved for v
+  const disc = NEON.rollK*NEON.rollK + 4*NEON.dragK*a;
+  return (-NEON.rollK + Math.sqrt(disc))/(2*NEON.dragK);
+}
+
+/* The grade a rider is about to be on, averaged over the next few seconds of travel. */
+function slopeAhead(T, s, ahead){
+  let sum = 0, n = 0;
+  const steps = Math.max(1, Math.ceil(ahead/T.ds));
+  for(let q = 0; q <= steps; q++){
+    let i = Math.floor(s/T.ds) + q;
+    if(T.closed) i = ((i % T.n) + T.n) % T.n; else if(i >= T.n) break;
+    sum += T.slope[i]; n++;
+  }
+  return n ? sum/n : 0;
+}
 
 /* input: {steer -1..1 (left +), throttle 0..1, brake 0..1, boost bool}
    env:   {gravity bool}
@@ -3600,10 +3675,10 @@ function stepRacer(r, T, input, env, dt){
   r.burnT = Math.max(0, r.burnT - dt);
   r.lockT = Math.max(0, r.lockT - dt);
   const wants = !!input.boost;
-  if(wants && !r.boostWasDown && !r.done && r.burnT <= 0 && r.lockT <= 0 && r.battery >= NEON.burnCost){
+  if(wants && !r.boostWasDown && !r.done && r.burnT <= 0 && r.lockT <= 0 && r.fuel >= 1){
     r.burnT = NEON.burnS;
     r.lockT = NEON.burnS + NEON.burnLock;
-    r.battery -= NEON.burnCost;
+    r.fuel--;
     r.burns = (r.burns || 0) + 1;
     r.burnFired = true;                     // one frame's flag, for the sound and the flame
   }else r.burnFired = false;
@@ -3615,8 +3690,6 @@ function stepRacer(r, T, input, env, dt){
   if(env.gravity) a -= NEON.gravity*NEON.gravityGain*slopeAlong/Math.sqrt(1+slopeAlong*slopeAlong);
   r.v = Math.max(0, r.v + a*dt);
   r.boosting = boosting;
-  r.battery = Math.max(0, Math.min(1, r.battery + NEON.boostCharge*dt
-    + (env.gravity && slopeAlong < 0 ? -slopeAlong*NEON.regenGain*dt : 0)));
 
   // --- heading ---
   r.bumpT = Math.max(0, r.bumpT - dt);
@@ -3683,7 +3756,9 @@ function rivalInput(r, T, others, env, t){
      one arrives too hot and meets the bumper, which is the whole reason bumpers exist. */
   const nerve = 1 + sk.wobble*0.45*Math.sin(t*0.23 + r.seed*2.1);
   const vCorner = Math.sqrt((15*sk.corner*nerve)/Math.max(bend.k, 1e-4));
-  const vTop = topSpeed(r)*sk.pace*r.paceMul;
+  /* The ceiling the hill allows, not the flat-ground one -- otherwise a rival brakes all
+     the way down a descent to hold a number that gravity has already made meaningless. */
+  const vTop = gradeTopSpeed(r, slopeAhead(T, r.s, look*1.5), env.gravity)*sk.pace*r.paceMul;
   let vWant = Math.min(vTop, vCorner);
   // lane: own lane on the straights, inside of the bend when one is coming
   // the narrower of here and where we are about to be: a road necks down into a trail
@@ -3717,7 +3792,7 @@ function rivalInput(r, T, others, env, t){
   const steer = Math.max(-1, Math.min(1, need/rate));
   /* Boost cells: worth a metre or two of lane, never worth a corner. A rival with a full
      pack drives its line and leaves the cells for whoever needs them. */
-  if(env.cells && r.battery < 0.75){
+  if(env.cells && r.fuel < NEON.fuelMax){
     for(const c of env.cells){
       if(!c.live) continue;
       let gap = c.s - r.s;
@@ -3734,8 +3809,7 @@ function rivalInput(r, T, others, env, t){
     throttle: dv > -0.5 ? 1 : 0,
     brake: dv < -2.5 ? Math.min(1, (-dv-2.5)/6) : 0,
     // one press, and only where it pays: out of a corner onto something straight
-    boost: r.burnT <= 0 && r.lockT <= 0 && r.battery >= NEON.burnCost + 0.05
-      && dv > 2 && bend.k < 0.012,
+    boost: r.burnT <= 0 && r.lockT <= 0 && r.fuel >= 1 && dv > 2 && bend.k < 0.012,
   };
 }
 
@@ -4250,6 +4324,76 @@ function clearTrackMesh(){
   PULSES.length = 0;
 }
 
+/* ---------- rocket smoke ----------
+   A shared pool of billboards, because every rider that burns wants the same effect and a
+   particle system each would be a dozen draw calls for a puff of smoke. Emitted behind the
+   board while a burn runs: each puff drifts back and up, swells, and fades. The pool is
+   fixed, so a long burn recycles the oldest puff rather than allocating -- the trail has a
+   length, not a memory. */
+const SMOKE_N = 64;
+const smoke = [];
+let smokeGroup = null, smokeNext = 0;
+
+function ensureSmoke(){
+  if(smokeGroup && smokeGroup.parent) return;
+  smokeGroup = new THREE.Group();
+  smokeGroup.name = 'neonSmoke';
+  smokeGroup.frustumCulled = false;
+  smoke.length = 0;
+  for(let i = 0; i < SMOKE_N; i++){
+    const m = new THREE.Sprite(new THREE.SpriteMaterial({map: glowTexture(), color: 0xffffff,
+      transparent:true, blending: THREE.AdditiveBlending, depthWrite:false, opacity: 0, fog:true}));
+    m.visible = false;
+    m.frustumCulled = false;
+    smokeGroup.add(m);
+    smoke.push({m, t: 0, life: 1, vx: 0, vy: 0, vz: 0, size: 1, hot: 0});
+  }
+  scene.add(smokeGroup);
+}
+/* hot 1 = flame straight out of the nozzle, 0 = cold smoke a moment later. */
+function puffSmoke(x, y, z, yaw, speed, scale){
+  ensureSmoke();
+  const p = smoke[smokeNext = (smokeNext + 1) % SMOKE_N];
+  const k = scale || 1;
+  p.t = 0;
+  p.life = 1.3 + Math.random()*0.7;      // long enough to leave a trail down the track
+  p.size = (1.15 + Math.random()*0.85)*k;   // bigger: at 70 mph a small puff is gone in a blink
+  p.hot = 1;
+  // pushed out of the back of the board, with a little spread
+  const back = -Math.cos(yaw), backZ = Math.sin(yaw);
+  const spread = (Math.random()-0.5)*2.2;
+  p.vx = back*(4 + speed*0.12) + Math.sin(yaw)*spread;
+  p.vz = backZ*(4 + speed*0.12) + Math.cos(yaw)*spread;
+  /* Drifting UP, not down. A puff thrown at the deck sinks behind the track surface and is
+     occluded by it -- the deck writes depth -- so the trail simply vanished a frame after
+     it was made. Rising slightly, it stays in front of the ribbon all the way back. */
+  p.vy = 0.25 + Math.random()*0.7;
+  p.m.position.set(x + back*0.6*k, y + 0.45*k, z + backZ*0.6*k);
+  p.m.visible = true;
+}
+function stepSmoke(dt){
+  for(const p of smoke){
+    if(!p.m.visible) continue;
+    p.t += dt;
+    const u = p.t/p.life;
+    if(u >= 1){ p.m.visible = false; p.m.material.opacity = 0; continue; }
+    p.m.position.x += p.vx*dt;
+    p.m.position.y += p.vy*dt;
+    p.m.position.z += p.vz*dt;
+    p.vx *= 0.93; p.vz *= 0.93; p.vy *= 0.98;
+    p.hot = Math.max(0, p.hot - dt*4.5);
+    // white-hot at the nozzle, cooling through amber into grey smoke as it swells
+    p.m.material.color.setRGB(1, 0.55 + 0.45*p.hot, 0.35 + 0.6*p.hot*p.hot);
+    p.m.material.opacity = (1-u)*(1-u)*(0.85 + 0.15*p.hot);
+    const g = p.size*(0.6 + u*3.8);        // small and hot at the nozzle, broad and cold behind
+    p.m.scale.set(g, g, 1);
+  }
+}
+function clearSmoke(){
+  if(smokeGroup){ scene.remove(smokeGroup); disposeGroup(smokeGroup); }
+  smokeGroup = null; smoke.length = 0;
+}
+
 /* A wall lighting up where it was hit. side: +1 left, -1 right. */
 function bumperPulse(x, y, z, yaw, side, hard){
   let p = PULSES[0];
@@ -4264,6 +4408,7 @@ function bumperPulse(x, y, z, yaw, side, hard){
   p.m.scale.set(0.6, 0.6, 1);
 }
 function updateScene(dt){
+  stepSmoke(dt);
   for(const p of PULSES){
     if(p.t <= 0) continue;
     p.t -= dt/0.38;
@@ -4695,20 +4840,71 @@ function makeBoard(len, wide, color){
     g.add(pad);
     pads.push(pad);
   }
-  // the light it throws on the deck below
+  /* the light it throws on the deck below. side: DoubleSide, and that is not a stylistic
+     default -- it is required. This plane rides inside `tilt`, which the game constantly
+     rotates (lean, bumps, tricks, the pitch a hill puts under the board), and a
+     MeshBasicMaterial without an explicit `side` renders FrontSide only. The instant a
+     tilt swings the plane's normal away from the camera -- exactly what a lean or a bump
+     does -- the back face is culled and the glow vanishes or is sliced through the
+     middle, which is what the hard straight edge through the glow was: not smoke or a
+     flame artifact, a single-sided plane caught edge-on. The exhaust cones (addMat(),
+     used a few lines down) already set DoubleSide for the same reason; this plane and
+     the scorch plane below it were the two things in the rig that didn't. */
   const glowMat = new THREE.MeshBasicMaterial({map: glowTexture(), color, transparent:true, opacity:0.75,
-    blending: THREE.AdditiveBlending, depthWrite:false});
+    blending: THREE.AdditiveBlending, depthWrite:false, side: THREE.DoubleSide});
+  /* Lifted clear of the deck's own paint, not resting on it. The dashes, edge lines and
+     finish-line box all sit within 2-6 cm of the deck surface (see neon-scene.js), and
+     this glow used to sit at 5 cm -- squarely inside that band. Two nearly-coplanar
+     surfaces that close together z-fight: which one wins a given pixel flickers frame to
+     frame, especially on real GPU hardware with tighter depth precision than a software
+     rasterizer shows in a still screenshot. Lifted to 18 cm, comfortably clear of
+     everything painted on the deck, it still reads as light falling ON the deck rather
+     than floating above it. */
   const glow = new THREE.Mesh(new THREE.PlaneGeometry(len*1.9, wide*3.2), glowMat);
   glow.rotation.x = -Math.PI/2;
-  glow.position.y = -HOVER_M + 0.05;
+  glow.position.y = -HOVER_M + 0.18;
   glow.renderOrder = 5;
   g.add(glow);
-  // boost flame
-  const jet = new THREE.Mesh(new THREE.ConeGeometry(wide*0.30, len*0.9, 10), addMat(color, 0.0));
-  jet.rotation.z = Math.PI/2;                         // point back along -X
-  jet.position.set(-len*0.95, -0.02, 0);
+  /* The scorch the burn leaves on the deck. A plume fired straight astern is pointed at
+     the chase camera and reads as a dot however bright it is; the light it throws on the
+     track behind is side-on to the lens, and that is what actually says "rocket" from
+     where the player is sitting. */
+  // same single-sided gap as glowMat above, and the same fix
+  const scorchMat = new THREE.MeshBasicMaterial({map: glowTexture(), color: 0xff9a3c, transparent:true,
+    opacity: 0, blending: THREE.AdditiveBlending, depthWrite:false, side: THREE.DoubleSide});
+  const scorch = new THREE.Mesh(new THREE.PlaneGeometry(len*5.5, wide*2.4), scorchMat);
+  scorch.rotation.x = -Math.PI/2;
+  scorch.position.set(-len*2.6, -HOVER_M + 0.20, 0);   // same z-fight fix as glow, just above it
+  scorch.renderOrder = 6;
+  g.add(scorch);
+  /* The rocket: a nozzle bolted under the tail, a hot white core, a longer amber flame
+     around it and a shock diamond in the middle. Three nested cones cost nothing and read
+     as a rocket rather than a traffic cone, which one cone on its own does not. */
+  const nozzle = new THREE.Mesh(new THREE.CylinderGeometry(wide*0.22, wide*0.28, len*0.18, 10),
+    new THREE.MeshBasicMaterial({color: 0x20242f}));
+  nozzle.rotation.z = Math.PI/2;
+  nozzle.position.set(-len*0.58, -0.02, 0);
+  g.add(nozzle);
+  const jet = new THREE.Group();
+  const flame = new THREE.Mesh(new THREE.ConeGeometry(wide*0.26, len*1.5, 12), addMat(0xff9a3c, 0));
+  flame.rotation.z = Math.PI/2;
+  flame.position.x = -len*0.75;
+  const core = new THREE.Mesh(new THREE.ConeGeometry(wide*0.13, len*0.85, 10), addMat(0xffffff, 0));
+  core.rotation.z = Math.PI/2;
+  core.position.x = -len*0.45;
+  const shock = new THREE.Mesh(new THREE.OctahedronGeometry(wide*0.11), addMat(0xbfe8ff, 0));
+  shock.position.x = -len*0.62;
+  jet.add(flame, core, shock);
+  jet.position.set(-len*0.62, -0.02, 0);
+  /* ANGLED DOWN, and that is not decoration. The chase camera looks straight along the
+     board's own axis, so a plume fired dead astern is pointed at the lens: it renders as a
+     white blob under the rider and reads as nothing at all. Tipped ~20 degrees towards the
+     deck, the flame and its smoke stream back along the track where the camera sees them
+     side-on, which is the shot this game is always framing. */
+  jet.rotation.z = -0.35;
+  nozzle.rotation.z = Math.PI/2 - 0.35;
   g.add(jet);
-  return {g, glowMat, jet, pads};
+  return {g, glowMat, jet, flame, core, shock, nozzle, scorch, scorchMat, pads};
 }
 
 /* who: {kind:'dog', params} | {kind:'wild', key} */
@@ -4789,9 +4985,46 @@ function poseRider(R, racer, x, y, z, pitch, t, dt){
     const far = Math.sqrt(dx*dx + dy*dy + dz*dz);
     R.tag.material.opacity = Math.max(0, Math.min(1, (far - 18)/22));
   }
-  R.board.jet.material.opacity = R.tuckAmt*(0.55 + 0.25*Math.sin(t*40));
-  R.board.jet.scale.set(1, 0.6 + R.tuckAmt*0.8, 1);
-  R.board.glowMat.opacity = 0.55 + 0.25*v01 + 0.2*R.tuckAmt;
+  /* THE BURN. Held at full while the burn runs and then snuffed, rather than tracking the
+     button: the whole point of one-press boost is that the flame is an event you can see
+     start and end. The flicker is fast and shallow -- a rocket roars, it does not strobe. */
+  const burn = racer.burnT > 0 ? Math.min(1, racer.burnT/0.25) : 0;
+  R.burnAmt = (R.burnAmt || 0) + (burn - (R.burnAmt || 0))*Math.min(1, dt*14);
+  /* TONED DOWN. Five additive layers -- flame, core, shock, scorch, and the deck glow
+     below -- all peak at once on a burn, and their old opacities (0.85 / 0.95 / 0.7 /
+     0.75 / up to 0.9) summed to something closer to a small sun than a rocket: the
+     screenshots that prompted this showed one white blob with no visible flame shape,
+     which is what over-saturated additive layers do -- they stop reading as separate
+     things and become one flat overexposed patch. Scaled down so the hottest pixel in
+     the stack lands well short of 1, the individual cones stay visible as a flame rather
+     than merging into a glare. */
+  const flick = 0.88 + 0.12*Math.sin(t*47 + R.seed*3);
+  R.board.flame.material.opacity = R.burnAmt*0.5*flick;
+  R.board.core.material.opacity = R.burnAmt*0.55;
+  R.board.shock.material.opacity = R.burnAmt*0.4*flick;
+  R.board.flame.scale.set(1, 0.5 + R.burnAmt*(0.6 + 0.18*Math.sin(t*31)), 1);
+  R.board.core.scale.set(1, 0.5 + R.burnAmt*0.55, 1);
+  R.board.shock.scale.setScalar(0.5 + 0.35*R.burnAmt);
+  R.board.scorchMat.opacity = R.burnAmt*0.4*flick;
+  R.board.scorch.scale.set(0.6 + 0.6*R.burnAmt, 1, 0.7 + 0.5*R.burnAmt);
+  if(racer.burnT > 0 && !R.isGhost){
+    // two puffs a frame at 60 Hz is a continuous trail without emptying the pool in a second
+    R.smokeT = (R.smokeT || 0) + dt;
+    while(R.smokeT > 0.03){
+      R.smokeT -= 0.03;
+      /* THE HEIGHT WAS THE BUG. This runs against `y`, the deck elevation passed into
+         poseRider -- but the board itself floats HOVER_M*K above that (board.g.position.y
+         a few lines up), and the nozzle sits close to the board. Emitting at y+0.18*R.K put
+         every puff nearly half a board-height BELOW the rocket, low enough to read as
+         nothing against the dark deck instead of a trail coming off the board. Emit level
+         with the nozzle instead, and further back (the nozzle itself is well behind the
+         board's centre, not at it). */
+      puffSmoke(x - Math.cos(racer.yaw)*2.3*R.K, y + HOVER_M*R.K*0.82, z + Math.sin(racer.yaw)*2.3*R.K,
+                racer.yaw, racer.v, R.K);
+    }
+  }
+  // the always-on speed glow is unchanged; only the burn's OWN contribution is cut back
+  R.board.glowMat.opacity = 0.55 + 0.25*v01 + 0.15*R.burnAmt;
 }
 function disposeRider(R){
   if(!R) return;
@@ -5132,7 +5365,8 @@ function stepCells(cells, racers, T, dt){
       // the window has to cover a whole frame of travel or a fast board steps over it
       if(Math.abs(gap) > Math.max(2.5, r.v*dt*1.2)) continue;
       if(Math.abs(r.d - c.d) > NEON.cellGrab + (T.bodyWide || NEON.bodyWide)*0.5) continue;
-      r.battery = Math.min(1, r.battery + NEON.cellGive);
+      if(r.fuel >= NEON.fuelMax) continue;         // a full rack leaves it for someone else
+      r.fuel++;
       r.cells = (r.cells || 0) + 1;
       c.live = false; c.backT = NEON.cellBackS;
       took.push({cell: c, racer: r});
@@ -5150,24 +5384,46 @@ function buildCellMeshes(T, cells, baseM, color){
   if(typeof THREE === 'undefined') return null;
   cellGroup = new THREE.Group(); cellGroup.name = 'neonCells';
   const K = 1/(T.widthK || 1);
-  const ringGeo = new THREE.TorusGeometry(1.15*K, 0.12*K, 6, 18);
-  const coreGeo = new THREE.OctahedronGeometry(0.42*K);
+  /* A PICKUP LOOKS LIKE WHAT IT GIVES YOU: the same rocket that sits on the HUD rack and
+     lights under the board. A ring would have been cheaper to draw and told you nothing
+     about what was in it. */
+  const bodyGeo = new THREE.CylinderGeometry(0.22*K, 0.26*K, 1.0*K, 10);
+  const noseGeo = new THREE.ConeGeometry(0.22*K, 0.45*K, 10);
+  const finGeo  = new THREE.BoxGeometry(0.06*K, 0.3*K, 0.34*K);
+  const flameGeo = new THREE.ConeGeometry(0.17*K, 0.5*K, 8);
+  const haloGeo = new THREE.TorusGeometry(1.25*K, 0.11*K, 6, 16);
   const mat = new THREE.MeshBasicMaterial({color, transparent:true, opacity:0.95,
     blending: THREE.AdditiveBlending, depthWrite:false});
-  const softMat = new THREE.MeshBasicMaterial({color, transparent:true, opacity:0.18,
+  const softMat = new THREE.MeshBasicMaterial({color, transparent:true, opacity:0.38,
+    blending: THREE.AdditiveBlending, depthWrite:false});
+  const flameMat = new THREE.MeshBasicMaterial({color: 0xff7a3c, transparent:true, opacity:0.8,
     blending: THREE.AdditiveBlending, depthWrite:false});
   for(const c of cells){
     const f = trackFrame(T, c.s, {});
     const g = new THREE.Group();
-    const ring = new THREE.Mesh(ringGeo, mat);
-    const halo = new THREE.Mesh(ringGeo, softMat);
-    halo.scale.setScalar(1.7);
-    const core = new THREE.Mesh(coreGeo, mat);
-    g.add(ring, halo, core);
+    const core = new THREE.Group();
+    const body = new THREE.Mesh(bodyGeo, mat);
+    const nose = new THREE.Mesh(noseGeo, mat);
+    nose.position.y = 0.72*K;
+    const flame = new THREE.Mesh(flameGeo, flameMat);
+    flame.position.y = -0.72*K; flame.rotation.z = Math.PI;
+    core.add(body, nose, flame);
+    for(let q = 0; q < 3; q++){
+      const fin = new THREE.Mesh(finGeo, mat);
+      fin.position.y = -0.42*K;
+      fin.position.x = Math.cos(q*2.094)*0.2*K;
+      fin.position.z = Math.sin(q*2.094)*0.2*K;
+      fin.rotation.y = -q*2.094;
+      core.add(fin);
+    }
+    const halo = new THREE.Mesh(haloGeo, softMat);
+    halo.rotation.x = Math.PI/2;
+    g.add(core, halo);
     g.position.set(f.x - Math.sin(f.yaw)*c.d, deckY(T, f.elev, baseM) + 1.25*K, f.z - Math.cos(f.yaw)*c.d);
-    g.rotation.y = f.yaw + Math.PI/2;       // the torus faces down the track
+    g.rotation.y = f.yaw + Math.PI/2;
     g.userData.cell = c;
     g.userData.core = core;
+    g.userData.flame = flame;
     cellGroup.add(g);
     cellMeshes.push(g);
   }
@@ -5182,8 +5438,9 @@ function updateCellMeshes(t){
     if(!g.visible) continue;
     const coming = c.live ? 1 : 1 - c.backT/(NEON.cellBackS*0.35);
     g.scale.setScalar(0.35 + 0.65*coming);
-    g.userData.core.rotation.y = t*2.2;
-    g.userData.core.rotation.x = t*1.4;
+    g.userData.core.rotation.y = t*1.6;
+    g.userData.core.rotation.z = Math.sin(t*1.1 + c.i)*0.18;
+    g.userData.flame.scale.set(1, 0.7 + 0.5*Math.abs(Math.sin(t*14 + c.i)), 1);
     g.position.y += Math.sin(t*2 + c.i)*0.004;
   }
 }
@@ -5412,7 +5669,7 @@ const trackMeta = new Map();    // sig|scale -> {L, climb, ok}: filled in by the
 let scanQueue = [];
 let activeTrack = null;         // the ribbon currently in the scene
 const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale: 1,
-                  cls: 'standard', cam: 'normal', rider: 'p:0', course: '', map: DEFAULT_NEON_WORLD};
+                  cls: 'standard', cam: 'normal', ghosts: true, rider: 'p:0', course: '', map: DEFAULT_NEON_WORLD};
 let bests = {}, ghostStore = {};
 let race = null;                // {T, racers, riders, me, phase, t, grav, scale, reverse, ...}
 let neonScreen = 'menu';   // NOT `screen`: the bundle is one classic script, and a
@@ -5653,21 +5910,46 @@ function riderChoices(){
   return out;
 }
 const riderWho = id => (riderChoices().find(c => c.v === id) || {}).who;
-/* A ghost is a recording, so it is drawn as one: the same rider, lit down to a memory. */
-function fadeRider(R){
+/* A ghost is a recording, so it is drawn as one: the same rider, cooled to a pale trace of
+   itself in its own colour.
+
+   TWO THINGS HERE ARE LOAD-BEARING. The single-material case must stay a single material:
+   an earlier version wrapped every mesh's material in an array and then failed to unwrap
+   it (the Array.isArray check it used was testing the array it had just built), and a mesh
+   with an array material but no geometry groups draws NOTHING -- which is why the ghosts
+   were invisible except for the marker sprite hanging over the track, the "tiny orb" they
+   were reported as. And the opacity has to stay well up: at 0.3 a toon-shaded pup on a
+   dark deck is a smudge. 0.62, tinted towards the ghost's colour, reads clearly as a
+   rider you can chase without being mistaken for a solid one. */
+function fadeRider(R, color){
+  const tint = new THREE.Color(color);
   R.root.traverse(o => {
     if(!o.material || o.isSprite) return;
-    const mats = Array.isArray(o.material) ? o.material : [o.material];
-    o.material = mats.map(m => {
+    const one = !Array.isArray(o.material);
+    const mats = (one ? [o.material] : o.material).map(m => {
       const c = m.clone ? m.clone() : m;
+      // the rocket flame and its glow are animated from zero; fading them means nothing
+      if(m.opacity != null && m.opacity < 0.05) return c;
       c.transparent = true;
-      c.opacity = (m.opacity == null ? 1 : m.opacity)*0.3;
-      c.depthWrite = false;
+      c.opacity = (m.opacity == null ? 1 : m.opacity)*0.62;
+      /* DEPTH WRITE STAYS ON. A rider is dozens of separate meshes -- legs, body, board
+         deck, kicks, hover pads -- and Three.js sorts transparent objects only by their
+         centroid distance to the camera, not per pixel. With depthWrite off, that sort is
+         unstable across a model with this many overlapping parts: a leg drawn before the
+         belly it sits in front of gets painted over by it, and the parts near the board
+         end up reading faint while the parts near the head don't. At 0.62 opacity a ghost
+         is mostly-opaque anyway, so writing depth lets each part occlude the ghost's OWN
+         farther parts correctly -- which is what actually fixed the top-bright,
+         bottom-faint look -- at the minor cost of a ghost no longer softly blending with
+         something directly behind it (it sits over open track, so that never shows). */
+      c.depthWrite = true;
+      if(c.color) c.color.lerp(tint, 0.4);
+      if(c.emissive) c.emissive.lerp(tint, 0.4);
       return c;
     });
-    if(!Array.isArray(o.material)) o.material = o.material[0];
+    o.material = one ? mats[0] : mats;
   });
-  if(R.tag) R.tag.material.opacity = 0.35;
+  if(R.tag) R.tag.material.opacity = 0.7;
 }
 function fillRiderSelect(){
   const sel = $('riderSel');
@@ -5689,8 +5971,9 @@ function syncMenu(){
   document.querySelectorAll('#classSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.cls === settings.cls));
   document.querySelectorAll('#camSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.cam === settings.cam));
   $('scaleSel').value = String(settings.scale);
-  $('ghostNote').textContent = settings.skill === 'fierce'
-    ? 'Fierce also lines up the fastest ghost of every rider who has raced this course.'
+  document.querySelectorAll('#ghostSeg .btn').forEach(b => b.classList.toggle('on', (b.dataset.ghost === '1') === settings.ghosts));
+  $('ghostNote').textContent = settings.ghosts
+    ? 'The fastest ghost of every rider who has raced this course lines up with the field.'
     : '';
 }
 /* Gravity, direction and scale are set BEFORE the lights go out and hold for the whole
@@ -5729,6 +6012,11 @@ function setClass(name){
   settings.cls = name;
   syncMenu(); neonWriteStore(); renderCourseList();
 }
+function setGhosts(on){
+  if(settings.ghosts === !!on) return;
+  settings.ghosts = !!on;
+  syncMenu(); neonWriteStore();
+}
 function setCam(name){
   if(!NEON_CAM[name] || settings.cam === name) return;
   settings.cam = name;
@@ -5764,6 +6052,7 @@ function endRace(){
   if(!race) return;
   for(const R of race.riders) disposeRider(R);
   clearCells();
+  clearSmoke();
   race = null;
   stopHum();
 }
@@ -5803,12 +6092,13 @@ function startRace(){
      time on exactly this course, in this class, this way round, at this scale, with this
      gravity, lines up as the run that set it. They replay, so they cannot be blocked or
      shoved, but they are ranked with everyone else -- beating a ghost is beating the time. */
-  const ghosts = settings.skill === 'fierce' ? bestGhosts(ghostStore, bestKey(course, settings)) : [];
+  const ghosts = settings.ghosts ? bestGhosts(ghostStore, bestKey(course, settings)) : [];
   ghosts.forEach((g, i) => {
     const gr = makeGhostRacer(g, T, GHOST_COLORS[i % GHOST_COLORS.length]);
     racers.push(gr);
     const R = makeRider(riderWho(g.rider) || choice.who, gr.color, 40 + i, sizeK);
-    fadeRider(R);
+    R.isGhost = true;
+    fadeRider(R, gr.color);
     riders.push(R);
   });
   const line = assembleLine(graph, course).pts;
@@ -5862,9 +6152,11 @@ function stepRace(dt){
     // rubber band, gently: nobody should be a dot on the horizon either way
     if(!r.isPlayer && !r.done){
       const gap = me.prog - r.prog;
-      r.paceBand = clamp(gap/400, -0.06, 0.08);
+      /* Only a long way clear does a rival ease off, and only a little: the band is here
+         so a runaway leader stays on screen, not to hand the race back. */
+      r.paceBand = clamp(gap/700, -0.03, 0.08);
       if(inp.throttle && r.paceBand < 0 && r.v > 8) inp.throttle = 1 + r.paceBand*2;
-      if(r.paceBand > 0.02) inp.boost = inp.boost || (gap > 60 && r.battery > 0.3);
+      if(r.paceBand > 0.02) inp.boost = inp.boost || (gap > 60 && r.fuel >= 1);
     }
     const ev = stepRacer(r, T, inp, env, dt);
     if(ev) onBump(r, ev);
@@ -5914,6 +6206,30 @@ function renderBoard(){
     li.append(a, b);
     ol.appendChild(li);
   }
+}
+
+/* THE ROCKET RACK. One icon per rocket on board, spent ones left as empty outlines so the
+   rack reads as "two of five used" at a glance rather than a bar that could be anything.
+   Rebuilt only when the count changes -- this runs every frame. */
+function paintFuel(me){
+  const box = $('fuelRack');
+  const lit = me.fuel, max = NEON.fuelMax;
+  if(box.childElementCount !== max){
+    box.textContent = '';
+    for(let i = 0; i < max; i++){
+      const el = document.createElement('i');
+      el.className = 'rocket';
+      box.appendChild(el);
+    }
+    box.dataset.lit = '';
+  }
+  const key = lit + (me.burnT > 0 ? 'b' : '');
+  if(box.dataset.lit === key) return;
+  box.dataset.lit = key;
+  [...box.children].forEach((el, i) => {
+    el.classList.toggle('on', i < lit);
+    el.classList.toggle('firing', me.burnT > 0 && i === lit);
+  });
 }
 
 /* ---------- camera ---------- */
@@ -5992,14 +6308,12 @@ function drawRace(dt){
                                      : Math.round(100*clamp(me.s/T.L, 0, 1)) + '%';
   $('hudClock').textContent = fmtTime(me.done ? me.finishT : me.time);
   $('speedVal').textContent = String(Math.round(mph(me.v)));
-  $('battFill').style.width = Math.round(me.battery*100) + '%';
+  paintFuel(me);
   const pct = Math.round(me.slope*100);
   $('slopeVal').textContent = !R.gravity ? '' : pct > 1 ? '▲ ' + pct + '%' : pct < -1 ? '▼ ' + (-pct) + '%'
     : (dem ? Math.round(feet(f.elev)) + ' ft' : '');
   setHum(me.v, me.burnT > 0 ? Math.min(1, me.burnT/NEON.burnS + 0.35) : 0);
-  $('burnPip').textContent = me.burnT > 0 ? 'BURN'
-    : me.battery >= NEON.burnCost ? Math.floor(me.battery/NEON.burnCost) + ' BURN' + (me.battery >= NEON.burnCost*2 ? 'S' : '')
-    : 'CHARGING';
+  $('burnPip').textContent = me.burnT > 0 ? 'BURNING' : me.fuel ? '' : 'OUT OF ROCKETS';
   $('burnPip').classList.toggle('hot', me.burnT > 0);
   const fit = paintMap($('minimap'), graph, mapBox, R.line, T.closed, 'mm|' + mapId + '|' + R.course.sig, true);
   const sc = R.scale;
@@ -6047,6 +6361,7 @@ function wireUI(){
   document.querySelectorAll('#gravSeg .btn').forEach(b => b.addEventListener('click', () => setGravity(b.dataset.grav === '1')));
   document.querySelectorAll('#classSeg .btn').forEach(b => b.addEventListener('click', () => setClass(b.dataset.cls)));
   document.querySelectorAll('#camSeg .btn').forEach(b => b.addEventListener('click', () => setCam(b.dataset.cam)));
+  document.querySelectorAll('#ghostSeg .btn').forEach(b => b.addEventListener('click', () => setGhosts(b.dataset.ghost === '1')));
   document.querySelectorAll('#dirSeg .btn').forEach(b => b.addEventListener('click', () => setReverse(b.dataset.dir === 'rev')));
   $('scaleSel').addEventListener('change', e => setScale(+e.target.value));
   $('riderSel').addEventListener('change', e => { settings.rider = e.target.value; neonWriteStore(); });

@@ -475,6 +475,76 @@ function clearTrackMesh(){
   PULSES.length = 0;
 }
 
+/* ---------- rocket smoke ----------
+   A shared pool of billboards, because every rider that burns wants the same effect and a
+   particle system each would be a dozen draw calls for a puff of smoke. Emitted behind the
+   board while a burn runs: each puff drifts back and up, swells, and fades. The pool is
+   fixed, so a long burn recycles the oldest puff rather than allocating -- the trail has a
+   length, not a memory. */
+const SMOKE_N = 64;
+const smoke = [];
+let smokeGroup = null, smokeNext = 0;
+
+function ensureSmoke(){
+  if(smokeGroup && smokeGroup.parent) return;
+  smokeGroup = new THREE.Group();
+  smokeGroup.name = 'neonSmoke';
+  smokeGroup.frustumCulled = false;
+  smoke.length = 0;
+  for(let i = 0; i < SMOKE_N; i++){
+    const m = new THREE.Sprite(new THREE.SpriteMaterial({map: glowTexture(), color: 0xffffff,
+      transparent:true, blending: THREE.AdditiveBlending, depthWrite:false, opacity: 0, fog:true}));
+    m.visible = false;
+    m.frustumCulled = false;
+    smokeGroup.add(m);
+    smoke.push({m, t: 0, life: 1, vx: 0, vy: 0, vz: 0, size: 1, hot: 0});
+  }
+  scene.add(smokeGroup);
+}
+/* hot 1 = flame straight out of the nozzle, 0 = cold smoke a moment later. */
+function puffSmoke(x, y, z, yaw, speed, scale){
+  ensureSmoke();
+  const p = smoke[smokeNext = (smokeNext + 1) % SMOKE_N];
+  const k = scale || 1;
+  p.t = 0;
+  p.life = 1.3 + Math.random()*0.7;      // long enough to leave a trail down the track
+  p.size = (1.15 + Math.random()*0.85)*k;   // bigger: at 70 mph a small puff is gone in a blink
+  p.hot = 1;
+  // pushed out of the back of the board, with a little spread
+  const back = -Math.cos(yaw), backZ = Math.sin(yaw);
+  const spread = (Math.random()-0.5)*2.2;
+  p.vx = back*(4 + speed*0.12) + Math.sin(yaw)*spread;
+  p.vz = backZ*(4 + speed*0.12) + Math.cos(yaw)*spread;
+  /* Drifting UP, not down. A puff thrown at the deck sinks behind the track surface and is
+     occluded by it -- the deck writes depth -- so the trail simply vanished a frame after
+     it was made. Rising slightly, it stays in front of the ribbon all the way back. */
+  p.vy = 0.25 + Math.random()*0.7;
+  p.m.position.set(x + back*0.6*k, y + 0.45*k, z + backZ*0.6*k);
+  p.m.visible = true;
+}
+function stepSmoke(dt){
+  for(const p of smoke){
+    if(!p.m.visible) continue;
+    p.t += dt;
+    const u = p.t/p.life;
+    if(u >= 1){ p.m.visible = false; p.m.material.opacity = 0; continue; }
+    p.m.position.x += p.vx*dt;
+    p.m.position.y += p.vy*dt;
+    p.m.position.z += p.vz*dt;
+    p.vx *= 0.93; p.vz *= 0.93; p.vy *= 0.98;
+    p.hot = Math.max(0, p.hot - dt*4.5);
+    // white-hot at the nozzle, cooling through amber into grey smoke as it swells
+    p.m.material.color.setRGB(1, 0.55 + 0.45*p.hot, 0.35 + 0.6*p.hot*p.hot);
+    p.m.material.opacity = (1-u)*(1-u)*(0.85 + 0.15*p.hot);
+    const g = p.size*(0.6 + u*3.8);        // small and hot at the nozzle, broad and cold behind
+    p.m.scale.set(g, g, 1);
+  }
+}
+function clearSmoke(){
+  if(smokeGroup){ scene.remove(smokeGroup); disposeGroup(smokeGroup); }
+  smokeGroup = null; smoke.length = 0;
+}
+
 /* A wall lighting up where it was hit. side: +1 left, -1 right. */
 function bumperPulse(x, y, z, yaw, side, hard){
   let p = PULSES[0];
@@ -489,6 +559,7 @@ function bumperPulse(x, y, z, yaw, side, hard){
   p.m.scale.set(0.6, 0.6, 1);
 }
 function updateScene(dt){
+  stepSmoke(dt);
   for(const p of PULSES){
     if(p.t <= 0) continue;
     p.t -= dt/0.38;
@@ -501,4 +572,4 @@ function updateScene(dt){
 }
 
 export { NEON_COL, glowTexture, addMat, buildEnvironment, buildTrackMesh, clearTrackMesh,
-         bumperPulse, updateScene, stripGeometry, offsetLine };
+         bumperPulse, updateScene, stripGeometry, offsetLine, puffSmoke, clearSmoke };
