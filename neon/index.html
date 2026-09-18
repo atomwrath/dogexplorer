@@ -40,6 +40,13 @@
           <span class="stepper"><button class="btn" id="rivalsDn" aria-label="Fewer rivals">−</button>
           <b id="rivalsVal">5</b><button class="btn" id="rivalsUp" aria-label="More rivals">+</button></span>
         </div>
+        <div class="row">Class
+          <span class="seg" id="classSeg">
+            <button class="btn" data-cls="cruiser">Cruiser</button>
+            <button class="btn on" data-cls="standard">Standard</button>
+            <button class="btn" data-cls="turbo">Turbo</button>
+          </span>
+        </div>
         <div class="row">Pace
           <span class="seg" id="skillSeg">
             <button class="btn" data-skill="chill">Chill</button>
@@ -51,6 +58,13 @@
           <span class="seg" id="gravSeg">
             <button class="btn on" data-grav="1">On</button>
             <button class="btn" data-grav="0">Off</button>
+          </span>
+        </div>
+        <div class="row">Camera
+          <span class="seg" id="camSeg">
+            <button class="btn" data-cam="close">Close</button>
+            <button class="btn on" data-cam="normal">Normal</button>
+            <button class="btn" data-cam="far">Far</button>
           </span>
         </div>
         <div class="row">Direction
@@ -78,10 +92,11 @@
         <label class="row filerow" for="worldFile">…or drop your own
           <span class="btn">Browse</span>
         </label>
-        <input type="file" id="worldFile" accept=".geojson,.json,application/geo+json,application/json" multiple hidden>
+        <input type="file" id="worldFile" accept=".geojson,.json,.txt,application/geo+json,application/json,text/plain" multiple hidden>
+        <p class="hint" id="ghostNote"></p>
         <button class="btn go" id="startBtn" disabled>START</button>
-        <p class="hint">W/↑ go · S/↓ brake · A D steer · Shift boost · R restart · Esc quit<br>
-      In the menu: G gravity · V reverse. Gravity, direction and scale are fixed once a race starts.</p>
+        <p class="hint">W/↑ go · S/↓ brake · A D steer · Shift boost (one burn per press) · C camera · R restart · Esc quit<br>
+      In the menu: G gravity · V reverse. Class, gravity, direction and scale are fixed once a race starts.</p>
       </section>
     </div>
   </div>
@@ -103,11 +118,12 @@
   <div id="hudB">
     <div id="speedVal">0</div><div id="speedUnit">mph</div>
     <div id="batt"><i id="battFill"></i></div>
+    <div id="burnPip"></div>
     <div id="slopeVal"></div>
   </div>
   <div id="touchCtl">
-    <div class="tgrp"><button class="tbtn" id="tLeft">◀</button><button class="tbtn" id="tRight">▶</button></div>
-    <div class="tgrp"><button class="tbtn" id="tBrake">BRAKE</button><button class="tbtn hot" id="tBoost">BOOST</button></div>
+    <div id="tSteer"><span>◀</span><b>STEER</b><span>▶</span></div>
+    <div class="tgrp"><button class="tbtn" id="tBrake">BRAKE</button><button class="tbtn hot" id="tBoost">BURN</button></div>
   </div>
 </div>
 <div id="count"></div>

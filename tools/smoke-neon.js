@@ -155,6 +155,10 @@ window.document.createElement = (tag, ...rest) => {
   if (String(tag).toLowerCase() === 'canvas') el.getContext = () => ctx2d;
   return el;
 };
+{
+  const pad = window.document.getElementById('tSteer');
+  if (pad) pad.getBoundingClientRect = () => ({ left: 100, top: 600, width: 240, height: 84, right: 340, bottom: 684 });
+}
 for (const id of ['c', 'preview', 'minimap']) {
   const cv = window.document.getElementById(id);
   cv.getContext = () => (id === 'c' ? null : ctx2d);
@@ -166,14 +170,25 @@ global.fetch = window.fetch = async (url) => {
   if (!fs.existsSync(file)) return { ok: false, status: 404, async json() { throw new Error('404'); } };
   return { ok: true, status: 200, async json() { return JSON.parse(fs.readFileSync(file, 'utf8')); } };
 };
-class FakeParam { constructor() { this.value = 0; } setValueAtTime() { return this; } exponentialRampToValueAtTime() { return this; } linearRampToValueAtTime() { return this; } }
-class FakeNode { constructor() { this.frequency = new FakeParam(); this.gain = new FakeParam(); this.Q = new FakeParam(); } connect(d) { if (d == null) throw new TypeError('connect(null)'); return d; } start() {} stop() {} }
+const audioLog = { nodes: [], filters: [], buffers: 0, samples: [] };
+global.audioLog = audioLog;
+class FakeParam { constructor() { this.value = 0; } setValueAtTime(v) { this.value = v; return this; } exponentialRampToValueAtTime(v) { this.value = v; return this; } linearRampToValueAtTime(v) { this.value = v; return this; } }
+class FakeNode {
+  constructor(kind) { this.kind = kind; this.frequency = new FakeParam(); this.gain = new FakeParam(); this.Q = new FakeParam(); audioLog.nodes.push(this); }
+  connect(d) { if (d == null) throw new TypeError('connect(null)'); return d; } start() {} stop() {}
+}
 global.AudioContext = window.AudioContext = class {
-  constructor() { this.state = 'running'; this.sampleRate = 44100; this.destination = new FakeNode(); }
+  constructor() { this.state = 'running'; this.sampleRate = 44100; this.destination = new FakeNode('dest'); }
   get currentTime() { return 5; } resume() { return Promise.resolve(); }
-  createOscillator() { return new FakeNode(); } createBiquadFilter() { return new FakeNode(); }
-  createGain() { return new FakeNode(); } createBufferSource() { return new FakeNode(); }
-  createBuffer(c, l) { return { getChannelData() { return new Float32Array(l); } }; }
+  createOscillator() { return new FakeNode('osc'); }
+  createBiquadFilter() { const n = new FakeNode('filter'); audioLog.filters.push(n); return n; }
+  createGain() { return new FakeNode('gain'); } createBufferSource() { return new FakeNode('buffersource'); }
+  createBuffer(c, l) {
+    // ONE array per buffer, kept: the app fills it, and the assertions read what it wrote
+    const data = new Float32Array(l);
+    audioLog.buffers++; audioLog.samples.push(data);
+    return { length: l, sampleRate: 44100, getChannelData() { return data; } };
+  }
 };
 
 // ---------- run the real bundle ----------
@@ -190,7 +205,9 @@ console.error = (...a) => errors.push('console.error: ' + a.map(String).join(' '
 const probe = `
 ;globalThis.__neon = { state: neonState, scene: () => scene, camera: () => camera,
   keys: neonKeys, touch: neonTouch, skills: NEON_SKILL, setScale, setReverse, setGravity,
-  reverseTrack, trackFrame, trackFor, buildTrack, mph, miles, feet };`;
+  reverseTrack, trackFrame, trackFor, buildTrack, mph, miles, feet,
+  setClass, setCam, cycleCam, topSpeed, placeCells, stepCells, classes: NEON_CLASS, cams: NEON_CAM,
+  makeRecorder, recordFrame, finishRecording, bestGhosts, keepGhost, ghostDt: GHOST_DT };`;
 try { (0, eval)(app + probe); }
 catch (e) { origError('THREW during boot:', e.message, '\n', e.stack.split('\n').slice(0, 6).join('\n')); process.exit(1); }
 
@@ -407,8 +424,9 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
     check('crossing the line shows the finish card', S.screen === 'finish' && S.race.racers[S.race.me].done);
     check('the finish board lists every racer', d.querySelectorAll('#finBoard li').length === want);
     const keys = Object.keys(S.bests);
-    check('finishing records a best time keyed to gravity, scale and direction',
-      keys.length === 1 && /\|g[01]\|s\d/.test(keys[0]) && S.bests[keys[0]] > 0, keys[0]);
+    check('finishing records a best time keyed to gravity, scale, direction and class',
+      keys.length === 1 && /\|g[01]\|s\d/.test(keys[0]) && keys[0].indexOf('|c' + S.settings.cls) > 0
+      && S.bests[keys[0]] > 0, keys[0]);
     check('the finish time is shown as minutes and seconds', /^\d:\d\d\.\d$/.test(d.getElementById('finTime').textContent));
     N.keys.clear();
     click('menuBtn');
@@ -529,6 +547,306 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
       [...d.querySelectorAll('#courseList .course:not(.off) .meta')].every(e => / mi\b/.test(e.textContent) && /ft\b/.test(e.textContent)));
   }
 
+  // ---- the course you were last on ----
+  {
+    const d = window.document;
+    const pick = Math.min(3, N.state().courses.length - 1);
+    d.querySelectorAll('#courseList .course')[pick].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    S = N.state();
+    check('the selected course is remembered by signature, not by index',
+      S.settings.course === S.courses[pick].sig && S.selCourse === pick, S.settings.course);
+  }
+
+  // ---- speed classes ----
+  {
+    N.setScale(1);
+    const T = trackFor(N.state().courses[0]);
+    const runFlat = speedK => {
+      const r = makeRacer({ s: 5, d: 0, yaw: trackFrame(T, 5, {}).yaw, speedK });
+      for (let i = 0; i < 120 * 40; i++) {
+        const f = trackFrame(T, r.s, {});
+        r.yaw = f.yaw; r.d = 0;
+        stepRacer(r, T, { steer: 0, throttle: 1, brake: 0, boost: false }, { gravity: false }, 1 / 120);
+      }
+      return r.v;
+    };
+    const base = N.classes.standard.top;
+    const slow = runFlat(N.classes.cruiser.top), fast = runFlat(N.classes.turbo.top);
+    const mid = runFlat(base);
+    check('a Cruiser tops out slower and a Turbo faster', slow < mid - 2 && fast > mid + 2,
+      `${N.mph(slow) | 0} / ${N.mph(mid) | 0} / ${N.mph(fast) | 0} mph`);
+    check('top speed follows the class multiplier', Math.abs(fast / mid / (N.classes.turbo.top / base) - 1) < 0.04
+      && Math.abs(slow / mid / (N.classes.cruiser.top / base) - 1) < 0.04);
+    check('rivals race the class you picked', Math.abs(N.topSpeed({ speedK: N.classes.turbo.top }) / N.topSpeed({ speedK: base })
+      - N.classes.turbo.top / base) < 1e-9);
+    const d = window.document;
+    N.setClass('turbo');
+    check('the class sticks and is shown', N.state().settings.cls === 'turbo'
+      && d.querySelector('#classSeg .btn[data-cls="turbo"]').classList.contains('on'));
+    N.setClass('standard');
+  }
+
+  // ---- boost is one burn per press ----
+  {
+    const T = trackFor(N.state().courses[0]);
+    const tune = N.state().tuning;
+    const r = makeRacer({ s: 5, d: 0, yaw: trackFrame(T, 5, {}).yaw, v: 14, battery: 1 });
+    let burns = 0, boostFrames = 0, battAtFire = null;
+    const drive = (boost, secs) => {
+      for (let i = 0; i < 120 * secs; i++) {
+        const f = trackFrame(T, r.s, {});
+        r.yaw = f.yaw; r.d = 0;
+        stepRacer(r, T, { steer: 0, throttle: 1, brake: 0, boost }, { gravity: false }, 1 / 120);
+        if (r.burnFired) { burns++; if (battAtFire == null) battAtFire = r.battery; }
+        if (r.burnT > 0) boostFrames++;
+      }
+    };
+    const batt0 = r.battery;
+    drive(true, 6);                                  // held down for six seconds
+    check('holding boost lights exactly one burn', burns === 1, `${burns} burns`);
+    /* Measured by THRUST, not by the timer that is supposed to drive it: two identical
+       boards, one holding the button, and the burn is the window over which the boosted
+       one out-accelerates its twin. A version that simply reports r.burnT would pass even
+       if the timer were wired to nothing. */
+    {
+      const seat = v => makeRacer({ s: 5, d: 0, yaw: trackFrame(T, 5, {}).yaw, v, battery: 1 });
+      const hot = seat(14), cold = seat(14);
+      let boostSecs = 0;
+      for (let i = 0; i < 120 * 6; i++) {
+        const h0 = hot.v, c0 = cold.v;
+        for (const [q, boost] of [[hot, true], [cold, false]]) {
+          const f = trackFrame(T, q.s, {});
+          q.yaw = f.yaw; q.d = 0;
+          stepRacer(q, T, { steer: 0, throttle: 1, brake: 0, boost }, { gravity: false }, 1 / 120);
+        }
+        if ((hot.v - h0) - (cold.v - c0) > 0.005) boostSecs += 1 / 120;
+      }
+      check('the burn is a fixed length', Math.abs(boostSecs - tune.burnS) < 0.15,
+        `${boostSecs.toFixed(2)} s of extra thrust vs ${tune.burnS} s`);
+    }
+    check('a burn spends a fixed slice of the pack', battAtFire != null
+      && Math.abs((batt0 - battAtFire) - tune.burnCost) < 0.02,
+      `${battAtFire == null ? 'never fired' : (batt0 - battAtFire).toFixed(3) + ' of ' + tune.burnCost}`);
+    drive(false, 0.1); burns = 0;
+    drive(true, 3);
+    check('releasing and pressing again lights another', burns === 1);
+    // a burn actually accelerates
+    const a = makeRacer({ s: 5, d: 0, yaw: trackFrame(T, 5, {}).yaw, v: 14, battery: 1 });
+    const b = makeRacer({ s: 5, d: 0, yaw: trackFrame(T, 5, {}).yaw, v: 14, battery: 1 });
+    for (let i = 0; i < 120 * 1.5; i++) {
+      for (const [q, boost] of [[a, true], [b, false]]) {
+        const f = trackFrame(T, q.s, {});
+        q.yaw = f.yaw; q.d = 0;
+        stepRacer(q, T, { steer: 0, throttle: 1, brake: 0, boost }, { gravity: false }, 1 / 120);
+      }
+    }
+    check('a burn is worth having', a.v > b.v + 2, `${a.v.toFixed(1)} vs ${b.v.toFixed(1)} m/s`);
+    const flat = makeRacer({ s: 5, d: 0, yaw: trackFrame(T, 5, {}).yaw, v: 14, battery: 0.05 });
+    let fired = false;
+    for (let i = 0; i < 120; i++) {
+      stepRacer(flat, T, { steer: 0, throttle: 1, brake: 0, boost: i % 2 === 0 }, { gravity: false }, 1 / 120);
+      if (flat.burnFired) fired = true;
+    }
+    check('an empty pack cannot burn', !fired);
+  }
+
+  // ---- boost cells on the course ----
+  {
+    const T = trackFor(N.state().courses.find(c => c.kind === 'sprint') || N.state().courses[0]);
+    const tune = N.state().tuning;
+    const cells = N.placeCells(T);
+    check('cells are laid along the whole course', cells.length >= Math.floor(T.L / tune.cellEveryM) - 1
+      && cells.every(c => c.s >= 0 && c.s <= T.L), `${cells.length} cells over ${(T.L / 1000).toFixed(2)} km`);
+    check('cells sit on the track, not in the bumpers',
+      cells.every(c => Math.abs(c.d) < trackFrame(T, c.s, {}).halfW - T.bodyWide * 0.5));
+    check('cells are placed the same way every time',
+      N.placeCells(T).map(c => c.s.toFixed(2) + ':' + c.d.toFixed(2)).join() === cells.map(c => c.s.toFixed(2) + ':' + c.d.toFixed(2)).join());
+    // drive through one
+    const c0 = cells[1];
+    const r = makeRacer({ s: c0.s - 30, d: c0.d, yaw: trackFrame(T, c0.s - 30, {}).yaw, v: 18, battery: 0.2 });
+    let took = 0;
+    for (let i = 0; i < 120 * 5; i++) {
+      const f = trackFrame(T, r.s, {});
+      r.yaw = f.yaw; r.d = c0.d;
+      stepRacer(r, T, { steer: 0, throttle: 1, brake: 0, boost: false }, { gravity: false }, 1 / 120);
+      took += N.stepCells(cells, [r], T, 1 / 120).length;
+    }
+    check('driving through a cell takes it', took === 1 && r.cells === 1 && r.battery > 0.2 + tune.cellGive * 0.8,
+      `battery ${r.battery.toFixed(2)}`);
+    check('a taken cell goes away and comes back', !c0.live && c0.backT > 0);
+    N.stepCells(cells, [], T, tune.cellBackS + 0.1);
+    check('it is back after its timer', c0.live);
+    // missing it by a wide margin takes nothing
+    const c1 = cells[2];
+    const wide = trackFrame(T, c1.s, {}).halfW;
+    const miss = makeRacer({ s: c1.s - 20, d: c1.d + (c1.d > 0 ? -1 : 1) * Math.min(wide * 1.5, 4.5), yaw: trackFrame(T, c1.s - 20, {}).yaw, v: 18 });
+    let missTook = 0;
+    for (let i = 0; i < 120 * 4; i++) {
+      const f = trackFrame(T, miss.s, {});
+      const keep = miss.d;
+      miss.yaw = f.yaw;
+      stepRacer(miss, T, { steer: 0, throttle: 1, brake: 0, boost: false }, { gravity: false }, 1 / 120);
+      miss.d = keep;
+      missTook += N.stepCells(cells, [miss], T, 1 / 120).length;
+    }
+    check('passing wide of a cell leaves it there', missTook === 0 && cells[2].live);
+  }
+
+  // ---- ghosts ----
+  {
+    const d = window.document;
+    const T = trackFor(N.state().courses[0]);
+    const rec = N.makeRecorder();
+    const r = makeRacer({ s: 5, d: 0, yaw: trackFrame(T, 5, {}).yaw, v: 16 });
+    for (let i = 0; i < 60 * 12; i++) {
+      stepRacer(r, T, { steer: 0.08, throttle: 1, brake: 0, boost: false }, { gravity: false }, 1 / 60);
+      N.recordFrame(rec, r, 1 / 60);
+    }
+    r.finishT = r.time;
+    const g = N.finishRecording(rec, r, { id: 'k:test', label: 'Test pup' });
+    check('a run is recorded as a ghost', !!g && g.s.length > 20 && g.dt === N.ghostDt && g.rider === 'k:test',
+      `${g.s.length} samples for ${r.time.toFixed(0)} s`);
+    check('a ghost is small enough to keep', JSON.stringify(g).length / r.time < 400,
+      `${Math.round(JSON.stringify(g).length / r.time)} bytes per second`);
+    const store = {};
+    check('a ghost is kept per rider', N.keepGhost(store, 'K', g)
+      && N.keepGhost(store, 'K', { ...g, rider: 'w:elk', label: 'Elk', time: g.time + 3 })
+      && N.bestGhosts(store, 'K').length === 2);
+    check('a slower run does not replace a rider\'s ghost', !N.keepGhost(store, 'K', { ...g, time: g.time + 5 })
+      && N.bestGhosts(store, 'K')[0].time === g.time);
+    check('a faster run does', N.keepGhost(store, 'K', { ...g, time: g.time - 5 })
+      && N.bestGhosts(store, 'K')[0].time === g.time - 5);
+    // and in the race itself: Fierce lines them up, Fair does not.
+    // The stored ghost belongs to one course, so race that one.
+    const haveKey = Object.keys(N.state().ghostStore)[0] || '';
+    const withGhost = N.state().courses.findIndex(c => haveKey.indexOf(c.sig) >= 0);
+    check('the run raced earlier left a ghost behind', withGhost >= 0, haveKey);
+    d.querySelectorAll('#courseList .course')[Math.max(0, withGhost)].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    d.querySelectorAll('#skillSeg .btn')[1].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    click('startBtn');
+    await pump(3, 50000);
+    const fairField = N.state().race.racers.length;
+    check('a ghost only appears at Fierce', N.state().race.racers.every(x => !x.isGhost));
+    click('quitBtn');
+    await pump(2, 51000);
+    d.querySelectorAll('#skillSeg .btn')[2].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    check('the menu says what Fierce adds', /ghost/i.test(d.getElementById('ghostNote').textContent));
+    click('startBtn');
+    await pump(3, 52000);
+    S = N.state();
+    const ghosts = S.race.racers.filter(x => x.isGhost);
+    check('at Fierce the stored ghost lines up with the field', ghosts.length >= 1
+      && S.race.racers.length === fairField + ghosts.length, `${ghosts.length} ghost(s)`);
+    check('a ghost gets a rider in the scene', S.race.riders.length === S.race.racers.length);
+    // it replays rather than driving
+    await pump(300, 53000);
+    S = N.state();
+    const gh = S.race.racers.find(x => x.isGhost);
+    check('a ghost follows its recording', gh.prog > 0 && Number.isFinite(gh.s) && Number.isFinite(gh.yaw)
+      && Math.abs(gh.d) <= trackFrame(S.race.T, gh.s, {}).halfW + 0.01);
+    const before = { s: gh.s, d: gh.d };
+    const me = S.race.racers[S.race.me];
+    me.s = gh.s; me.d = gh.d;                        // park right on top of it
+    resolveContacts(S.race.racers, S.race.T);
+    check('a ghost cannot be shoved', gh.s === before.s && gh.d === before.d);
+    check('ghosts are ranked with everyone else', S.race.racers.every(x => x.place >= 1));
+    click('quitBtn');
+    await pump(2, 54000);
+    d.querySelectorAll('#skillSeg .btn')[1].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  }
+
+  // ---- camera distance ----
+  {
+    const d = window.document;
+    click('startBtn');
+    await pump(200, 60000);
+    const camDist = () => {
+      const c = N.camera(), l = c.lookedAt;
+      return Math.hypot(c.position.x - l.x, c.position.z - l.z);
+    };
+    N.setCam('normal'); await pump(30, 64000);
+    const normal = camDist();
+    N.setCam('close'); await pump(30, 65000);
+    const close = camDist();
+    N.setCam('far'); await pump(30, 66000);
+    const far = camDist();
+    check('the camera toggle actually moves the camera', close < normal - 1 && far > normal + 1,
+      `${close.toFixed(1)} / ${normal.toFixed(1)} / ${far.toFixed(1)} m`);
+    check('C cycles the camera in a race', (() => {
+      const was = N.state().settings.cam;
+      N.cycleCam();
+      const now = N.state().settings.cam;
+      N.setCam(was);
+      return now !== was;
+    })());
+    N.setCam('normal');
+    click('quitBtn');
+    await pump(2, 67000);
+  }
+
+  // ---- the jet ----
+  {
+    const log = global.audioLog;
+    /* Not just "a buffer exists": a real noise source is AT LEAST a few thousand samples
+       of varying signal. A one-line stub that allocates eight zeroes would satisfy a
+       buffer count, and sound like nothing at all. */
+    const noise = log.samples.filter(a => {
+      if (a.length < 8000) return false;
+      let sum = 0, sumSq = 0;
+      for (let i = 0; i < a.length; i += 7) { sum += a[i]; sumSq += a[i] * a[i]; }
+      const n = Math.ceil(a.length / 7);
+      return Math.sqrt(sumSq / n - (sum / n) ** 2) > 0.01;
+    });
+    check('the engine is filtered noise, not an oscillator',
+      noise.length > 0 && log.filters.length >= 2,
+      `${noise.length} noise buffer(s) of ${log.samples.length}, ${log.filters.length} filters`);
+  }
+
+  // ---- touch ----
+  {
+    const d = window.document;
+    const pad = d.getElementById('tSteer');
+    check('there is one steering pad, not two buttons', !!pad && !d.getElementById('tLeft'));
+    const css = fs.readFileSync(path.join(ROOT, 'styles/neon.css'), 'utf8');
+    check('the speed readout stays at the bottom on a touch screen',
+      /body\.touch #hudB\{[^}]*bottom:calc\(10px/.test(css) && !/body\.touch #hudB\{[^}]*bottom:calc\(112px/.test(css));
+    check('the page-wide backstop against double-tap zoom is in the stylesheet',
+      /html,body\{[^}]*touch-action:manipulation/.test(css));
+    // analog steering: where the thumb is across the pad sets the lock, and sliding changes it
+    const at = (x, type, id) => {
+      const e = new window.Event(type, { bubbles: true, cancelable: true });
+      e.clientX = x; e.clientY = 640; e.pointerId = id == null ? 1 : id;
+      pad.dispatchEvent(e);
+    };
+    const steerNow = () => { let v = 0; for (let i = 0; i < 40; i++) v = readNeonInput(1 / 60).steer; return v; };
+    at(340, 'pointerdown');                       // right-hand edge
+    const right = steerNow();
+    at(100, 'pointermove');                       // slide to the left-hand edge
+    const left = steerNow();
+    at(220, 'pointermove');                       // and back towards the middle
+    const mid = steerNow();
+    at(220, 'pointerup');
+    const released = steerNow();
+    check('the steering pad is analog and follows a sliding thumb',
+      right < -0.85 && left > 0.85 && Math.abs(mid) < 0.25 && Math.abs(released) < 0.05,
+      `${right.toFixed(2)} -> ${left.toFixed(2)} -> ${mid.toFixed(2)} -> ${released.toFixed(2)}`);
+    check('touching the pad puts the page in touch mode', d.body.classList.contains('touch'));
+  }
+
+  // ---- geojson dropped as .txt ----
+  {
+    const d = window.document;
+    const accept = d.getElementById('worldFile').getAttribute('accept');
+    check('a .txt geojson can be picked', /\.txt/.test(accept) && /text\/plain/.test(accept), accept);
+    const txt = fs.readFileSync(path.join(ROOT, 'data/world.json'), 'utf8');
+    await loadNeonMap([JSON.parse(txt)], 'dropped.txt');
+    S = N.state();
+    check('a map loaded from a .txt file races like any other', S.courses.length > 3 && /dropped\.txt/.test(d.getElementById('mapLine').textContent),
+      `${S.courses.length} courses`);
+    await loadNeonMap('../data/world.json', 'Garden of the Gods');
+    await pump(40, 70000);
+  }
+
   // ---- the scenery ----
   {
     const sc = N.scene();
@@ -543,6 +861,20 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
       && kinds.every(k => !!sc.getObjectByName('neonAreaEdge_' + k)), `${S.areas.length} areas: ${kinds.join(', ')}`);
     let calls = 0; sc.getObjectByName('neonEnv').traverse(o => { if (o.geometry) calls++; });
     check('the whole environment is a handful of draws', calls <= 24, `${calls} objects`);
+    /* Every trail ribbon is draped on the terrain, so no triangle of one should be
+       standing on end: a tall triangle means a segment SPANNED a fin instead of following
+       it, which on screen is a sheet of light hanging in the sky. */
+    {
+      const ghost = sc.getObjectByName('neonGhost');
+      const pos = ghost && ghost.geometry.attributes.position.array;
+      let tallest = 0;
+      for (let i = 0; pos && i + 8 < pos.length; i += 9) {
+        const ys = [pos[i + 1], pos[i + 4], pos[i + 7]];
+        tallest = Math.max(tallest, Math.max(...ys) - Math.min(...ys));
+      }
+      check('the trail ribbons lie on the ground rather than spanning the cliffs',
+        !!pos && tallest < 25, `tallest triangle ${tallest.toFixed(1)} m`);
+    }
     check('the far plane is well beyond the fog', N.camera().far > 2000 && sc.fog.far > 800, `far ${N.camera().far | 0}, fog ${sc.fog.far | 0}`);
   }
 

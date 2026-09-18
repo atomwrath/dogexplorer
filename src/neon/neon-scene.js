@@ -82,6 +82,7 @@ function demDetail(){
    than a pixel in WebGL (linewidth is ignored on every desktop driver), and a network of
    hairlines vanishes at distance -- a 1.5 m quad strip is both visible from a kilometre
    up and, at a few thousand triangles for an entire map, cheaper than caring about. */
+const RIBBON_STEP_M = 9;
 function ribbonInto(pos, col, pts, width, yOf, c, fade){
   const n = pts.length;
   if(n < 2) return;
@@ -92,13 +93,25 @@ function ribbonInto(pos, col, pts, width, yOf, c, fade){
     if(L < 1e-6) continue;
     dx /= L; dz /= L;
     const nx = -dz*width*0.5, nz = dx*width*0.5;
-    const ya = yOf(a[0], a[1]), yb = yOf(b[0], b[1]);
-    const quad = [
-      a[0]+nx, ya, a[1]+nz,  a[0]-nx, ya, a[1]-nz,  b[0]+nx, yb, b[1]+nz,
-      a[0]-nx, ya, a[1]-nz,  b[0]-nx, yb, b[1]-nz,  b[0]+nx, yb, b[1]+nz,
-    ];
-    for(let q = 0; q < 18; q++) pos.push(quad[q]);
-    for(let q = 0; q < 6; q++) col.push(c.r*fade, c.g*fade, c.b*fade);
+    /* SUBDIVIDED, because the height comes from the terrain at each end. A simplified
+       trail leaves segments a couple of hundred metres long, and Garden of the Gods has
+       fins a hundred metres tall in between: a single quad from one end to the other does
+       not drape over the fin, it SPANS it, and a 1.3 m wide ribbon standing 100 m proud of
+       the ground reads on screen as a great triangular sheet hanging in the air. Stepping
+       along the segment puts the ribbon back on the ground it is describing. */
+    const steps = Math.max(1, Math.ceil(L/RIBBON_STEP_M));
+    for(let k = 0; k < steps; k++){
+      const t0 = k/steps, t1 = (k+1)/steps;
+      const ax = a[0] + (b[0]-a[0])*t0, az = a[1] + (b[1]-a[1])*t0;
+      const bx = a[0] + (b[0]-a[0])*t1, bz = a[1] + (b[1]-a[1])*t1;
+      const ya = yOf(ax, az), yb = yOf(bx, bz);
+      const quad = [
+        ax+nx, ya, az+nz,  ax-nx, ya, az-nz,  bx+nx, yb, bz+nz,
+        ax-nx, ya, az-nz,  bx-nx, yb, bz-nz,  bx+nx, yb, bz+nz,
+      ];
+      for(let q = 0; q < 18; q++) pos.push(quad[q]);
+      for(let q = 0; q < 6; q++) col.push(c.r*fade, c.g*fade, c.b*fade);
+    }
   }
 }
 
@@ -215,19 +228,35 @@ function buildEnvironment(W, graph, areas, bbox, scale){
         const pa = geo.getAttribute && geo.getAttribute('position');
         const index = geo.index;
         if(!pa || !index) continue;
-        // ShapeGeometry lays the shape out in XY; here XY was (x, z), so lift it into Y
+        /* ShapeGeometry lays the shape out in XY; here XY was (x, z), so lift it into Y.
+           A FILL IS GROUND COVER, AND A CLIFF IS NOT GROUND. Draping a 300 m rock polygon
+           over Garden of the Gods' fins gives triangles that climb 150 exaggerated metres
+           from base to top, and up close one of those fills half the sky as a flat sheet.
+           Triangles that steep are dropped -- the outline still traces the formation, and
+           the flat areas (meadows, car parks, water) fill as intended. */
+        const tri = [];
         for(let q = 0; q < index.count; q++){
           const v = index.array[q];
           const px = pa.array[v*3], pz = pa.array[v*3+1];
-          fillPos.push(px, yAt(px, pz) + 0.25, pz);
+          tri.push(px, yAt(px, pz) + 0.25, pz);
+          if(tri.length < 9) continue;
+          const ys = [tri[1], tri[4], tri[7]];
+          const drop = Math.max.apply(null, ys) - Math.min.apply(null, ys);
+          if(drop <= 14) for(let w = 0; w < 9; w++) fillPos.push(tri[w]);
+          tri.length = 0;
         }
         geo.dispose();
       }
       if(fillPos.length){
         const g = new THREE.BufferGeometry();
         g.setAttribute('position', new THREE.Float32BufferAttribute(fillPos, 3));
+        /* Fills are NORMAL blending, not additive. A rock formation is a couple of hundred
+           metres across, so the moment the course runs through one an additive fill is
+           most of the screen glowing -- the polygon reads as a light source instead of
+           ground. Blended normally it tints the wireframe underneath and stays where it
+           belongs; the outline is what identifies it anyway. */
         const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({color: spec.fill, transparent:true,
-          opacity: spec.a, blending: THREE.AdditiveBlending, depthWrite:false, side: THREE.DoubleSide}));
+          opacity: spec.a, depthWrite:false, side: THREE.DoubleSide}));
         m.name = 'neonArea_' + kind;
         envGroup.add(m);
       }

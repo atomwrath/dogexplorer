@@ -7,7 +7,13 @@
   --safe-r:env(safe-area-inset-right, 0px); --safe-t:env(safe-area-inset-top, 0px);
 }
 *{box-sizing:border-box;}
+/* touch-action:manipulation page-wide is the BACKSTOP for double-tap zoom: it drops the
+   double-tap and press-hold gestures while leaving the menu's lists scrollable under a
+   thumb. It is only a backstop -- iOS ignores user-scalable=no, so the zoom recognisers
+   stay armed and a tap pair spanning two elements slips past per-element touch-action.
+   neon-input.js closes that at the touchend/gesture level. */
 html,body{margin:0; height:100%; background:var(--bg); color:var(--text); overflow:hidden;
+  touch-action:manipulation; max-width:100%;
   font:500 15px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color:transparent;
   overscroll-behavior:none;}
@@ -85,17 +91,39 @@ body[data-screen="race"] #hud, body[data-screen="count"] #hud, body[data-screen=
 #speedUnit{font-size:11px; letter-spacing:.3em; color:var(--dim);}
 #batt{width:180px; height:6px; margin:6px auto 0; border:1px solid var(--line); border-radius:3px; overflow:hidden;}
 #battFill{display:block; height:100%; width:100%; background:var(--mag); box-shadow:0 0 10px var(--mag);}
+#burnPip{font-size:11px; letter-spacing:.2em; color:var(--dim); margin-top:4px; min-height:1.2em;}
+#burnPip.hot{color:var(--lime);}
 #slopeVal{font-size:12px; color:var(--dim); min-height:1.3em; margin-top:3px;}
-#touchCtl{left:0; right:0; bottom:calc(16px + var(--safe-b)); display:none; justify-content:space-between;
+#touchCtl{left:0; right:0; bottom:calc(16px + var(--safe-b)); display:none; align-items:flex-end;
+  justify-content:space-between; gap:12px;
   padding:0 calc(16px + var(--safe-r)) 0 calc(16px + var(--safe-l)); pointer-events:none;}
 body.touch #touchCtl{display:flex;}
-body.touch #hudB{bottom:calc(112px + var(--safe-b));}
+/* The speed readout STAYS AT THE BOTTOM on a touch screen. It used to be pushed up above
+   the thumb controls, which put a 44px number across the middle of the road -- exactly
+   where you are looking. The controls live in the two bottom corners, so the middle of
+   the bottom edge is free; the readout just gets smaller and sits between them. */
+body.touch #hudB{bottom:calc(10px + var(--safe-b)); z-index:1;}
+body.touch #speedVal{font-size:30px;}
+body.touch #batt{width:120px;}
+body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
 .tgrp{display:flex; gap:12px; pointer-events:auto;}
+/* The steering pad is ONE control: where the thumb is across it sets the lock, and
+   sliding changes it without lifting (see bindSteerPad). Wide and short, so a thumb
+   resting on the bottom-left corner can reach full lock either way without stretching. */
+#tSteer{pointer-events:auto; touch-action:none; display:flex; align-items:center;
+  justify-content:space-between; gap:6px; width:min(46vw,240px); height:84px; padding:0 14px;
+  border:2px solid var(--cyan); border-radius:42px; color:var(--cyan);
+  background:linear-gradient(90deg, rgba(25,240,255,.16), rgba(8,12,28,.5) 35%,
+    rgba(8,12,28,.5) 65%, rgba(25,240,255,.16));}
+#tSteer b{font-weight:600; font-size:11px; letter-spacing:.2em; color:var(--dim);}
+#tSteer span{font-size:20px;}
+#tSteer:active{border-color:#fff;}
 .tbtn{font:inherit; font-size:20px; width:84px; height:84px; border-radius:50%; color:var(--cyan);
   background:rgba(8,12,28,.55); border:2px solid var(--cyan); touch-action:none;}
 .tbtn.hot{color:var(--mag); border-color:var(--mag);}
 .tbtn:active{background:rgba(25,240,255,.2);}
 #tBrake{font-size:13px;} #tBoost{font-size:13px;}
+@media (max-height:520px){ #tSteer, .tbtn{height:66px;} .tbtn{width:66px;} }
 @media (max-width:720px){ #minimap{width:112px; height:112px;} #hudPlace b{font-size:40px;} }
 
 #count{position:fixed; inset:0; display:none; align-items:center; justify-content:center; pointer-events:none;

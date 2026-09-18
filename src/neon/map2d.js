@@ -74,7 +74,7 @@ function paintDots(cv, fit, dots){
   if(!g || !fit) return;
   for(const d of dots){
     g.fillStyle = d.color;
-    g.beginPath(); g.arc(fit.X(d.x), fit.Y(d.z), (d.big ? 5 : 3.2)*cv.width/260, 0, 7); g.fill();
+    g.beginPath(); g.arc(fit.X(d.x), fit.Y(d.z), (d.big ? 5 : d.small ? 2 : 3.2)*cv.width/260, 0, 7); g.fill();
     if(d.big){ g.strokeStyle = '#fff'; g.lineWidth = 1.5*cv.width/260; g.stroke(); }
   }
 }

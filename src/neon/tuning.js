@@ -28,10 +28,17 @@ const NEON = {
   bumpRestitution: 0.65,// how much of the into-wall angle comes back out
   bumpKick:   0.16,     // rad, minimum angle you leave the wall at
   bumpLock:   0.18,     // s of reduced steering after a hit, so it reads as a bounce
-  // --- battery ---
-  boostDrain: 0.30,     // per second
-  boostCharge:0.07,     // per second, always
+  // --- boost: one burn per press, not a held button ---
+  burnS:      1.6,      // how long a burn lasts
+  burnCost:   0.34,     // battery per burn, so a full pack is three of them
+  burnLock:   0.45,     // dead time after a burn, so it reads as a discrete shove
+  boostCharge:0.055,    // per second, always
   regenGain:  0.9,      // extra charge per second per unit of downhill slope, gravity on
+  // --- boost cells sitting on the course ---
+  cellEveryM: 240,      // one every so many metres of track
+  cellGrab:   1.5,      // how close across the track you have to pass
+  cellGive:   0.40,     // battery per cell
+  cellBackS:  9,        // seconds before a taken cell comes back
   // --- racers bumping each other ---
   bodyLen:    2.6,
   bodyWide:   1.5,
@@ -51,6 +58,21 @@ const NEON_SKILL = {
   fierce: {pace: 1.14, corner: 1.28, wobble: 0.05, label: 'Fierce'},
 };
 
+/* Speed classes. The multiplier is on TOP SPEED; thrust goes as its square so the class
+   keeps the same shape of acceleration curve rather than just a different ceiling. Rivals
+   race the class you picked, since their pace is a fraction of what your board can do. */
+const NEON_CLASS = {
+  cruiser:  {top: 0.78, label: 'Cruiser'},
+  standard: {top: 1.00, label: 'Standard'},
+  turbo:    {top: 1.26, label: 'Turbo'},
+};
+/* How far back the chase camera sits. */
+const NEON_CAM = {
+  close:  {dist: 0.62, high: 0.70, label: 'Close'},
+  normal: {dist: 1.00, high: 1.00, label: 'Normal'},
+  far:    {dist: 1.75, high: 1.55, label: 'Far'},
+};
+
 /* Imperial display. Everything inside the game is metres and seconds; these are used at
    the last moment, on the way to the screen. */
 const M_PER_MILE = 1609.344, FT_PER_M = 3.280839895;
@@ -58,4 +80,4 @@ const miles = m => m/M_PER_MILE;
 const feet  = m => m*FT_PER_M;
 const mph   = ms => ms*3600/M_PER_MILE;
 
-export { NEON, NEON_SKILL, miles, feet, mph, M_PER_MILE, FT_PER_M };
+export { NEON, NEON_SKILL, NEON_CLASS, NEON_CAM, miles, feet, mph, M_PER_MILE, FT_PER_M };

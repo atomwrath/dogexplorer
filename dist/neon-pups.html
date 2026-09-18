@@ -21,7 +21,13 @@
   --safe-r:env(safe-area-inset-right, 0px); --safe-t:env(safe-area-inset-top, 0px);
 }
 *{box-sizing:border-box;}
+/* touch-action:manipulation page-wide is the BACKSTOP for double-tap zoom: it drops the
+   double-tap and press-hold gestures while leaving the menu's lists scrollable under a
+   thumb. It is only a backstop -- iOS ignores user-scalable=no, so the zoom recognisers
+   stay armed and a tap pair spanning two elements slips past per-element touch-action.
+   neon-input.js closes that at the touchend/gesture level. */
 html,body{margin:0; height:100%; background:var(--bg); color:var(--text); overflow:hidden;
+  touch-action:manipulation; max-width:100%;
   font:500 15px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color:transparent;
   overscroll-behavior:none;}
@@ -99,17 +105,39 @@ body[data-screen="race"] #hud, body[data-screen="count"] #hud, body[data-screen=
 #speedUnit{font-size:11px; letter-spacing:.3em; color:var(--dim);}
 #batt{width:180px; height:6px; margin:6px auto 0; border:1px solid var(--line); border-radius:3px; overflow:hidden;}
 #battFill{display:block; height:100%; width:100%; background:var(--mag); box-shadow:0 0 10px var(--mag);}
+#burnPip{font-size:11px; letter-spacing:.2em; color:var(--dim); margin-top:4px; min-height:1.2em;}
+#burnPip.hot{color:var(--lime);}
 #slopeVal{font-size:12px; color:var(--dim); min-height:1.3em; margin-top:3px;}
-#touchCtl{left:0; right:0; bottom:calc(16px + var(--safe-b)); display:none; justify-content:space-between;
+#touchCtl{left:0; right:0; bottom:calc(16px + var(--safe-b)); display:none; align-items:flex-end;
+  justify-content:space-between; gap:12px;
   padding:0 calc(16px + var(--safe-r)) 0 calc(16px + var(--safe-l)); pointer-events:none;}
 body.touch #touchCtl{display:flex;}
-body.touch #hudB{bottom:calc(112px + var(--safe-b));}
+/* The speed readout STAYS AT THE BOTTOM on a touch screen. It used to be pushed up above
+   the thumb controls, which put a 44px number across the middle of the road -- exactly
+   where you are looking. The controls live in the two bottom corners, so the middle of
+   the bottom edge is free; the readout just gets smaller and sits between them. */
+body.touch #hudB{bottom:calc(10px + var(--safe-b)); z-index:1;}
+body.touch #speedVal{font-size:30px;}
+body.touch #batt{width:120px;}
+body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
 .tgrp{display:flex; gap:12px; pointer-events:auto;}
+/* The steering pad is ONE control: where the thumb is across it sets the lock, and
+   sliding changes it without lifting (see bindSteerPad). Wide and short, so a thumb
+   resting on the bottom-left corner can reach full lock either way without stretching. */
+#tSteer{pointer-events:auto; touch-action:none; display:flex; align-items:center;
+  justify-content:space-between; gap:6px; width:min(46vw,240px); height:84px; padding:0 14px;
+  border:2px solid var(--cyan); border-radius:42px; color:var(--cyan);
+  background:linear-gradient(90deg, rgba(25,240,255,.16), rgba(8,12,28,.5) 35%,
+    rgba(8,12,28,.5) 65%, rgba(25,240,255,.16));}
+#tSteer b{font-weight:600; font-size:11px; letter-spacing:.2em; color:var(--dim);}
+#tSteer span{font-size:20px;}
+#tSteer:active{border-color:#fff;}
 .tbtn{font:inherit; font-size:20px; width:84px; height:84px; border-radius:50%; color:var(--cyan);
   background:rgba(8,12,28,.55); border:2px solid var(--cyan); touch-action:none;}
 .tbtn.hot{color:var(--mag); border-color:var(--mag);}
 .tbtn:active{background:rgba(25,240,255,.2);}
 #tBrake{font-size:13px;} #tBoost{font-size:13px;}
+@media (max-height:520px){ #tSteer, .tbtn{height:66px;} .tbtn{width:66px;} }
 @media (max-width:720px){ #minimap{width:112px; height:112px;} #hudPlace b{font-size:40px;} }
 
 #count{position:fixed; inset:0; display:none; align-items:center; justify-content:center; pointer-events:none;
@@ -155,6 +183,13 @@ body[data-screen="count"] #count{display:flex;}
           <span class="stepper"><button class="btn" id="rivalsDn" aria-label="Fewer rivals">−</button>
           <b id="rivalsVal">5</b><button class="btn" id="rivalsUp" aria-label="More rivals">+</button></span>
         </div>
+        <div class="row">Class
+          <span class="seg" id="classSeg">
+            <button class="btn" data-cls="cruiser">Cruiser</button>
+            <button class="btn on" data-cls="standard">Standard</button>
+            <button class="btn" data-cls="turbo">Turbo</button>
+          </span>
+        </div>
         <div class="row">Pace
           <span class="seg" id="skillSeg">
             <button class="btn" data-skill="chill">Chill</button>
@@ -166,6 +201,13 @@ body[data-screen="count"] #count{display:flex;}
           <span class="seg" id="gravSeg">
             <button class="btn on" data-grav="1">On</button>
             <button class="btn" data-grav="0">Off</button>
+          </span>
+        </div>
+        <div class="row">Camera
+          <span class="seg" id="camSeg">
+            <button class="btn" data-cam="close">Close</button>
+            <button class="btn on" data-cam="normal">Normal</button>
+            <button class="btn" data-cam="far">Far</button>
           </span>
         </div>
         <div class="row">Direction
@@ -193,10 +235,11 @@ body[data-screen="count"] #count{display:flex;}
         <label class="row filerow" for="worldFile">…or drop your own
           <span class="btn">Browse</span>
         </label>
-        <input type="file" id="worldFile" accept=".geojson,.json,application/geo+json,application/json" multiple hidden>
+        <input type="file" id="worldFile" accept=".geojson,.json,.txt,application/geo+json,application/json,text/plain" multiple hidden>
+        <p class="hint" id="ghostNote"></p>
         <button class="btn go" id="startBtn" disabled>START</button>
-        <p class="hint">W/↑ go · S/↓ brake · A D steer · Shift boost · R restart · Esc quit<br>
-      In the menu: G gravity · V reverse. Gravity, direction and scale are fixed once a race starts.</p>
+        <p class="hint">W/↑ go · S/↓ brake · A D steer · Shift boost (one burn per press) · C camera · R restart · Esc quit<br>
+      In the menu: G gravity · V reverse. Class, gravity, direction and scale are fixed once a race starts.</p>
       </section>
     </div>
   </div>
@@ -218,11 +261,12 @@ body[data-screen="count"] #count{display:flex;}
   <div id="hudB">
     <div id="speedVal">0</div><div id="speedUnit">mph</div>
     <div id="batt"><i id="battFill"></i></div>
+    <div id="burnPip"></div>
     <div id="slopeVal"></div>
   </div>
   <div id="touchCtl">
-    <div class="tgrp"><button class="tbtn" id="tLeft">◀</button><button class="tbtn" id="tRight">▶</button></div>
-    <div class="tgrp"><button class="tbtn" id="tBrake">BRAKE</button><button class="tbtn hot" id="tBoost">BOOST</button></div>
+    <div id="tSteer"><span>◀</span><b>STEER</b><span>▶</span></div>
+    <div class="tgrp"><button class="tbtn" id="tBrake">BRAKE</button><button class="tbtn hot" id="tBoost">BURN</button></div>
   </div>
 </div>
 <div id="count"></div>
@@ -2680,10 +2724,17 @@ const NEON = {
   bumpRestitution: 0.65,// how much of the into-wall angle comes back out
   bumpKick:   0.16,     // rad, minimum angle you leave the wall at
   bumpLock:   0.18,     // s of reduced steering after a hit, so it reads as a bounce
-  // --- battery ---
-  boostDrain: 0.30,     // per second
-  boostCharge:0.07,     // per second, always
+  // --- boost: one burn per press, not a held button ---
+  burnS:      1.6,      // how long a burn lasts
+  burnCost:   0.34,     // battery per burn, so a full pack is three of them
+  burnLock:   0.45,     // dead time after a burn, so it reads as a discrete shove
+  boostCharge:0.055,    // per second, always
   regenGain:  0.9,      // extra charge per second per unit of downhill slope, gravity on
+  // --- boost cells sitting on the course ---
+  cellEveryM: 240,      // one every so many metres of track
+  cellGrab:   1.5,      // how close across the track you have to pass
+  cellGive:   0.40,     // battery per cell
+  cellBackS:  9,        // seconds before a taken cell comes back
   // --- racers bumping each other ---
   bodyLen:    2.6,
   bodyWide:   1.5,
@@ -2701,6 +2752,21 @@ const NEON_SKILL = {
   chill:  {pace: 1.00, corner: 1.04, wobble: 0.18, label: 'Chill'},
   fair:   {pace: 1.07, corner: 1.16, wobble: 0.10, label: 'Fair'},
   fierce: {pace: 1.14, corner: 1.28, wobble: 0.05, label: 'Fierce'},
+};
+
+/* Speed classes. The multiplier is on TOP SPEED; thrust goes as its square so the class
+   keeps the same shape of acceleration curve rather than just a different ceiling. Rivals
+   race the class you picked, since their pace is a fraction of what your board can do. */
+const NEON_CLASS = {
+  cruiser:  {top: 0.78, label: 'Cruiser'},
+  standard: {top: 1.00, label: 'Standard'},
+  turbo:    {top: 1.26, label: 'Turbo'},
+};
+/* How far back the chase camera sits. */
+const NEON_CAM = {
+  close:  {dist: 0.62, high: 0.70, label: 'Close'},
+  normal: {dist: 1.00, high: 1.00, label: 'Normal'},
+  far:    {dist: 1.75, high: 1.55, label: 'Far'},
 };
 
 /* Imperial display. Everything inside the game is metres and seconds; these are used at
@@ -3507,9 +3573,12 @@ function makeRacer(o){
     s: 0, d: 0, yaw: 0, v: 0, lap: 0, prog: 0, battery: 1, boosting: false,
     bumpT: 0, bumpSide: 0, bumps: 0, lean: 0, time: 0, done: false, finishT: null,
     place: 0, isPlayer: false, name: '?', skill: null, lane: 0, seed: 1, wob: 0,
-    steerIn: 0, slope: 0,
+    steerIn: 0, slope: 0, speedK: 1, burnT: 0, lockT: 0, boostWasDown: false, cells: 0,
   }, o || {});
 }
+
+/* Top speed on the flat for this board: sqrt(thrust/drag), with the class multiplier.  */
+function topSpeed(r){ return Math.sqrt(NEON.thrust/NEON.dragK)*(r.speedK || 1); }
 
 /* input: {steer -1..1 (left +), throttle 0..1, brake 0..1, boost bool}
    env:   {gravity bool}
@@ -3522,15 +3591,31 @@ function stepRacer(r, T, input, env, dt){
   // --- along-heading acceleration ---
   const slopeAlong = Math.max(-NEON.slopeClamp, Math.min(NEON.slopeClamp, f.slope))*Math.cos(theta);
   r.slope = env.gravity ? slopeAlong : 0;
-  let boosting = !!input.boost && r.battery > 0.02 && !r.done;
-  let a = NEON.thrust*(r.done ? 0 : input.throttle) + (boosting ? NEON.boostThrust : 0);
+  /* BOOST IS ONE BURN PER PRESS. Holding the button down does nothing after the first
+     frame: the press starts a fixed burn, the burn spends a fixed slice of the pack, and
+     nothing can start another until it has run out and the short lock after it has
+     passed. So a boost is a decision about WHERE, made a few times a lap, rather than a
+     button to lean on down every straight. */
+  const k2 = (r.speedK || 1)*(r.speedK || 1);
+  r.burnT = Math.max(0, r.burnT - dt);
+  r.lockT = Math.max(0, r.lockT - dt);
+  const wants = !!input.boost;
+  if(wants && !r.boostWasDown && !r.done && r.burnT <= 0 && r.lockT <= 0 && r.battery >= NEON.burnCost){
+    r.burnT = NEON.burnS;
+    r.lockT = NEON.burnS + NEON.burnLock;
+    r.battery -= NEON.burnCost;
+    r.burns = (r.burns || 0) + 1;
+    r.burnFired = true;                     // one frame's flag, for the sound and the flame
+  }else r.burnFired = false;
+  r.boostWasDown = wants;
+  const boosting = r.burnT > 0;
+  let a = NEON.thrust*k2*(r.done ? 0 : input.throttle) + (boosting ? NEON.boostThrust*k2 : 0);
   a -= NEON.dragK*r.v*r.v + NEON.rollK*r.v;
   a -= NEON.brake*(r.done ? 0.6 : input.brake);
   if(env.gravity) a -= NEON.gravity*NEON.gravityGain*slopeAlong/Math.sqrt(1+slopeAlong*slopeAlong);
   r.v = Math.max(0, r.v + a*dt);
   r.boosting = boosting;
-  r.battery = Math.max(0, Math.min(1, r.battery
-    + (boosting ? -NEON.boostDrain : NEON.boostCharge)*dt
+  r.battery = Math.max(0, Math.min(1, r.battery + NEON.boostCharge*dt
     + (env.gravity && slopeAlong < 0 ? -slopeAlong*NEON.regenGain*dt : 0)));
 
   // --- heading ---
@@ -3598,7 +3683,7 @@ function rivalInput(r, T, others, env, t){
      one arrives too hot and meets the bumper, which is the whole reason bumpers exist. */
   const nerve = 1 + sk.wobble*0.45*Math.sin(t*0.23 + r.seed*2.1);
   const vCorner = Math.sqrt((15*sk.corner*nerve)/Math.max(bend.k, 1e-4));
-  const vTop = Math.sqrt(NEON.thrust/NEON.dragK)*sk.pace*r.paceMul;
+  const vTop = topSpeed(r)*sk.pace*r.paceMul;
   let vWant = Math.min(vTop, vCorner);
   // lane: own lane on the straights, inside of the bend when one is coming
   // the narrower of here and where we are about to be: a road necks down into a trail
@@ -3630,12 +3715,27 @@ function rivalInput(r, T, others, env, t){
   const rate = NEON.steerRate/(1 + r.v*NEON.steerFade);
   const need = (thetaWant - theta)*4.0 + (1 - NEON.railAssist)*f.k*r.v;
   const steer = Math.max(-1, Math.min(1, need/rate));
+  /* Boost cells: worth a metre or two of lane, never worth a corner. A rival with a full
+     pack drives its line and leaves the cells for whoever needs them. */
+  if(env.cells && r.battery < 0.75){
+    for(const c of env.cells){
+      if(!c.live) continue;
+      let gap = c.s - r.s;
+      if(T.closed){ gap = ((gap % T.L) + T.L) % T.L; if(gap > T.L/2) gap -= T.L; }
+      if(gap > 4 && gap < 45 && Math.abs(c.d - dWant) < lim*1.2 && bendAhead(T, r.s, gap).k < 0.02){
+        dWant = Math.max(-lim, Math.min(lim, c.d));
+        break;
+      }
+    }
+  }
   const dv = vWant - r.v;
   return {
     steer,
     throttle: dv > -0.5 ? 1 : 0,
     brake: dv < -2.5 ? Math.min(1, (-dv-2.5)/6) : 0,
-    boost: dv > 3 && r.battery > 0.5 && bend.k < 0.01,
+    // one press, and only where it pays: out of a corner onto something straight
+    boost: r.burnT <= 0 && r.lockT <= 0 && r.battery >= NEON.burnCost + 0.05
+      && dv > 2 && bend.k < 0.012,
   };
 }
 
@@ -3645,6 +3745,7 @@ function resolveContacts(racers, T){
   for(let i = 0; i < racers.length; i++) for(let j = i+1; j < racers.length; j++){
     const a = racers[i], b = racers[j];
     if(a.done && b.done) continue;
+    if(a.isGhost || b.isGhost) continue;        // a ghost is a record, not a rider
     let ds = b.s - a.s;
     if(T.closed){ ds = ((ds % T.L) + T.L) % T.L; if(ds > T.L/2) ds -= T.L; }
     const dd = b.d - a.d;
@@ -3756,6 +3857,7 @@ function demDetail(){
    than a pixel in WebGL (linewidth is ignored on every desktop driver), and a network of
    hairlines vanishes at distance -- a 1.5 m quad strip is both visible from a kilometre
    up and, at a few thousand triangles for an entire map, cheaper than caring about. */
+const RIBBON_STEP_M = 9;
 function ribbonInto(pos, col, pts, width, yOf, c, fade){
   const n = pts.length;
   if(n < 2) return;
@@ -3766,13 +3868,25 @@ function ribbonInto(pos, col, pts, width, yOf, c, fade){
     if(L < 1e-6) continue;
     dx /= L; dz /= L;
     const nx = -dz*width*0.5, nz = dx*width*0.5;
-    const ya = yOf(a[0], a[1]), yb = yOf(b[0], b[1]);
-    const quad = [
-      a[0]+nx, ya, a[1]+nz,  a[0]-nx, ya, a[1]-nz,  b[0]+nx, yb, b[1]+nz,
-      a[0]-nx, ya, a[1]-nz,  b[0]-nx, yb, b[1]-nz,  b[0]+nx, yb, b[1]+nz,
-    ];
-    for(let q = 0; q < 18; q++) pos.push(quad[q]);
-    for(let q = 0; q < 6; q++) col.push(c.r*fade, c.g*fade, c.b*fade);
+    /* SUBDIVIDED, because the height comes from the terrain at each end. A simplified
+       trail leaves segments a couple of hundred metres long, and Garden of the Gods has
+       fins a hundred metres tall in between: a single quad from one end to the other does
+       not drape over the fin, it SPANS it, and a 1.3 m wide ribbon standing 100 m proud of
+       the ground reads on screen as a great triangular sheet hanging in the air. Stepping
+       along the segment puts the ribbon back on the ground it is describing. */
+    const steps = Math.max(1, Math.ceil(L/RIBBON_STEP_M));
+    for(let k = 0; k < steps; k++){
+      const t0 = k/steps, t1 = (k+1)/steps;
+      const ax = a[0] + (b[0]-a[0])*t0, az = a[1] + (b[1]-a[1])*t0;
+      const bx = a[0] + (b[0]-a[0])*t1, bz = a[1] + (b[1]-a[1])*t1;
+      const ya = yOf(ax, az), yb = yOf(bx, bz);
+      const quad = [
+        ax+nx, ya, az+nz,  ax-nx, ya, az-nz,  bx+nx, yb, bz+nz,
+        ax-nx, ya, az-nz,  bx-nx, yb, bz-nz,  bx+nx, yb, bz+nz,
+      ];
+      for(let q = 0; q < 18; q++) pos.push(quad[q]);
+      for(let q = 0; q < 6; q++) col.push(c.r*fade, c.g*fade, c.b*fade);
+    }
   }
 }
 
@@ -3889,19 +4003,35 @@ function buildEnvironment(W, graph, areas, bbox, scale){
         const pa = geo.getAttribute && geo.getAttribute('position');
         const index = geo.index;
         if(!pa || !index) continue;
-        // ShapeGeometry lays the shape out in XY; here XY was (x, z), so lift it into Y
+        /* ShapeGeometry lays the shape out in XY; here XY was (x, z), so lift it into Y.
+           A FILL IS GROUND COVER, AND A CLIFF IS NOT GROUND. Draping a 300 m rock polygon
+           over Garden of the Gods' fins gives triangles that climb 150 exaggerated metres
+           from base to top, and up close one of those fills half the sky as a flat sheet.
+           Triangles that steep are dropped -- the outline still traces the formation, and
+           the flat areas (meadows, car parks, water) fill as intended. */
+        const tri = [];
         for(let q = 0; q < index.count; q++){
           const v = index.array[q];
           const px = pa.array[v*3], pz = pa.array[v*3+1];
-          fillPos.push(px, yAt(px, pz) + 0.25, pz);
+          tri.push(px, yAt(px, pz) + 0.25, pz);
+          if(tri.length < 9) continue;
+          const ys = [tri[1], tri[4], tri[7]];
+          const drop = Math.max.apply(null, ys) - Math.min.apply(null, ys);
+          if(drop <= 14) for(let w = 0; w < 9; w++) fillPos.push(tri[w]);
+          tri.length = 0;
         }
         geo.dispose();
       }
       if(fillPos.length){
         const g = new THREE.BufferGeometry();
         g.setAttribute('position', new THREE.Float32BufferAttribute(fillPos, 3));
+        /* Fills are NORMAL blending, not additive. A rock formation is a couple of hundred
+           metres across, so the moment the course runs through one an additive fill is
+           most of the screen glowing -- the polygon reads as a light source instead of
+           ground. Blended normally it tints the wireframe underneath and stays where it
+           belongs; the outline is what identifies it anyway. */
         const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({color: spec.fill, transparent:true,
-          opacity: spec.a, blending: THREE.AdditiveBlending, depthWrite:false, side: THREE.DoubleSide}));
+          opacity: spec.a, depthWrite:false, side: THREE.DoubleSide}));
         m.name = 'neonArea_' + kind;
         envGroup.add(m);
       }
@@ -4677,9 +4807,15 @@ function disposeRider(R){
    Touch drives with auto-throttle: two thumbs have enough to do steering and boosting,
    and "hold a button the entire race" is not a control, it is a tax. Brake overrides it. */
 const neonKeys = new Set();
-const neonTouch = {left:false, right:false, brake:false, boost:false};
+const neonTouch = {brake:false, boost:false};
 let neonIsTouch = false;
 let steerSmooth = 0;
+/* Analog touch steering. The steering pad is one control, not two buttons: where the
+   thumb lands sets the lock, and SLIDING IT changes the lock without lifting. Tapping the
+   far edge is still full lock, so it behaves like a pair of buttons for anyone who
+   treats it as one, but a thumb that rolls fifteen degrees into a corner gets fifteen
+   degrees of steering instead of everything. */
+let touchSteer = 0, steerPointer = null;
 const neonHandlers = {};
 
 function initNeonInput(handlers){
@@ -4690,8 +4826,9 @@ function initNeonInput(handlers){
     if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(k)) e.preventDefault();
     if(!neonKeys.has(k)){
       if(k === 'g' && neonHandlers.gravity) neonHandlers.gravity();
-      if(k === 'r' && neonHandlers.restart) neonHandlers.restart();
       if(k === 'v' && neonHandlers.reverse) neonHandlers.reverse();
+      if(k === 'c' && neonHandlers.camera) neonHandlers.camera();
+      if(k === 'r' && neonHandlers.restart) neonHandlers.restart();
       if(k === 'Escape' && neonHandlers.quit) neonHandlers.quit();
       if(k === 'Enter' && neonHandlers.confirm) neonHandlers.confirm();
     }
@@ -4700,7 +4837,10 @@ function initNeonInput(handlers){
   window.addEventListener('keyup', e => {
     neonKeys.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key);
   });
-  window.addEventListener('blur', () => { neonKeys.clear(); for(const k in neonTouch) neonTouch[k] = false; });
+  window.addEventListener('blur', () => {
+    neonKeys.clear(); touchSteer = 0; steerPointer = null;
+    for(const k in neonTouch) neonTouch[k] = false;
+  });
   const hold = (id, key) => {
     const el = document.getElementById(id);
     if(!el) return;
@@ -4712,9 +4852,76 @@ function initNeonInput(handlers){
     el.addEventListener('pointerleave', off);
     el.addEventListener('contextmenu', e => e.preventDefault());
   };
-  hold('tLeft', 'left'); hold('tRight', 'right'); hold('tBrake', 'brake'); hold('tBoost', 'boost');
+  hold('tBrake', 'brake'); hold('tBoost', 'boost');
+  bindSteerPad(document.getElementById('tSteer'));
+  blockZoomGestures();
   if(window.matchMedia && window.matchMedia('(pointer: coarse)').matches) markTouch();
 }
+
+function bindSteerPad(pad){
+  if(!pad) return;
+  const read = e => {
+    const r = pad.getBoundingClientRect();
+    const half = r.width/2;
+    if(!half) return 0;
+    // + is left, matching the steering convention everywhere else
+    const x = (e.clientX - (r.left + half))/half;
+    return Math.max(-1, Math.min(1, -x));
+  };
+  pad.addEventListener('pointerdown', e => {
+    e.preventDefault(); markTouch();
+    steerPointer = e.pointerId;
+    /* Capture, or the first fast slide leaves the element and the steering sticks at
+       whatever it was when the thumb crossed the edge. */
+    if(pad.setPointerCapture) try{ pad.setPointerCapture(e.pointerId); }catch(err){}
+    touchSteer = read(e);
+  });
+  pad.addEventListener('pointermove', e => {
+    if(steerPointer !== e.pointerId) return;
+    e.preventDefault();
+    touchSteer = read(e);
+  });
+  const up = e => {
+    if(steerPointer !== e.pointerId) return;
+    e.preventDefault();
+    steerPointer = null; touchSteer = 0;
+  };
+  pad.addEventListener('pointerup', up);
+  pad.addEventListener('pointercancel', up);
+  pad.addEventListener('lostpointercapture', up);
+  pad.addEventListener('contextmenu', e => e.preventDefault());
+}
+
+/* THE ZOOM GESTURES touch-action CANNOT REACH. Same fix as Pup Trails, same reason: iOS
+   has ignored user-scalable=no since iOS 10, so the double-tap and pinch recognisers stay
+   armed however the stylesheet is written, and per-element touch-action only governs
+   touches that BEGIN on that element. A tap on the boost button followed by a tap on the
+   canvas is two elements' business, resolved at the page level -- and zooms. Scoped to
+   the play surface so the menu's buttons keep their synthesised clicks. */
+const DOUBLE_TAP_MS = 350;
+let lastTouchEndT = -1e9;
+function inPlaySurface(node){
+  for(let n = node; n; n = n.parentNode){
+    if(n.id === 'c' || n.id === 'hud' || n.id === 'touchCtl') return true;
+  }
+  return false;
+}
+function blockZoomGestures(){
+  window.addEventListener('touchend', e => {
+    if(document.body.getAttribute('data-screen') === 'menu') return;
+    if(!inPlaySurface(e.target)) return;
+    const now = Date.now();
+    if(now - lastTouchEndT <= DOUBLE_TAP_MS) e.preventDefault();
+    lastTouchEndT = now;
+  }, {passive: false});
+  // WebKit's own pinch events, which carry the page zoom themselves
+  for(const type of ['gesturestart','gesturechange','gestureend']){
+    window.addEventListener(type, e => {
+      if(document.body.getAttribute('data-screen') !== 'menu') e.preventDefault();
+    }, {passive: false});
+  }
+}
+
 function markTouch(){
   if(neonIsTouch) return;
   neonIsTouch = true;
@@ -4722,53 +4929,354 @@ function markTouch(){
 }
 function readNeonInput(dt){
   const K = k => neonKeys.has(k);
-  const left  = K('a') || K('ArrowLeft')  || neonTouch.left;
-  const right = K('d') || K('ArrowRight') || neonTouch.right;
+  const left  = K('a') || K('ArrowLeft');
+  const right = K('d') || K('ArrowRight');
   const want = (left ? 1 : 0) - (right ? 1 : 0);
-  // a key is all-or-nothing; ease it so a tap is a nudge and a hold is full lock
-  const rate = want === 0 ? 7 : 4.5;
-  steerSmooth += Math.max(-rate*dt, Math.min(rate*dt, want - steerSmooth));
+  if(steerPointer !== null){
+    /* The pad is already analog, so it only needs enough smoothing to take the stair-step
+       out of a dragging thumb. The key easing below must NOT also run here: it pulls
+       towards zero every frame, and the two together settle about three quarters of the
+       way to full lock -- a pad that can never quite reach the stops. */
+    steerSmooth += (touchSteer - steerSmooth)*Math.min(1, dt*18);
+  }else{
+    // a key is all-or-nothing; ease it so a tap is a nudge and a hold is full lock
+    const rate = want === 0 ? 7 : 4.5;
+    steerSmooth += Math.max(-rate*dt, Math.min(rate*dt, want - steerSmooth));
+  }
+  const steer = steerSmooth;
   const brake = (K('s') || K('ArrowDown') || neonTouch.brake) ? 1 : 0;
   const gas = (K('w') || K('ArrowUp') || (neonIsTouch && !brake)) ? 1 : 0;
-  return {steer: steerSmooth, throttle: gas, brake, boost: K('Shift') || K(' ') || neonTouch.boost};
+  return {steer, throttle: gas, brake, boost: K('Shift') || K(' ') || neonTouch.boost};
 }
-function resetNeonInput(){ steerSmooth = 0; }
+function resetNeonInput(){ steerSmooth = 0; touchSteer = 0; steerPointer = null; }
 
 /* ==== src/neon/neon-sound.js ==== */
-/* The board's motor: one sawtooth through a lowpass, pitched by speed. Everything else
-   (count pips, the go tone, the bumper bonk, the finish cheer) is core/audio.js as is.
-   Routed through out(), so the shared mute switch and master level apply. */
+/* THE BOARD'S ENGINE, as a jet rather than a motor.
+
+   One second of white noise on a loop, through a bandpass that rides speed and a lowpass
+   that opens up under boost, plus a little sine under it for the thrust you feel rather
+   than hear. That is the whole rig: noise shaped by filters is what a turbine IS, whereas
+   the sawtooth this replaces was a moped.
+
+   Everything goes through out(), so the shared mute switch and master level still apply,
+   and nothing is built until whenRunning() says the context has been unlocked by a
+   gesture -- an AudioContext created before that is born suspended and stays silent. */
 
 
-let humOsc = null, humGain = null, humFilt = null;
+let jet = null;
+
+function noiseBuffer(){
+  const n = Math.floor(AC.sampleRate);
+  const buf = AC.createBuffer(1, n, AC.sampleRate);
+  const ch = buf.getChannelData(0);
+  /* Brown-ish rather than white: a running sum tilts the spectrum down about 6 dB an
+     octave, which is much closer to a turbine and far less like a hissing tap. Scaled
+     back towards zero each sample so the sum cannot wander off into a DC offset. */
+  let last = 0;
+  for(let i = 0; i < n; i++){
+    const w = Math.random()*2 - 1;
+    last = (last + 0.035*w)/1.035;
+    ch[i] = last*3.2;
+  }
+  return buf;
+}
 
 function startHum(){
-  if(humOsc) return;
+  if(jet) return;
   whenRunning(() => {
-    if(humOsc || !AC) return;
+    if(jet || !AC) return;
     const dest = out();
     if(!dest) return;
-    humOsc = AC.createOscillator(); humFilt = AC.createBiquadFilter(); humGain = AC.createGain();
-    humOsc.type = 'sawtooth';
-    humOsc.frequency.setValueAtTime(180, AC.currentTime);
-    humFilt.type = 'lowpass';
-    humFilt.frequency.setValueAtTime(700, AC.currentTime);
-    humGain.gain.setValueAtTime(0.0001, AC.currentTime);
-    humOsc.connect(humFilt).connect(humGain).connect(dest);
-    humOsc.start(AC.currentTime + 0.02);
+    const src = AC.createBufferSource();
+    src.buffer = noiseBuffer();
+    src.loop = true;
+    const band = AC.createBiquadFilter();
+    band.type = 'bandpass';
+    band.frequency.setValueAtTime(420, AC.currentTime);
+    band.Q.setValueAtTime(0.7, AC.currentTime);
+    const low = AC.createBiquadFilter();
+    low.type = 'lowpass';
+    low.frequency.setValueAtTime(900, AC.currentTime);
+    const gain = AC.createGain();
+    gain.gain.setValueAtTime(0.0001, AC.currentTime);
+    src.connect(band).connect(low).connect(gain).connect(dest);
+    // the body of the thrust, an octave below anything the noise is doing
+    const sub = AC.createOscillator();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(70, AC.currentTime);
+    const subGain = AC.createGain();
+    subGain.gain.setValueAtTime(0.0001, AC.currentTime);
+    sub.connect(subGain).connect(dest);
+    src.start(AC.currentTime + 0.02);
+    sub.start(AC.currentTime + 0.02);
+    jet = {src, band, low, gain, sub, subGain};
   });
 }
-function setHum(v, boosting){
-  if(!humOsc || !AC) return;
-  const tN = AC.currentTime + 0.03;
-  // 180 Hz up: a tablet speaker rolls off hard below that (see SPEAKER_FLOOR_HZ)
-  humOsc.frequency.linearRampToValueAtTime(180 + v*9 + (boosting ? 60 : 0), tN);
-  humFilt.frequency.linearRampToValueAtTime(600 + v*55, tN);
-  humGain.gain.linearRampToValueAtTime(v < 0.3 ? 0.0001 : 0.018 + Math.min(0.03, v*0.0012), tN);
+
+/* v: speed in m/s. burn: 0 (coasting) .. 1 (mid-burn). */
+function setHum(v, burn){
+  if(!jet || !AC) return;
+  const tN = AC.currentTime + 0.04;
+  const b = Math.max(0, Math.min(1, burn || 0));
+  const spool = Math.min(1, v/24);
+  jet.band.frequency.linearRampToValueAtTime(380 + spool*760 + b*900, tN);
+  jet.band.Q.linearRampToValueAtTime(0.75 + b*0.9, tN);
+  // the lowpass is what "opening the throttle" sounds like: the top end arrives with it
+  jet.low.frequency.linearRampToValueAtTime(700 + spool*1900 + b*5200, tN);
+  jet.gain.gain.linearRampToValueAtTime(v < 0.3 && b <= 0 ? 0.0001
+    : 0.012 + spool*0.030 + b*0.055, tN);
+  jet.sub.frequency.linearRampToValueAtTime(62 + spool*26 + b*22, tN);
+  jet.subGain.gain.linearRampToValueAtTime(v < 0.3 ? 0.0001 : 0.008 + spool*0.012 + b*0.03, tN);
+}
+
+/* The moment a burn lights: a short upward whoosh laid over the running jet, so the
+   single press has an attack of its own rather than just a louder steady state. */
+function burnSound(){
+  if(!AC) return;
+  whenRunning(() => {
+    const dest = out();
+    if(!dest || !jet) return;
+    const t0 = AC.currentTime;
+    const src = AC.createBufferSource();
+    src.buffer = jet.src.buffer;
+    src.loop = true;
+    const bp = AC.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.setValueAtTime(1.4, t0);
+    bp.frequency.setValueAtTime(500, t0);
+    bp.frequency.exponentialRampToValueAtTime(5200, t0 + 0.42);
+    const g = AC.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(0.10, t0 + 0.06);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.75);
+    src.connect(bp).connect(g).connect(dest);
+    src.start(t0);
+    src.stop(t0 + 0.8);
+  });
+}
+/* Taking a boost cell: a short bright blip, nothing like the jet. */
+function cellSound(){
+  if(!AC) return;
+  whenRunning(() => {
+    const dest = out();
+    if(!dest) return;
+    const t0 = AC.currentTime;
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type = 'triangle';
+    o.frequency.setValueAtTime(680, t0);
+    o.frequency.exponentialRampToValueAtTime(1320, t0 + 0.09);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(0.05, t0 + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.26);
+    o.connect(g).connect(dest);
+    o.start(t0); o.stop(t0 + 0.28);
+  });
 }
 function stopHum(){
-  if(!humOsc || !AC) return;
-  humGain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.08);
+  if(!jet || !AC) return;
+  jet.gain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.1);
+  jet.subGain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.1);
+}
+
+/* ==== src/neon/cells.js ==== */
+/* BOOST CELLS. Free charge lying on the racing line, and the reason the line is worth
+   arguing about: the fast way through a corner and the way past the cell on its outside
+   are rarely the same, so a lap is a series of small bargains.
+
+   Placed deterministically from the course, like everything else here -- a best time is
+   only a record if the next run is the same course with the same cells in the same
+   places. Logic and mesh live together because they are the same object seen twice; the
+   scene half no-ops if THREE is absent, which is what lets the pure parts be tested.  */
+
+
+
+
+/* One cell every NEON.cellEveryM, placed where the track is straight enough to reach for
+   it, and set left/right/centre in a fixed rotation so a lap is never a straight line. */
+function placeCells(T){
+  const cells = [];
+  const n = Math.max(1, Math.round(T.L/NEON.cellEveryM));
+  const step = T.L/n;
+  for(let i = 0; i < n; i++){
+    // nudge off the exact multiple so a cell never lands on the start line itself
+    let s = (i + 0.5)*step;
+    let best = s, bestK = Infinity;
+    for(let o = -step*0.3; o <= step*0.3; o += Math.max(2, step*0.1)){
+      const f = trackFrame(T, s + o, {});
+      const k = Math.abs(f.k);
+      if(k < bestK){ bestK = k; best = s + o; }
+    }
+    const f = trackFrame(T, best, {});
+    const lim = f.halfW - (T.bodyWide || NEON.bodyWide);
+    const lane = [0, 1, -1, 0, -1, 1][i % 6];
+    cells.push({s: T.closed ? ((best % T.L) + T.L) % T.L : Math.min(T.L - 5, Math.max(5, best)),
+                d: lane*lim*0.62, live: true, backT: 0, i});
+  }
+  return cells;
+}
+
+/* Anyone passing through a live cell takes it. Returns the cells taken this step, so the
+   caller can make a noise about the ones the player got. */
+function stepCells(cells, racers, T, dt){
+  const took = [];
+  for(const c of cells){
+    if(!c.live){
+      c.backT -= dt;
+      if(c.backT <= 0) c.live = true;
+      continue;
+    }
+    for(const r of racers){
+      if(r.done || r.isGhost) continue;
+      let gap = r.s - c.s;
+      if(T.closed){ gap = ((gap % T.L) + T.L) % T.L; if(gap > T.L/2) gap -= T.L; }
+      // the window has to cover a whole frame of travel or a fast board steps over it
+      if(Math.abs(gap) > Math.max(2.5, r.v*dt*1.2)) continue;
+      if(Math.abs(r.d - c.d) > NEON.cellGrab + (T.bodyWide || NEON.bodyWide)*0.5) continue;
+      r.battery = Math.min(1, r.battery + NEON.cellGive);
+      r.cells = (r.cells || 0) + 1;
+      c.live = false; c.backT = NEON.cellBackS;
+      took.push({cell: c, racer: r});
+      break;
+    }
+  }
+  return took;
+}
+
+/* ---- the visible half ---- */
+let cellGroup = null, cellMeshes = [];
+
+function buildCellMeshes(T, cells, baseM, color){
+  clearCells();
+  if(typeof THREE === 'undefined') return null;
+  cellGroup = new THREE.Group(); cellGroup.name = 'neonCells';
+  const K = 1/(T.widthK || 1);
+  const ringGeo = new THREE.TorusGeometry(1.15*K, 0.12*K, 6, 18);
+  const coreGeo = new THREE.OctahedronGeometry(0.42*K);
+  const mat = new THREE.MeshBasicMaterial({color, transparent:true, opacity:0.95,
+    blending: THREE.AdditiveBlending, depthWrite:false});
+  const softMat = new THREE.MeshBasicMaterial({color, transparent:true, opacity:0.18,
+    blending: THREE.AdditiveBlending, depthWrite:false});
+  for(const c of cells){
+    const f = trackFrame(T, c.s, {});
+    const g = new THREE.Group();
+    const ring = new THREE.Mesh(ringGeo, mat);
+    const halo = new THREE.Mesh(ringGeo, softMat);
+    halo.scale.setScalar(1.7);
+    const core = new THREE.Mesh(coreGeo, mat);
+    g.add(ring, halo, core);
+    g.position.set(f.x - Math.sin(f.yaw)*c.d, deckY(T, f.elev, baseM) + 1.25*K, f.z - Math.cos(f.yaw)*c.d);
+    g.rotation.y = f.yaw + Math.PI/2;       // the torus faces down the track
+    g.userData.cell = c;
+    g.userData.core = core;
+    cellGroup.add(g);
+    cellMeshes.push(g);
+  }
+  cellGroup.traverse(o => { o.frustumCulled = false; });
+  scene.add(cellGroup);
+  return cellGroup;
+}
+function updateCellMeshes(t){
+  for(const g of cellMeshes){
+    const c = g.userData.cell;
+    g.visible = c.live || c.backT < NEON.cellBackS*0.35;
+    if(!g.visible) continue;
+    const coming = c.live ? 1 : 1 - c.backT/(NEON.cellBackS*0.35);
+    g.scale.setScalar(0.35 + 0.65*coming);
+    g.userData.core.rotation.y = t*2.2;
+    g.userData.core.rotation.x = t*1.4;
+    g.position.y += Math.sin(t*2 + c.i)*0.004;
+  }
+}
+function clearCells(){
+  if(cellGroup){ scene.remove(cellGroup); disposeGroup(cellGroup); }
+  cellGroup = null; cellMeshes = [];
+}
+
+/* ==== src/neon/ghosts.js ==== */
+/* GHOSTS. A best time, kept as the line that set it, so the next run has something to
+   chase rather than a number to beat.
+
+   One ghost per RIDER per course setting: your fastest lap as the corgi and your fastest
+   as the elk are different records, and at Fierce they all line up together. A ghost is a
+   replay, not a driver -- it never steers, never collides and cannot be blocked -- so it
+   is honest about what it is: the exact run that set the time.
+
+   STORED SMALL, because localStorage is a few megabytes for everything the three games
+   keep. Position along and across the track, four times a second, rounded to a decimetre
+   and a centimetre; heading is not stored at all but recovered from where the line went,
+   which is what heading means anyway. That is about 1.2 kB of JSON per minute of racing. */
+
+
+
+const GHOST_DT = 0.25;
+const GHOST_KEEP = 6;          // per course setting, fastest first
+
+function makeRecorder(){ return {t: 0, next: 0, s: [], d: []}; }
+function recordFrame(rec, r, dt){
+  rec.t += dt;
+  if(rec.t < rec.next) return;
+  rec.next += GHOST_DT;
+  rec.s.push(Math.round(r.prog*10)/10);
+  rec.d.push(Math.round(r.d*100)/100);
+}
+function finishRecording(rec, r, who){
+  if(rec.s.length < 3) return null;
+  return {dt: GHOST_DT, time: +r.finishT.toFixed(2), rider: who.id, label: who.label,
+          s: rec.s, d: rec.d};
+}
+
+/* The stored table is {key: {riderId: ghost}}: one per rider, the fastest that rider has
+   gone. Beating your own time replaces it; beating someone else's does not touch theirs. */
+function bestGhosts(store, key){
+  const byRider = (store && store[key]) || {};
+  return Object.keys(byRider).map(k => byRider[k])
+    .sort((a, b) => a.time - b.time || (a.rider < b.rider ? -1 : 1))
+    .slice(0, GHOST_KEEP);
+}
+function keepGhost(store, key, ghost){
+  if(!ghost) return false;
+  const table = store[key] || (store[key] = {});
+  const old = table[ghost.rider];
+  if(old && old.time <= ghost.time) return false;
+  table[ghost.rider] = ghost;
+  return true;
+}
+
+/* A ghost racer: same shape as any other racer so ranking, the HUD and the minimap need
+   to know nothing about it, but driven by the recording instead of by physics. */
+function makeGhostRacer(g, T, color){
+  const r = makeRacer({name: g.label + ' ghost', isGhost: true, color, ghost: g,
+                       skill: null, lane: 0, seed: 1});
+  applyGhost(r, T, 0);
+  return r;
+}
+function stepGhost(r, T, dt){
+  r.time += dt;
+  applyGhost(r, T, r.time);
+  if(!r.done && r.time >= r.ghost.time){ r.done = true; r.finishT = r.ghost.time; }
+}
+function applyGhost(r, T, t){
+  const g = r.ghost, n = g.s.length;
+  const u = Math.max(0, Math.min(n-1, t/g.dt));
+  const i = Math.floor(u), j = Math.min(n-1, i+1), f = u - i;
+  const prog = g.s[i] + (g.s[j]-g.s[i])*f;
+  const d = g.d[i] + (g.d[j]-g.d[i])*f;
+  const prev = r.prog;
+  r.prog = prog;
+  r.d = d;
+  r.lap = T.closed ? Math.floor(prog/T.L) : 0;
+  r.s = T.closed ? prog - r.lap*T.L : Math.min(prog, T.L);
+  r.v = Math.max(0, (prog - prev)/Math.max(1e-4, r.lastDt || 0.016));
+  // heading from the direction the recorded line is going, not from a stored angle
+  const ahead = Math.min(n-1, u + 1.2);
+  const ai = Math.floor(ahead), aj = Math.min(n-1, ai+1), af = ahead - ai;
+  const pa = g.s[ai] + (g.s[aj]-g.s[ai])*af, da = g.d[ai] + (g.d[aj]-g.d[ai])*af;
+  const ds = Math.max(0.05, pa - prog), dd = da - d;
+  const fr = trackFrame(T, r.s, {});
+  r.yaw = fr.yaw + Math.atan2(dd, ds);
+  r.slope = 0;
+  r.boosting = false;
+  r.lean += ((-Math.atan2(dd, ds)*0.5) - r.lean)*0.1;
 }
 
 /* ==== src/neon/map2d.js ==== */
@@ -4848,7 +5356,7 @@ function paintDots(cv, fit, dots){
   if(!g || !fit) return;
   for(const d of dots){
     g.fillStyle = d.color;
-    g.beginPath(); g.arc(fit.X(d.x), fit.Y(d.z), (d.big ? 5 : 3.2)*cv.width/260, 0, 7); g.fill();
+    g.beginPath(); g.arc(fit.X(d.x), fit.Y(d.z), (d.big ? 5 : d.small ? 2 : 3.2)*cv.width/260, 0, 7); g.fill();
     if(d.big){ g.strokeStyle = '#fff'; g.lineWidth = 1.5*cv.width/260; g.stroke(); }
   }
 }
@@ -4883,8 +5391,11 @@ function paintDots(cv, fit, dots){
 
 
 
+
+
 const DEFAULT_NEON_WORLD = '../data/world.json';
 const NEON_STORE = 'dogexplorer.neon';
+const GHOST_COLORS = [0x8fd0ff, 0xc0a8ff, 0x9fe0c8, 0xd8d0a0, 0xb0c0e0, 0xe0b0d0];
 const RIVAL_COLORS = [0xff2bd6, 0xff8a1f, 0xffe14a, 0x9a6bff, 0xff4466, 0x2bffc0, 0xff9ee6, 0x4f8cff];
 const PLAYER_COLOR = 0xb6ff3c;
 const PHYS_DT = 1/120;
@@ -4900,8 +5411,9 @@ const trackCache = new Map();
 const trackMeta = new Map();    // sig|scale -> {L, climb, ok}: filled in by the menu scan
 let scanQueue = [];
 let activeTrack = null;         // the ribbon currently in the scene
-const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale: 1, rider: 'p:0', map: DEFAULT_NEON_WORLD};
-let bests = {};
+const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale: 1,
+                  cls: 'standard', cam: 'normal', rider: 'p:0', course: '', map: DEFAULT_NEON_WORLD};
+let bests = {}, ghostStore = {};
 let race = null;                // {T, racers, riders, me, phase, t, grav, scale, reverse, ...}
 let neonScreen = 'menu';   // NOT `screen`: the bundle is one classic script, and a
                             // top-level `let screen` would shadow window.screen for core/quality.js
@@ -4914,10 +5426,18 @@ function neonReadStore(){
     const s = JSON.parse(localStorage.getItem(NEON_STORE) || 'null');
     if(s && s.settings) Object.assign(settings, s.settings);
     if(s && s.bests) bests = s.bests;
+    if(s && s.ghosts) ghostStore = s.ghosts;
   }catch(e){ /* private mode: play without persistence */ }
 }
 function neonWriteStore(){
-  try{ localStorage.setItem(NEON_STORE, JSON.stringify({settings, bests})); }catch(e){}
+  try{ localStorage.setItem(NEON_STORE, JSON.stringify({settings, bests, ghosts: ghostStore})); }
+  catch(e){
+    /* Ghost recordings are the only thing here big enough to fill a quota. If they do,
+       drop them all and keep the settings and the times, which are what the player would
+       actually miss. */
+    ghostStore = {};
+    try{ localStorage.setItem(NEON_STORE, JSON.stringify({settings, bests, ghosts: {}})); }catch(e2){}
+  }
 }
 function setScreen(name){ neonScreen = name; document.body.setAttribute('data-screen', name); }
 function fmtTime(t){
@@ -4928,8 +5448,12 @@ function fmtTime(t){
 function strHash(s){ let h = 2166136261; for(let i = 0; i < s.length; i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
 /* A best time belongs to one way round one course at one scale with gravity one way, so
    all four are in the key. Changing any of them is a different race, not a slower lap. */
+/* A best time belongs to one way round one course at one scale in one speed class with
+   gravity one way, so all five are in the key. Changing any of them is a different race,
+   not a slower lap. Rivals and camera are not: they change who you are racing and what
+   you can see, never what the board can do. */
 const bestKey = (c, st) => mapId + '|' + c.sig + '|g' + (st.gravity ? 1 : 0)
-  + '|s' + st.scale + (st.reverse ? '|rev' : '');
+  + '|s' + st.scale + (st.reverse ? '|rev' : '') + '|c' + st.cls;
 const fmtMi = m => miles(m).toFixed(m < 1609 ? 2 : 2) + ' mi';
 const fmtFt = m => Math.round(feet(m)).toLocaleString() + ' ft';
 
@@ -4984,6 +5508,8 @@ async function loadNeonMap(src, label){
   rebuildEnvironment();
   mapLabel = label || mapId;
   syncMapLine();
+  const remembered = courses.findIndex(c => c.sig === settings.course);
+  if(remembered >= 0) selCourse = remembered;
   selCourse = clamp(selCourse, 0, Math.max(0, courses.length-1));
   trackMeta.clear();
   renderCourseList();
@@ -5091,6 +5617,11 @@ function renderCourseList(){
 function selectCourse(i){
   if(!courses.length) return;
   selCourse = i;
+  /* Remembered BY SIGNATURE, not by index: the course list is regenerated whenever the
+     scale changes, and an index would quietly point at a different race. Coming back to
+     the game on the course you were last racing is the difference between seeing your
+     best time and seeing an empty board. */
+  if(courses[i] && settings.course !== courses[i].sig){ settings.course = courses[i].sig; neonWriteStore(); }
   document.querySelectorAll('#courseList .course').forEach((el, k) => el.classList.toggle('on', k === i));
   const c = courses[i], T = trackFor(c);
   if(!trackMeta.has(metaKey(c))){
@@ -5121,6 +5652,23 @@ function riderChoices(){
   Object.keys(SPECIES).forEach(key => out.push({v: 'w:' + key, group: 'Wildlife', label: SPECIES[key].nm, who: {kind: 'wild', key}}));
   return out;
 }
+const riderWho = id => (riderChoices().find(c => c.v === id) || {}).who;
+/* A ghost is a recording, so it is drawn as one: the same rider, lit down to a memory. */
+function fadeRider(R){
+  R.root.traverse(o => {
+    if(!o.material || o.isSprite) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    o.material = mats.map(m => {
+      const c = m.clone ? m.clone() : m;
+      c.transparent = true;
+      c.opacity = (m.opacity == null ? 1 : m.opacity)*0.3;
+      c.depthWrite = false;
+      return c;
+    });
+    if(!Array.isArray(o.material)) o.material = o.material[0];
+  });
+  if(R.tag) R.tag.material.opacity = 0.35;
+}
 function fillRiderSelect(){
   const sel = $('riderSel');
   sel.textContent = '';
@@ -5138,7 +5686,12 @@ function syncMenu(){
   document.querySelectorAll('#skillSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.skill === settings.skill));
   document.querySelectorAll('#gravSeg .btn').forEach(b => b.classList.toggle('on', (b.dataset.grav === '1') === settings.gravity));
   document.querySelectorAll('#dirSeg .btn').forEach(b => b.classList.toggle('on', (b.dataset.dir === 'rev') === settings.reverse));
+  document.querySelectorAll('#classSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.cls === settings.cls));
+  document.querySelectorAll('#camSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.cam === settings.cam));
   $('scaleSel').value = String(settings.scale);
+  $('ghostNote').textContent = settings.skill === 'fierce'
+    ? 'Fierce also lines up the fastest ghost of every rider who has raced this course.'
+    : '';
 }
 /* Gravity, direction and scale are set BEFORE the lights go out and hold for the whole
    race. They change what the course is, not how you are driving it, so mid-race they
@@ -5166,11 +5719,27 @@ function setScale(n){
      long in real metres (see routeTargetM). */
   const made = buildCourses(graph, dem ? (x, z) => dem.heightAt(x, z) : null, {scale: sc});
   courses = made.courses; coverInfo = made;
+  const kept = courses.findIndex(c => c.sig === settings.course);
+  if(kept >= 0) selCourse = kept;
   selCourse = clamp(selCourse, 0, Math.max(0, courses.length-1));
   syncMapLine(); rebuildEnvironment(); renderCourseList(); startScan(); selectCourse(selCourse);
 }
+function setClass(name){
+  if(!NEON_CLASS[name] || settings.cls === name) return;
+  settings.cls = name;
+  syncMenu(); neonWriteStore(); renderCourseList();
+}
+function setCam(name){
+  if(!NEON_CAM[name] || settings.cam === name) return;
+  settings.cam = name;
+  syncMenu(); neonWriteStore();
+}
+function cycleCam(){
+  const order = ['close', 'normal', 'far'];
+  setCam(order[(order.indexOf(settings.cam) + 1) % order.length]);
+}
 function modeChip(){
-  const bits = [];
+  const bits = [NEON_CLASS[settings.cls].label.toUpperCase()];
   if(settings.scale > 1) bits.push('1:' + settings.scale);
   if(settings.reverse) bits.push('REVERSE');
   bits.push(settings.gravity ? 'GRAVITY' : 'NO GRAVITY');
@@ -5194,6 +5763,7 @@ function pickRivals(n, course, playerWho){
 function endRace(){
   if(!race) return;
   for(const R of race.riders) disposeRider(R);
+  clearCells();
   race = null;
   stopHum();
 }
@@ -5205,6 +5775,7 @@ function startRace(){
   showTrack(T);
   const choice = riderChoices().find(c => c.v === settings.rider) || riderChoices()[0];
   const cast = pickRivals(settings.rivals, course, choice.who);
+  const speedK = NEON_CLASS[settings.cls].top;
   // riders shrink with the ribbon, so a six-board pack fills the same share of it at 1:6
   const sizeK = 1/widthFactor(settings.scale);
   const racers = [], riders = [];
@@ -5220,19 +5791,35 @@ function startRace(){
       lap: T.closed ? -1 : 0}, o));
   };
   cast.forEach((c, i) => {
-    racers.push(place(i, {name: c.name, skill: NEON_SKILL[settings.skill], paceMul: c.paceMul,
+    racers.push(place(i, {name: c.name, skill: NEON_SKILL[settings.skill], paceMul: c.paceMul, speedK,
       lane: ((i % 4) - 1.5)/2.2, seed: c.seed % 1000, color: c.color, emo: SPECIES[c.key].emo}));
     riders.push(makeRider({kind: 'wild', key: c.key}, c.color, c.seed, sizeK));
   });
-  racers.push(place(cast.length, {name: choice.label, isPlayer: true, color: PLAYER_COLOR}));
+  racers.push(place(cast.length, {name: choice.label, isPlayer: true, color: PLAYER_COLOR, speedK}));
   riders.push(makeRider(choice.who, PLAYER_COLOR, 7, sizeK));
   riders[riders.length-1].tag.visible = false;
-  for(const r of racers) r.prog = (r.lap|0)*T.L + r.s;
+  for(const r of racers) if(!r.isGhost) r.prog = (r.lap|0)*T.L + r.s;
+  /* GHOSTS RIDE AT FIERCE. They are the point of the setting: every rider who has set a
+     time on exactly this course, in this class, this way round, at this scale, with this
+     gravity, lines up as the run that set it. They replay, so they cannot be blocked or
+     shoved, but they are ranked with everyone else -- beating a ghost is beating the time. */
+  const ghosts = settings.skill === 'fierce' ? bestGhosts(ghostStore, bestKey(course, settings)) : [];
+  ghosts.forEach((g, i) => {
+    const gr = makeGhostRacer(g, T, GHOST_COLORS[i % GHOST_COLORS.length]);
+    racers.push(gr);
+    const R = makeRider(riderWho(g.rider) || choice.who, gr.color, 40 + i, sizeK);
+    fadeRider(R);
+    riders.push(R);
+  });
   const line = assembleLine(graph, course).pts;
   if(settings.reverse) line.reverse();
-  race = {T, course, racers, riders, me: racers.length-1, phase: 'count', countT: 3.4, lastPip: 4,
-          t: 0, finishShown: false, doneCount: 0, line,
-          gravity: settings.gravity, scale: settings.scale, reverse: settings.reverse, sizeK};
+  const cells = placeCells(T);
+  buildCellMeshes(T, cells, baseM(), 0xffe14a);
+  race = {T, course, racers, riders, me: cast.length, phase: 'count', countT: 3.4, lastPip: 4,
+          t: 0, finishShown: false, doneCount: 0, line, cells, rec: makeRecorder(),
+          riderId: choice.v, riderLabel: choice.label, ghosts: ghosts.length,
+          gravity: settings.gravity, scale: settings.scale, reverse: settings.reverse,
+          cls: settings.cls, sizeK};
   rankRacers(racers);
   resetNeonInput();
   camYaw = racers[race.me].yaw;
@@ -5268,7 +5855,9 @@ function stepRace(dt){
   R.t += dt;
   const me = R.racers[R.me];
   const input = readNeonInput(dt);
+  env.cells = R.cells;
   for(const r of R.racers){
+    if(r.isGhost){ r.lastDt = dt; stepGhost(r, T, dt); continue; }
     const inp = r.isPlayer ? input : rivalInput(r, T, R.racers, env, R.t);
     // rubber band, gently: nobody should be a dot on the horizon either way
     if(!r.isPlayer && !r.done){
@@ -5279,8 +5868,11 @@ function stepRace(dt){
     }
     const ev = stepRacer(r, T, inp, env, dt);
     if(ev) onBump(r, ev);
+    if(r.burnFired && r === me) burnSound();
   }
   resolveContacts(R.racers, T);
+  for(const t of stepCells(R.cells, R.racers, T, dt)) if(t.racer === me) cellSound();
+  if(!me.done) recordFrame(R.rec, me, dt);
 }
 function onBump(r, ev){
   const T = race.T, me = race.racers[race.me];
@@ -5295,8 +5887,12 @@ function finishPlayer(){
   const R = race, me = R.racers[R.me], key = bestKey(R.course, R);
   const old = bests[key];
   let note = '';
-  if(!old || me.finishT < old){ bests[key] = +me.finishT.toFixed(2); neonWriteStore(); note = old ? '★ New best! (was ' + fmtTime(old) + ')' : '★ First time on the board.'; }
+  const ghost = finishRecording(R.rec, me, {id: R.riderId, label: R.riderLabel});
+  const keptGhost = keepGhost(ghostStore, key, ghost);
+  if(!old || me.finishT < old){ bests[key] = +me.finishT.toFixed(2); note = old ? '★ New best! (was ' + fmtTime(old) + ')' : '★ First time on the board.'; }
   else note = 'Best ' + fmtTime(old) + ' · +' + (me.finishT - old).toFixed(1) + ' s';
+  if(keptGhost) note += ' · ghost saved';
+  neonWriteStore();
   $('finTitle').textContent = me.place === 1 ? '🏁 YOU WIN' : '🏁 P' + me.place + ' OF ' + R.racers.length;
   $('finTime').textContent = fmtTime(me.finishT);
   $('finNote').textContent = note + ' · ' + modeChip().toLowerCase();
@@ -5312,7 +5908,7 @@ function renderBoard(){
     if(r.isPlayer) li.className = 'me';
     const a = document.createElement('span'), dot = document.createElement('i');
     dot.style.background = hex(r.color);
-    a.append(dot, r.place + '. ' + (r.emo ? r.emo + ' ' : '') + r.name);
+    a.append(dot, r.place + '. ' + (r.emo ? r.emo + ' ' : '') + r.name + (r.isGhost ? ' 👻' : ''));
     const b = document.createElement('span');
     b.textContent = r.done ? fmtTime(r.finishT) : '…';
     li.append(a, b);
@@ -5329,7 +5925,8 @@ function chaseTarget(){
   /* The part of the chase distance that frames the BOARD scales with the board; the part
      that buys you a view of the corner ahead is about speed, and speed does not scale. */
   const K = R.sizeK || 1;
-  const dist = 7.5*K + me.v*0.13, high = 3.1*K + me.v*0.035;
+  const cam = NEON_CAM[settings.cam] || NEON_CAM.normal;
+  const dist = (7.5*K + me.v*0.13)*cam.dist, high = (3.1*K + me.v*0.035)*cam.high;
   const x = f.wx - Math.cos(camYaw)*dist, z = f.wz + Math.sin(camYaw)*dist;
   // never let a crest come between the lens and the board
   const behind = trackFrame(T, T.closed ? me.s - dist : Math.max(0, me.s - dist), _cb);
@@ -5399,10 +5996,19 @@ function drawRace(dt){
   const pct = Math.round(me.slope*100);
   $('slopeVal').textContent = !R.gravity ? '' : pct > 1 ? '▲ ' + pct + '%' : pct < -1 ? '▼ ' + (-pct) + '%'
     : (dem ? Math.round(feet(f.elev)) + ' ft' : '');
-  setHum(me.v, me.boosting);
+  setHum(me.v, me.burnT > 0 ? Math.min(1, me.burnT/NEON.burnS + 0.35) : 0);
+  $('burnPip').textContent = me.burnT > 0 ? 'BURN'
+    : me.battery >= NEON.burnCost ? Math.floor(me.battery/NEON.burnCost) + ' BURN' + (me.battery >= NEON.burnCost*2 ? 'S' : '')
+    : 'CHARGING';
+  $('burnPip').classList.toggle('hot', me.burnT > 0);
   const fit = paintMap($('minimap'), graph, mapBox, R.line, T.closed, 'mm|' + mapId + '|' + R.course.sig, true);
   const sc = R.scale;
   const dots = R.racers.map(r => { const w = trackToWorld(T, r.s, r.d, {}); return {x: w.wx*sc, z: w.wz*sc, color: hex(r.color), big: r.isPlayer}; });
+  for(const c of R.cells){
+    if(!c.live) continue;
+    const w = trackToWorld(T, c.s, c.d, {});
+    dots.push({x: w.wx*sc, z: w.wz*sc, color: '#ffe14a', small: true});
+  }
   dots.sort((p, q) => (p.big ? 1 : 0) - (q.big ? 1 : 0));
   paintDots($('minimap'), fit, dots);
 }
@@ -5425,6 +6031,7 @@ function frame(ms){
   }
   updateCamera(dt);
   updateScene(dt);
+  if(race) updateCellMeshes(clockT);
   renderer.render(scene, camera);
 }
 
@@ -5438,6 +6045,8 @@ function wireUI(){
   $('rivalsUp').addEventListener('click', () => { settings.rivals = clamp(settings.rivals+1, 0, 7); syncMenu(); neonWriteStore(); });
   document.querySelectorAll('#skillSeg .btn').forEach(b => b.addEventListener('click', () => { settings.skill = b.dataset.skill; syncMenu(); neonWriteStore(); }));
   document.querySelectorAll('#gravSeg .btn').forEach(b => b.addEventListener('click', () => setGravity(b.dataset.grav === '1')));
+  document.querySelectorAll('#classSeg .btn').forEach(b => b.addEventListener('click', () => setClass(b.dataset.cls)));
+  document.querySelectorAll('#camSeg .btn').forEach(b => b.addEventListener('click', () => setCam(b.dataset.cam)));
   document.querySelectorAll('#dirSeg .btn').forEach(b => b.addEventListener('click', () => setReverse(b.dataset.dir === 'rev')));
   $('scaleSel').addEventListener('change', e => setScale(+e.target.value));
   $('riderSel').addEventListener('change', e => { settings.rider = e.target.value; neonWriteStore(); });
@@ -5459,6 +6068,7 @@ function wireUI(){
     // only on the menu: a race is run at the settings it started with
     gravity: () => { if(neonScreen === 'menu') setGravity(!settings.gravity); },
     reverse: () => { if(neonScreen === 'menu') setReverse(!settings.reverse); },
+    camera: cycleCam,                      // the one setting that is safe to change mid-race
     restart: () => { if(race) startRace(); },
     quit: () => { if(neonScreen !== 'menu') quitToMenu(); },
     confirm: () => { if(neonScreen === 'menu' && !$('startBtn').disabled) startRace(); else if(neonScreen === 'finish') startRace(); },
@@ -5489,7 +6099,7 @@ async function bootNeon(){
 /* test seam (tools/smoke-neon.js reads the bundle's globals directly, but one tidy
    snapshot keeps the assertions short) */
 function neonState(){
-  return {screen: neonScreen, tuning: NEON, graph, areas: mapAreas, mapId, courses, trackMeta, scanLeft: scanQueue.length, coverInfo, selCourse, settings, race, activeTrack, bests, hasDem: !!dem};
+  return {screen: neonScreen, tuning: NEON, graph, areas: mapAreas, mapId, courses, trackMeta, scanLeft: scanQueue.length, ghostStore, coverInfo, selCourse, settings, race, activeTrack, bests, hasDem: !!dem};
 }
 bootNeon();
 </script>

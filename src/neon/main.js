@@ -17,18 +17,22 @@ import { SPECIES } from '../data/species.js';
 import { kennelPups, loadKennel } from '../data/kennel.js';
 import { PRESETS } from '../creator/presets.js';
 import { parseFeatures, buildGraph } from '../trails/geo.js';
-import { NEON, NEON_SKILL, miles, feet, mph } from './tuning.js';
+import { NEON, NEON_SKILL, NEON_CLASS, NEON_CAM, miles, feet, mph } from './tuning.js';
 import { buildCourses } from './routes.js';
 import { buildTrack, reverseTrack, widthFactor, trackFrame, trackToWorld, deckY, calmestStart, rotateTrack, assembleLine } from './track.js';
-import { makeRacer, stepRacer, rivalInput, resolveContacts, rankRacers, raceDistance } from './racer.js';
+import { makeRacer, stepRacer, rivalInput, resolveContacts, rankRacers, raceDistance, topSpeed } from './racer.js';
 import { buildEnvironment, buildTrackMesh, clearTrackMesh, bumperPulse, updateScene } from './neon-scene.js';
 import { makeRider, poseRider, disposeRider } from './riders.js';
 import { initNeonInput, readNeonInput, resetNeonInput } from './neon-input.js';
-import { startHum, setHum, stopHum } from './neon-sound.js';
+import { startHum, setHum, stopHum, burnSound, cellSound } from './neon-sound.js';
+import { placeCells, stepCells, buildCellMeshes, updateCellMeshes, clearCells } from './cells.js';
+import { makeRecorder, recordFrame, finishRecording, bestGhosts, keepGhost,
+         makeGhostRacer, stepGhost } from './ghosts.js';
 import { paintMap, paintDots } from './map2d.js';
 
 const DEFAULT_NEON_WORLD = '../data/world.json';
 const NEON_STORE = 'dogexplorer.neon';
+const GHOST_COLORS = [0x8fd0ff, 0xc0a8ff, 0x9fe0c8, 0xd8d0a0, 0xb0c0e0, 0xe0b0d0];
 const RIVAL_COLORS = [0xff2bd6, 0xff8a1f, 0xffe14a, 0x9a6bff, 0xff4466, 0x2bffc0, 0xff9ee6, 0x4f8cff];
 const PLAYER_COLOR = 0xb6ff3c;
 const PHYS_DT = 1/120;
@@ -44,8 +48,9 @@ const trackCache = new Map();
 const trackMeta = new Map();    // sig|scale -> {L, climb, ok}: filled in by the menu scan
 let scanQueue = [];
 let activeTrack = null;         // the ribbon currently in the scene
-const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale: 1, rider: 'p:0', map: DEFAULT_NEON_WORLD};
-let bests = {};
+const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale: 1,
+                  cls: 'standard', cam: 'normal', rider: 'p:0', course: '', map: DEFAULT_NEON_WORLD};
+let bests = {}, ghostStore = {};
 let race = null;                // {T, racers, riders, me, phase, t, grav, scale, reverse, ...}
 let neonScreen = 'menu';   // NOT `screen`: the bundle is one classic script, and a
                             // top-level `let screen` would shadow window.screen for core/quality.js
@@ -58,10 +63,18 @@ function neonReadStore(){
     const s = JSON.parse(localStorage.getItem(NEON_STORE) || 'null');
     if(s && s.settings) Object.assign(settings, s.settings);
     if(s && s.bests) bests = s.bests;
+    if(s && s.ghosts) ghostStore = s.ghosts;
   }catch(e){ /* private mode: play without persistence */ }
 }
 function neonWriteStore(){
-  try{ localStorage.setItem(NEON_STORE, JSON.stringify({settings, bests})); }catch(e){}
+  try{ localStorage.setItem(NEON_STORE, JSON.stringify({settings, bests, ghosts: ghostStore})); }
+  catch(e){
+    /* Ghost recordings are the only thing here big enough to fill a quota. If they do,
+       drop them all and keep the settings and the times, which are what the player would
+       actually miss. */
+    ghostStore = {};
+    try{ localStorage.setItem(NEON_STORE, JSON.stringify({settings, bests, ghosts: {}})); }catch(e2){}
+  }
 }
 function setScreen(name){ neonScreen = name; document.body.setAttribute('data-screen', name); }
 function fmtTime(t){
@@ -72,8 +85,12 @@ function fmtTime(t){
 function strHash(s){ let h = 2166136261; for(let i = 0; i < s.length; i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
 /* A best time belongs to one way round one course at one scale with gravity one way, so
    all four are in the key. Changing any of them is a different race, not a slower lap. */
+/* A best time belongs to one way round one course at one scale in one speed class with
+   gravity one way, so all five are in the key. Changing any of them is a different race,
+   not a slower lap. Rivals and camera are not: they change who you are racing and what
+   you can see, never what the board can do. */
 const bestKey = (c, st) => mapId + '|' + c.sig + '|g' + (st.gravity ? 1 : 0)
-  + '|s' + st.scale + (st.reverse ? '|rev' : '');
+  + '|s' + st.scale + (st.reverse ? '|rev' : '') + '|c' + st.cls;
 const fmtMi = m => miles(m).toFixed(m < 1609 ? 2 : 2) + ' mi';
 const fmtFt = m => Math.round(feet(m)).toLocaleString() + ' ft';
 
@@ -128,6 +145,8 @@ async function loadNeonMap(src, label){
   rebuildEnvironment();
   mapLabel = label || mapId;
   syncMapLine();
+  const remembered = courses.findIndex(c => c.sig === settings.course);
+  if(remembered >= 0) selCourse = remembered;
   selCourse = clamp(selCourse, 0, Math.max(0, courses.length-1));
   trackMeta.clear();
   renderCourseList();
@@ -235,6 +254,11 @@ function renderCourseList(){
 function selectCourse(i){
   if(!courses.length) return;
   selCourse = i;
+  /* Remembered BY SIGNATURE, not by index: the course list is regenerated whenever the
+     scale changes, and an index would quietly point at a different race. Coming back to
+     the game on the course you were last racing is the difference between seeing your
+     best time and seeing an empty board. */
+  if(courses[i] && settings.course !== courses[i].sig){ settings.course = courses[i].sig; neonWriteStore(); }
   document.querySelectorAll('#courseList .course').forEach((el, k) => el.classList.toggle('on', k === i));
   const c = courses[i], T = trackFor(c);
   if(!trackMeta.has(metaKey(c))){
@@ -265,6 +289,23 @@ function riderChoices(){
   Object.keys(SPECIES).forEach(key => out.push({v: 'w:' + key, group: 'Wildlife', label: SPECIES[key].nm, who: {kind: 'wild', key}}));
   return out;
 }
+const riderWho = id => (riderChoices().find(c => c.v === id) || {}).who;
+/* A ghost is a recording, so it is drawn as one: the same rider, lit down to a memory. */
+function fadeRider(R){
+  R.root.traverse(o => {
+    if(!o.material || o.isSprite) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    o.material = mats.map(m => {
+      const c = m.clone ? m.clone() : m;
+      c.transparent = true;
+      c.opacity = (m.opacity == null ? 1 : m.opacity)*0.3;
+      c.depthWrite = false;
+      return c;
+    });
+    if(!Array.isArray(o.material)) o.material = o.material[0];
+  });
+  if(R.tag) R.tag.material.opacity = 0.35;
+}
 function fillRiderSelect(){
   const sel = $('riderSel');
   sel.textContent = '';
@@ -282,7 +323,12 @@ function syncMenu(){
   document.querySelectorAll('#skillSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.skill === settings.skill));
   document.querySelectorAll('#gravSeg .btn').forEach(b => b.classList.toggle('on', (b.dataset.grav === '1') === settings.gravity));
   document.querySelectorAll('#dirSeg .btn').forEach(b => b.classList.toggle('on', (b.dataset.dir === 'rev') === settings.reverse));
+  document.querySelectorAll('#classSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.cls === settings.cls));
+  document.querySelectorAll('#camSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.cam === settings.cam));
   $('scaleSel').value = String(settings.scale);
+  $('ghostNote').textContent = settings.skill === 'fierce'
+    ? 'Fierce also lines up the fastest ghost of every rider who has raced this course.'
+    : '';
 }
 /* Gravity, direction and scale are set BEFORE the lights go out and hold for the whole
    race. They change what the course is, not how you are driving it, so mid-race they
@@ -310,11 +356,27 @@ function setScale(n){
      long in real metres (see routeTargetM). */
   const made = buildCourses(graph, dem ? (x, z) => dem.heightAt(x, z) : null, {scale: sc});
   courses = made.courses; coverInfo = made;
+  const kept = courses.findIndex(c => c.sig === settings.course);
+  if(kept >= 0) selCourse = kept;
   selCourse = clamp(selCourse, 0, Math.max(0, courses.length-1));
   syncMapLine(); rebuildEnvironment(); renderCourseList(); startScan(); selectCourse(selCourse);
 }
+function setClass(name){
+  if(!NEON_CLASS[name] || settings.cls === name) return;
+  settings.cls = name;
+  syncMenu(); neonWriteStore(); renderCourseList();
+}
+function setCam(name){
+  if(!NEON_CAM[name] || settings.cam === name) return;
+  settings.cam = name;
+  syncMenu(); neonWriteStore();
+}
+function cycleCam(){
+  const order = ['close', 'normal', 'far'];
+  setCam(order[(order.indexOf(settings.cam) + 1) % order.length]);
+}
 function modeChip(){
-  const bits = [];
+  const bits = [NEON_CLASS[settings.cls].label.toUpperCase()];
   if(settings.scale > 1) bits.push('1:' + settings.scale);
   if(settings.reverse) bits.push('REVERSE');
   bits.push(settings.gravity ? 'GRAVITY' : 'NO GRAVITY');
@@ -338,6 +400,7 @@ function pickRivals(n, course, playerWho){
 function endRace(){
   if(!race) return;
   for(const R of race.riders) disposeRider(R);
+  clearCells();
   race = null;
   stopHum();
 }
@@ -349,6 +412,7 @@ function startRace(){
   showTrack(T);
   const choice = riderChoices().find(c => c.v === settings.rider) || riderChoices()[0];
   const cast = pickRivals(settings.rivals, course, choice.who);
+  const speedK = NEON_CLASS[settings.cls].top;
   // riders shrink with the ribbon, so a six-board pack fills the same share of it at 1:6
   const sizeK = 1/widthFactor(settings.scale);
   const racers = [], riders = [];
@@ -364,19 +428,35 @@ function startRace(){
       lap: T.closed ? -1 : 0}, o));
   };
   cast.forEach((c, i) => {
-    racers.push(place(i, {name: c.name, skill: NEON_SKILL[settings.skill], paceMul: c.paceMul,
+    racers.push(place(i, {name: c.name, skill: NEON_SKILL[settings.skill], paceMul: c.paceMul, speedK,
       lane: ((i % 4) - 1.5)/2.2, seed: c.seed % 1000, color: c.color, emo: SPECIES[c.key].emo}));
     riders.push(makeRider({kind: 'wild', key: c.key}, c.color, c.seed, sizeK));
   });
-  racers.push(place(cast.length, {name: choice.label, isPlayer: true, color: PLAYER_COLOR}));
+  racers.push(place(cast.length, {name: choice.label, isPlayer: true, color: PLAYER_COLOR, speedK}));
   riders.push(makeRider(choice.who, PLAYER_COLOR, 7, sizeK));
   riders[riders.length-1].tag.visible = false;
-  for(const r of racers) r.prog = (r.lap|0)*T.L + r.s;
+  for(const r of racers) if(!r.isGhost) r.prog = (r.lap|0)*T.L + r.s;
+  /* GHOSTS RIDE AT FIERCE. They are the point of the setting: every rider who has set a
+     time on exactly this course, in this class, this way round, at this scale, with this
+     gravity, lines up as the run that set it. They replay, so they cannot be blocked or
+     shoved, but they are ranked with everyone else -- beating a ghost is beating the time. */
+  const ghosts = settings.skill === 'fierce' ? bestGhosts(ghostStore, bestKey(course, settings)) : [];
+  ghosts.forEach((g, i) => {
+    const gr = makeGhostRacer(g, T, GHOST_COLORS[i % GHOST_COLORS.length]);
+    racers.push(gr);
+    const R = makeRider(riderWho(g.rider) || choice.who, gr.color, 40 + i, sizeK);
+    fadeRider(R);
+    riders.push(R);
+  });
   const line = assembleLine(graph, course).pts;
   if(settings.reverse) line.reverse();
-  race = {T, course, racers, riders, me: racers.length-1, phase: 'count', countT: 3.4, lastPip: 4,
-          t: 0, finishShown: false, doneCount: 0, line,
-          gravity: settings.gravity, scale: settings.scale, reverse: settings.reverse, sizeK};
+  const cells = placeCells(T);
+  buildCellMeshes(T, cells, baseM(), 0xffe14a);
+  race = {T, course, racers, riders, me: cast.length, phase: 'count', countT: 3.4, lastPip: 4,
+          t: 0, finishShown: false, doneCount: 0, line, cells, rec: makeRecorder(),
+          riderId: choice.v, riderLabel: choice.label, ghosts: ghosts.length,
+          gravity: settings.gravity, scale: settings.scale, reverse: settings.reverse,
+          cls: settings.cls, sizeK};
   rankRacers(racers);
   resetNeonInput();
   camYaw = racers[race.me].yaw;
@@ -412,7 +492,9 @@ function stepRace(dt){
   R.t += dt;
   const me = R.racers[R.me];
   const input = readNeonInput(dt);
+  env.cells = R.cells;
   for(const r of R.racers){
+    if(r.isGhost){ r.lastDt = dt; stepGhost(r, T, dt); continue; }
     const inp = r.isPlayer ? input : rivalInput(r, T, R.racers, env, R.t);
     // rubber band, gently: nobody should be a dot on the horizon either way
     if(!r.isPlayer && !r.done){
@@ -423,8 +505,11 @@ function stepRace(dt){
     }
     const ev = stepRacer(r, T, inp, env, dt);
     if(ev) onBump(r, ev);
+    if(r.burnFired && r === me) burnSound();
   }
   resolveContacts(R.racers, T);
+  for(const t of stepCells(R.cells, R.racers, T, dt)) if(t.racer === me) cellSound();
+  if(!me.done) recordFrame(R.rec, me, dt);
 }
 function onBump(r, ev){
   const T = race.T, me = race.racers[race.me];
@@ -439,8 +524,12 @@ function finishPlayer(){
   const R = race, me = R.racers[R.me], key = bestKey(R.course, R);
   const old = bests[key];
   let note = '';
-  if(!old || me.finishT < old){ bests[key] = +me.finishT.toFixed(2); neonWriteStore(); note = old ? '★ New best! (was ' + fmtTime(old) + ')' : '★ First time on the board.'; }
+  const ghost = finishRecording(R.rec, me, {id: R.riderId, label: R.riderLabel});
+  const keptGhost = keepGhost(ghostStore, key, ghost);
+  if(!old || me.finishT < old){ bests[key] = +me.finishT.toFixed(2); note = old ? '★ New best! (was ' + fmtTime(old) + ')' : '★ First time on the board.'; }
   else note = 'Best ' + fmtTime(old) + ' · +' + (me.finishT - old).toFixed(1) + ' s';
+  if(keptGhost) note += ' · ghost saved';
+  neonWriteStore();
   $('finTitle').textContent = me.place === 1 ? '🏁 YOU WIN' : '🏁 P' + me.place + ' OF ' + R.racers.length;
   $('finTime').textContent = fmtTime(me.finishT);
   $('finNote').textContent = note + ' · ' + modeChip().toLowerCase();
@@ -456,7 +545,7 @@ function renderBoard(){
     if(r.isPlayer) li.className = 'me';
     const a = document.createElement('span'), dot = document.createElement('i');
     dot.style.background = hex(r.color);
-    a.append(dot, r.place + '. ' + (r.emo ? r.emo + ' ' : '') + r.name);
+    a.append(dot, r.place + '. ' + (r.emo ? r.emo + ' ' : '') + r.name + (r.isGhost ? ' 👻' : ''));
     const b = document.createElement('span');
     b.textContent = r.done ? fmtTime(r.finishT) : '…';
     li.append(a, b);
@@ -473,7 +562,8 @@ function chaseTarget(){
   /* The part of the chase distance that frames the BOARD scales with the board; the part
      that buys you a view of the corner ahead is about speed, and speed does not scale. */
   const K = R.sizeK || 1;
-  const dist = 7.5*K + me.v*0.13, high = 3.1*K + me.v*0.035;
+  const cam = NEON_CAM[settings.cam] || NEON_CAM.normal;
+  const dist = (7.5*K + me.v*0.13)*cam.dist, high = (3.1*K + me.v*0.035)*cam.high;
   const x = f.wx - Math.cos(camYaw)*dist, z = f.wz + Math.sin(camYaw)*dist;
   // never let a crest come between the lens and the board
   const behind = trackFrame(T, T.closed ? me.s - dist : Math.max(0, me.s - dist), _cb);
@@ -543,10 +633,19 @@ function drawRace(dt){
   const pct = Math.round(me.slope*100);
   $('slopeVal').textContent = !R.gravity ? '' : pct > 1 ? '▲ ' + pct + '%' : pct < -1 ? '▼ ' + (-pct) + '%'
     : (dem ? Math.round(feet(f.elev)) + ' ft' : '');
-  setHum(me.v, me.boosting);
+  setHum(me.v, me.burnT > 0 ? Math.min(1, me.burnT/NEON.burnS + 0.35) : 0);
+  $('burnPip').textContent = me.burnT > 0 ? 'BURN'
+    : me.battery >= NEON.burnCost ? Math.floor(me.battery/NEON.burnCost) + ' BURN' + (me.battery >= NEON.burnCost*2 ? 'S' : '')
+    : 'CHARGING';
+  $('burnPip').classList.toggle('hot', me.burnT > 0);
   const fit = paintMap($('minimap'), graph, mapBox, R.line, T.closed, 'mm|' + mapId + '|' + R.course.sig, true);
   const sc = R.scale;
   const dots = R.racers.map(r => { const w = trackToWorld(T, r.s, r.d, {}); return {x: w.wx*sc, z: w.wz*sc, color: hex(r.color), big: r.isPlayer}; });
+  for(const c of R.cells){
+    if(!c.live) continue;
+    const w = trackToWorld(T, c.s, c.d, {});
+    dots.push({x: w.wx*sc, z: w.wz*sc, color: '#ffe14a', small: true});
+  }
   dots.sort((p, q) => (p.big ? 1 : 0) - (q.big ? 1 : 0));
   paintDots($('minimap'), fit, dots);
 }
@@ -569,6 +668,7 @@ function frame(ms){
   }
   updateCamera(dt);
   updateScene(dt);
+  if(race) updateCellMeshes(clockT);
   renderer.render(scene, camera);
 }
 
@@ -582,6 +682,8 @@ function wireUI(){
   $('rivalsUp').addEventListener('click', () => { settings.rivals = clamp(settings.rivals+1, 0, 7); syncMenu(); neonWriteStore(); });
   document.querySelectorAll('#skillSeg .btn').forEach(b => b.addEventListener('click', () => { settings.skill = b.dataset.skill; syncMenu(); neonWriteStore(); }));
   document.querySelectorAll('#gravSeg .btn').forEach(b => b.addEventListener('click', () => setGravity(b.dataset.grav === '1')));
+  document.querySelectorAll('#classSeg .btn').forEach(b => b.addEventListener('click', () => setClass(b.dataset.cls)));
+  document.querySelectorAll('#camSeg .btn').forEach(b => b.addEventListener('click', () => setCam(b.dataset.cam)));
   document.querySelectorAll('#dirSeg .btn').forEach(b => b.addEventListener('click', () => setReverse(b.dataset.dir === 'rev')));
   $('scaleSel').addEventListener('change', e => setScale(+e.target.value));
   $('riderSel').addEventListener('change', e => { settings.rider = e.target.value; neonWriteStore(); });
@@ -603,6 +705,7 @@ function wireUI(){
     // only on the menu: a race is run at the settings it started with
     gravity: () => { if(neonScreen === 'menu') setGravity(!settings.gravity); },
     reverse: () => { if(neonScreen === 'menu') setReverse(!settings.reverse); },
+    camera: cycleCam,                      // the one setting that is safe to change mid-race
     restart: () => { if(race) startRace(); },
     quit: () => { if(neonScreen !== 'menu') quitToMenu(); },
     confirm: () => { if(neonScreen === 'menu' && !$('startBtn').disabled) startRace(); else if(neonScreen === 'finish') startRace(); },
@@ -633,9 +736,9 @@ async function bootNeon(){
 /* test seam (tools/smoke-neon.js reads the bundle's globals directly, but one tidy
    snapshot keeps the assertions short) */
 function neonState(){
-  return {screen: neonScreen, tuning: NEON, graph, areas: mapAreas, mapId, courses, trackMeta, scanLeft: scanQueue.length, coverInfo, selCourse, settings, race, activeTrack, bests, hasDem: !!dem};
+  return {screen: neonScreen, tuning: NEON, graph, areas: mapAreas, mapId, courses, trackMeta, scanLeft: scanQueue.length, ghostStore, coverInfo, selCourse, settings, race, activeTrack, bests, hasDem: !!dem};
 }
 bootNeon();
 
-export { bootNeon, loadNeonMap, startRace, quitToMenu, setGravity, setReverse, setScale,
+export { bootNeon, loadNeonMap, startRace, quitToMenu, setGravity, setReverse, setScale, setClass, setCam, cycleCam,
          selectCourse, neonState, stepRace, trackFor, modeChip };
