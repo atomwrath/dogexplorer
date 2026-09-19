@@ -5,6 +5,12 @@
   --cyan:#19f0ff; --mag:#ff2bd6; --lime:#b6ff3c; --text:#cfe0ff; --dim:#6f82b8;
   --safe-b:env(safe-area-inset-bottom, 0px); --safe-l:env(safe-area-inset-left, 0px);
   --safe-r:env(safe-area-inset-right, 0px); --safe-t:env(safe-area-inset-top, 0px);
+  /* Touch control position, adjustable on the pause screen (see #pauseCard, main.js
+     setCtlInset/setCtlBottom). Declared here so #touchCtl has a sane value before JS
+     ever runs -- applyControlLayout() overwrites these on the html element at boot with
+     whatever was saved, but a stylesheet default means a broken boot still leaves the
+     controls somewhere sane rather than at 0/0. */
+  --ctl-inset:16px; --ctl-bottom:16px;
 }
 *{box-sizing:border-box;}
 /* touch-action:manipulation page-wide is the BACKSTOP for double-tap zoom: it drops the
@@ -34,6 +40,7 @@ select{font:inherit; color:var(--text); background:#0a1026; border:1px solid var
   background:rgba(4,5,13,.55);}
 body[data-screen="menu"] #menu{display:flex;}
 body[data-screen="finish"] #finish{display:flex;}
+body[data-screen="pause"] #pause{display:flex;}
 
 #menuCard{width:min(980px,100%); max-height:100%; display:flex; flex-direction:column;
   background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px 18px;}
@@ -77,7 +84,7 @@ h2{margin:0 0 8px; font-size:12px; letter-spacing:.2em; color:var(--dim); font-w
 
 /* --- HUD: four corners, nothing in the middle of the road --- */
 #hud{position:fixed; inset:0; display:none; pointer-events:none;}
-body[data-screen="race"] #hud, body[data-screen="count"] #hud, body[data-screen="finish"] #hud{display:block;}
+body[data-screen="race"] #hud, body[data-screen="count"] #hud, body[data-screen="finish"] #hud, body[data-screen="pause"] #hud{display:block;}
 #hud > div{position:absolute; touch-action:none;}
 #hudL{left:calc(14px + var(--safe-l)); top:calc(12px + var(--safe-t)); text-shadow:0 0 8px #000;}
 #hudPlace b{font-size:54px; line-height:1; color:var(--cyan); text-shadow:0 0 16px rgba(25,240,255,.7);}
@@ -115,9 +122,13 @@ body[data-screen="race"] #hud, body[data-screen="count"] #hud, body[data-screen=
 #burnPip{font-size:11px; letter-spacing:.2em; color:var(--dim); margin-top:4px; min-height:1.2em;}
 #burnPip.hot{color:var(--lime);}
 #slopeVal{font-size:12px; color:var(--dim); min-height:1.3em; margin-top:3px;}
-#touchCtl{left:0; right:0; bottom:calc(16px + var(--safe-b)); display:none; align-items:flex-end;
+/* Position comes from --ctl-inset / --ctl-bottom, not a fixed 16px: the pause screen's
+   In/Out and Up/Down steppers (main.js setCtlInset/setCtlBottom) write these two
+   variables on the html element, and this is the only rule in the file that reads
+   them, so a click there repaints instantly with no other CSS to touch. */
+#touchCtl{left:0; right:0; bottom:calc(var(--ctl-bottom) + var(--safe-b)); display:none; align-items:flex-end;
   justify-content:space-between; gap:12px;
-  padding:0 calc(16px + var(--safe-r)) 0 calc(16px + var(--safe-l)); pointer-events:none;}
+  padding:0 calc(var(--ctl-inset) + var(--safe-r)) 0 calc(var(--ctl-inset) + var(--safe-l)); pointer-events:none;}
 body.touch #touchCtl{display:flex;}
 /* The speed readout STAYS AT THE BOTTOM on a touch screen. It used to be pushed up above
    the thumb controls, which put a 44px number across the middle of the road -- exactly
@@ -146,6 +157,16 @@ body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
 #tBrake{font-size:13px;} #tBoost{font-size:13px;}
 @media (max-height:520px){ #tSteer, .tbtn{height:66px;} .tbtn{width:66px;} }
 @media (max-width:720px){ #minimap{width:112px; height:112px;} #hudPlace b{font-size:40px;} }
+/* A tablet has the screen real estate a phone doesn't, and a thumb reaching for a phone-
+   sized button on a 10" screen has to travel farther relatively to land on the same
+   fraction of the target -- bigger controls are a real accuracy win here, not just a
+   cosmetic one. Gated on both a wide viewport AND a coarse pointer, so a mouse-and-
+   keyboard desktop window this wide never sees touch-sized buttons it can't use anyway. */
+@media (min-width:700px) and (pointer:coarse){
+  .tbtn{width:104px; height:104px; font-size:23px;}
+  #tSteer{width:min(50vw,320px); height:104px;}
+  #tSteer span{font-size:24px;}
+}
 
 #count{position:fixed; inset:0; display:none; align-items:center; justify-content:center; pointer-events:none;
   font-size:140px; font-weight:700; color:var(--lime); text-shadow:0 0 40px rgba(182,255,60,.8);}
@@ -161,3 +182,16 @@ body[data-screen="count"] #count{display:flex;}
 #finBoard li.me{color:var(--cyan);}
 #finBoard li i{font-style:normal; display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:8px;}
 .actions{display:flex; gap:10px; justify-content:center;}
+
+/* PAUSE. Same panel language as #finishCard on purpose -- it is the other place a race
+   stops to show the player something -- but narrower, since a stepper and two buttons
+   need less width than a leaderboard. The overlay behind it (`.overlay`, 55% black) is
+   what lets #touchCtl show through dimly for the live position preview: this card is
+   deliberately NOT opaque background all the way to the screen edge. */
+#pauseCard{width:min(360px,100%); max-height:100%; overflow-y:auto; text-align:center;
+  background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:18px;}
+#pauseCard h2{font-size:16px; color:var(--cyan); letter-spacing:.3em; margin:0 0 16px;}
+#pauseCard .row{margin-bottom:12px; text-align:left;}
+#pauseCard #ctlResetBtn{width:100%; margin:4px 0 10px; font-size:12px; letter-spacing:.1em; color:var(--dim);}
+#pauseCard .hint{text-align:left; margin:0 0 14px;}
+#pauseCard .stepper .btn:disabled{opacity:.3; cursor:default; border-color:var(--line);}

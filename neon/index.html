@@ -105,7 +105,7 @@
         </label>
         <input type="file" id="worldFile" accept=".geojson,.json,.txt,application/geo+json,application/json,text/plain" multiple hidden>
         <p class="hint" id="ghostNote"></p>
-        <p class="hint">W/↑ go · S/↓ brake · A D steer · Shift fire a rocket (one burn per press) · C camera · R restart · Esc quit<br>
+        <p class="hint">W/↑ go · S/↓ brake · A D steer · Shift fire a rocket (one burn per press) · C camera · P pause · R restart · Esc quit<br>
       In the menu: G gravity · V reverse. Class, gravity, direction and scale are fixed once a race starts.</p>
       </section>
     </div>
@@ -122,6 +122,7 @@
   </div>
   <div id="hudTop">
     <span id="hudMode">GRAVITY</span>
+    <button class="btn" id="pauseBtn" title="Pause (P)">❚❚</button>
     <button class="btn" id="quitBtn" title="Quit (Esc)">✕</button>
   </div>
   <div id="hudR"><canvas id="minimap"></canvas></div>
@@ -137,6 +138,33 @@
   </div>
 </div>
 <div id="count"></div>
+
+<!-- PAUSE: a hold on the race in progress, not a screen of its own -- the HUD stays up
+     behind it (frozen: physics stops advancing while this is open, see main.js), so the
+     translucent panel is a genuine pause rather than a trip back to a menu. Doubles as
+     where touch players fit the on-screen controls to their own hands: the steer pad and
+     the two buttons move together (In/Out) and as a bar (Up/Down), previewed live behind
+     this panel since the overlay is translucent, not opaque. -->
+<div id="pause" class="overlay">
+  <div id="pauseCard">
+    <h2>PAUSED</h2>
+    <div class="row">Controls: In / Out
+      <span class="stepper"><button class="btn" id="ctlInDn" aria-label="Move controls out">−</button>
+      <b id="ctlInVal">16px</b><button class="btn" id="ctlInUp" aria-label="Move controls in">+</button></span>
+    </div>
+    <div class="row">Controls: Up / Down
+      <span class="stepper"><button class="btn" id="ctlUpDn" aria-label="Move controls down">−</button>
+      <b id="ctlUpVal">16px</b><button class="btn" id="ctlUpUp" aria-label="Move controls up">+</button></span>
+    </div>
+    <button class="btn" id="ctlResetBtn">Reset control position</button>
+    <p class="hint">Only affects the on-screen touch controls. Sliders live here, not mid-race, so
+      adjusting them never costs you a frame of driving.</p>
+    <div class="actions">
+      <button class="btn go" id="resumeBtn">▶ Resume</button>
+      <button class="btn" id="pauseQuitBtn">Quit to Courses</button>
+    </div>
+  </div>
+</div>
 
 <!-- FINISH -->
 <div id="finish" class="overlay">

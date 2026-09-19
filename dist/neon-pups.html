@@ -19,6 +19,12 @@
   --cyan:#19f0ff; --mag:#ff2bd6; --lime:#b6ff3c; --text:#cfe0ff; --dim:#6f82b8;
   --safe-b:env(safe-area-inset-bottom, 0px); --safe-l:env(safe-area-inset-left, 0px);
   --safe-r:env(safe-area-inset-right, 0px); --safe-t:env(safe-area-inset-top, 0px);
+  /* Touch control position, adjustable on the pause screen (see #pauseCard, main.js
+     setCtlInset/setCtlBottom). Declared here so #touchCtl has a sane value before JS
+     ever runs -- applyControlLayout() overwrites these on the html element at boot with
+     whatever was saved, but a stylesheet default means a broken boot still leaves the
+     controls somewhere sane rather than at 0/0. */
+  --ctl-inset:16px; --ctl-bottom:16px;
 }
 *{box-sizing:border-box;}
 /* touch-action:manipulation page-wide is the BACKSTOP for double-tap zoom: it drops the
@@ -48,6 +54,7 @@ select{font:inherit; color:var(--text); background:#0a1026; border:1px solid var
   background:rgba(4,5,13,.55);}
 body[data-screen="menu"] #menu{display:flex;}
 body[data-screen="finish"] #finish{display:flex;}
+body[data-screen="pause"] #pause{display:flex;}
 
 #menuCard{width:min(980px,100%); max-height:100%; display:flex; flex-direction:column;
   background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px 18px;}
@@ -91,7 +98,7 @@ h2{margin:0 0 8px; font-size:12px; letter-spacing:.2em; color:var(--dim); font-w
 
 /* --- HUD: four corners, nothing in the middle of the road --- */
 #hud{position:fixed; inset:0; display:none; pointer-events:none;}
-body[data-screen="race"] #hud, body[data-screen="count"] #hud, body[data-screen="finish"] #hud{display:block;}
+body[data-screen="race"] #hud, body[data-screen="count"] #hud, body[data-screen="finish"] #hud, body[data-screen="pause"] #hud{display:block;}
 #hud > div{position:absolute; touch-action:none;}
 #hudL{left:calc(14px + var(--safe-l)); top:calc(12px + var(--safe-t)); text-shadow:0 0 8px #000;}
 #hudPlace b{font-size:54px; line-height:1; color:var(--cyan); text-shadow:0 0 16px rgba(25,240,255,.7);}
@@ -129,9 +136,13 @@ body[data-screen="race"] #hud, body[data-screen="count"] #hud, body[data-screen=
 #burnPip{font-size:11px; letter-spacing:.2em; color:var(--dim); margin-top:4px; min-height:1.2em;}
 #burnPip.hot{color:var(--lime);}
 #slopeVal{font-size:12px; color:var(--dim); min-height:1.3em; margin-top:3px;}
-#touchCtl{left:0; right:0; bottom:calc(16px + var(--safe-b)); display:none; align-items:flex-end;
+/* Position comes from --ctl-inset / --ctl-bottom, not a fixed 16px: the pause screen's
+   In/Out and Up/Down steppers (main.js setCtlInset/setCtlBottom) write these two
+   variables on the html element, and this is the only rule in the file that reads
+   them, so a click there repaints instantly with no other CSS to touch. */
+#touchCtl{left:0; right:0; bottom:calc(var(--ctl-bottom) + var(--safe-b)); display:none; align-items:flex-end;
   justify-content:space-between; gap:12px;
-  padding:0 calc(16px + var(--safe-r)) 0 calc(16px + var(--safe-l)); pointer-events:none;}
+  padding:0 calc(var(--ctl-inset) + var(--safe-r)) 0 calc(var(--ctl-inset) + var(--safe-l)); pointer-events:none;}
 body.touch #touchCtl{display:flex;}
 /* The speed readout STAYS AT THE BOTTOM on a touch screen. It used to be pushed up above
    the thumb controls, which put a 44px number across the middle of the road -- exactly
@@ -160,6 +171,16 @@ body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
 #tBrake{font-size:13px;} #tBoost{font-size:13px;}
 @media (max-height:520px){ #tSteer, .tbtn{height:66px;} .tbtn{width:66px;} }
 @media (max-width:720px){ #minimap{width:112px; height:112px;} #hudPlace b{font-size:40px;} }
+/* A tablet has the screen real estate a phone doesn't, and a thumb reaching for a phone-
+   sized button on a 10" screen has to travel farther relatively to land on the same
+   fraction of the target -- bigger controls are a real accuracy win here, not just a
+   cosmetic one. Gated on both a wide viewport AND a coarse pointer, so a mouse-and-
+   keyboard desktop window this wide never sees touch-sized buttons it can't use anyway. */
+@media (min-width:700px) and (pointer:coarse){
+  .tbtn{width:104px; height:104px; font-size:23px;}
+  #tSteer{width:min(50vw,320px); height:104px;}
+  #tSteer span{font-size:24px;}
+}
 
 #count{position:fixed; inset:0; display:none; align-items:center; justify-content:center; pointer-events:none;
   font-size:140px; font-weight:700; color:var(--lime); text-shadow:0 0 40px rgba(182,255,60,.8);}
@@ -175,6 +196,19 @@ body[data-screen="count"] #count{display:flex;}
 #finBoard li.me{color:var(--cyan);}
 #finBoard li i{font-style:normal; display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:8px;}
 .actions{display:flex; gap:10px; justify-content:center;}
+
+/* PAUSE. Same panel language as #finishCard on purpose -- it is the other place a race
+   stops to show the player something -- but narrower, since a stepper and two buttons
+   need less width than a leaderboard. The overlay behind it (`.overlay`, 55% black) is
+   what lets #touchCtl show through dimly for the live position preview: this card is
+   deliberately NOT opaque background all the way to the screen edge. */
+#pauseCard{width:min(360px,100%); max-height:100%; overflow-y:auto; text-align:center;
+  background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:18px;}
+#pauseCard h2{font-size:16px; color:var(--cyan); letter-spacing:.3em; margin:0 0 16px;}
+#pauseCard .row{margin-bottom:12px; text-align:left;}
+#pauseCard #ctlResetBtn{width:100%; margin:4px 0 10px; font-size:12px; letter-spacing:.1em; color:var(--dim);}
+#pauseCard .hint{text-align:left; margin:0 0 14px;}
+#pauseCard .stepper .btn:disabled{opacity:.3; cursor:default; border-color:var(--line);}
 
 </style>
 </head>
@@ -269,7 +303,7 @@ body[data-screen="count"] #count{display:flex;}
         </label>
         <input type="file" id="worldFile" accept=".geojson,.json,.txt,application/geo+json,application/json,text/plain" multiple hidden>
         <p class="hint" id="ghostNote"></p>
-        <p class="hint">W/↑ go · S/↓ brake · A D steer · Shift fire a rocket (one burn per press) · C camera · R restart · Esc quit<br>
+        <p class="hint">W/↑ go · S/↓ brake · A D steer · Shift fire a rocket (one burn per press) · C camera · P pause · R restart · Esc quit<br>
       In the menu: G gravity · V reverse. Class, gravity, direction and scale are fixed once a race starts.</p>
       </section>
     </div>
@@ -286,6 +320,7 @@ body[data-screen="count"] #count{display:flex;}
   </div>
   <div id="hudTop">
     <span id="hudMode">GRAVITY</span>
+    <button class="btn" id="pauseBtn" title="Pause (P)">❚❚</button>
     <button class="btn" id="quitBtn" title="Quit (Esc)">✕</button>
   </div>
   <div id="hudR"><canvas id="minimap"></canvas></div>
@@ -301,6 +336,33 @@ body[data-screen="count"] #count{display:flex;}
   </div>
 </div>
 <div id="count"></div>
+
+<!-- PAUSE: a hold on the race in progress, not a screen of its own -- the HUD stays up
+     behind it (frozen: physics stops advancing while this is open, see main.js), so the
+     translucent panel is a genuine pause rather than a trip back to a menu. Doubles as
+     where touch players fit the on-screen controls to their own hands: the steer pad and
+     the two buttons move together (In/Out) and as a bar (Up/Down), previewed live behind
+     this panel since the overlay is translucent, not opaque. -->
+<div id="pause" class="overlay">
+  <div id="pauseCard">
+    <h2>PAUSED</h2>
+    <div class="row">Controls: In / Out
+      <span class="stepper"><button class="btn" id="ctlInDn" aria-label="Move controls out">−</button>
+      <b id="ctlInVal">16px</b><button class="btn" id="ctlInUp" aria-label="Move controls in">+</button></span>
+    </div>
+    <div class="row">Controls: Up / Down
+      <span class="stepper"><button class="btn" id="ctlUpDn" aria-label="Move controls down">−</button>
+      <b id="ctlUpVal">16px</b><button class="btn" id="ctlUpUp" aria-label="Move controls up">+</button></span>
+    </div>
+    <button class="btn" id="ctlResetBtn">Reset control position</button>
+    <p class="hint">Only affects the on-screen touch controls. Sliders live here, not mid-race, so
+      adjusting them never costs you a frame of driving.</p>
+    <div class="actions">
+      <button class="btn go" id="resumeBtn">▶ Resume</button>
+      <button class="btn" id="pauseQuitBtn">Quit to Courses</button>
+    </div>
+  </div>
+</div>
 
 <!-- FINISH -->
 <div id="finish" class="overlay">
@@ -5061,6 +5123,7 @@ function initNeonInput(handlers){
       if(k === 'g' && neonHandlers.gravity) neonHandlers.gravity();
       if(k === 'v' && neonHandlers.reverse) neonHandlers.reverse();
       if(k === 'c' && neonHandlers.camera) neonHandlers.camera();
+      if(k === 'p' && neonHandlers.pause) neonHandlers.pause();
       if(k === 'r' && neonHandlers.restart) neonHandlers.restart();
       if(k === 'Escape' && neonHandlers.quit) neonHandlers.quit();
       if(k === 'Enter' && neonHandlers.confirm) neonHandlers.confirm();
@@ -5669,7 +5732,10 @@ const trackMeta = new Map();    // sig|scale -> {L, climb, ok}: filled in by the
 let scanQueue = [];
 let activeTrack = null;         // the ribbon currently in the scene
 const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale: 1,
-                  cls: 'standard', cam: 'normal', ghosts: true, rider: 'p:0', course: '', map: DEFAULT_NEON_WORLD};
+                  cls: 'standard', cam: 'normal', ghosts: true, rider: 'p:0', course: '', map: DEFAULT_NEON_WORLD,
+                  // touch control position: how far the steer pad and buttons sit from the
+                  // screen edges (ctlInset) and above the bottom edge (ctlBottom), in px
+                  ctlInset: 16, ctlBottom: 16};
 let bests = {}, ghostStore = {};
 let race = null;                // {T, racers, riders, me, phase, t, grav, scale, reverse, ...}
 let neonScreen = 'menu';   // NOT `screen`: the bundle is one classic script, and a
@@ -5727,6 +5793,42 @@ function flatProjector(docs){
   const pc = c => typeof c[0] === 'number' ? [(c[0]-lon0)*mLon, (lat0-c[1])*mLat] : c.map(pc);
   return {layers: docs, projectCoords: pc};
 }
+
+/* THE MAP LIST COMES FROM data/maps.json, not this file. Adding a map to the game is a
+   commit and one line in that manifest -- see its own comment for the format -- and
+   nothing here needs to know a map exists until this fetch finds it. The three <option>s
+   already sitting in neon/index.html are the fallback for a plain file:// open or an
+   offline dev server where the fetch can't land: on failure they are left exactly as
+   they are, so the dropdown still has something in it and still works, it just doesn't
+   show anything added since. On success they are replaced outright, in the manifest's
+   own order, and whichever value SETTINGS.MAP already names is preserved as the current
+   selection if the new list still contains it. */
+async function loadMapList(){
+  const sel = $('mapSel');
+  if(!sel) return;
+  const keep = sel.value;
+  try{
+    const res = await fetch('../data/maps.json');
+    if(!res.ok) throw new Error('maps.json ' + res.status);
+    const manifest = await res.json();
+    const list = Array.isArray(manifest && manifest.maps) ? manifest.maps : null;
+    if(!list || !list.length) throw new Error('maps.json has no maps');
+    sel.textContent = '';
+    for(const m of list){
+      if(!m || !m.url) continue;
+      const o = document.createElement('option');
+      o.value = m.url;
+      o.textContent = m.name || m.url.replace(/^.*\//, '');
+      sel.appendChild(o);
+    }
+    if(!sel.options.length) throw new Error('maps.json had no usable entries');
+    if([...sel.options].some(o => o.value === keep)) sel.value = keep;
+  }catch(err){
+    // offline, no server, or a malformed file: keep the three built-in options as they are
+    console.warn('could not load ../data/maps.json, using the built-in map list:', err);
+  }
+}
+
 async function loadNeonMap(src, label){
   $('startBtn').disabled = true;
   $('mapLine').textContent = 'Loading ' + (label || 'map') + '…';
@@ -5895,7 +5997,10 @@ function selectCourse(i){
     + (settings.reverse ? ' · reverse' : '');
   const line = assembleLine(graph, c).pts;
   if(settings.reverse) line.reverse();
-  paintMap($('preview'), graph, mapBox, line, T.closed, 'pv|' + mapId + '|' + c.sig + (settings.reverse ? '|r' : ''), false);
+  // zoomToCourse: true -- the start-screen preview used to fit the WHOLE map, which made
+  // a 2 km circuit a few pixels of cyan on a huge network of grey trails. It frames the
+  // selected course instead, the same way the in-race minimap already does.
+  paintMap($('preview'), graph, mapBox, line, T.closed, 'pv|' + mapId + '|' + c.sig + (settings.reverse ? '|r' : ''), true);
 }
 function showTrack(T){
   if(activeTrack === T) return;
@@ -5919,7 +6024,7 @@ const riderWho = id => (riderChoices().find(c => c.v === id) || {}).who;
    with an array material but no geometry groups draws NOTHING -- which is why the ghosts
    were invisible except for the marker sprite hanging over the track, the "tiny orb" they
    were reported as. And the opacity has to stay well up: at 0.3 a toon-shaded pup on a
-   dark deck is a smudge. 0.62, tinted towards the ghost's colour, reads clearly as a
+   dark deck is a smudge. 0.82, tinted towards the ghost's colour, reads clearly as a
    rider you can chase without being mistaken for a solid one. */
 function fadeRider(R, color){
   const tint = new THREE.Color(color);
@@ -5931,13 +6036,13 @@ function fadeRider(R, color){
       // the rocket flame and its glow are animated from zero; fading them means nothing
       if(m.opacity != null && m.opacity < 0.05) return c;
       c.transparent = true;
-      c.opacity = (m.opacity == null ? 1 : m.opacity)*0.62;
+      c.opacity = (m.opacity == null ? 1 : m.opacity)*0.82;
       /* DEPTH WRITE STAYS ON. A rider is dozens of separate meshes -- legs, body, board
          deck, kicks, hover pads -- and Three.js sorts transparent objects only by their
          centroid distance to the camera, not per pixel. With depthWrite off, that sort is
          unstable across a model with this many overlapping parts: a leg drawn before the
          belly it sits in front of gets painted over by it, and the parts near the board
-         end up reading faint while the parts near the head don't. At 0.62 opacity a ghost
+         end up reading faint while the parts near the head don't. At 0.82 opacity a ghost
          is mostly-opaque anyway, so writing depth lets each part occlude the ghost's OWN
          farther parts correctly -- which is what actually fixed the top-bright,
          bottom-faint look -- at the minor cost of a ghost no longer softly blending with
@@ -5975,6 +6080,43 @@ function syncMenu(){
   $('ghostNote').textContent = settings.ghosts
     ? 'The fastest ghost of every rider who has raced this course lines up with the field.'
     : '';
+}
+
+/* CONTROL LAYOUT. Where the steer pad and the brake/burn buttons sit is a CSS custom
+   property, not a class or an inline style per element -- one variable moves both
+   clusters together (ctlInset, the margin from each side edge) and one moves the whole
+   bar up off the bottom edge (ctlBottom), so a single stepper click repaints instantly
+   with no per-element math. Read on boot, written on every change, and there is nothing
+   else in this file that touches #touchCtl's position. */
+const CTL_INSET_MIN = 0, CTL_INSET_MAX = 110, CTL_INSET_STEP = 10;
+const CTL_BOTTOM_MIN = 0, CTL_BOTTOM_MAX = 220, CTL_BOTTOM_STEP = 12;
+function applyControlLayout(){
+  const root = document.documentElement.style;
+  root.setProperty('--ctl-inset', settings.ctlInset + 'px');
+  root.setProperty('--ctl-bottom', settings.ctlBottom + 'px');
+}
+function setCtlInset(v){
+  settings.ctlInset = clamp(Math.round(v/CTL_INSET_STEP)*CTL_INSET_STEP, CTL_INSET_MIN, CTL_INSET_MAX);
+  applyControlLayout(); neonWriteStore(); syncPauseCard();
+}
+function setCtlBottom(v){
+  settings.ctlBottom = clamp(Math.round(v/CTL_BOTTOM_STEP)*CTL_BOTTOM_STEP, CTL_BOTTOM_MIN, CTL_BOTTOM_MAX);
+  applyControlLayout(); neonWriteStore(); syncPauseCard();
+}
+/* A direct assignment, not setCtlInset(16)/setCtlBottom(16): those round to the nearest
+   step (10px / 12px), and 16 is not a multiple of either -- routing the default through
+   the steppers would silently snap it to 20/12 the moment someone hit Reset. */
+function resetControlLayout(){
+  settings.ctlInset = 16; settings.ctlBottom = 16;
+  applyControlLayout(); neonWriteStore(); syncPauseCard();
+}
+function syncPauseCard(){
+  $('ctlInVal').textContent = settings.ctlInset + 'px';
+  $('ctlUpVal').textContent = settings.ctlBottom + 'px';
+  $('ctlInDn').disabled = settings.ctlInset <= CTL_INSET_MIN;
+  $('ctlInUp').disabled = settings.ctlInset >= CTL_INSET_MAX;
+  $('ctlUpDn').disabled = settings.ctlBottom <= CTL_BOTTOM_MIN;
+  $('ctlUpUp').disabled = settings.ctlBottom >= CTL_BOTTOM_MAX;
 }
 /* Gravity, direction and scale are set BEFORE the lights go out and hold for the whole
    race. They change what the course is, not how you are driving it, so mid-race they
@@ -6128,6 +6270,27 @@ function quitToMenu(){
   setScreen('menu');
   renderCourseList();
   selectCourse(selCourse);
+}
+
+/* PAUSE is a hold on an in-progress race, not a mode of its own -- 'race' keeps existing
+   with its own `paused` flag, and the screen just borrows the 'pause' state to show the
+   overlay over a HUD that never disappears. Guarded to the 'go' phase and not-yet-finished
+   so a countdown or a just-crossed finish line can't be caught mid-transition. */
+function pauseRace(){
+  if(!race || race.phase !== 'go' || race.paused || race.racers[race.me].done) return;
+  race.paused = true;
+  setScreen('pause');
+  stopHum();
+  syncPauseCard();
+}
+function resumeRace(){
+  if(!race || !race.paused) return;
+  race.paused = false;
+  setScreen('race');
+  startHum();
+}
+function togglePause(){
+  if(race && race.paused) resumeRace(); else pauseRace();
 }
 
 function stepRace(dt){
@@ -6332,7 +6495,14 @@ function frame(ms){
   const dt = Math.min(0.05, Math.max(0, now - lastT)); lastT = now;
   clockT += dt;
   if(!race && scanQueue.length) scanStep();
-  if(race){
+  /* PAUSE freezes the race, not the loop: rAF keeps running (so `lastT` never falls
+     behind and a resume can't produce a giant catch-up dt), the camera keeps its gentle
+     drift, and the scene's ambient motion (stars, cell pulse) keeps going -- only the
+     physics step and the HUD's per-frame numbers stop advancing. That is also why pause
+     lives here and nowhere in stepRace itself: everything stepRace touches (input,
+     racers, the clock) simply never runs while paused, so there is no separate "is this
+     safe to do while paused" question to answer inside it. */
+  if(race && !race.paused){
     physAcc += dt;
     let guard = 0;
     while(physAcc >= PHYS_DT && guard++ < 12){ stepRace(PHYS_DT); physAcc -= PHYS_DT; }
@@ -6355,6 +6525,14 @@ function wireUI(){
   $('againBtn').addEventListener('click', startRace);
   $('menuBtn').addEventListener('click', quitToMenu);
   $('quitBtn').addEventListener('click', quitToMenu);
+  $('pauseBtn').addEventListener('click', togglePause);
+  $('resumeBtn').addEventListener('click', resumeRace);
+  $('pauseQuitBtn').addEventListener('click', quitToMenu);
+  $('ctlInDn').addEventListener('click', () => setCtlInset(settings.ctlInset - CTL_INSET_STEP));
+  $('ctlInUp').addEventListener('click', () => setCtlInset(settings.ctlInset + CTL_INSET_STEP));
+  $('ctlUpDn').addEventListener('click', () => setCtlBottom(settings.ctlBottom - CTL_BOTTOM_STEP));
+  $('ctlUpUp').addEventListener('click', () => setCtlBottom(settings.ctlBottom + CTL_BOTTOM_STEP));
+  $('ctlResetBtn').addEventListener('click', resetControlLayout);
   $('rivalsDn').addEventListener('click', () => { settings.rivals = clamp(settings.rivals-1, 0, 7); syncMenu(); neonWriteStore(); });
   $('rivalsUp').addEventListener('click', () => { settings.rivals = clamp(settings.rivals+1, 0, 7); syncMenu(); neonWriteStore(); });
   document.querySelectorAll('#skillSeg .btn').forEach(b => b.addEventListener('click', () => { settings.skill = b.dataset.skill; syncMenu(); neonWriteStore(); }));
@@ -6384,9 +6562,12 @@ function wireUI(){
     gravity: () => { if(neonScreen === 'menu') setGravity(!settings.gravity); },
     reverse: () => { if(neonScreen === 'menu') setReverse(!settings.reverse); },
     camera: cycleCam,                      // the one setting that is safe to change mid-race
-    restart: () => { if(race) startRace(); },
+    pause: togglePause,
+    restart: () => { if(race && !race.paused) startRace(); },
     quit: () => { if(neonScreen !== 'menu') quitToMenu(); },
-    confirm: () => { if(neonScreen === 'menu' && !$('startBtn').disabled) startRace(); else if(neonScreen === 'finish') startRace(); },
+    confirm: () => { if(neonScreen === 'menu' && !$('startBtn').disabled) startRace();
+      else if(neonScreen === 'finish') startRace();
+      else if(neonScreen === 'pause') resumeRace(); },
   });
 }
 function showLoadError(err){
@@ -6394,10 +6575,13 @@ function showLoadError(err){
 }
 async function bootNeon(){
   neonReadStore();
+  applyControlLayout();
   loadKennel();
   wireUI();
   fillRiderSelect();
   syncMenu();
+  syncPauseCard();
+  await loadMapList();
   resize();
   const q = new URLSearchParams(location.search).get('world');
   const src = q || settings.map || DEFAULT_NEON_WORLD;

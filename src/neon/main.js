@@ -49,7 +49,10 @@ const trackMeta = new Map();    // sig|scale -> {L, climb, ok}: filled in by the
 let scanQueue = [];
 let activeTrack = null;         // the ribbon currently in the scene
 const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale: 1,
-                  cls: 'standard', cam: 'normal', ghosts: true, rider: 'p:0', course: '', map: DEFAULT_NEON_WORLD};
+                  cls: 'standard', cam: 'normal', ghosts: true, rider: 'p:0', course: '', map: DEFAULT_NEON_WORLD,
+                  // touch control position: how far the steer pad and buttons sit from the
+                  // screen edges (ctlInset) and above the bottom edge (ctlBottom), in px
+                  ctlInset: 16, ctlBottom: 16};
 let bests = {}, ghostStore = {};
 let race = null;                // {T, racers, riders, me, phase, t, grav, scale, reverse, ...}
 let neonScreen = 'menu';   // NOT `screen`: the bundle is one classic script, and a
@@ -107,6 +110,42 @@ function flatProjector(docs){
   const pc = c => typeof c[0] === 'number' ? [(c[0]-lon0)*mLon, (lat0-c[1])*mLat] : c.map(pc);
   return {layers: docs, projectCoords: pc};
 }
+
+/* THE MAP LIST COMES FROM data/maps.json, not this file. Adding a map to the game is a
+   commit and one line in that manifest -- see its own comment for the format -- and
+   nothing here needs to know a map exists until this fetch finds it. The three <option>s
+   already sitting in neon/index.html are the fallback for a plain file:// open or an
+   offline dev server where the fetch can't land: on failure they are left exactly as
+   they are, so the dropdown still has something in it and still works, it just doesn't
+   show anything added since. On success they are replaced outright, in the manifest's
+   own order, and whichever value SETTINGS.MAP already names is preserved as the current
+   selection if the new list still contains it. */
+async function loadMapList(){
+  const sel = $('mapSel');
+  if(!sel) return;
+  const keep = sel.value;
+  try{
+    const res = await fetch('../data/maps.json');
+    if(!res.ok) throw new Error('maps.json ' + res.status);
+    const manifest = await res.json();
+    const list = Array.isArray(manifest && manifest.maps) ? manifest.maps : null;
+    if(!list || !list.length) throw new Error('maps.json has no maps');
+    sel.textContent = '';
+    for(const m of list){
+      if(!m || !m.url) continue;
+      const o = document.createElement('option');
+      o.value = m.url;
+      o.textContent = m.name || m.url.replace(/^.*\//, '');
+      sel.appendChild(o);
+    }
+    if(!sel.options.length) throw new Error('maps.json had no usable entries');
+    if([...sel.options].some(o => o.value === keep)) sel.value = keep;
+  }catch(err){
+    // offline, no server, or a malformed file: keep the three built-in options as they are
+    console.warn('could not load ../data/maps.json, using the built-in map list:', err);
+  }
+}
+
 async function loadNeonMap(src, label){
   $('startBtn').disabled = true;
   $('mapLine').textContent = 'Loading ' + (label || 'map') + '…';
@@ -275,7 +314,10 @@ function selectCourse(i){
     + (settings.reverse ? ' · reverse' : '');
   const line = assembleLine(graph, c).pts;
   if(settings.reverse) line.reverse();
-  paintMap($('preview'), graph, mapBox, line, T.closed, 'pv|' + mapId + '|' + c.sig + (settings.reverse ? '|r' : ''), false);
+  // zoomToCourse: true -- the start-screen preview used to fit the WHOLE map, which made
+  // a 2 km circuit a few pixels of cyan on a huge network of grey trails. It frames the
+  // selected course instead, the same way the in-race minimap already does.
+  paintMap($('preview'), graph, mapBox, line, T.closed, 'pv|' + mapId + '|' + c.sig + (settings.reverse ? '|r' : ''), true);
 }
 function showTrack(T){
   if(activeTrack === T) return;
@@ -299,7 +341,7 @@ const riderWho = id => (riderChoices().find(c => c.v === id) || {}).who;
    with an array material but no geometry groups draws NOTHING -- which is why the ghosts
    were invisible except for the marker sprite hanging over the track, the "tiny orb" they
    were reported as. And the opacity has to stay well up: at 0.3 a toon-shaded pup on a
-   dark deck is a smudge. 0.62, tinted towards the ghost's colour, reads clearly as a
+   dark deck is a smudge. 0.82, tinted towards the ghost's colour, reads clearly as a
    rider you can chase without being mistaken for a solid one. */
 function fadeRider(R, color){
   const tint = new THREE.Color(color);
@@ -311,13 +353,13 @@ function fadeRider(R, color){
       // the rocket flame and its glow are animated from zero; fading them means nothing
       if(m.opacity != null && m.opacity < 0.05) return c;
       c.transparent = true;
-      c.opacity = (m.opacity == null ? 1 : m.opacity)*0.62;
+      c.opacity = (m.opacity == null ? 1 : m.opacity)*0.82;
       /* DEPTH WRITE STAYS ON. A rider is dozens of separate meshes -- legs, body, board
          deck, kicks, hover pads -- and Three.js sorts transparent objects only by their
          centroid distance to the camera, not per pixel. With depthWrite off, that sort is
          unstable across a model with this many overlapping parts: a leg drawn before the
          belly it sits in front of gets painted over by it, and the parts near the board
-         end up reading faint while the parts near the head don't. At 0.62 opacity a ghost
+         end up reading faint while the parts near the head don't. At 0.82 opacity a ghost
          is mostly-opaque anyway, so writing depth lets each part occlude the ghost's OWN
          farther parts correctly -- which is what actually fixed the top-bright,
          bottom-faint look -- at the minor cost of a ghost no longer softly blending with
@@ -355,6 +397,43 @@ function syncMenu(){
   $('ghostNote').textContent = settings.ghosts
     ? 'The fastest ghost of every rider who has raced this course lines up with the field.'
     : '';
+}
+
+/* CONTROL LAYOUT. Where the steer pad and the brake/burn buttons sit is a CSS custom
+   property, not a class or an inline style per element -- one variable moves both
+   clusters together (ctlInset, the margin from each side edge) and one moves the whole
+   bar up off the bottom edge (ctlBottom), so a single stepper click repaints instantly
+   with no per-element math. Read on boot, written on every change, and there is nothing
+   else in this file that touches #touchCtl's position. */
+const CTL_INSET_MIN = 0, CTL_INSET_MAX = 110, CTL_INSET_STEP = 10;
+const CTL_BOTTOM_MIN = 0, CTL_BOTTOM_MAX = 220, CTL_BOTTOM_STEP = 12;
+function applyControlLayout(){
+  const root = document.documentElement.style;
+  root.setProperty('--ctl-inset', settings.ctlInset + 'px');
+  root.setProperty('--ctl-bottom', settings.ctlBottom + 'px');
+}
+function setCtlInset(v){
+  settings.ctlInset = clamp(Math.round(v/CTL_INSET_STEP)*CTL_INSET_STEP, CTL_INSET_MIN, CTL_INSET_MAX);
+  applyControlLayout(); neonWriteStore(); syncPauseCard();
+}
+function setCtlBottom(v){
+  settings.ctlBottom = clamp(Math.round(v/CTL_BOTTOM_STEP)*CTL_BOTTOM_STEP, CTL_BOTTOM_MIN, CTL_BOTTOM_MAX);
+  applyControlLayout(); neonWriteStore(); syncPauseCard();
+}
+/* A direct assignment, not setCtlInset(16)/setCtlBottom(16): those round to the nearest
+   step (10px / 12px), and 16 is not a multiple of either -- routing the default through
+   the steppers would silently snap it to 20/12 the moment someone hit Reset. */
+function resetControlLayout(){
+  settings.ctlInset = 16; settings.ctlBottom = 16;
+  applyControlLayout(); neonWriteStore(); syncPauseCard();
+}
+function syncPauseCard(){
+  $('ctlInVal').textContent = settings.ctlInset + 'px';
+  $('ctlUpVal').textContent = settings.ctlBottom + 'px';
+  $('ctlInDn').disabled = settings.ctlInset <= CTL_INSET_MIN;
+  $('ctlInUp').disabled = settings.ctlInset >= CTL_INSET_MAX;
+  $('ctlUpDn').disabled = settings.ctlBottom <= CTL_BOTTOM_MIN;
+  $('ctlUpUp').disabled = settings.ctlBottom >= CTL_BOTTOM_MAX;
 }
 /* Gravity, direction and scale are set BEFORE the lights go out and hold for the whole
    race. They change what the course is, not how you are driving it, so mid-race they
@@ -508,6 +587,27 @@ function quitToMenu(){
   setScreen('menu');
   renderCourseList();
   selectCourse(selCourse);
+}
+
+/* PAUSE is a hold on an in-progress race, not a mode of its own -- 'race' keeps existing
+   with its own `paused` flag, and the screen just borrows the 'pause' state to show the
+   overlay over a HUD that never disappears. Guarded to the 'go' phase and not-yet-finished
+   so a countdown or a just-crossed finish line can't be caught mid-transition. */
+function pauseRace(){
+  if(!race || race.phase !== 'go' || race.paused || race.racers[race.me].done) return;
+  race.paused = true;
+  setScreen('pause');
+  stopHum();
+  syncPauseCard();
+}
+function resumeRace(){
+  if(!race || !race.paused) return;
+  race.paused = false;
+  setScreen('race');
+  startHum();
+}
+function togglePause(){
+  if(race && race.paused) resumeRace(); else pauseRace();
 }
 
 function stepRace(dt){
@@ -712,7 +812,14 @@ function frame(ms){
   const dt = Math.min(0.05, Math.max(0, now - lastT)); lastT = now;
   clockT += dt;
   if(!race && scanQueue.length) scanStep();
-  if(race){
+  /* PAUSE freezes the race, not the loop: rAF keeps running (so `lastT` never falls
+     behind and a resume can't produce a giant catch-up dt), the camera keeps its gentle
+     drift, and the scene's ambient motion (stars, cell pulse) keeps going -- only the
+     physics step and the HUD's per-frame numbers stop advancing. That is also why pause
+     lives here and nowhere in stepRace itself: everything stepRace touches (input,
+     racers, the clock) simply never runs while paused, so there is no separate "is this
+     safe to do while paused" question to answer inside it. */
+  if(race && !race.paused){
     physAcc += dt;
     let guard = 0;
     while(physAcc >= PHYS_DT && guard++ < 12){ stepRace(PHYS_DT); physAcc -= PHYS_DT; }
@@ -735,6 +842,14 @@ function wireUI(){
   $('againBtn').addEventListener('click', startRace);
   $('menuBtn').addEventListener('click', quitToMenu);
   $('quitBtn').addEventListener('click', quitToMenu);
+  $('pauseBtn').addEventListener('click', togglePause);
+  $('resumeBtn').addEventListener('click', resumeRace);
+  $('pauseQuitBtn').addEventListener('click', quitToMenu);
+  $('ctlInDn').addEventListener('click', () => setCtlInset(settings.ctlInset - CTL_INSET_STEP));
+  $('ctlInUp').addEventListener('click', () => setCtlInset(settings.ctlInset + CTL_INSET_STEP));
+  $('ctlUpDn').addEventListener('click', () => setCtlBottom(settings.ctlBottom - CTL_BOTTOM_STEP));
+  $('ctlUpUp').addEventListener('click', () => setCtlBottom(settings.ctlBottom + CTL_BOTTOM_STEP));
+  $('ctlResetBtn').addEventListener('click', resetControlLayout);
   $('rivalsDn').addEventListener('click', () => { settings.rivals = clamp(settings.rivals-1, 0, 7); syncMenu(); neonWriteStore(); });
   $('rivalsUp').addEventListener('click', () => { settings.rivals = clamp(settings.rivals+1, 0, 7); syncMenu(); neonWriteStore(); });
   document.querySelectorAll('#skillSeg .btn').forEach(b => b.addEventListener('click', () => { settings.skill = b.dataset.skill; syncMenu(); neonWriteStore(); }));
@@ -764,9 +879,12 @@ function wireUI(){
     gravity: () => { if(neonScreen === 'menu') setGravity(!settings.gravity); },
     reverse: () => { if(neonScreen === 'menu') setReverse(!settings.reverse); },
     camera: cycleCam,                      // the one setting that is safe to change mid-race
-    restart: () => { if(race) startRace(); },
+    pause: togglePause,
+    restart: () => { if(race && !race.paused) startRace(); },
     quit: () => { if(neonScreen !== 'menu') quitToMenu(); },
-    confirm: () => { if(neonScreen === 'menu' && !$('startBtn').disabled) startRace(); else if(neonScreen === 'finish') startRace(); },
+    confirm: () => { if(neonScreen === 'menu' && !$('startBtn').disabled) startRace();
+      else if(neonScreen === 'finish') startRace();
+      else if(neonScreen === 'pause') resumeRace(); },
   });
 }
 function showLoadError(err){
@@ -774,10 +892,13 @@ function showLoadError(err){
 }
 async function bootNeon(){
   neonReadStore();
+  applyControlLayout();
   loadKennel();
   wireUI();
   fillRiderSelect();
   syncMenu();
+  syncPauseCard();
+  await loadMapList();
   resize();
   const q = new URLSearchParams(location.search).get('world');
   const src = q || settings.map || DEFAULT_NEON_WORLD;
@@ -798,5 +919,6 @@ function neonState(){
 }
 bootNeon();
 
-export { bootNeon, loadNeonMap, startRace, quitToMenu, setGravity, setReverse, setScale, setClass, setCam, setGhosts, cycleCam,
+export { bootNeon, loadNeonMap, loadMapList, startRace, quitToMenu, setGravity, setReverse, setScale, setClass, setCam, setGhosts, cycleCam,
+         pauseRace, resumeRace, togglePause, setCtlInset, setCtlBottom, resetControlLayout,
          selectCourse, neonState, stepRace, trackFor, modeChip };
