@@ -127,7 +127,7 @@ body[data-screen="race"] #hud, body[data-screen="count"] #hud, body[data-screen=
    variables on the html element, and this is the only rule in the file that reads
    them, so a click there repaints instantly with no other CSS to touch. */
 #touchCtl{left:0; right:0; bottom:calc(var(--ctl-bottom) + var(--safe-b)); display:none; align-items:flex-end;
-  justify-content:space-between; gap:12px;
+  justify-content:space-between; gap:12px; touch-action:none;
   padding:0 calc(var(--ctl-inset) + var(--safe-r)) 0 calc(var(--ctl-inset) + var(--safe-l)); pointer-events:none;}
 body.touch #touchCtl{display:flex;}
 /* The speed readout STAYS AT THE BOTTOM on a touch screen. It used to be pushed up above

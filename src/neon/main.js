@@ -52,7 +52,7 @@ const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale
                   cls: 'standard', cam: 'normal', ghosts: true, rider: 'p:0', course: '', map: DEFAULT_NEON_WORLD,
                   // touch control position: how far the steer pad and buttons sit from the
                   // screen edges (ctlInset) and above the bottom edge (ctlBottom), in px
-                  ctlInset: 16, ctlBottom: 16};
+                  ctlInset: 24, ctlBottom: 16};   // ctlInset defaults AT the swipe-safe floor, not below it
 let bests = {}, ghostStore = {};
 let race = null;                // {T, racers, riders, me, phase, t, grav, scale, reverse, ...}
 let neonScreen = 'menu';   // NOT `screen`: the bundle is one classic script, and a
@@ -405,7 +405,15 @@ function syncMenu(){
    bar up off the bottom edge (ctlBottom), so a single stepper click repaints instantly
    with no per-element math. Read on boot, written on every change, and there is nothing
    else in this file that touches #touchCtl's position. */
-const CTL_INSET_MIN = 0, CTL_INSET_MAX = 110, CTL_INSET_STEP = 10;
+/* CTL_INSET_MIN is not 0, on purpose. A drag that starts within a platform's reserved
+   edge zone can trigger the browser or OS's own "swipe to go back" gesture -- iOS Safari's
+   edge-swipe and Android's gesture-nav back zone both live in roughly the outer 20-24 px
+   of the screen, and neither respects a page's `overscroll-behavior` (that CSS property
+   only reaches Chrome/Edge's OWN overscroll-navigation, a different mechanism). The one
+   thing that reliably avoids all of them is not putting a drag surface there: the steer
+   pad is exactly that kind of surface, so its minimum distance from either edge is floored
+   here regardless of how far a player drags the In/Out stepper. */
+const CTL_INSET_MIN = 24, CTL_INSET_MAX = 110, CTL_INSET_STEP = 10;
 const CTL_BOTTOM_MIN = 0, CTL_BOTTOM_MAX = 220, CTL_BOTTOM_STEP = 12;
 function applyControlLayout(){
   const root = document.documentElement.style;
@@ -424,7 +432,7 @@ function setCtlBottom(v){
    step (10px / 12px), and 16 is not a multiple of either -- routing the default through
    the steppers would silently snap it to 20/12 the moment someone hit Reset. */
 function resetControlLayout(){
-  settings.ctlInset = 16; settings.ctlBottom = 16;
+  settings.ctlInset = 24; settings.ctlBottom = 16;
   applyControlLayout(); neonWriteStore(); syncPauseCard();
 }
 function syncPauseCard(){

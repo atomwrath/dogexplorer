@@ -67,6 +67,17 @@ function bindSteerPad(pad){
     const x = (e.clientX - (r.left + half))/half;
     return Math.max(-1, Math.min(1, -x));
   };
+  /* Belt and suspenders against the browser's own "swipe to go back": touch-action:none
+     (in the stylesheet) and preventDefault() on the pointer handlers below stop it on
+     most browsers, but iOS Safari's edge-swipe gesture is recognised by the OS layer and
+     can preempt a page's pointer events entirely when the touch starts close enough to
+     the screen edge -- CTL_INSET_MIN (main.js) is what actually keeps that from
+     happening. These raw touch listeners are the other half: some browsers respect an
+     explicit, non-passive preventDefault() on the underlying touch event even where they
+     do not fully honour touch-action, so both are wired to the same effect for whichever
+     one a given browser actually listens to. */
+  pad.addEventListener('touchstart', e => { if(e.cancelable) e.preventDefault(); }, {passive:false});
+  pad.addEventListener('touchmove', e => { if(e.cancelable) e.preventDefault(); }, {passive:false});
   pad.addEventListener('pointerdown', e => {
     e.preventDefault(); markTouch();
     steerPointer = e.pointerId;

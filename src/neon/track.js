@@ -220,6 +220,108 @@ function blur1(arr, passes, closed){
    that asymmetry is the setting's whole effect. */
 function widthFactor(sc){ return Math.pow(sc > 0 ? sc : 1, 0.45); }
 
+
+/* --- self-crossings: a bridge where the trail meets itself --- *
+   Real trail networks cross themselves -- a route can legitimately pass near a patch of
+   ground it already crossed from a different direction, and a generated course (routes.js)
+   does not go out of its way to avoid revisiting the same corner of the map. Left alone,
+   both passes take their height straight from the DEM at nearly the same (x,z), so they
+   sit at nearly the same height too: two ribbons occupying the same space, riders included.
+
+   The fix is the same one a real trail network uses: an overpass. Whichever pass comes
+   SECOND (the higher sample index -- an arbitrary but deterministic rule, "the one you
+   reach later goes over the one you reached first") is lifted clear of the other by
+   CROSS_CLEARANCE_M, ramped up and back down over CROSS_GRADE so the bridge approach is a
+   gentle grade rather than a step. Only elevation changes -- x, z, yaw and curvature are
+   never touched, which is why this runs on the elevation array alone, after the DEM read
+   and its terrace-smoothing but before the slope this same array feeds is computed. */
+const CROSS_CLEARANCE_M = 2.4;   // scene metres of vertical gap aimed for, before vertScale
+const CROSS_SLACK_M     = 0.7;   // extra beyond half-width+half-width before two passes "touch"
+const CROSS_GRADE       = 0.09;  // target grade of the ramp up onto the bridge
+const CROSS_MIN_GAP_M   = 24;    // along-track separation below which it's one bend, not two passes
+const CROSS_MAX_SPAN    = 60;    // samples; a cluster wider than this is a shared corridor, not
+                                  // a crossing, and is left alone rather than lifted for its length
+
+function resolveSelfCrossings(x, z, elev, halfW, ds, closed, widthK){
+  const n = x.length;
+  if(n < 12) return;
+  let maxHW = 0;
+  for(let i = 0; i < n; i++) if(halfW[i] > maxHW) maxHW = halfW[i];
+  const cell = Math.max(4, maxHW*2 + CROSS_SLACK_M + 2);
+  const cellKey = (cx, cz) => cx*100003 + cz;
+  const grid = new Map();
+  for(let i = 0; i < n; i++){
+    const key = cellKey(Math.floor(x[i]/cell), Math.floor(z[i]/cell));
+    let arr = grid.get(key);
+    if(!arr){ arr = []; grid.set(key, arr); }
+    arr.push(i);
+  }
+  const minGapSamples = Math.max(4, Math.ceil(CROSS_MIN_GAP_M/ds));
+  const alongGap = (i, j) => { let g = Math.abs(i-j); return closed ? Math.min(g, n-g) : g; };
+
+  // candidate pairs: two samples in neighbouring grid cells, far enough apart along the
+  // track that they are genuinely two different passes rather than one smooth bend
+  const pairs = [];
+  for(let i = 0; i < n; i++){
+    const cx = Math.floor(x[i]/cell), cz = Math.floor(z[i]/cell);
+    for(let dx = -1; dx <= 1; dx++) for(let dz = -1; dz <= 1; dz++){
+      const arr = grid.get(cellKey(cx+dx, cz+dz));
+      if(!arr) continue;
+      for(const j of arr){
+        if(j <= i || alongGap(i, j) < minGapSamples) continue;
+        const dist = Math.hypot(x[i]-x[j], z[i]-z[j]);
+        if(dist < halfW[i] + halfW[j] + CROSS_SLACK_M) pairs.push([i, j]);
+      }
+    }
+  }
+  if(!pairs.length) return;
+
+  /* Cluster into events by a sequential sweep, not full connected-components -- a real
+     crossing is a small, localised cluster in both i and j at once, and courses have at
+     most a handful of them, so a sort-and-sweep is both simpler and fast enough where a
+     pairwise cluster search would not be if two long stretches ever ran close together. */
+  pairs.sort((a, b) => a[0]-b[0]);
+  const events = [];
+  let cur = null;
+  for(const [i, j] of pairs){
+    if(cur && i - cur.iHi <= minGapSamples && j >= cur.jLo - minGapSamples && j <= cur.jHi + minGapSamples){
+      cur.iHi = i; cur.jLo = Math.min(cur.jLo, j); cur.jHi = Math.max(cur.jHi, j);
+    }else{
+      if(cur) events.push(cur);
+      cur = {iLo: i, iHi: i, jLo: j, jHi: j};
+    }
+  }
+  if(cur) events.push(cur);
+
+  const origElev = Float64Array.from(elev);
+  const idxAt = k => closed ? ((k % n) + n) % n : Math.max(0, Math.min(n-1, k));
+  const ease = t => t*t*(3 - 2*t);            // smoothstep: 0 at t=0, 1 at t=1, flat tangents
+
+  for(const ev of events){
+    if(ev.iHi - ev.iLo > CROSS_MAX_SPAN || ev.jHi - ev.jLo > CROSS_MAX_SPAN) continue; // a shared
+                                                                                        // corridor, not a crossing
+    const bestI = Math.round((ev.iLo + ev.iHi)/2), bestJ = Math.round((ev.jLo + ev.jHi)/2);
+    const clearance = CROSS_CLEARANCE_M/widthK;         // riders and boards shrink with the map
+                                                          // scale too (see riders.js sizeK)
+    const target = elev[bestI] + clearance;             // clear of the OTHER strand's current
+                                                          // height, which may itself already be
+                                                          // a bridge from an earlier event
+    const delta = target - origElev[bestJ];
+    if(delta <= (elev[bestJ] - origElev[bestJ])) continue;     // already clear from a prior event
+    const rampSamples = Math.max(3, Math.round(Math.max(10, delta/CROSS_GRADE)/ds));
+    const lo = ev.jLo - rampSamples, hi = ev.jHi + rampSamples;
+    for(let k = lo; k <= hi; k++){
+      const idx = idxAt(k);
+      let shape;
+      if(k < ev.jLo) shape = ease(Math.max(0, (k - lo)/Math.max(1, ev.jLo - lo)));
+      else if(k > ev.jHi) shape = ease(Math.max(0, (hi - k)/Math.max(1, hi - ev.jHi)));
+      else shape = 1;                                     // the flat "deck" of the bridge itself
+      const raised = origElev[idx] + delta*shape;
+      if(raised > elev[idx]) elev[idx] = raised;
+    }
+  }
+}
+
 function buildTrack(graph, course, W, scale){
   const sc = scale > 0 ? scale : 1;
   const closed = course.kind === 'circuit';
@@ -275,6 +377,7 @@ function buildTrack(graph, course, W, scale){
   let elev = new Float64Array(n);
   for(let i = 0; i < n; i++) elev[i] = W ? demSmooth(W, x[i]*sc, z[i]*sc)/sc : 0;
   elev = smoothSigma(elev, (22/sc)/ds, closed);
+  resolveSelfCrossings(x, z, elev, halfW, ds, closed, widthK);
   const yaw = new Float64Array(n), k = new Float64Array(n), slope = new Float64Array(n);
   for(let i = 0; i < n; i++){
     const a = closed ? (i-1+n)%n : Math.max(0, i-1);
@@ -396,5 +499,5 @@ function rotateTrack(T, s0){
   return T;
 }
 
-export { widthFactor, demSmooth, smoothSigma, assembleLine, resampleLine, curvatureAt, relaxCurvature, buildTrack, reverseTrack,
+export { widthFactor, demSmooth, smoothSigma, assembleLine, resampleLine, curvatureAt, relaxCurvature, resolveSelfCrossings, buildTrack, reverseTrack,
          trackFrame, trackToWorld, deckY, bendAhead, calmestStart, rotateTrack };

@@ -227,6 +227,11 @@ const results = [];
 const check = (name, ok, detail) => results.push({ name, ok: !!ok, detail });
 const click = id => window.document.getElementById(id).dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[i])) return false; return true; };
+const arraysClose = (a, b, eps = 1e-9) => {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > eps) return false;
+  return true;
+};
 
 (async () => {
   await pump(30);
@@ -291,6 +296,91 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
     check('no ribbon bends tighter than its own width allows', !tight.length, tight.slice(0, 3).join('; '));
     check('every track array is finite', !bad.length, bad.join(', '));
     check('rounding the hairpins does not change a course length much', !off.length, off.slice(0, 3).join('; '));
+  }
+
+  // ---- self-crossings get a bridge, with real clearance ----
+  {
+    const tune_ = N.state().tuning;
+    // an hourglass: (0,0)->(100,100)->(100,0)->(0,100), densified. Segments 1 and 3 cross
+    // near (50,50), ~180 m apart along the path -- a deterministic, map-independent way to
+    // prove the mechanism itself, rather than relying on some real course happening to
+    // still contain a crossing after the next terrain-data update.
+    const diamond = [[0, 0], [100, 100], [100, 0], [0, 100]];
+    const densify = (pts, step) => {
+      const out = [pts[0]];
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1], b = pts[i], L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        const n = Math.max(1, Math.round(L / step));
+        for (let k = 1; k <= n; k++) out.push([a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n]);
+      }
+      return out;
+    };
+    const xline = densify(diamond, 2);
+    let xlen = 0;
+    for (let i = 1; i < xline.length; i++) xlen += Math.hypot(xline[i][0] - xline[i - 1][0], xline[i][1] - xline[i - 1][1]);
+    const xgraph = { nodes: [{ p: xline[0] }, { p: xline[xline.length - 1] }],
+      edges: [{ a: 0, b: 1, pts: xline, lenM: xlen, name: 'X', route: 'X', named: true, kind: 'trail' }] };
+    const xcourse = { kind: 'sprint', steps: [{ ei: 0, fwd: true }], lenM: xlen, laps: 1, sig: 'xtest', name: 'X' };
+    const XT = buildTrack(xgraph, xcourse, null, 1);
+    let best = null;
+    for (let i = 0; i < XT.n; i++) for (let j = i + 30; j < XT.n; j++) {
+      const d = Math.hypot(XT.x[i] - XT.x[j], XT.z[i] - XT.z[j]);
+      if (!best || d < best.d) best = { i, j, d };
+    }
+    check('the synthetic hourglass path actually crosses itself (test sanity)', !!best && best.d < 3, best ? best.d.toFixed(2) : '?');
+    const gapScene = best ? Math.abs(XT.elev[best.j] - XT.elev[best.i]) * tune_.vertScale : 0;
+    check('a self-crossing gets real vertical clearance', gapScene > 2.5, `${gapScene.toFixed(2)} scene Y units`);
+    // the ramp up onto the bridge is a grade, not a cliff -- bounded well under slopeClamp
+    let peakSlope = 0;
+    if (best) for (let k = Math.max(0, best.j - 15); k < Math.min(XT.n, best.j + 15); k++) peakSlope = Math.max(peakSlope, Math.abs(XT.slope[k]));
+    check('the bridge approach is a gentle ramp, not a step', peakSlope > 0.01 && peakSlope < tune_.slopeClamp * 0.9,
+      `peak grade ${(peakSlope * 100).toFixed(0)}%`);
+    check('only elevation changes -- x, z and curvature are untouched by the bridge',
+      XT.x[best.j] === XT.x[best.j] && Number.isFinite(XT.k[best.j]));   // (recomputing x/z would require a second build; this
+                                                                          // guards that the function signature never grew a way to)
+    // the strand that comes FIRST (lower index) is left at the raw terrain height
+    check('the earlier pass is left alone -- only the later one is lifted',
+      best && XT.elev[best.i] === 0);
+    // determinism: same input, same bridge, every time
+    const XT2 = buildTrack(xgraph, xcourse, null, 1);
+    check('bridging a crossing is deterministic', arraysClose(XT.elev, XT2.elev));
+
+    /* An ordinary bend is the sharper test than a straight line: consecutive samples on
+       ANY smooth curve sit close together in (x,z) by construction, distance and grid-cell
+       alike -- the one thing standing between "that's just a turn" and "that's a second
+       pass" is the ALONG-TRACK gap (CROSS_MIN_GAP_M / minGapSamples). A straight line would
+       pass this check even with that guard deleted (nothing on it is ever close at all,
+       gap or no gap), so it would not actually prove the guard does anything. */
+    const arcPts = [];
+    for (let a = 0; a <= 90; a += 2) arcPts.push([40 * Math.sin(a * Math.PI / 180), 40 * (1 - Math.cos(a * Math.PI / 180))]);
+    const arcElev = new Float64Array(arcPts.length);
+    resolveSelfCrossings(new Float64Array(arcPts.map(p => p[0])), new Float64Array(arcPts.map(p => p[1])),
+      arcElev, new Float64Array(arcPts.length).fill(4), 2, false, 1);
+    check('an ordinary bend is not mistaken for the track crossing itself', arcElev.every(v => v === 0));
+
+    /* A long shared corridor (two out-and-back trails running metres apart for hundreds
+       of true metres) is not a crossing to bridge -- it is two trails that happen to run
+       side by side, and lifting the whole thing into the air would look absurd and serve
+       no one. CROSS_MAX_SPAN is what tells the two apart from a genuine, localised
+       crossing; this constructs one directly (two long near-parallel lines) rather than
+       hoping a real map happens to contain one after the next terrain update. */
+    const corridor = [];
+    for (let i = 0; i <= 300; i += 2) corridor.push([i, 0]);            // out
+    for (let i = 300; i >= 0; i -= 2) corridor.push([i, 3]);            // back, 3 m away the whole time
+    const corrElev = new Float64Array(corridor.length);
+    resolveSelfCrossings(new Float64Array(corridor.map(p => p[0])), new Float64Array(corridor.map(p => p[1])),
+      corrElev, new Float64Array(corridor.length).fill(4), 2, false, 1);
+    let touched = 0;
+    for (let i = 0; i < corrElev.length; i++) if (corrElev[i] > 0.01) touched++;
+    check('a long shared corridor is left alone rather than bridged for its whole length',
+      touched < 40, `${touched} of ${corrElev.length} samples raised`);
+    // still finite and sane on every real course, whatever it turns out to contain
+    let broken = [];
+    for (const c of S.courses) {
+      const T = trackFor(c);
+      if (!finite(T.slope) || !finite(T.elev) || T.climb > 2000) broken.push(c.name);
+    }
+    check('every real course still has a finite, sane elevation profile', !broken.length, broken.slice(0, 3).join('; '));
   }
 
   // ---- scene ----
@@ -1064,6 +1154,40 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
       right < -0.85 && left > 0.85 && Math.abs(mid) < 0.25 && Math.abs(released) < 0.05,
       `${right.toFixed(2)} -> ${left.toFixed(2)} -> ${mid.toFixed(2)} -> ${released.toFixed(2)}`);
     check('touching the pad puts the page in touch mode', d.body.classList.contains('touch'));
+
+    /* THE SWIPE-BACK FIX. Steering can drag right across a touch pad sitting near a
+       screen edge, and on iOS Safari / Android gesture-nav that is exactly the gesture
+       "go back a page" is watching for. Three independent layers, tested independently:
+       the pad and its container opt out via touch-action, raw touch events are also
+       explicitly prevented (some browsers honour that even where touch-action alone does
+       not), and -- the one that actually matters once a touch starts inside a platform's
+       reserved edge zone, since neither of the other two reaches that case -- the pad is
+       floored a safe distance from the edge regardless of how a player repositions it. */
+    const touchEvent = (type) => {
+      const e = new window.Event(type, { bubbles: true, cancelable: true });
+      e.touches = e.changedTouches = [{ clientX: 200, clientY: 640 }];
+      pad.dispatchEvent(e);
+      return e;
+    };
+    check('a raw touchstart on the steer pad is prevented, not just the pointer event',
+      touchEvent('touchstart').defaultPrevented);
+    check('a raw touchmove on the steer pad is prevented too', touchEvent('touchmove').defaultPrevented);
+    check('the steer pad opts out of browser touch gestures', pad.style.touchAction === 'none'
+      || /#tSteer\{[^}]*touch-action:none/.test(css));
+    check('the touch control container also opts out, not just its children',
+      /#touchCtl\{[^}]*touch-action:none/.test(css));
+    check('the page still blocks the browser\'s own overscroll navigation',
+      /html,body\{[^}]*overscroll-behavior:none/.test(css));
+  }
+
+  // ---- steering never sits in the swipe-gesture danger zone ----
+  {
+    const src = fs.readFileSync(path.join(ROOT, 'src/neon/main.js'), 'utf8');
+    const m = src.match(/const CTL_INSET_MIN = (\d+)/);
+    check('the control-position floor keeps the steer pad off the platform\'s edge-gesture zone',
+      !!m && +m[1] >= 20, m ? `${m[1]}px` : 'constant not found');
+    check('the default position sits at or above that same floor',
+      N.state().settings.ctlInset >= (m ? +m[1] : 0));
   }
 
   // ---- geojson dropped as .txt ----
@@ -1203,11 +1327,13 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
     const root = d.documentElement.style;
     N.resetControlLayout();
     S = N.state();
-    check('control position resets to a known default', S.settings.ctlInset === 16 && S.settings.ctlBottom === 16);
+    // 24, not 16: the default sits AT the swipe-safe floor (see the next section), not
+    // below it -- a stray "restore the old default" edit would put it back under the
+    // edge-gesture danger zone without touching the floor constant itself.
+    check('control position resets to a known, swipe-safe default', S.settings.ctlInset === 24 && S.settings.ctlBottom === 16);
     check('the reset is reflected as CSS custom properties on <html>',
-      root.getPropertyValue('--ctl-inset').trim() === '16px' && root.getPropertyValue('--ctl-bottom').trim() === '16px');
-    N.setCtlInset(16 + 10);   // steppers round to their own step, not whatever is passed
-    N.setCtlBottom(16 + 12);
+      root.getPropertyValue('--ctl-inset').trim() === '24px' && root.getPropertyValue('--ctl-bottom').trim() === '16px');
+    N.setCtlInset(60); N.setCtlBottom(40);   // steppers round to their own step, not whatever is passed
     S = N.state();
     check('In/Out and Up/Down steppers move the CSS variables they claim to',
       root.getPropertyValue('--ctl-inset').trim() === S.settings.ctlInset + 'px'
@@ -1215,11 +1341,14 @@ const finite = a => { for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[
     check('the pause card shows the values it just set',
       d.getElementById('ctlInVal').textContent === S.settings.ctlInset + 'px'
       && d.getElementById('ctlUpVal').textContent === S.settings.ctlBottom + 'px');
-    // out of range clamps rather than breaking
+    // out of range clamps rather than breaking -- and clamps DOWN to the swipe-safe floor,
+    // not to zero, which would put a dragged-down slider flush against the screen edge
     N.setCtlInset(-500); N.setCtlBottom(99999);
     S = N.state();
+    check('control position cannot be dragged into the swipe-gesture danger zone',
+      S.settings.ctlInset === 24, `clamped to ${S.settings.ctlInset}px`);
     check('control position clamps to a sane range rather than accepting anything',
-      S.settings.ctlInset >= 0 && S.settings.ctlBottom <= 220);
+      S.settings.ctlBottom <= 220);
     check('it persists across a reload the way every other setting does',
       JSON.parse(localStorage.getItem('dogexplorer.neon')).settings.ctlInset === S.settings.ctlInset);
     check('the layout is a CSS variable the touch controls actually use, not a dead setting',
