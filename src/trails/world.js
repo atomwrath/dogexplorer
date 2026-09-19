@@ -23,6 +23,10 @@ import { parseFeatures, buildGraph, ptSeg, segCross } from './geo.js';
 import { pointInArea, areaBBox } from './geom2d.js';
 import { resetSpatialHash, hashSeg, nearestTrail } from './spatial.js';
 import { THEME, THEMES, setTheme } from './themes.js';
+/* One-way: sky.js knows about the renderer's lights and the theme palette, and nothing
+   about maps, graphs or bundles. That is what lets this file call into it from
+   applyThemeLighting without a cycle -- the chain is themes -> sky -> world -> main. */
+import { refreshSky, setSkyBackdrop, setSkyPlace } from './sky.js';
 import { ribbonGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
          pickTree, buildPOI, buildArea, buildAreaSign, POI_STYLE, AREA_STYLE, shade,
          buildBackdrop, backdropRadius, embankmentGeom, bridgeDeckGeom, bridgeFrameGeom,
@@ -324,7 +328,13 @@ function fallbackProjector(layers){
   const originLon=lo, originLat=ha;   // x >= 0 eastward, z >= 0 southward
   const proj={
     isFallback:true,
+    /* zSign and unproject exist only to match World's shape, so whoever needs to turn
+       world metres back into lon/lat -- the time-zone lookup for the sky clock, today --
+       can do it without asking which projector it got. Same contract, same sign
+       convention: +z south, hence zSign 1. */
+    zSign:1,
     project(lon,lat){ return {x:(lon-originLon)*mLon, z:(originLat-lat)*mLat}; },
+    unproject(x,z){ return {lon:originLon+x/mLon, lat:originLat-z/mLat}; },
     projectCoords(coords){
       if(typeof coords[0]==='number'){ const p=proj.project(coords[0],coords[1]); return [p.x,p.z]; }
       return coords.map(c=>proj.projectCoords(c));
@@ -344,6 +354,13 @@ let startHead=0;
    and an honest one. */
 let MAP_ID='none';
 function getMapId(){ return MAP_ID; }
+/* Where the loaded map sits on the globe -- {lat, lon, zSouth} for the centre of the
+   network, or null when there is no map or its projector cannot be inverted. Written by
+   rebuildWorld, read by the sky clock (which needs a latitude for the sun and a longitude
+   for the time zone) and by the panel, which says which place the clock is telling the
+   time at. */
+let MAP_LATLON=null;
+function getMapLatLon(){ return MAP_LATLON; }
 
 /* Two independent knobs, one derived value.
 
@@ -475,6 +492,12 @@ function applyThemeLighting(){
   hemi.groundColor=new THREE.Color(THEME.hemiGround);
   hemi.intensity=THEME.hemiInt;
   sun.intensity=THEME.sunInt;
+  /* THE THEME IS THE BASE, THE CLOCK IS THE OVERLAY, and they are applied in that order
+     from one place so no caller can get one without the other. In default lighting mode
+     this call restores the fixed key light and returns; in day/night it mixes everything
+     above away from the theme toward the time of day. Fog DISTANCES stay ours -- sky.js
+     only ever touches the fog's colour. */
+  refreshSky();
 }
 function getGraph(){ return GRAPH; }
 function getTrailheads(){ return TRAILHEADS; }
@@ -1806,7 +1829,7 @@ function rebuildWorld(){
   MAP_ID = BUNDLE
     ? 'dem:'+(+BUNDLE.originLon).toFixed(4)+','+(+BUNDLE.originLat).toFixed(4)
     : (layers.length ? 'geojson:'+layers.length : 'none');
-  if(!layers.length){ applyThemeLighting(); return; }
+  if(!layers.length){ MAP_LATLON=null; setSkyPlace(null, null, true); applyThemeLighting(); return; }
   // A bundle's own projection is authoritative whenever one is loaded; the fallback only
   // covers the no-DEM case, where there's no heightfield to stay aligned with anyway.
   const PROJ = BUNDLE || fallbackProjector(layers);
@@ -1879,9 +1902,31 @@ function rebuildWorld(){
   bboxW={minx:mx,maxx:Mx,minz:mz,maxz:Mz};
   const rng=mulberry(1337);
 
+  /* WHERE ON EARTH THIS MAP IS, taken from the centre of what was actually built rather
+     than from the projection origin. The origin is a corner of the DEM and can sit a
+     kilometre or two off the trail network; the centre of the bbox is where the walking
+     happens, and it is the point the sun, the moon and the time zone should be computed
+     for. Run through whichever projector built the map, so a bundle and a bare pair of
+     .geojson files answer identically. Before applyThemeLighting, because that is what
+     asks sky.js to relight the scene and it should do so knowing where it is. */
+  MAP_LATLON = null;
+  if(typeof PROJ.unproject === 'function'){
+    const c = PROJ.unproject((mx+Mx)/2, (mz+Mz)/2);
+    if(c && Number.isFinite(c.lat) && Number.isFinite(c.lon))
+      MAP_LATLON = {lat:c.lat, lon:c.lon, zSouth: (PROJ.zSign == null ? 1 : PROJ.zSign) >= 0};
+  }
+  setSkyPlace(MAP_LATLON ? MAP_LATLON.lat : null,
+              MAP_LATLON ? MAP_LATLON.lon : null,
+              MAP_LATLON ? MAP_LATLON.zSouth : true);
+
   applyThemeLighting();
   backdropG=buildBackdrop(THEME,rng,MAP_SCALE);
   worldG.add(backdropG);
+  /* The horizon ring is rebuilt here and nowhere else, and it is the one thing in the
+     scene that has to be re-tinted by hand at night (MeshBasicMaterial, fog-exempt: see
+     sky.js's tintBackdrop). Handing the new group over at the moment it is created keeps
+     that a push rather than a per-frame lookup. */
+  setSkyBackdrop(backdropG);
 
   setWorld(BUNDLE || null);
   setStep(STEP_M);
@@ -2454,6 +2499,39 @@ function rebuildWorld(){
     gt.position.y=standingY(th.x,th.z);
     worldG.add(gt);
   });
+
+  markReceivers();
+}
+
+/* THE LANDSCAPE CATCHES SHADOWS; the avatar only casts them.
+
+   Until day/night lighting there was nothing in this game with receiveShadow set, on any
+   mesh, anywhere -- so the renderer was rendering a shadow map every frame on medium and
+   high tier that not one draw call ever sampled. Turning receiving ON here is the half of
+   that fix that lives in the world; sky.js owns the other half (where the light is, and
+   whether it casts at all).
+
+   ONE TRAVERSE OVER EVERYTHING IN worldG, rather than picking out the ground mesh. A
+   shadow that stops dead at the edge of a trail is worse than no shadow: the ribbons sit
+   five centimetres above the terrain and are exactly where a walker is looking, so a pine
+   throwing a shadow across the tread has to land on the tread. Rocks and trees receiving
+   as well costs nothing extra and means a stand of pines shades itself.
+
+   The one cost worth naming: three.js keys its shader programs partly on receiveShadow,
+   so a toon material shared between a tree here (receiving) and the pup's rig (not)
+   compiles twice. That is a handful of the ~85 shared materials, paid once at warm-up
+   behind the loader, against a shadow pass that currently renders for nothing.
+
+   Deliberately NOT applied to the horizon ring: it is MeshBasicMaterial, which has no
+   lighting model to receive into, and it is ten thousand units away from any shadow
+   camera. sky.js tints it by hand instead. */
+function markReceivers(){
+  if(!worldG) return;
+  worldG.traverse(o=>{
+    if(!o.isMesh) return;
+    if(backdropG && o.parent === backdropG) return;
+    o.receiveShadow = true;
+  });
 }
 
 function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);
@@ -2462,10 +2540,10 @@ function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a
 function getBackdrop(){ return backdropG; }
 
 export { loadWorld, rebuildWorld, addLayers, clearLayers, hasBundle, setContourStep,
-         standingY, getWorldRevision, pathWidth, getContourStep, getSignCount, getPathMix, getMapId, getCrossings,
+         standingY, getWorldRevision, pathWidth, getContourStep, getSignCount, getPathMix, getMapId, getMapLatLon, getCrossings,
          pathRank, kindLift, pathOutlineWidth, getWaterways, getBridges, inWaterway, styleKey,
          getAreaLabels, updateAreaLabels, getAreaSolids, areaBlocked, areaSolidTop, lineOfSight, nearestSolidFace, solidEmbed, distToSolid,
          setThemeById, getTheme, setMapScale, getMapScale, getExaggeration, getBackdrop,
-         setFogMultiplier, getFogMultiplier, setTerrainQuadBudget, getDemStride,
+         setFogMultiplier, getFogMultiplier, setTerrainQuadBudget, getDemStride, applyThemeLighting,
          getGraph, getTrailheads, getPOIs, getAreas, getBBox,
          getWorldGroup, setStartHead, getStartHead, setVertScale, getVertScale, compass, THEMES, THEME };

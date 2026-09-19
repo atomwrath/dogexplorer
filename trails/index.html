@@ -117,6 +117,33 @@
                 <input type="range" id="fogAmt" min="0.15" max="5" step="0.05" value="1">
               </div>
             </div>
+            <!-- Time of day sits directly under Landscape because it is the same
+                 question asked twice: that one picks WHERE you are walking, this one
+                 picks WHEN. The date and clock only appear once day/night is on -- they
+                 do nothing under default lighting, and a live control that does nothing
+                 is worse than an absent one. -->
+            <div class="sect">
+              <h2>🕐 Time of day</h2>
+              <div class="toggle-row" id="skyToggle">
+                <button class="toggle sel" data-sky="default">☀️ Default</button>
+                <button class="toggle" data-sky="daynight">🌗 Day &amp; night</button>
+              </div>
+              <div id="skyControls" hidden>
+                <div class="io-row">
+                  <input type="date" id="skyDate" class="url-in" aria-label="Date at the map">
+                  <button class="btn small" id="skyNowBtn">🕐 Now</button>
+                </div>
+                <div class="ctl">
+                  <label>Time <span class="val" id="skyTimeVal">12:00</span></label>
+                  <input type="range" id="skyTime" min="0" max="1439" step="1" value="720">
+                </div>
+              </div>
+              <div class="statbox" id="skyNote"></div>
+              <p class="hint">The sun and moon go where they really are for this map's own
+                latitude and longitude, so sunrise lands where the terrain says it should.
+                Shadows follow whichever one is lighting the sky; after dark that is the
+                moon, and how much light you get depends on its phase.</p>
+            </div>
             <div class="sect">
               <h2>⛰️ Terrain detail</h2>
               <div class="toggle-row" id="detailToggle">

@@ -1001,7 +1001,20 @@ function buildBackdrop(theme, rng, mapScale=1){
     const peakH = (150 + b*55) * mapScale;
     const mat = new THREE.MeshBasicMaterial({
       color: mixHex(theme.mountain[b], theme.sky, 0.28 + b*0.17),
-      side: THREE.DoubleSide, fog:false, depthTest:false, depthWrite:false,
+      /* REAL DEPTH NOW, where this used to be depthTest:false, depthWrite:false with
+         renderOrder faking the layering by hand. That was fine as long as nothing but
+         these bands themselves needed to agree with the ring's distance -- but sky.js's
+         sun and moon sit at roughly this same radius (see its skyVector/placeBody) and
+         need the ring to actually occlude them as they cross behind a ridge, which a
+         depth-disabled paint can never do: it always wins by submission order, never by
+         which surface is nearer. Turning depth back on is what lets a setting sun
+         disappear behind the silhouette instead of floating in front of it.
+
+         This also fixes a smaller, pre-existing wrong: with depth off, a FAR band drawn
+         after a NEAR one simply overpainted it wherever both covered the same pixel, so
+         the hazier outer ring occasionally showed through solid nearer rock. Real z gets
+         that right too -- the closer band wins because it actually is closer. */
+      side: THREE.DoubleSide, fog:false, depthTest:true, depthWrite:true,
     });
     // ridge profile: one height per segment, flat-topped runs for mesas, spikes for peaks
     const h = new Array(segs+1);
@@ -1029,7 +1042,9 @@ function buildBackdrop(theme, rng, mapScale=1){
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(P), 3));
     geo.setIndex(idx);
     const m = new THREE.Mesh(geo, mat);
-    m.renderOrder = -10 + b;               // furthest band first
+    // no longer load-bearing for correctness (real depth settles overlaps now), kept as
+    // a stable submission order -- cheapest first, in case the driver ever cares
+    m.renderOrder = -10 + b;
     m.frustumCulled = false;               // it surrounds the camera; culling it is wrong
     g.add(m);
   }

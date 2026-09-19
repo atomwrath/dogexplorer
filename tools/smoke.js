@@ -4633,6 +4633,264 @@ async function assertAll(window, errors, stats) {
     check('a crossing near both lines\' ends still joins them', topo.met);
   }
 
+  /* ---------- time of day: where the sun and moon are, and what they do to the scene ----------
+
+     Split on purpose into a PURE half and a SCENE half. The pure half checks sundial.js
+     against an almanac -- if the epoch, the time zone or the hour angle is wrong, every
+     colour and shadow downstream is wrong in a way that still looks plausible on screen,
+     so it has to be caught against real numbers rather than against itself. The scene
+     half checks the two promises day/night lighting makes: that default mode is exactly
+     what it always was, and that the key light is actually over the player rather than
+     parked at the world origin where it spent its whole life before this.
+
+     Every dayEvents call passes an explicit offset instead of letting zoneOffsetHours
+     pick one, because the zone rule consults the DEVICE clock and this harness runs in
+     whatever TZ the machine happens to have. The zone rule itself is checked separately,
+     against longitudes far enough from anywhere to be unambiguous. */
+  {
+    const sky = (0, eval)(`(()=>{
+      const GOG = {lat: 38.8739, lon: -104.8834};
+      // Colorado Springs, 18 Sep 2026, MOUNTAIN STANDARD time (-7): the almanac says
+      // 06:44 / 19:03 MDT, which is 05:44 / 18:03 with no daylight saving applied.
+      const sep = dayEvents(2026, 9, 18, GOG.lat, GOG.lon, -7);
+      const jun = dayEvents(2026, 6, 21, GOG.lat, GOG.lon, -7);
+      const riseAz = sunAltAz(clockToMs(2026, 9, 18, sep.rise, -7), GOG.lat, GOG.lon).az;
+      const setAz  = sunAltAz(clockToMs(2026, 9, 18, sep.set,  -7), GOG.lat, GOG.lon).az;
+      // polar night: Svalbard in December has no sunrise at all, which the scanning
+      // rise/set finds by simply not crossing rather than by an out-of-range acos
+      const svalbard = dayEvents(2026, 12, 21, 78.2, 15.6, 1);
+      // two moments the whole world watched: a total solar eclipse is a new moon and a
+      // total lunar eclipse is a full one, to the minute
+      const newMoon = moonAltAz(Date.UTC(2024, 3, 8, 18, 21), GOG.lat, GOG.lon);
+      const fullMoon = moonAltAz(Date.UTC(2000, 0, 21, 4, 40), GOG.lat, GOG.lon);
+      return {
+        riseMin: sep.rise, setMin: sep.set, riseAz, setAz,
+        junNoonAlt: jun.noonAlt,
+        polarNight: svalbard.polarNight, polarRise: svalbard.rise,
+        newIllum: newMoon.illum, fullIllum: fullMoon.illum,
+        // the zone rule: a longitude nowhere near this machine's own zone falls back to
+        // the 15-degrees-per-hour estimate
+        // THE EQUINOX IS THE EPOCH'S OWN ALARM. Sunrise moves only a couple of minutes
+        // if the day number is counted from the wrong epoch -- inside the tolerance any
+        // honest almanac check can have -- but the sun's declination sweeps 0.4 degrees
+        // a day through the equinox, so the DATE it crosses zero moves outright. Found
+        // by scanning rather than stated from a table: which day the equinox falls on is
+        // certain (22 or 23 September, always), its clock time is not.
+        equinox: (()=>{
+          let prev = null;
+          for(let h = 0; h <= 200; h++){
+            const ms = Date.UTC(2026, 8, 19, 0) + h * 3600000;
+            const dec = sunAltAz(ms, GOG.lat, GOG.lon).dec;
+            if(prev !== null && prev > 0 && dec <= 0) return new Date(ms).getUTCDate();
+            prev = dec;
+          }
+          return null;
+        })(),
+        tokyo: zoneOffsetHours(139.7, 2026, 9, 18),
+        chatham: zoneOffsetHours(-104.8834, 2026, 1, 15),
+        // the compass -> world mapping, which is the one place a wrong sign mirrors the
+        // entire sky and nothing else in the game would notice
+        east: skyVector(0, 90, true), south: skyVector(0, 180, true),
+        northFlip: skyVector(0, 0, false),
+      };
+    })()`);
+    check('sunrise and sunset at the default map match the almanac',
+      Math.abs(sky.riseMin - (5 * 60 + 44)) <= 3 && Math.abs(sky.setMin - (18 * 60 + 3)) <= 3,
+      `rise ${(sky.riseMin / 60 | 0)}:${String(Math.round(sky.riseMin % 60)).padStart(2, '0')} set ${(sky.setMin / 60 | 0)}:${String(Math.round(sky.setMin % 60)).padStart(2, '0')} MST`);
+    check('midsummer noon sun is as high as the latitude allows',
+      Math.abs(sky.junNoonAlt - (90 - 38.8739 + 23.44)) < 0.2, `${sky.junNoonAlt.toFixed(2)}° vs 74.57°`);
+    check('the sun rises in the east and sets in the west',
+      sky.riseAz > 45 && sky.riseAz < 135 && sky.setAz > 225 && sky.setAz < 315,
+      `rise az ${sky.riseAz.toFixed(0)}°, set az ${sky.setAz.toFixed(0)}°`);
+    check('the September equinox lands on the day it has to',
+      sky.equinox === 22 || sky.equinox === 23, `declination crosses zero on Sept ${sky.equinox}, 2026`);
+    check('a polar night is reported rather than crashing the rise/set search',
+      sky.polarNight === true && sky.polarRise == null);
+    check('moon phase is right on the days everyone checked',
+      sky.newIllum < 0.01 && sky.fullIllum > 0.99,
+      `eclipse new ${sky.newIllum.toFixed(3)}, eclipse full ${sky.fullIllum.toFixed(3)}`);
+    check('a map on the far side of the world gets its zone from its longitude',
+      sky.tokyo.hours === 9 && sky.tokyo.local === false, `Tokyo ${sky.tokyo.hours}`);
+    check('compass azimuth maps to the world axes the map is drawn on',
+      sky.east.x > 0.99 && Math.abs(sky.east.z) < 0.01 &&
+      sky.south.z > 0.99 && Math.abs(sky.south.x) < 0.01 &&
+      sky.northFlip.z > 0.99,
+      `east x=${sky.east.x.toFixed(2)} z=${sky.east.z.toFixed(2)}, south z=${sky.south.z.toFixed(2)}`);
+
+    const lit = (0, eval)(`(()=>{
+      const rgb = h => ({r:(h>>16)&255, g:(h>>8)&255, b:h&255});
+      /* skyLights() reads the renderer's own lights back, rather than reporting what
+         sky.js believes it set -- see its note in sky.js. Reached as a global because
+         top-level functions survive the bundle's eval boundary and const bindings
+         (scene, sun, hemi, player) do not. */
+      const P = getTrailPlayer();
+      const out = {where: getMapLatLon(), before: skyLights()};
+
+      setSkyMode('daynight');
+      applyThemeLighting();
+      // a fixed date and time, so every reading below is against a known sky rather than
+      // against whatever today happens to be
+      setSkyClock({y:2026, m:9, day:18, minutes: 13*60});
+      out.noon = skyLights(); out.noonState = skyState();
+      // one frame's worth of the loop, which is what places the shadow box
+      skyFrame(P.x, standingY(P.x, P.z), P.z);
+      out.key = Object.assign(skyLights(), {px: P.x, pz: P.z, py: standingY(P.x, P.z)});
+
+      // sunset at this map on this date, read from the module's own answer
+      setSkyClock({minutes: Math.round(skyState().set)});
+      out.sunset = skyLights(); out.sunsetState = skyState();
+      setSkyClock({minutes: 0});
+      out.night = skyLights(); out.nightState = skyState();
+
+      let receivers = 0, meshes = 0, ground = null;
+      getWorldGroup().traverse(o=>{ if(o.isMesh){ meshes++; if(o.receiveShadow) receivers++;
+        if(o.name === 'ground') ground = !!o.receiveShadow; } });
+      out.receivers = {receivers, meshes, ground};
+
+      setSkyMode('default');
+      applyThemeLighting();
+      out.after = skyLights();
+      out.warmth = {noon: rgb(out.noon.sunC), sunset: rgb(out.sunset.sunC), night: rgb(out.night.bg)};
+      return out;
+    })()`);
+    check('the map itself says where on earth it is',
+      lit.where && Math.abs(lit.where.lat - 38.874) < 0.05 && Math.abs(lit.where.lon + 104.883) < 0.05,
+      lit.where ? `${lit.where.lat.toFixed(3)}, ${lit.where.lon.toFixed(3)}` : 'no coordinates');
+    check('default lighting casts no shadow map at all', lit.before.cast === false);
+    /* The midday sky is the theme's OWN sky, to the hex digit. That is the promise the
+       whole ramp is built around -- colours are mixes away from the theme rather than
+       absolutes -- and it is what lets a player switch day/night on at noon and see no
+       change at all until the sun starts to drop. */
+    check('day/night at a high sun is the theme\'s own sky, unchanged',
+      lit.noon.bg === lit.before.bg && lit.noon.fog === lit.before.fog,
+      `theme #${lit.before.bg.toString(16)} · day/night #${lit.noon.bg.toString(16)}`);
+    check('day/night at midday lights the world and turns shadows on',
+      lit.noonState.sunAlt > 40 && lit.noon.sunI > 0.5 && lit.noon.cast === lit.noon.shadowsWanted &&
+      lit.noon.sunUp === true,
+      `sun ${lit.noonState.sunAlt.toFixed(0)}° · key ${lit.noon.sunI.toFixed(2)} · cast ${lit.noon.cast} (tier wants shadows: ${lit.noon.shadowsWanted})`);
+    check('the shadow box is carried under the walker, not left at the world origin',
+      Math.hypot(lit.key.tx - lit.key.px, lit.key.tz - lit.key.pz) < 0.01 &&
+      Math.hypot(lit.key.lx - lit.key.px, lit.key.lz - lit.key.pz) < 130 &&
+      lit.key.ly > lit.key.py + 5 && lit.key.boxL === -30,
+      `target sits ${Math.hypot(lit.key.tx - lit.key.px, lit.key.tz - lit.key.pz).toFixed(2)}u from the pup, ${Math.hypot(lit.key.px, lit.key.pz).toFixed(0)}u from the origin`);
+    check('the landscape catches the shadows the key light casts',
+      lit.receivers.ground === true && lit.receivers.receivers > lit.receivers.meshes * 0.9,
+      `${lit.receivers.receivers} of ${lit.receivers.meshes} meshes receive`);
+    check('sunset light is warmer than midday light',
+      (lit.warmth.sunset.r - lit.warmth.sunset.b) > (lit.warmth.noon.r - lit.warmth.noon.b) + 40 &&
+      lit.sunsetState.sunAlt < 1,
+      `sunset r-b ${lit.warmth.sunset.r - lit.warmth.sunset.b} vs noon ${lit.warmth.noon.r - lit.warmth.noon.b}`);
+    check('midnight is dark but never unplayably black',
+      lit.nightState.keyIntensity < 0.2 && lit.night.hemiI > 0.1 &&
+      (lit.warmth.night.r + lit.warmth.night.g + lit.warmth.night.b) < 180,
+      `key ${lit.nightState.keyIntensity.toFixed(2)} · ambient ${lit.night.hemiI.toFixed(2)} · sky #${lit.night.bg.toString(16)}`);
+    check('leaving day/night puts the theme lighting back exactly as it was',
+      lit.after.bg === lit.before.bg && lit.after.fog === lit.before.fog &&
+      lit.after.hemiI === lit.before.hemiI && lit.after.hemiC === lit.before.hemiC &&
+      lit.after.sunI === lit.before.sunI && lit.after.sunC === lit.before.sunC &&
+      lit.after.cast === false && lit.after.sunUp === false,
+      `sky #${lit.before.bg.toString(16)} -> #${lit.after.bg.toString(16)}, key ${lit.before.sunI} -> ${lit.after.sunI}`);
+
+    // the panel: the two controls only exist while they mean something
+    const ui = (0, eval)(`(()=>{
+      const box = document.querySelector('#skyControls');
+      const shut = !!(box && box.hidden);
+      document.querySelectorAll('#skyToggle .toggle').forEach(b=>{ if(b.dataset.sky==='daynight')
+        b.dispatchEvent(new window.MouseEvent('click', {bubbles:true})); });
+      const open = !!(box && !box.hidden);
+      const t = document.querySelector('#skyTime');
+      t.value = '270';
+      t.dispatchEvent(new window.Event('input', {bubbles:true}));
+      const moved = getSkyClock().minutes;
+      const label = (document.querySelector('#skyTimeVal')||{}).textContent;
+      const note = (document.querySelector('#skyNote')||{}).textContent || '';
+      document.querySelectorAll('#skyToggle .toggle').forEach(b=>{ if(b.dataset.sky==='default')
+        b.dispatchEvent(new window.MouseEvent('click', {bubbles:true})); });
+      return {buttons: document.querySelectorAll('#skyToggle .toggle').length,
+              shut, open, moved, label, note, backTo: getSkyMode(),
+              shutAgain: !!(box && box.hidden)};
+    })()`);
+    check('the time controls appear with day/night and go away with it',
+      ui.buttons === 2 && ui.shut && ui.open && ui.shutAgain && ui.backTo === 'default');
+    check('the clock slider moves the sky and says what it moved it to',
+      ui.moved === 270 && ui.label === '04:30', `${ui.moved} min -> "${ui.label}"`);
+    check('the panel reports the sun times and the time zone it used',
+      /\d\d:\d\d/.test(ui.note) && /UTC/.test(ui.note), ui.note.slice(0, 96));
+
+    /* ---------- the sun and moon actually go BEHIND the landscape ----------
+
+       The screenshot that prompted this fix showed the sun disc painted straight
+       through a real rock mass: depthTest was off on both the sprite and the horizon
+       ring, so nothing ever occluded it regardless of what was really in front. These
+       assertions check the fields that mattered, not a rendered pixel -- but they are
+       exactly the fields a passing test would need to have caught the original bug, and
+       a revert of either one is what tools/revert-sky.py exercises below. */
+    const occ = (0, eval)(`(()=>{
+      setSkyMode('daynight');
+      applyThemeLighting();
+      setSkyClock({y:2026, m:9, day:18, minutes: 13*60});
+      const sprites = skyOcclusion();
+      let bandFlags = [];
+      const bd = getBackdrop();
+      if(bd) bd.traverse(o=>{ if(o.isMesh && o.material)
+        bandFlags.push({depthTest: o.material.depthTest, depthWrite: o.material.depthWrite}); });
+      setSkyMode('default');
+      applyThemeLighting();
+      return {sprites, bandFlags};
+    })()`);
+    check('the sun and moon discs are tested against real depth, not painted through it',
+      occ.sprites.sun && occ.sprites.sun.depthTest === true && occ.sprites.sun.depthWrite === false &&
+      occ.sprites.moon && occ.sprites.moon.depthTest === true && occ.sprites.moon.depthWrite === false,
+      JSON.stringify(occ.sprites));
+    check('the horizon ring writes real depth, so it can actually hide what sets behind it',
+      occ.bandFlags.length > 0 && occ.bandFlags.every(b => b.depthTest === true && b.depthWrite === true),
+      JSON.stringify(occ.bandFlags));
+
+    /* ---------- shadows: the objects near the trailhead are wired to cast ----------
+
+       Not a render test (the stub has no GPU), but everything short of the pixel: the
+       gate the player is standing at when a walk starts casts, the shadow box at that
+       moment actually contains it, and the count of casting meshes in a rebuilt world is
+       not suspiciously near zero -- which is what "receiveShadow got set everywhere and
+       castShadow got set nowhere" would look like. */
+    const cast = (0, eval)(`(()=>{
+      const P = getTrailPlayer();
+      setSkyMode('daynight');
+      applyThemeLighting();
+      setSkyClock({y:2026, m:9, day:18, minutes: 8*60});
+      skyFrame(P.x, standingY(P.x, P.z), P.z);
+      let casters = 0, meshes = 0, gate = null;
+      getWorldGroup().traverse(o=>{
+        if(!o.isMesh) return; meshes++;
+        if(o.castShadow) casters++;
+      });
+      // the gate at the CURRENT trailhead -- wherever pickDefaultHead() actually seated
+      // the player, not head 0, so this holds regardless of which map is loaded
+      const heads = getTrailheads();
+      const th = heads[getStartHead()] || heads[0];
+      const half = Math.abs(skyLights().boxL);
+      const out = {casters, meshes, half, bias: skyLights().bias, normalBias: skyLights().normalBias};
+      if(th){
+        out.withinBox = Math.abs(th.x - P.x) <= half && Math.abs(th.z - P.z) <= half;
+      }
+      setSkyMode('default');
+      applyThemeLighting();
+      return out;
+    })()`);
+    check('a meaningful share of the world casts shadows, not just receives them',
+      cast.meshes > 0 && cast.casters > cast.meshes * 0.1, `${cast.casters} of ${cast.meshes} cast`);
+    check("the starting trailhead's gate sits inside the shadow frustum",
+      cast.withinBox !== false, JSON.stringify(cast));
+    /* Not a claim that these exact numbers look right on a GPU -- only that normalBias
+       stays comfortably under a gate post's own 0.2-unit radius, which is the specific
+       failure mode (a thin caster loses its own shadow) the tuning note in sizeShadowCamera
+       explains. A future edit that pushes this back toward the old 0.06 would reintroduce
+       exactly that risk without anything else here catching it. */
+    check("the shadow bias stays small enough not to lose a thin gate post's own shadow",
+      Math.abs(cast.normalBias) < 0.05 && Math.abs(cast.bias) < 0.005,
+      `bias ${cast.bias}, normalBias ${cast.normalBias}`);
+  }
+
   /* ---------- the seven-bridges map: water, bridges, decks ----------
      Loaded here, measured, and the default map put back, like the coarse-DEM block. */
   const sb = await (0,eval)(`(async()=>{

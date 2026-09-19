@@ -17,6 +17,8 @@
   "maps": [
     { "name": "Garden of the Gods", "url": "../data/world.json" },
     { "name": "Red Rocks",          "url": "../data/rrworld.json" },
+    { "name": "Seven Bridges",          "url": "../data/sevenBridgesWorld.json" },
+    { "name": "Mt Cutler/Muscoco",          "url": "../data/cheyworld.json" },
     { "name": "Pikes Peak",         "url": "../data/pikesworld.json" }
   ]
 }

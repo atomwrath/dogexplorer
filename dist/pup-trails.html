@@ -700,6 +700,33 @@ body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
                 <input type="range" id="fogAmt" min="0.15" max="5" step="0.05" value="1">
               </div>
             </div>
+            <!-- Time of day sits directly under Landscape because it is the same
+                 question asked twice: that one picks WHERE you are walking, this one
+                 picks WHEN. The date and clock only appear once day/night is on -- they
+                 do nothing under default lighting, and a live control that does nothing
+                 is worse than an absent one. -->
+            <div class="sect">
+              <h2>🕐 Time of day</h2>
+              <div class="toggle-row" id="skyToggle">
+                <button class="toggle sel" data-sky="default">☀️ Default</button>
+                <button class="toggle" data-sky="daynight">🌗 Day &amp; night</button>
+              </div>
+              <div id="skyControls" hidden>
+                <div class="io-row">
+                  <input type="date" id="skyDate" class="url-in" aria-label="Date at the map">
+                  <button class="btn small" id="skyNowBtn">🕐 Now</button>
+                </div>
+                <div class="ctl">
+                  <label>Time <span class="val" id="skyTimeVal">12:00</span></label>
+                  <input type="range" id="skyTime" min="0" max="1439" step="1" value="720">
+                </div>
+              </div>
+              <div class="statbox" id="skyNote"></div>
+              <p class="hint">The sun and moon go where they really are for this map's own
+                latitude and longitude, so sunrise lands where the terrain says it should.
+                Shadows follow whichever one is lighting the sky; after dark that is the
+                moon, and how much light you get depends on its phase.</p>
+            </div>
             <div class="sect">
               <h2>⛰️ Terrain detail</h2>
               <div class="toggle-row" id="detailToggle">
@@ -5724,7 +5751,20 @@ function buildBackdrop(theme, rng, mapScale=1){
     const peakH = (150 + b*55) * mapScale;
     const mat = new THREE.MeshBasicMaterial({
       color: mixHex(theme.mountain[b], theme.sky, 0.28 + b*0.17),
-      side: THREE.DoubleSide, fog:false, depthTest:false, depthWrite:false,
+      /* REAL DEPTH NOW, where this used to be depthTest:false, depthWrite:false with
+         renderOrder faking the layering by hand. That was fine as long as nothing but
+         these bands themselves needed to agree with the ring's distance -- but sky.js's
+         sun and moon sit at roughly this same radius (see its skyVector/placeBody) and
+         need the ring to actually occlude them as they cross behind a ridge, which a
+         depth-disabled paint can never do: it always wins by submission order, never by
+         which surface is nearer. Turning depth back on is what lets a setting sun
+         disappear behind the silhouette instead of floating in front of it.
+
+         This also fixes a smaller, pre-existing wrong: with depth off, a FAR band drawn
+         after a NEAR one simply overpainted it wherever both covered the same pixel, so
+         the hazier outer ring occasionally showed through solid nearer rock. Real z gets
+         that right too -- the closer band wins because it actually is closer. */
+      side: THREE.DoubleSide, fog:false, depthTest:true, depthWrite:true,
     });
     // ridge profile: one height per segment, flat-topped runs for mesas, spikes for peaks
     const h = new Array(segs+1);
@@ -5752,7 +5792,9 @@ function buildBackdrop(theme, rng, mapScale=1){
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(P), 3));
     geo.setIndex(idx);
     const m = new THREE.Mesh(geo, mat);
-    m.renderOrder = -10 + b;               // furthest band first
+    // no longer load-bearing for correctness (real depth settles overlaps now), kept as
+    // a stable submission order -- cheapest first, in case the driver ever cares
+    m.renderOrder = -10 + b;
     m.frustumCulled = false;               // it surrounds the camera; culling it is wrong
     g.add(m);
   }
@@ -6633,6 +6675,853 @@ function nearestTrail(x,z){
   return{d:best,edge,y,hw,px,pz,deck};
 }
 
+/* ==== src/trails/sundial.js ==== */
+/* WHERE THE SUN AND THE MOON ARE, for a place and a moment. Pure maths -- no THREE, no
+   DOM, no scene, no module state -- which is the whole point: sky.js turns these answers
+   into light and colour, and this file can be checked against an almanac on its own.
+
+   Everything here is Paul Schlyter's "Computing planetary positions", which is the right
+   tool for this job rather than a compromise: it is about a hundred lines, it needs no
+   ephemeris tables, and it is good to roughly an arcminute for the sun and a few
+   arcminutes for the moon after the perturbation terms below. The error that matters to a
+   player is the one in RISE TIME, and at these accuracies that is under a minute -- far
+   inside the couple of minutes that refraction, the horizon profile and the terrain
+   itself already move it by.
+
+   ONE EPOCH, used everywhere: Schlyter's day number `dS` counts days from 2000 Jan 0.0 UT
+   (JD 2451543.5), NOT from J2000.0 (JD 2451545.0). The two differ by a day and a half,
+   and every orbital constant below is stated against the first one. Mixing them is a 1.5
+   day error in the moon's position -- about 19 degrees -- which is exactly the kind of
+   bug that still looks plausible on screen, so the conversion happens once, in dayNumber,
+   and nothing else in this file touches a Julian date.
+
+   ANGLES ARE DEGREES at every boundary of this module and radians nowhere outside a
+   single expression. Trigonometry in degrees is what the source formulae are written in,
+   and converting at the call site is how the signs get lost. */
+
+const D2R = Math.PI / 180;
+const R2D = 180 / Math.PI;
+const sinD = a => Math.sin(a * D2R);
+const cosD = a => Math.cos(a * D2R);
+const tanD = a => Math.tan(a * D2R);
+const asinD = v => Math.asin(v < -1 ? -1 : v > 1 ? 1 : v) * R2D;
+const atan2D = (y, x) => Math.atan2(y, x) * R2D;
+/* 0..360. Needed on every mean element: they are linear in time and run to hundreds of
+   thousands of degrees after a couple of decades, and sin/cos of a number that large
+   loses real precision in double arithmetic. */
+const rev = a => ((a % 360) + 360) % 360;
+
+/* Days since 2000 Jan 0.0 UT, fractional. The 2440587.5 is the Unix epoch as a Julian
+   date; 2451543.5 is Schlyter's epoch. */
+function dayNumber(ms){ return ms / 86400000 + 2440587.5 - 2451543.5; }
+
+/* UT in hours for the same instant. Taken from the epoch milliseconds directly rather
+   than from a Date, because a Date's getUTCHours is the same number arrived at more
+   expensively and with a timezone-shaped trap next to it. */
+function utHours(ms){
+  const day = ms / 86400000;
+  return (day - Math.floor(day)) * 24;
+}
+
+/* Kepler's equation, iterated. The sun's eccentricity (0.0167) is small enough that
+   Schlyter's single closed-form step is exact to well under an arcsecond; the moon's
+   (0.0549) is not, and the first version of this file used one step for both and put the
+   moon up to a quarter of a degree out. Three Newton steps costs nothing and removes the
+   question. */
+function eccentricAnomaly(M, e){
+  let E = M + R2D * e * sinD(M) * (1 + e * cosD(M));
+  for(let i = 0; i < 3; i++){
+    const dE = (E - R2D * e * sinD(E) - M) / (1 - e * cosD(E));
+    E -= dE;
+    if(Math.abs(dE) < 1e-8) break;
+  }
+  return E;
+}
+
+/* Equatorial -> horizontal. `ha` is the local hour angle in degrees, positive west of the
+   meridian; azimuth comes back measured from NORTH, increasing to the EAST, which is the
+   compass convention and the one sky.js converts into world x/z. */
+function horizontal(ha, dec, lat){
+  const sinAlt = sinD(lat) * sinD(dec) + cosD(lat) * cosD(dec) * cosD(ha);
+  const alt = asinD(sinAlt);
+  const az = rev(atan2D(-cosD(dec) * sinD(ha),
+                        cosD(lat) * sinD(dec) - sinD(lat) * cosD(dec) * cosD(ha)));
+  return {alt, az};
+}
+
+/* THE SUN, in ecliptic and equatorial coordinates. Returned as a bag rather than just
+   alt/az because the moon's phase needs the sun's ecliptic longitude and its own rise
+   calculation needs nothing else -- computing it twice would be the same work and one
+   more place for the epoch to drift. */
+function solarState(ms){
+  const d = dayNumber(ms);
+  const w = 282.9404 + 4.70935e-5 * d;        // longitude of perihelion
+  const e = 0.016709 - 1.151e-9 * d;          // eccentricity
+  const M = rev(356.0470 + 0.9856002585 * d); // mean anomaly
+  const obl = 23.4393 - 3.563e-7 * d;         // obliquity of the ecliptic
+  const E = eccentricAnomaly(M, e);
+  const xv = cosD(E) - e, yv = Math.sqrt(1 - e * e) * sinD(E);
+  const r = Math.hypot(xv, yv);
+  const lon = rev(atan2D(yv, xv) + w);        // true ecliptic longitude
+  const xs = r * cosD(lon), ys = r * sinD(lon);
+  const xe = xs, ye = ys * cosD(obl), ze = ys * sinD(obl);
+  return {
+    d, obl, M, meanLon: rev(w + M), lon, r,
+    ra: rev(atan2D(ye, xe)),
+    dec: atan2D(ze, Math.hypot(xe, ye)),
+  };
+}
+
+/* Local sidereal time in degrees. GMST0 comes straight out of the sun's own mean
+   longitude, which is why solarState hands it back. */
+function siderealDeg(S, ms, lon){
+  const gmst0 = S.meanLon / 15 + 12;                 // hours
+  return rev((gmst0 + utHours(ms) + lon / 15) * 15);
+}
+
+/* Sun altitude/azimuth at (lat, lon) for an instant. */
+function sunAltAz(ms, lat, lon){
+  const S = solarState(ms);
+  const ha = rev(siderealDeg(S, ms, lon) - S.ra);
+  const h = horizontal(ha, S.dec, lat);
+  return {alt: h.alt, az: h.az, dec: S.dec, lon: S.lon};
+}
+
+/* THE MOON. Same machinery plus the five biggest perturbation terms in longitude and
+   latitude, which is where the difference between "roughly right" and "the phase matches
+   the calendar" lives: evection and the variation alone are more than two degrees between
+   them, and two degrees of ecliptic longitude is four hours of the wrong phase. */
+function moonAltAz(ms, lat, lon){
+  const S = solarState(ms);
+  const d = S.d;
+  const N = rev(125.1228 - 0.0529538083 * d);   // longitude of the ascending node
+  const i = 5.1454;                             // inclination
+  const w = rev(318.0634 + 0.1643573223 * d);   // argument of perigee
+  const a = 60.2666;                            // semi-major axis, earth radii
+  const e = 0.054900;
+  const M = rev(115.3654 + 13.0649929509 * d);  // mean anomaly
+
+  const E = eccentricAnomaly(M, e);
+  const xv = a * (cosD(E) - e), yv = a * Math.sqrt(1 - e * e) * sinD(E);
+  const r0 = Math.hypot(xv, yv), v = atan2D(yv, xv);
+
+  const xh = r0 * (cosD(N) * cosD(v + w) - sinD(N) * sinD(v + w) * cosD(i));
+  const yh = r0 * (sinD(N) * cosD(v + w) + cosD(N) * sinD(v + w) * cosD(i));
+  const zh = r0 * sinD(v + w) * sinD(i);
+  let lonEcl = rev(atan2D(yh, xh));
+  let latEcl = atan2D(zh, Math.hypot(xh, yh));
+  let r = Math.hypot(xh, yh, zh);
+
+  // the four arguments every perturbation term is built from
+  const Ls = S.meanLon;                 // sun's mean longitude
+  const Lm = rev(N + w + M);            // moon's mean longitude
+  const Ms = S.M;                       // sun's mean anomaly
+  const Mm = M;                         // moon's mean anomaly
+  const Dm = rev(Lm - Ls);              // mean elongation
+  const F = rev(Lm - N);                // argument of latitude
+
+  lonEcl += -1.274 * sinD(Mm - 2 * Dm)        // evection
+          +  0.658 * sinD(2 * Dm)             // variation
+          -  0.186 * sinD(Ms)                 // yearly equation
+          -  0.059 * sinD(2 * Mm - 2 * Dm)
+          -  0.057 * sinD(Mm - 2 * Dm + Ms)
+          +  0.053 * sinD(Mm + 2 * Dm)
+          +  0.046 * sinD(2 * Dm - Ms)
+          +  0.041 * sinD(Mm - Ms)
+          -  0.035 * sinD(Dm)                 // parallactic equation
+          -  0.031 * sinD(Mm + Ms)
+          -  0.015 * sinD(2 * F - 2 * Dm)
+          +  0.011 * sinD(Mm - 4 * Dm);
+  latEcl += -0.173 * sinD(F - 2 * Dm)
+          -  0.055 * sinD(Mm - F - 2 * Dm)
+          -  0.046 * sinD(Mm + F - 2 * Dm)
+          +  0.033 * sinD(F + 2 * Dm)
+          +  0.017 * sinD(2 * Mm + F);
+  r += -0.58 * cosD(Mm - 2 * Dm) - 0.46 * cosD(2 * Dm);
+  lonEcl = rev(lonEcl);
+
+  // ecliptic -> equatorial
+  const xg = r * cosD(lonEcl) * cosD(latEcl);
+  const yg = r * sinD(lonEcl) * cosD(latEcl);
+  const zg = r * sinD(latEcl);
+  const xq = xg;
+  const yq = yg * cosD(S.obl) - zg * sinD(S.obl);
+  const zq = yg * sinD(S.obl) + zg * cosD(S.obl);
+  const ra = rev(atan2D(yq, xq));
+  const dec = atan2D(zq, Math.hypot(xq, yq));
+
+  const ha = rev(siderealDeg(S, ms, lon) - ra);
+  const h = horizontal(ha, dec, lat);
+  /* PARALLAX, and unlike most refinements in this file it is visible: the moon is close
+     enough that an observer on the surface sees it up to about a degree lower than a
+     geocentric calculation says, which is a couple of minutes of rise time and, right at
+     moonrise, the difference between a moon on the horizon and a moon that has not come
+     up yet. */
+  const par = asinD(1 / r);
+  const alt = h.alt - par * cosD(h.alt);
+
+  /* PHASE from the elongation between the two ecliptic longitudes -- the geometry itself,
+     not a count of days since some new moon. That matters because a day-count drifts, and
+     because this way the lit fraction and the moon's position in the sky can never
+     disagree with each other. */
+  const elong = Math.acos(cosD(S.lon - lonEcl) * cosD(latEcl)) * R2D;
+  const illum = (1 - cosD(elong)) / 2;
+  const waxing = rev(lonEcl - S.lon) < 180;
+  return {alt, az: h.az, illum, waxing, elong, lonEcl};
+}
+
+/* The lit side faces the sun, so the crescent's tips point away from it. `az` values are
+   compass degrees; the answer is which way the bright limb leans, -1 for one side and +1
+   for the other, and it is all sky.js needs to draw the terminator on the right edge. */
+function moonBrightSide(moonAz, sunAz){ return rev(sunAz - moonAz) < 180 ? 1 : -1; }
+
+const PHASE_NAMES = ['new moon', 'waxing crescent', 'first quarter', 'waxing gibbous',
+                     'full moon', 'waning gibbous', 'last quarter', 'waning crescent'];
+const PHASE_EMOJI = ['🌑', '🌒', '🌓', '🌔', '🌕', '🌖', '🌗', '🌘'];
+/* Named from the lit fraction and the direction, not from the elongation, so the name
+   always agrees with the picture on screen. The quarters get a band around them rather
+   than a single value, because "first quarter" is what a player calls a moon that is
+   half lit for about a day either side. */
+function phaseIndex(illum, waxing){
+  if(illum < 0.04) return 0;
+  if(illum > 0.96) return 4;
+  if(Math.abs(illum - 0.5) < 0.06) return waxing ? 2 : 6;
+  if(illum < 0.5) return waxing ? 1 : 7;
+  return waxing ? 3 : 5;
+}
+function phaseName(illum, waxing){ return PHASE_NAMES[phaseIndex(illum, waxing)]; }
+function phaseEmoji(illum, waxing){ return PHASE_EMOJI[phaseIndex(illum, waxing)]; }
+
+/* ---------- clock, calendar and time zone ----------
+
+   THE ZONE IS ESTIMATED, and that is a deliberate limit rather than an unfinished bit.
+   Turning a longitude into an IANA zone needs the boundary shapes of every country on
+   earth, which is megabytes of polygon nobody wants to download to walk a dog around
+   Garden of the Gods. Fifteen degrees of longitude is one hour, so the standard-time
+   offset falls straight out of the map's own position.
+
+   What that misses is daylight saving, which is political rather than astronomical and
+   cannot be derived from a longitude at all. So there is one exception, and it is the
+   case that actually gets played: if the map sits in the SAME zone the device is in, the
+   device's own clock rules are used instead, daylight saving and all. A player walking a
+   local trail on an August evening gets the sunset they would see out of the window; a
+   player exploring a map on the other side of the world gets standard time there, which
+   is right in the winter and an hour out in that country's summer. The offset is shown in
+   the panel either way, so what you are getting is never a mystery.
+
+   `dst` in the result says which of the two answers came back, purely so the UI can say
+   so. */
+function zoneOffsetHours(lon, y, m, day){
+  const solar = Math.round((Number(lon) || 0) / 15);
+  let device = null;
+  try{
+    // noon local, so the offset is read in the middle of the day rather than on top of
+    // the changeover hour, where a 23- or 25-hour day makes it ambiguous
+    device = -new Date(y, m - 1, day, 12, 0, 0).getTimezoneOffset() / 60;
+  }catch(err){ device = null; }
+  if(device != null && Math.abs(device - solar) <= 1) return {hours: device, local: true};
+  return {hours: solar, local: false};
+}
+
+/* Local civil clock -> epoch ms. `minutes` is minutes past midnight and may sit outside
+   0..1440 (the rise/set scanner walks past both ends), which Date.UTC handles by rolling
+   the date, exactly as wanted. */
+function clockToMs(y, m, day, minutes, offsetHours){
+  return Date.UTC(y, m - 1, day, 0, 0, 0) + (minutes - offsetHours * 60) * 60000;
+}
+function msToClock(ms, offsetHours){
+  const t = new Date(ms + offsetHours * 3600000);
+  return {y: t.getUTCFullYear(), m: t.getUTCMonth() + 1, day: t.getUTCDate(),
+          minutes: t.getUTCHours() * 60 + t.getUTCMinutes()};
+}
+function fmtClock(minutes){
+  const m = ((Math.round(minutes) % 1440) + 1440) % 1440;
+  return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+}
+function fmtOffset(hours){
+  const s = hours < 0 ? '\u2212' : '+';                 // real minus sign, not a hyphen
+  const a = Math.abs(hours);
+  const w = Math.floor(a), f = Math.round((a - w) * 60);
+  return 'UTC' + s + w + (f ? ':' + String(f).padStart(2, '0') : '');
+}
+
+/* SUNRISE AND SUNSET BY SCANNING, not by inverting the hour-angle formula.
+
+   The closed form is four lines and is wrong in all the interesting places: it needs the
+   equation of time to find solar noon, it divides by cos(lat)cos(dec) and so blows up
+   near the poles, and it has no way to express "the sun does not rise today" other than
+   an out-of-range acos the caller has to remember to check. Walking the day in ten-minute
+   steps and bisecting each crossing is a dozen lines, costs about 150 evaluations of a
+   function that is already cheap, handles polar day and polar night by simply finding no
+   crossing, and gives the same answer to the second. It runs when the clock or the map
+   changes -- never per frame -- so the cost is not worth optimising away.
+
+   -0.833 degrees is the standard rise/set altitude: half a degree of solar radius plus
+   about a third of a degree of atmospheric refraction at the horizon. */
+const HORIZON_ALT = -0.833;
+function dayEvents(y, m, day, lat, lon, offsetHours){
+  const altAt = minutes => sunAltAz(clockToMs(y, m, day, minutes, offsetHours), lat, lon).alt;
+  const STEP = 10;
+  let rise = null, set = null, high = -90, highAt = 0;
+  let prev = altAt(0), prevT = 0;
+  for(let t = STEP; t <= 1440; t += STEP){
+    const cur = altAt(t);
+    if(cur > high){ high = cur; highAt = t; }
+    const crossed = (prev - HORIZON_ALT) * (cur - HORIZON_ALT) < 0;
+    if(crossed){
+      // bisect to a quarter of a minute, which is finer than the input can express
+      let lo = prevT, hi = t, loV = prev;
+      for(let k = 0; k < 12; k++){
+        const mid = (lo + hi) / 2, v = altAt(mid);
+        if((loV - HORIZON_ALT) * (v - HORIZON_ALT) < 0){ hi = mid; } else { lo = mid; loV = v; }
+      }
+      const at = (lo + hi) / 2;
+      if(cur > prev){ if(rise == null) rise = at; } else if(set == null || rise != null) set = at;
+    }
+    prev = cur; prevT = t;
+  }
+  return {rise, set, noon: highAt, noonAlt: high,
+          /* No crossing at all means one of two very different days, and the caller has
+             to be able to tell them apart to say anything useful. */
+          polarDay: rise == null && set == null && high > HORIZON_ALT,
+          polarNight: rise == null && set == null && high <= HORIZON_ALT};
+}
+
+/* ==== src/trails/sky.js ==== */
+/* TIME OF DAY: what sundial.js's answers do to the scene.
+
+   Two modes, and the split is the whole design. `default` is the lighting Pup Trails has
+   always had -- a fixed key light over the shoulder, the theme's own sky, no shadows on
+   the ground -- and this file guarantees it by RESTORING those values rather than by
+   leaving them alone, so switching back out of day/night lands on exactly what you left.
+   `daynight` puts the sun and the moon where they really are for the map's own latitude
+   and longitude at the date and time you set, and lights the world from there.
+
+   ONE KEY LIGHT, not two. core/render.js's `sun` DirectionalLight is repointed at
+   whichever body is doing the lighting; at twilight, when both contribute, its direction
+   is the intensity-weighted blend of the two. That is not physics -- there is no single
+   direction light coming from two places -- but a second shadow-casting directional light
+   doubles the shadow pass for a few minutes of crossover a player will spend seconds in,
+   and a hard snap from sun-shadows to moon-shadows as the slider passes sunset is far
+   more noticeable than a direction that slides. Both bodies are dim exactly when the
+   blend is doing the most work, which is what makes it get away with it.
+
+   WHY THE THEME STILL WINS AT MIDDAY. Every colour here is expressed as a MIX from the
+   theme's own palette toward a time-of-day target, never as an absolute. At a high sun
+   the mix is zero, so meadow at noon in day/night mode is pixel-for-pixel meadow in
+   default mode; the warmth comes in as the sun drops and the landscape keeps its
+   identity through it. That also means a new theme needs no entry here.
+
+   SHADOWS ARE A DAY/NIGHT FEATURE, and turning them on is the reason the key light has to
+   move. Before this, `sun` sat at a fixed (12,22,8) aimed at the world ORIGIN with a 48
+   unit shadow box around it -- on a 2.8 km map that box is somewhere out in the scrub,
+   nowhere near the player, so the shadow pass was rendering an empty frustum every frame
+   and nothing in the game had receiveShadow set to catch the result anyway. Both halves
+   are fixed together: world.js now marks the landscape as receiving, and the box follows
+   the walker. In default mode castShadow goes OFF, which is not a downgrade -- with no
+   receivers it was drawing a shadow map nothing ever sampled. */
+
+
+
+
+
+
+/* ---------- colour helpers ----------
+   Deliberately hex-in, hex-out, doing the arithmetic on plain numbers. THREE.Color has
+   lerp/copy/setRGB that would say this more neatly, and none of them exist on the smoke
+   harness's duck-typed Color -- which has set(), r/g/b and little else. Eight bits per
+   channel is more precision than a light colour needs, and this way every line in this
+   file behaves identically under the harness and in the browser. */
+function hexNum(c){
+  if(typeof c === 'number') return c;
+  const s = String(c).replace('#', '');
+  return parseInt(s.length === 3 ? s.replace(/./g, m => m + m) : s, 16) || 0;
+}
+function mixHexes(a, b, t){
+  const A = hexNum(a), B = hexNum(b), k = clamp(t, 0, 1);
+  const r = Math.round(((A >> 16) & 255) + (((B >> 16) & 255) - ((A >> 16) & 255)) * k);
+  const g = Math.round(((A >> 8) & 255) + (((B >> 8) & 255) - ((A >> 8) & 255)) * k);
+  const bl = Math.round((A & 255) + ((B & 255) - (A & 255)) * k);
+  return (r << 16) | (g << 8) | bl;
+}
+function scaleHex(c, k){ return mixHexes(0x000000, c, k); }
+function col(hex){ return new THREE.Color(hexNum(hex)); }
+
+/* ---------- the ramp ----------
+
+   THE TUNING TABLE. Everything about how the day looks is these eight rows, interpolated
+   on the sun's altitude in degrees, and nothing else in this file holds a colour opinion.
+   Want a longer golden hour? Move the 4-degree row. Want brighter nights? `hemiAdd` on
+   the bottom two rows.
+
+     key / keyMul   the sun's own light: colour, and a multiplier on THEME.sunInt
+     tint / mix     what the sky, the fog and the horizon ring lean toward, and how far
+     hemiMul        multiplier on THEME.hemiInt -- the ambient fill
+     hemiAdd        ambient added AFTER the multiply, so a moonless night still has a
+                    floor under it. This is a playability number, not a physical one: a
+                    real overcast new-moon night is unplayably black, and a pup you cannot
+                    see is not a feature.
+
+   The altitudes are chosen off real twilight boundaries rather than by eye: -6 is civil
+   twilight (the sky is genuinely dark below it), 0 is geometric sunset, and the warm rows
+   at 4 and 10 are the golden hour photographers actually shoot in. */
+const SUN_RAMP = [
+  {alt: -90, key: '#3c4a72', keyMul: 0.00, tint: '#0a1330', mix: 1.00, hemiMul: 0.16, hemiAdd: 0.07},
+  {alt:  -6, key: '#4b4f82', keyMul: 0.03, tint: '#141d40', mix: 0.94, hemiMul: 0.20, hemiAdd: 0.06},
+  {alt:  -2, key: '#c0673f', keyMul: 0.10, tint: '#4a3660', mix: 0.84, hemiMul: 0.34, hemiAdd: 0.04},
+  {alt:   0, key: '#ff6f33', keyMul: 0.24, tint: '#dd7040', mix: 0.70, hemiMul: 0.48, hemiAdd: 0.03},
+  {alt:   4, key: '#ff9a51', keyMul: 0.52, tint: '#efa06b', mix: 0.48, hemiMul: 0.66, hemiAdd: 0.02},
+  {alt:  10, key: '#ffc684', keyMul: 0.78, tint: '#f4cba4', mix: 0.24, hemiMul: 0.84, hemiAdd: 0.01},
+  {alt:  20, key: '#ffe7c2', keyMul: 0.94, tint: '#fdf6ea', mix: 0.07, hemiMul: 0.96, hemiAdd: 0.00},
+  {alt:  45, key: '#fff4de', keyMul: 1.00, tint: '#ffffff', mix: 0.00, hemiMul: 1.00, hemiAdd: 0.00},
+];
+/* Moonlight. Cool rather than white because that is how a lit landscape under a full moon
+   reads to the eye, and because it has to be unmistakably NOT the sun at the crossover. */
+const MOON_COL = '#9fb4e0';
+const MOON_MAX = 0.30;          // full moon, high in the sky, against THEME.sunInt
+
+function rampAt(alt){
+  const R = SUN_RAMP;
+  if(alt <= R[0].alt) return R[0];
+  if(alt >= R[R.length - 1].alt) return R[R.length - 1];
+  let i = 0;
+  while(i < R.length - 2 && alt > R[i + 1].alt) i++;
+  const a = R[i], b = R[i + 1];
+  const t = (alt - a.alt) / (b.alt - a.alt);
+  return {
+    alt,
+    key: mixHexes(a.key, b.key, t),
+    keyMul: a.keyMul + (b.keyMul - a.keyMul) * t,
+    tint: mixHexes(a.tint, b.tint, t),
+    mix: a.mix + (b.mix - a.mix) * t,
+    hemiMul: a.hemiMul + (b.hemiMul - a.hemiMul) * t,
+    hemiAdd: a.hemiAdd + (b.hemiAdd - a.hemiAdd) * t,
+  };
+}
+
+/* ---------- state ----------
+   The clock is a civil calendar date plus minutes past midnight AT THE MAP, not an epoch
+   timestamp, because that is what the player set and what the UI shows. Turning it into an
+   instant needs the zone offset, which depends on the map -- so it is derived on every
+   refresh rather than stored, and a map swap moves the sun without the clock changing. */
+let MODE = 'default';                 // 'default' | 'daynight'
+let CLOCK = null;                     // {y, m, day, minutes}
+let PLACE = null;                     // {lat, lon, zSouth}
+let skyBackdropG = null;
+let SKY = null;                       // last computed state, for the UI and the harness
+
+/* The map's own coordinates, handed over by world.js on every rebuild. zSouth says which
+   way the world's +z axis points, which is the one thing that can silently mirror the
+   whole sky: every shipped bundle is +z south, but the bundle format allows +z north and
+   a sun rising in the west is a bug nobody would think to look for in a projection flag. */
+function setSkyPlace(lat, lon, zSouth){
+  const ok = Number.isFinite(lat) && Number.isFinite(lon);
+  PLACE = ok ? {lat: +lat, lon: +lon, zSouth: zSouth !== false} : null;
+  refreshSky();
+}
+function getSkyPlace(){ return PLACE; }
+/* No map, or a map with no georeference: Garden of the Gods. The alternative is refusing
+   to light the scene at all, which would make "day/night does nothing on this map" a
+   thing a player has to diagnose. */
+const FALLBACK_PLACE = {lat: 38.8739, lon: -104.8834, zSouth: true};
+function place(){ return PLACE || FALLBACK_PLACE; }
+
+function nowClock(){
+  const t = new Date();
+  return {y: t.getFullYear(), m: t.getMonth() + 1, day: t.getDate(),
+          minutes: t.getHours() * 60 + t.getMinutes()};
+}
+function getSkyClock(){ return CLOCK ? Object.assign({}, CLOCK) : nowClock(); }
+function setSkyClock(c){
+  if(!c) return;
+  const base = getSkyClock();
+  CLOCK = {
+    y: Number.isFinite(+c.y) ? +c.y : base.y,
+    m: Number.isFinite(+c.m) ? +c.m : base.m,
+    day: Number.isFinite(+c.day) ? +c.day : base.day,
+    minutes: clamp(Number.isFinite(+c.minutes) ? +c.minutes : base.minutes, 0, 1439),
+  };
+  refreshSky();
+}
+function getSkyMode(){ return MODE; }
+/* Returns whether it changed, so the caller can skip the world-lighting reapply that a
+   no-op mode set would otherwise trigger. */
+function setSkyMode(m){
+  const next = m === 'daynight' ? 'daynight' : 'default';
+  if(next === MODE) return false;
+  MODE = next;
+  if(MODE === 'daynight' && !CLOCK) CLOCK = nowClock();
+  return true;
+}
+function skyState(){ return SKY; }
+
+/* ---------- the celestial bodies ----------
+   Sprites rather than meshes: a disc in the sky has to face the camera, and a Sprite is
+   the one thing in three.js that does that for free. They live in `scene` and NOT in
+   worldG for the same reason shadow.js's blob does -- worldG is emptied and rebuilt on
+   every scale, exaggeration and theme change, and the sky is not part of the map. */
+let sunSprite = null, moonSprite = null, moonTexKey = '';
+
+/* Soft-edged disc with a halo. The gradient is what makes it read as a light source
+   rather than a sticker; wrapped in try/catch because headless harnesses stub canvas
+   loosely and a missing sky disc is a cosmetic loss, not a broken boot. */
+function discTexture(inner, outer){
+  try{
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 64;
+    const g = cv.getContext('2d');
+    if(!g || typeof g.createRadialGradient !== 'function') return null;
+    const grd = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grd.addColorStop(0, inner);
+    grd.addColorStop(0.42, inner);
+    grd.addColorStop(0.52, outer);
+    grd.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grd;
+    g.fillRect(0, 0, 64, 64);
+    return new THREE.CanvasTexture(cv);
+  }catch(err){ return null; }
+}
+
+/* The moon, with its phase cut out of it.
+
+   Drawn rather than shaded: the disc is painted, then the dark part is REMOVED with a
+   destination-out pass, so the unlit limb is genuinely transparent and the night sky shows
+   through it the way it does in life. The terminator is an ellipse whose width is the
+   cosine of the phase angle -- that is the actual geometry of a sphere lit from the side,
+   and it gives a correct crescent, a straight edge at the quarters and a correct gibbous
+   from the same two shapes.
+
+   Rebuilt only when the phase moves by 4% or flips sides, because this is a canvas draw
+   and the clock slider fires on every pixel of travel. */
+function moonTexture(illum, side){
+  try{
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 64;
+    const g = cv.getContext('2d');
+    if(!g || typeof g.createRadialGradient !== 'function') return null;
+    const R = 26, cx = 32, cy = 32;
+    const grd = g.createRadialGradient(cx, cy, 0, cx, cy, 32);
+    grd.addColorStop(0, '#fffdf2');
+    grd.addColorStop(R / 32 - 0.02, '#f2edda');
+    grd.addColorStop(R / 32, 'rgba(226,222,205,0.35)');
+    grd.addColorStop(1, 'rgba(226,222,205,0)');
+    g.fillStyle = grd;
+    g.beginPath(); g.arc(cx, cy, 32, 0, 6.2832); g.fill();
+
+    // cut away the unlit part
+    const k = Math.abs(1 - 2 * clamp(illum, 0, 1));    // 1 at new, 0 at full
+    if(illum < 0.995 && typeof g.ellipse === 'function'){
+      g.globalCompositeOperation = 'destination-out';
+      g.beginPath();
+      // the dark half, then the terminator ellipse either added to it or carved out of it
+      g.arc(cx, cy, R + 0.5, -Math.PI / 2, Math.PI / 2, side > 0);
+      g.ellipse(cx, cy, R * k, R, 0, Math.PI / 2, -Math.PI / 2, illum > 0.5 ? side > 0 : side < 0);
+      g.closePath();
+      g.fill();
+      g.globalCompositeOperation = 'source-over';
+    }
+    return new THREE.CanvasTexture(cv);
+  }catch(err){ return null; }
+}
+
+function ensureBodies(){
+  if(sunSprite) return;
+  try{
+    const mk = tex => {
+      const m = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: tex || null, color: 0xffffff, transparent: true,
+        /* depthTest ON. This is the same fix pieces.js's buildFloatingLabel already made
+           for area names, and for the same reason: with it off, the disc paints through
+           everything in front of it -- a ridge, a rock mass, a tree -- because a
+           depth-disabled draw wins on order alone, not on which surface is actually
+           nearer the camera. A sun that is always visible can never set. depthWrite
+           stays off: the disc is a translucent gradient, and writing depth from it would
+           let its own faint edge wrongly occlude whatever's directly behind it. */
+        fog: false, depthTest: true, depthWrite: false,
+      }));
+      /* renderOrder no longer does the occlusion work -- depthTest above does, against
+         whatever the depth buffer already holds. This just keeps the disc from being
+         submitted ahead of opaque geometry that shares its exact depth (the far edge of
+         the horizon ring), which is a submission-order nicety, not a correctness one. */
+      m.renderOrder = -11;
+      m.frustumCulled = false;
+      m.visible = false;
+      scene.add(m);
+      return m;
+    };
+    sunSprite = mk(discTexture('rgba(255,250,230,1)', 'rgba(255,214,150,0.55)'));
+    sunSprite.name = 'skySun';
+    moonSprite = mk(null);
+    moonSprite.name = 'skyMoon';
+  }catch(err){ sunSprite = moonSprite = null; }
+}
+
+/* Azimuth/altitude -> a unit vector in world space. Compass azimuth runs from north
+   clockwise through east; the world is +x east, and +z is south on every bundle the game
+   ships (see setSkyPlace for why that is not assumed). */
+function skyVector(alt, az, zSouth){
+  const ca = Math.cos(alt * Math.PI / 180);
+  const east = ca * Math.sin(az * Math.PI / 180);
+  const north = ca * Math.cos(az * Math.PI / 180);
+  return {x: east, y: Math.sin(alt * Math.PI / 180), z: zSouth ? -north : north};
+}
+
+/* ---------- applying it ----------
+
+   Called from world.js's applyThemeLighting, which has just written the theme's own sky,
+   fog colour, hemisphere light and sun intensity. In default mode that is the finished
+   answer and this does nothing but park the light where it has always been. In day/night
+   mode this is the second half: the theme values are the BASE the ramp mixes away from,
+   which is why the order matters and why there is no path that applies one without the
+   other. Fog DISTANCES are never touched here -- those belong to the map scale and the
+   fog slider, both of which are world.js's business. */
+function refreshSky(){
+  ensureBodies();
+  if(MODE !== 'daynight'){
+    SKY = null;
+    restoreDefaultKey();
+    tintBackdrop(null, 0);
+    if(sunSprite) sunSprite.visible = false;
+    if(moonSprite) moonSprite.visible = false;
+    return;
+  }
+  const P = place();
+  const C = getSkyClock();
+  const zone = zoneOffsetHours(P.lon, C.y, C.m, C.day);
+  const ms = clockToMs(C.y, C.m, C.day, C.minutes, zone.hours);
+  const S = sunAltAz(ms, P.lat, P.lon);
+  const M = moonAltAz(ms, P.lat, P.lon);
+  const R = rampAt(S.alt);
+
+  /* Moonlight fades in as the moon clears the horizon AND as the sun leaves the sky:
+     a daylight moon is a lovely thing to look at and contributes no visible light, so
+     the second factor is what keeps it from washing out a sunset. */
+  const moonUp = clamp(M.alt / 10, 0, 1);
+  const sunGone = clamp(-S.alt / 6, 0, 1);
+  const moonI = MOON_MAX * THEME.sunInt * (0.15 + 0.85 * M.illum) * moonUp * sunGone;
+  const sunI = THEME.sunInt * R.keyMul;
+
+  /* One light, blended. See the module header: physically wrong, visually right, and only
+     ever doing real work in the few minutes where both bodies are dim. */
+  const total = sunI + moonI;
+  const w = total > 1e-6 ? moonI / total : 0;
+  const sv = skyVector(S.alt, S.az, P.zSouth);
+  const mv = skyVector(M.alt, M.az, P.zSouth);
+  const dir = {x: sv.x + (mv.x - sv.x) * w, y: sv.y + (mv.y - sv.y) * w, z: sv.z + (mv.z - sv.z) * w};
+  const L = Math.hypot(dir.x, dir.y, dir.z) || 1;
+  dir.x /= L; dir.y /= L; dir.z /= L;
+  /* A key light at or below the horizon rakes the terrain at a grazing angle, which on a
+     stepped toon heightfield is all shadow acne and nothing else. Floor the elevation so
+     the last of the light still comes from slightly above. */
+  if(dir.y < 0.08){ dir.y = 0.08; const l2 = Math.hypot(dir.x, dir.y, dir.z) || 1; dir.x /= l2; dir.y /= l2; dir.z /= l2; }
+
+  const keyCol = mixHexes(R.key, MOON_COL, w);
+  const skyHex = mixHexes(THEME.sky, R.tint, R.mix);
+
+  sun.color = col(keyCol);
+  sun.intensity = total;
+  hemi.color = col(mixHexes(THEME.hemiSky, R.tint, R.mix * 0.85));
+  hemi.groundColor = col(scaleHex(mixHexes(THEME.hemiGround, R.tint, R.mix * 0.5), 1 - R.mix * 0.55));
+  hemi.intensity = THEME.hemiInt * R.hemiMul + R.hemiAdd + moonI * 0.35;
+
+  scene.background = col(skyHex);
+  if(scene.fog) scene.fog.color = col(skyHex);
+  tintBackdrop(skyHex, R.mix);
+
+  /* The shadow pass is skipped outright whenever the key light is too weak to cast
+     anything you would notice -- deep night with the moon down is the common case, and it
+     is also the case where a shadow map would be pure cost. */
+  const wantShadow = QUALITY.shadows && total > 0.08;
+  sun.castShadow = wantShadow;
+  /* Sized whether or not it is switched on, because the box belongs to the MODE and the
+     switch belongs to the device: core/quality.js's watchdog drops a tier mid-walk on a
+     struggling tablet and can raise nothing back, so a frustum sized only on the path
+     where shadows happened to be enabled is a frustum that can be left stale by a tier
+     change. It is half a dozen field writes behind an already-sized early return. */
+  sizeShadowCamera();
+
+  placeBody(sunSprite, sv, S.alt > -2.5, mixHexes('#ffffff', R.key, 0.55));
+  const mside = moonBrightSide(M.az, S.az);
+  const mkey = Math.round(M.illum * 25) + (mside > 0 ? 'R' : 'L');
+  if(moonSprite && mkey !== moonTexKey){
+    const tex = moonTexture(M.illum, mside);
+    if(tex){
+      if(moonSprite.material.map && moonSprite.material.map.dispose) moonSprite.material.map.dispose();
+      moonSprite.material.map = tex;
+      moonSprite.material.needsUpdate = true;
+    }
+    moonTexKey = mkey;
+  }
+  // a daylight moon is pale against a bright sky, not a glowing disc
+  placeBody(moonSprite, mv, M.alt > -1.5 && M.illum > 0.02,
+            mixHexes('#ffffff', skyHex, clamp(R.keyMul * 0.55, 0, 0.5)));
+
+  const ev = dayEvents(C.y, C.m, C.day, P.lat, P.lon, zone.hours);
+  SKY = {
+    sunAlt: S.alt, sunAz: S.az, moonAlt: M.alt, moonAz: M.az,
+    illum: M.illum, waxing: M.waxing,
+    phase: phaseName(M.illum, M.waxing), emoji: phaseEmoji(M.illum, M.waxing),
+    keyIntensity: total, sunIntensity: sunI, moonIntensity: moonI,
+    keyColor: keyCol, skyColor: skyHex, hemiIntensity: hemi.intensity,
+    dir, night: S.alt < -6, golden: S.alt > -6 && S.alt < 10,
+    zoneHours: zone.hours, zoneLocal: zone.local, zoneLabel: fmtOffset(zone.hours),
+    lat: P.lat, lon: P.lon, ms,
+    rise: ev.rise, set: ev.set, noonAlt: ev.noonAlt,
+    polarDay: ev.polarDay, polarNight: ev.polarNight,
+    shadows: wantShadow,
+  };
+}
+
+function placeBody(sprite, v, visible, tint){
+  if(!sprite) return;
+  sprite.visible = !!visible;
+  if(!visible) return;
+  sprite.material.color = col(tint);
+  /* Distance is a fraction of the far plane rather than a constant: world.js pulls the far
+     plane in to meet the fog, so a fixed 900 would be outside the frustum on a compacted
+     map and the sun would vanish. Apparent size is what actually matters and that is held
+     constant by scaling with the same number. */
+  const D = Math.max(60, camera.far * 0.78);
+  sprite.position.set(camera.position.x + v.x * D, camera.position.y + v.y * D, camera.position.z + v.z * D);
+  sprite.scale.set(D * 0.075, D * 0.075, 1);
+}
+
+/* The horizon ring is MeshBasicMaterial and deliberately exempt from fog and from
+   lighting (pieces.js), so it is the one thing in the scene that will happily stay
+   noon-bright at midnight. Tinting it toward the sky colour is what keeps the mountains
+   as a silhouette rather than a glowing cutout; a little contrast is held back so they do
+   not disappear into the sky entirely.
+
+   Base colours are captured lazily on first touch, per mesh, so a rebuilt backdrop starts
+   from its own theme colours rather than from whatever tint the last one ended on. */
+function tintBackdrop(skyHex, mix){
+  if(!skyBackdropG || typeof skyBackdropG.traverse !== 'function') return;
+  skyBackdropG.traverse(o => {
+    if(!o.material || !o.material.color) return;
+    if(o.userData.skyBase == null) o.userData.skyBase = o.material.color.getHex();
+    o.material.color = col(skyHex == null ? o.userData.skyBase
+                                          : mixHexes(o.userData.skyBase, skyHex, clamp(mix * 0.9, 0, 1)));
+  });
+}
+function setSkyBackdrop(g){
+  skyBackdropG = g || null;
+  if(SKY) tintBackdrop(SKY.skyColor, rampAt(SKY.sunAlt).mix);
+}
+
+/* ---------- the key light's position ----------
+
+   Direction is set by refreshSky; this is the other half, and it runs every frame because
+   a directional light's shadow frustum is finite and has to be wherever the player is.
+   The light itself is placed KEY_DIST up the light vector from the focus, which has to
+   clear local relief or a hill between the light and the player falls outside the shadow
+   camera's near plane and stops casting. */
+const KEY_DIST = 110;
+/* Half-width of the shadow box in world units. Bigger looks better and blurs: the same
+   1024 or 2048 map spread over more ground. 30 covers roughly the near field the fog
+   leaves visible at the default scale, which is the ground a walker actually reads
+   shadows on. */
+const SHADOW_R = 30;
+function sizeShadowCamera(){
+  const c = sun.shadow && sun.shadow.camera;
+  if(!c) return;
+  if(c.left === -SHADOW_R && c.far === KEY_DIST * 2.2) return;   // already sized
+  c.left = -SHADOW_R; c.right = SHADOW_R; c.top = SHADOW_R; c.bottom = -SHADOW_R;
+  c.near = 1; c.far = KEY_DIST * 2.2;
+  if(typeof c.updateProjectionMatrix === 'function') c.updateProjectionMatrix();
+  /* normalBias, not just bias: terraced terrain meets the light at every angle including
+     nearly edge-on risers, and a constant depth bias that clears acne on a flat meadow
+     leaves it on a slope. Offsetting along the surface normal scales with the geometry
+     instead of fighting it.
+
+     0.025, not the 0.06 this started at. A gate post is a 0.2-radius cylinder and a
+     signpost cap is smaller still, and normalBias pushes the SAMPLE POINT that distance
+     off the surface before testing it against the shadow map -- on geometry that thin,
+     0.06 is 30% of the post's own radius, enough to walk the sample past the far side of
+     the post and lose its shadow entirely rather than clean the acne it was meant to
+     fix. 0.025 stays comfortably under the radius of the thinnest caster in the scene
+     (tuft cones aside, which are too small to shadow anything worth reading regardless)
+     while still clearing acne on the terraces, which is a shallower-angle problem than a
+     0.06 fix implies. The constant bias below moves a little further negative to make up
+     the difference on broad flat ground, where normalBias alone under-corrects. */
+  sun.shadow.bias = -0.0007;
+  sun.shadow.normalBias = 0.025;
+}
+function restoreDefaultKey(){
+  sun.castShadow = false;
+  sun.color = col('#fff1cf');                 // core/render.js's own constructor colour
+  sunTarget.position.set(0, 0, 0);
+  sun.position.set(12, 22, 8);
+}
+
+/* Per frame, from main.js's loop. `focus` is the player, not the camera: the shadow box
+   should be centred on what the player is looking AT rather than on a camera rig that
+   swings around behind them, or half the box is spent on ground behind the pup. */
+function skyFrame(focusX, focusY, focusZ){
+  if(MODE !== 'daynight' || !SKY) return;
+  const d = SKY.dir;
+  sunTarget.position.set(focusX, focusY, focusZ);
+  sun.position.set(focusX + d.x * KEY_DIST, focusY + d.y * KEY_DIST, focusZ + d.z * KEY_DIST);
+  if(sunSprite && sunSprite.visible) placeBody(sunSprite, skyVector(SKY.sunAlt, SKY.sunAz, place().zSouth), true, sunSprite.material.color.getHex());
+  if(moonSprite && moonSprite.visible) placeBody(moonSprite, skyVector(SKY.moonAlt, SKY.moonAz, place().zSouth), true, moonSprite.material.color.getHex());
+}
+
+/* One line for the panel: when the sun comes up and goes down at this map on this date,
+   what the moon is doing, and which time zone the clock is being read in. The zone note
+   is not decoration -- it is the only place the longitude estimate and its daylight-saving
+   limit are visible (see sundial.js's zoneOffsetHours). */
+function skyReadout(){
+  if(MODE !== 'daynight') return 'Default lighting — fixed midday sun, no time of day.';
+  if(!SKY) return 'Day & night lighting.';
+  const parts = [];
+  if(SKY.polarDay) parts.push('☀️ sun never sets today');
+  else if(SKY.polarNight) parts.push('🌑 sun never rises today');
+  else parts.push('🌅 ' + (SKY.rise == null ? '—' : fmtClock(SKY.rise)) +
+                  '  🌇 ' + (SKY.set == null ? '—' : fmtClock(SKY.set)));
+  parts.push('☀ ' + SKY.sunAlt.toFixed(0) + '°');
+  parts.push(SKY.emoji + ' ' + SKY.phase + ' ' + Math.round(SKY.illum * 100) + '%' +
+             (SKY.moonAlt > 0 ? ' · up' : ' · down'));
+  parts.push(SKY.zoneLabel + (SKY.zoneLocal ? ' (your device)' : ' (from longitude, no DST)'));
+  return parts.join('  ·  ');
+}
+
+/* TEST SEAM, and deliberately a READ-BACK rather than a copy of what refreshSky decided:
+   it asks the renderer's own scene, hemisphere light and key light what they are currently
+   set to. An assertion against skyState() would only prove this file agrees with itself,
+   which is exactly the class of test that passes while the screen stays noon-bright.
+   `const` bindings do not survive the smoke harness's eval boundary (see shadow.js's
+   shadowLift for the same pattern), so scene, sun and hemi are unreachable from an
+   assertion without a function to hand them over. */
+function skyLights(){
+  const hex = c => (c && typeof c.getHex === 'function') ? c.getHex() : c;
+  const cam = sun.shadow && sun.shadow.camera;
+  return {
+    mode: MODE,
+    bg: hex(scene.background),
+    fog: hex(scene.fog && scene.fog.color),
+    hemiI: hemi.intensity, hemiC: hex(hemi.color), hemiG: hex(hemi.groundColor),
+    sunI: sun.intensity, sunC: hex(sun.color), cast: !!sun.castShadow,
+    tx: sunTarget.position.x, ty: sunTarget.position.y, tz: sunTarget.position.z,
+    lx: sun.position.x, ly: sun.position.y, lz: sun.position.z,
+    boxL: cam ? cam.left : null, boxFar: cam ? cam.far : null,
+    bias: sun.shadow.bias, normalBias: sun.shadow.normalBias,
+    shadowsWanted: !!QUALITY.shadows,
+    sunUp: !!(sunSprite && sunSprite.visible), moonUp: !!(moonSprite && moonSprite.visible),
+  };
+}
+
+/* TEST SEAM: sunSprite/moonSprite are module-private consts, unreachable from the smoke
+   harness's eval boundary on their own (see shadowLift in shadow.js for the same
+   pattern). What matters for the "sets behind the landscape" behaviour is entirely in
+   these three fields -- if depthTest ever regresses to false here, the disc goes back to
+   painting through everything in front of it regardless of what the scene actually looks
+   like, so this is what a test should read rather than reconstructing the material from
+   scratch. */
+function skyOcclusion(){
+  const flags = s => s && s.material ? {depthTest: s.material.depthTest, depthWrite: s.material.depthWrite,
+                                         fog: s.material.fog, transparent: s.material.transparent} : null;
+  return {sun: flags(sunSprite), moon: flags(moonSprite)};
+}
+
 /* ==== src/trails/world.js ==== */
 /* Scene state + rebuildWorld(). Owns GRAPH, POIS, AREAS, TRAILHEADS, bboxW -- read
    elsewhere as live bindings, mutated only through the functions here, same rule as
@@ -6658,6 +7547,10 @@ function nearestTrail(x,z){
 
 
 
+
+/* One-way: sky.js knows about the renderer's lights and the theme palette, and nothing
+   about maps, graphs or bundles. That is what lets this file call into it from
+   applyThemeLighting without a cycle -- the chain is themes -> sky -> world -> main. */
 
 
 
@@ -6957,7 +7850,13 @@ function fallbackProjector(layers){
   const originLon=lo, originLat=ha;   // x >= 0 eastward, z >= 0 southward
   const proj={
     isFallback:true,
+    /* zSign and unproject exist only to match World's shape, so whoever needs to turn
+       world metres back into lon/lat -- the time-zone lookup for the sky clock, today --
+       can do it without asking which projector it got. Same contract, same sign
+       convention: +z south, hence zSign 1. */
+    zSign:1,
     project(lon,lat){ return {x:(lon-originLon)*mLon, z:(originLat-lat)*mLat}; },
+    unproject(x,z){ return {lon:originLon+x/mLon, lat:originLat-z/mLat}; },
     projectCoords(coords){
       if(typeof coords[0]==='number'){ const p=proj.project(coords[0],coords[1]); return [p.x,p.z]; }
       return coords.map(c=>proj.projectCoords(c));
@@ -6977,6 +7876,13 @@ let startHead=0;
    and an honest one. */
 let MAP_ID='none';
 function getMapId(){ return MAP_ID; }
+/* Where the loaded map sits on the globe -- {lat, lon, zSouth} for the centre of the
+   network, or null when there is no map or its projector cannot be inverted. Written by
+   rebuildWorld, read by the sky clock (which needs a latitude for the sun and a longitude
+   for the time zone) and by the panel, which says which place the clock is telling the
+   time at. */
+let MAP_LATLON=null;
+function getMapLatLon(){ return MAP_LATLON; }
 
 /* Two independent knobs, one derived value.
 
@@ -7108,6 +8014,12 @@ function applyThemeLighting(){
   hemi.groundColor=new THREE.Color(THEME.hemiGround);
   hemi.intensity=THEME.hemiInt;
   sun.intensity=THEME.sunInt;
+  /* THE THEME IS THE BASE, THE CLOCK IS THE OVERLAY, and they are applied in that order
+     from one place so no caller can get one without the other. In default lighting mode
+     this call restores the fixed key light and returns; in day/night it mixes everything
+     above away from the theme toward the time of day. Fog DISTANCES stay ours -- sky.js
+     only ever touches the fog's colour. */
+  refreshSky();
 }
 function getGraph(){ return GRAPH; }
 function getTrailheads(){ return TRAILHEADS; }
@@ -8439,7 +9351,7 @@ function rebuildWorld(){
   MAP_ID = BUNDLE
     ? 'dem:'+(+BUNDLE.originLon).toFixed(4)+','+(+BUNDLE.originLat).toFixed(4)
     : (layers.length ? 'geojson:'+layers.length : 'none');
-  if(!layers.length){ applyThemeLighting(); return; }
+  if(!layers.length){ MAP_LATLON=null; setSkyPlace(null, null, true); applyThemeLighting(); return; }
   // A bundle's own projection is authoritative whenever one is loaded; the fallback only
   // covers the no-DEM case, where there's no heightfield to stay aligned with anyway.
   const PROJ = BUNDLE || fallbackProjector(layers);
@@ -8512,9 +9424,31 @@ function rebuildWorld(){
   bboxW={minx:mx,maxx:Mx,minz:mz,maxz:Mz};
   const rng=mulberry(1337);
 
+  /* WHERE ON EARTH THIS MAP IS, taken from the centre of what was actually built rather
+     than from the projection origin. The origin is a corner of the DEM and can sit a
+     kilometre or two off the trail network; the centre of the bbox is where the walking
+     happens, and it is the point the sun, the moon and the time zone should be computed
+     for. Run through whichever projector built the map, so a bundle and a bare pair of
+     .geojson files answer identically. Before applyThemeLighting, because that is what
+     asks sky.js to relight the scene and it should do so knowing where it is. */
+  MAP_LATLON = null;
+  if(typeof PROJ.unproject === 'function'){
+    const c = PROJ.unproject((mx+Mx)/2, (mz+Mz)/2);
+    if(c && Number.isFinite(c.lat) && Number.isFinite(c.lon))
+      MAP_LATLON = {lat:c.lat, lon:c.lon, zSouth: (PROJ.zSign == null ? 1 : PROJ.zSign) >= 0};
+  }
+  setSkyPlace(MAP_LATLON ? MAP_LATLON.lat : null,
+              MAP_LATLON ? MAP_LATLON.lon : null,
+              MAP_LATLON ? MAP_LATLON.zSouth : true);
+
   applyThemeLighting();
   backdropG=buildBackdrop(THEME,rng,MAP_SCALE);
   worldG.add(backdropG);
+  /* The horizon ring is rebuilt here and nowhere else, and it is the one thing in the
+     scene that has to be re-tinted by hand at night (MeshBasicMaterial, fog-exempt: see
+     sky.js's tintBackdrop). Handing the new group over at the moment it is created keeps
+     that a push rather than a per-frame lookup. */
+  setSkyBackdrop(backdropG);
 
   setWorld(BUNDLE || null);
   setStep(STEP_M);
@@ -9086,6 +10020,39 @@ function rebuildWorld(){
     // ribbon, so it needs the ribbon's own (corridor-max) height, not the raw cell.
     gt.position.y=standingY(th.x,th.z);
     worldG.add(gt);
+  });
+
+  markReceivers();
+}
+
+/* THE LANDSCAPE CATCHES SHADOWS; the avatar only casts them.
+
+   Until day/night lighting there was nothing in this game with receiveShadow set, on any
+   mesh, anywhere -- so the renderer was rendering a shadow map every frame on medium and
+   high tier that not one draw call ever sampled. Turning receiving ON here is the half of
+   that fix that lives in the world; sky.js owns the other half (where the light is, and
+   whether it casts at all).
+
+   ONE TRAVERSE OVER EVERYTHING IN worldG, rather than picking out the ground mesh. A
+   shadow that stops dead at the edge of a trail is worse than no shadow: the ribbons sit
+   five centimetres above the terrain and are exactly where a walker is looking, so a pine
+   throwing a shadow across the tread has to land on the tread. Rocks and trees receiving
+   as well costs nothing extra and means a stand of pines shades itself.
+
+   The one cost worth naming: three.js keys its shader programs partly on receiveShadow,
+   so a toon material shared between a tree here (receiving) and the pup's rig (not)
+   compiles twice. That is a handful of the ~85 shared materials, paid once at warm-up
+   behind the loader, against a shadow pass that currently renders for nothing.
+
+   Deliberately NOT applied to the horizon ring: it is MeshBasicMaterial, which has no
+   lighting model to receive into, and it is ten thousand units away from any shadow
+   camera. sky.js tints it by hand instead. */
+function markReceivers(){
+  if(!worldG) return;
+  worldG.traverse(o=>{
+    if(!o.isMesh) return;
+    if(backdropG && o.parent === backdropG) return;
+    o.receiveShadow = true;
   });
 }
 
@@ -11819,6 +12786,8 @@ function parsePupFile(data){
 
 
 
+
+
 /* fov: Pup City's 38 deg is a tight telephoto, chosen for its small enclosed blocks;
    trails is wide open country, so a wider, more natural-feeling field of view suits it.
 
@@ -13422,6 +14391,15 @@ function loop(t){
   const bd=getBackdrop();
   if(bd) bd.position.set(camera.position.x, 0, camera.position.z);
 
+  /* A directional light's shadow frustum is a finite box, so in day/night mode it has to
+     be carried along under the walker -- parked at the world origin (which is where it
+     sat for the whole life of this file) it covers a patch of scrub a kilometre from
+     anyone. Centred on the PLAYER rather than the camera: the camera rig swings around
+     behind the pup on every turn, and half a box spent on ground the player has their
+     back to is half a box wasted. Above the early return below, because the idle and
+     paused branches still render and their shadows still have to land in the right place. */
+  skyFrame(player.x, standingY(player.x, player.z), player.z);
+
   if(!playing || !getGraph() || trip.paused){
     // idle, or the arrival card is up: no movement, but keep the avatar breathing so
     // neither the lobby nor the summary is a still frame. Pausing deliberately keeps the
@@ -14158,6 +15136,105 @@ document.querySelectorAll('#soundToggle .toggle').forEach(b=>{
 });
 applySound(soundOn);
 
+/* ---------- time of day ----------
+
+   WHAT IS PERSISTED, AND WHAT IS NOT. The mode is: a player who walks at dusk is telling
+   you how they like the game to look, and coming back to flat midday every session would
+   be the same annoyance as coming back to sound they had switched off. The DATE is not,
+   and deliberately: a date saved in March is wrong every day after it, and a stale date
+   is worse than no date because the sun is then in the wrong place for a reason nothing
+   on screen explains. So the clock starts at now, every session, and stays wherever you
+   put it for as long as the tab is open.
+
+   The TIME is persisted as "minutes past midnight" only when you moved it -- so an
+   evening walker keeps their evening, on today's date, with today's sunset. That is the
+   combination that survives being away for a week.
+
+   Nothing here recomputes the world: the clock only touches lights, colours and two
+   sprites, so the slider applies live on `input` the way the fog slider does rather than
+   waiting for `change` the way the three rebuild-triggering sliders have to. */
+const SKY_MODE_KEY = 'pupSkyMode';
+const SKY_TIME_KEY = 'pupSkyTime';
+function readSkyPrefs(){
+  let mode = 'default', minutes = null;
+  try{
+    if(localStorage.getItem(SKY_MODE_KEY) === 'daynight') mode = 'daynight';
+    const t = parseInt(localStorage.getItem(SKY_TIME_KEY), 10);
+    if(Number.isFinite(t) && t >= 0 && t < 1440) minutes = t;
+  }catch(err){}
+  return {mode, minutes};
+}
+function renderSkyToggle(){
+  const m = getSkyMode();
+  document.querySelectorAll('#skyToggle .toggle').forEach(b=>{
+    b.classList.toggle('sel', b.dataset.sky === m);
+  });
+  const box = $('#skyControls');
+  if(box) box.hidden = m !== 'daynight';
+}
+/* The readout and the two inputs, pushed FROM the sky module rather than from whatever
+   the DOM last had in it. That direction matters on a map swap: the clock is unchanged
+   but the place is not, so sunrise, the phase and the time zone all move without anybody
+   touching a control. */
+function renderSkyUI(){
+  renderSkyToggle();
+  const c = getSkyClock();
+  const d = $('#skyDate');
+  if(d) d.value = c.y + '-' + String(c.m).padStart(2,'0') + '-' + String(c.day).padStart(2,'0');
+  const t = $('#skyTime'), tv = $('#skyTimeVal');
+  if(t) t.value = c.minutes;
+  if(tv) tv.textContent = fmtClock(c.minutes);
+  const note = $('#skyNote');
+  if(note){
+    const where = getMapLatLon();
+    note.textContent = skyReadout()
+      + (getSkyMode()==='daynight' && where
+          ? '  ·  📍 ' + where.lat.toFixed(2) + '°, ' + where.lon.toFixed(2) + '°'
+          : '');
+  }
+}
+function applySkyMode(m, remember){
+  /* setSkyMode answers whether anything changed, so re-picking the mode you are already
+     in does not push a full relight through the scene. */
+  if(setSkyMode(m)){
+    /* THE THEME FIRST, THEN THE CLOCK. Leaving day/night has to put back the theme's own
+       sky, fog colour and ambient levels, and world.js owns those -- calling its
+       applyThemeLighting is what restores them, and its own tail re-applies the overlay
+       for the other direction. One call, both ways round. */
+    applyThemeLighting();
+  }
+  if(remember){ try{ localStorage.setItem(SKY_MODE_KEY, getSkyMode()); }catch(err){} }
+  renderSkyUI();
+}
+document.querySelectorAll('#skyToggle .toggle').forEach(b=>{
+  b.addEventListener('click', ()=> applySkyMode(b.dataset.sky, true));
+});
+$('#skyDate')?.addEventListener('change', e=>{
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(e.target.value||''));
+  if(!m) return;                       // an empty or half-typed date is not a date yet
+  setSkyClock({y:+m[1], m:+m[2], day:+m[3]});
+  renderSkyUI();
+});
+$('#skyTime')?.addEventListener('input', e=>{
+  const mins = clamp(parseInt(e.target.value, 10) || 0, 0, 1439);
+  setSkyClock({minutes: mins});
+  try{ localStorage.setItem(SKY_TIME_KEY, String(mins)); }catch(err){}
+  renderSkyUI();
+});
+$('#skyNowBtn')?.addEventListener('click', ()=>{
+  setSkyClock(nowClock());
+  // "now" is a request to stop holding a time, so the saved one goes with it
+  try{ localStorage.removeItem(SKY_TIME_KEY); }catch(err){}
+  renderSkyUI();
+});
+(function initSky(){
+  const pref = readSkyPrefs();
+  const c = nowClock();
+  if(pref.minutes != null) c.minutes = pref.minutes;
+  setSkyClock(c);
+  applySkyMode(pref.mode, false);
+})();
+
 $('#randomPupBtn')?.addEventListener('click', ()=>{
   const params = randomPupParams();
   mode='dog'; browseMode='dog'; dogChoice={label:'random:'+params.name, params};
@@ -14687,6 +15764,8 @@ function refreshMapUI(){
   renderSpotList();
   renderCourseUI();
   syncCourseOverlay();
+  // a new map is a new latitude, longitude and time zone: same clock, different sunrise
+  renderSkyUI();
 }
 
 /* --- loaded GeoJSON file chips ---

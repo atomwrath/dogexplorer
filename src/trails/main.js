@@ -38,9 +38,11 @@ import { barkSound, cheerBlip, initAudio, thudSound,
          stepSound, landSound, jumpSound, scrabbleSound,
          countPip, goTone, offCourseSound, rejoinSound } from '../core/audio.js';
 
-import { setTerrainQuadBudget, getDemStride, addLayers, clearLayers, compass, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapId, getMapScale, getPathMix, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, inWaterway, loadWorld, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY, areaBlocked, areaSolidTop, nearestSolidFace, solidEmbed, distToSolid } from './world.js';
+import { applyThemeLighting, getMapLatLon, setTerrainQuadBudget, getDemStride, addLayers, clearLayers, compass, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapId, getMapScale, getPathMix, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, inWaterway, loadWorld, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY, areaBlocked, areaSolidTop, nearestSolidFace, solidEmbed, distToSolid } from './world.js';
 
 import { THEME, THEMES } from './themes.js';
+import { setSkyMode, getSkyMode, setSkyClock, getSkyClock, skyFrame, skyReadout, skyState, nowClock } from './sky.js';
+import { fmtClock } from './sundial.js';
 import { renderer, scene, camera, resize, warmUp } from '../core/render.js';
 import { onQualityChange, watchFrame } from '../core/quality.js';
 import { SPECIES } from '../data/species.js';
@@ -1653,6 +1655,15 @@ function loop(t){
   const bd=getBackdrop();
   if(bd) bd.position.set(camera.position.x, 0, camera.position.z);
 
+  /* A directional light's shadow frustum is a finite box, so in day/night mode it has to
+     be carried along under the walker -- parked at the world origin (which is where it
+     sat for the whole life of this file) it covers a patch of scrub a kilometre from
+     anyone. Centred on the PLAYER rather than the camera: the camera rig swings around
+     behind the pup on every turn, and half a box spent on ground the player has their
+     back to is half a box wasted. Above the early return below, because the idle and
+     paused branches still render and their shadows still have to land in the right place. */
+  skyFrame(player.x, standingY(player.x, player.z), player.z);
+
   if(!playing || !getGraph() || trip.paused){
     // idle, or the arrival card is up: no movement, but keep the avatar breathing so
     // neither the lobby nor the summary is a still frame. Pausing deliberately keeps the
@@ -2389,6 +2400,105 @@ document.querySelectorAll('#soundToggle .toggle').forEach(b=>{
 });
 applySound(soundOn);
 
+/* ---------- time of day ----------
+
+   WHAT IS PERSISTED, AND WHAT IS NOT. The mode is: a player who walks at dusk is telling
+   you how they like the game to look, and coming back to flat midday every session would
+   be the same annoyance as coming back to sound they had switched off. The DATE is not,
+   and deliberately: a date saved in March is wrong every day after it, and a stale date
+   is worse than no date because the sun is then in the wrong place for a reason nothing
+   on screen explains. So the clock starts at now, every session, and stays wherever you
+   put it for as long as the tab is open.
+
+   The TIME is persisted as "minutes past midnight" only when you moved it -- so an
+   evening walker keeps their evening, on today's date, with today's sunset. That is the
+   combination that survives being away for a week.
+
+   Nothing here recomputes the world: the clock only touches lights, colours and two
+   sprites, so the slider applies live on `input` the way the fog slider does rather than
+   waiting for `change` the way the three rebuild-triggering sliders have to. */
+const SKY_MODE_KEY = 'pupSkyMode';
+const SKY_TIME_KEY = 'pupSkyTime';
+function readSkyPrefs(){
+  let mode = 'default', minutes = null;
+  try{
+    if(localStorage.getItem(SKY_MODE_KEY) === 'daynight') mode = 'daynight';
+    const t = parseInt(localStorage.getItem(SKY_TIME_KEY), 10);
+    if(Number.isFinite(t) && t >= 0 && t < 1440) minutes = t;
+  }catch(err){}
+  return {mode, minutes};
+}
+function renderSkyToggle(){
+  const m = getSkyMode();
+  document.querySelectorAll('#skyToggle .toggle').forEach(b=>{
+    b.classList.toggle('sel', b.dataset.sky === m);
+  });
+  const box = $('#skyControls');
+  if(box) box.hidden = m !== 'daynight';
+}
+/* The readout and the two inputs, pushed FROM the sky module rather than from whatever
+   the DOM last had in it. That direction matters on a map swap: the clock is unchanged
+   but the place is not, so sunrise, the phase and the time zone all move without anybody
+   touching a control. */
+function renderSkyUI(){
+  renderSkyToggle();
+  const c = getSkyClock();
+  const d = $('#skyDate');
+  if(d) d.value = c.y + '-' + String(c.m).padStart(2,'0') + '-' + String(c.day).padStart(2,'0');
+  const t = $('#skyTime'), tv = $('#skyTimeVal');
+  if(t) t.value = c.minutes;
+  if(tv) tv.textContent = fmtClock(c.minutes);
+  const note = $('#skyNote');
+  if(note){
+    const where = getMapLatLon();
+    note.textContent = skyReadout()
+      + (getSkyMode()==='daynight' && where
+          ? '  ·  📍 ' + where.lat.toFixed(2) + '°, ' + where.lon.toFixed(2) + '°'
+          : '');
+  }
+}
+function applySkyMode(m, remember){
+  /* setSkyMode answers whether anything changed, so re-picking the mode you are already
+     in does not push a full relight through the scene. */
+  if(setSkyMode(m)){
+    /* THE THEME FIRST, THEN THE CLOCK. Leaving day/night has to put back the theme's own
+       sky, fog colour and ambient levels, and world.js owns those -- calling its
+       applyThemeLighting is what restores them, and its own tail re-applies the overlay
+       for the other direction. One call, both ways round. */
+    applyThemeLighting();
+  }
+  if(remember){ try{ localStorage.setItem(SKY_MODE_KEY, getSkyMode()); }catch(err){} }
+  renderSkyUI();
+}
+document.querySelectorAll('#skyToggle .toggle').forEach(b=>{
+  b.addEventListener('click', ()=> applySkyMode(b.dataset.sky, true));
+});
+$('#skyDate')?.addEventListener('change', e=>{
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(e.target.value||''));
+  if(!m) return;                       // an empty or half-typed date is not a date yet
+  setSkyClock({y:+m[1], m:+m[2], day:+m[3]});
+  renderSkyUI();
+});
+$('#skyTime')?.addEventListener('input', e=>{
+  const mins = clamp(parseInt(e.target.value, 10) || 0, 0, 1439);
+  setSkyClock({minutes: mins});
+  try{ localStorage.setItem(SKY_TIME_KEY, String(mins)); }catch(err){}
+  renderSkyUI();
+});
+$('#skyNowBtn')?.addEventListener('click', ()=>{
+  setSkyClock(nowClock());
+  // "now" is a request to stop holding a time, so the saved one goes with it
+  try{ localStorage.removeItem(SKY_TIME_KEY); }catch(err){}
+  renderSkyUI();
+});
+(function initSky(){
+  const pref = readSkyPrefs();
+  const c = nowClock();
+  if(pref.minutes != null) c.minutes = pref.minutes;
+  setSkyClock(c);
+  applySkyMode(pref.mode, false);
+})();
+
 $('#randomPupBtn')?.addEventListener('click', ()=>{
   const params = randomPupParams();
   mode='dog'; browseMode='dog'; dogChoice={label:'random:'+params.name, params};
@@ -2918,6 +3028,8 @@ function refreshMapUI(){
   renderSpotList();
   renderCourseUI();
   syncCourseOverlay();
+  // a new map is a new latitude, longitude and time zone: same clock, different sunrise
+  renderSkyUI();
 }
 
 /* --- loaded GeoJSON file chips ---
