@@ -4894,7 +4894,7 @@ async function assertAll(window, errors, stats) {
   /* ---------- the seven-bridges map: water, bridges, decks ----------
      Loaded here, measured, and the default map put back, like the coarse-DEM block. */
   const sb = await (0,eval)(`(async()=>{
-    await loadWorld('../data/sevenbridgesworld.json', [], 3);
+    await loadWorld('../data/sevenBridgesWorld.json', [], 3);
     const G=getGraph(), W=getWaterways(), B=getBridges(), VS=getVertScale();
     const named = n => G.edges.filter(e=>e.name===n);
     const out = {

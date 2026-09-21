@@ -3106,7 +3106,11 @@ async function boot(bundleUrl){
     onTrailhead: i => showHereHead(i),
     onSpot: sp => { placeAtSpot(sp); if(!playing) enterPlay(); showPane(null); },
   });
-  await loadMap(bundleUrl || DEFAULT_WORLD, !bundleUrl);
+  await loadMapList();
+  const startUrl = bundleUrl || DEFAULT_WORLD;
+  const mapSel = $('#mapList');
+  if(mapSel && [...mapSel.options].some(o => o.value === startUrl)) mapSel.value = startUrl;
+  await loadMap(startUrl, !bundleUrl);
   renderRoster();
   refreshMapUI();
   // seat an avatar unconditionally. With a map that means the chosen trailhead; without
@@ -3156,13 +3160,72 @@ async function loadMap(url, isDefault){
   }
 }
 
-$('#defaultMapBtn')?.addEventListener('click', async ()=>{
-  // the default map is a DEM bundle, not dropped GeoJSON files -- it doesn't belong in
-  // the file-chip list, and replaces whatever chips/EXTRA layers were there
+/* THE MAP LIST COMES FROM data/maps.json, not this file. Adding a map to the game is a
+   commit and one line in that manifest -- see its own comment for the format -- and
+   nothing here needs to know a map exists until this fetch finds it. The three <option>s
+   already sitting in trails/index.html are the fallback for a plain file:// open or an
+   offline dev server where the fetch can't land: on failure they are left exactly as
+   they are, so the dropdown still has something in it and still works, it just doesn't
+   show anything added since. On success they are replaced outright, in the manifest's
+   own order, and whichever value the dropdown already shows is preserved as the current
+   selection if the new list still contains it. (Mirrors loadMapList in src/neon/main.js.) */
+async function loadMapList(){
+  const sel = $('#mapList');
+  if(!sel) return;
+  const keep = sel.value;
+  try{
+    const res = await fetch('../data/maps.json');
+    if(!res.ok) throw new Error('maps.json ' + res.status);
+    const manifest = await res.json();
+    const list = Array.isArray(manifest && manifest.maps) ? manifest.maps : null;
+    if(!list || !list.length) throw new Error('maps.json has no maps');
+    sel.textContent = '';
+    for(const m of list){
+      if(!m || !m.url) continue;
+      const o = document.createElement('option');
+      o.value = m.url;
+      o.textContent = m.name || m.url.replace(/^.*\//, '');
+      sel.appendChild(o);
+    }
+    if(!sel.options.length) throw new Error('maps.json had no usable entries');
+    if([...sel.options].some(o => o.value === keep)) sel.value = keep;
+  }catch(err){
+    // offline, no server, or a malformed file: keep the three built-in options as they are
+    console.warn('could not load ../data/maps.json, using the built-in map list:', err);
+  }
+}
+$('#mapList')?.addEventListener('change', async e=>{
+  const url = e.target.value;
+  if(!url) return;
+  // picking a map is a whole new DEM bundle, not dropped GeoJSON files -- it doesn't
+  // belong in the file-chip list, and replaces whatever chips/EXTRA layers were there
   loadedFiles=[];
   renderFileChips();
-  if(await loadMap(DEFAULT_WORLD, true)){ refreshMapUI(); placeAtHead(pickDefaultHead()); }
+  if(await loadMap(url, url === DEFAULT_WORLD)){ refreshMapUI(); placeAtHead(pickDefaultHead()); }
 });
+
+/* Collapse/expand for the Trail map section. #mapListRow (the map picker) sits outside
+   #mapSectBody in the markup for exactly this reason -- collapsing hides the drop zone,
+   sliders and stats, but switching maps has to keep working regardless, or collapsing
+   becomes a trap. State is remembered per browser the same way sound/detail/sky are. */
+const MAP_SECT_KEY = 'pupMapSectOpen';
+const mapSectToggle = $('#mapSectToggle');
+const mapSectBody = $('#mapSectBody');
+function setMapSectOpen(open, remember){
+  if(!mapSectBody || !mapSectToggle) return;
+  mapSectBody.hidden = !open;
+  mapSectToggle.textContent = open ? '▾' : '▸';
+  mapSectToggle.title = open ? 'Collapse' : 'Expand';
+  mapSectToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  mapSectToggle.setAttribute('aria-label', (open ? 'Collapse' : 'Expand') + ' trail map settings');
+  if(remember){ try{ localStorage.setItem(MAP_SECT_KEY, open ? '1' : '0'); }catch(err){} }
+}
+if(mapSectToggle && mapSectBody){
+  let startOpen = true;
+  try{ startOpen = localStorage.getItem(MAP_SECT_KEY) !== '0'; }catch(err){}
+  setMapSectOpen(startOpen, false);
+  mapSectToggle.addEventListener('click', ()=> setMapSectOpen(mapSectBody.hidden, true));
+}
 tapBtn($('#touchBarkBtn'), doBark);
 tapBtn($('#tJump'), trailJump);
 tapBtn($('#tSneak'), toggleSneak);

@@ -121,6 +121,16 @@ body[data-pane="map"] #paneDrawer{width:100%;border-right-color:transparent;box-
 #paneBody{flex:1;position:relative;min-height:0;}
 .sect{border:3px solid var(--ink);border-radius:16px;background:#fff;padding:12px;margin-bottom:14px;}
 .sect h2{margin:0 0 8px;font-size:15px;}
+/* Collapsible section header (currently just Trail map). The toggle sits beside the
+   heading rather than replacing it as the click target, so the map dropdown right below
+   -- which stays visible collapsed or not -- is never mistaken for part of the toggle. */
+.sect-head{display:flex;align-items:center;justify-content:space-between;margin:0 0 8px;}
+.sect-head h2{margin:0;}
+.sect-toggle{flex:none;width:32px;height:32px;padding:0;font-size:14px;line-height:1;
+  border:3px solid var(--ink);border-radius:10px;background:#fff;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;}
+.sect-toggle:hover{background:var(--cream);}
+#mapListRow{margin-top:0;}
 .hint{font-size:11.5px;opacity:.65;}
 /* left:58px, not 10px -- #paneTabs owns the left edge from the top down.
    touch-action:none for the same reason as #paneTabs and #miniWrap -- this readout sits
@@ -132,15 +142,17 @@ body.play #playHud{display:block;}
 .io-row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;}
 .io-row .btn{flex:1;text-align:center;}
 /* display:flex above beats the UA's [hidden]{display:none}, exactly as .pup-grid does,
-   so a hidden io-row stays on screen unless this says otherwise. #mapListRow ships
-   hidden and only appears if data/maps.json parsed. */
+   so a hidden io-row would stay on screen unless this says otherwise. Nothing currently
+   ships an io-row hidden, but a future one shouldn't have to rediscover this. */
 .io-row[hidden]{display:none;}
-/* The link box wants the whole row; its button keeps the .btn flex:1 above from
-   stretching it to half the panel. */
+/* Still shares a row with a button elsewhere (the sky-clock date field), so it keeps
+   its own flex-basis rather than assuming it has the row to itself. */
 .io-row .url-in{flex:3 1 60%;min-width:0;font:inherit;font-size:11.5px;
   border:2px solid var(--ink);border-radius:10px;padding:6px 8px;background:var(--cream);}
 .io-row .url-in:focus{outline:none;border-color:var(--orange);background:#fff;}
-.io-row select{flex:2 1 55%;min-width:0;font:inherit;font-size:11.5px;font-weight:bold;
+/* Full-width: #mapList is the only io-row select and, unlike the removed url+button
+   link row, has no neighbor to share the row with. */
+.io-row select{flex:1 1 100%;min-width:0;font:inherit;font-size:11.5px;font-weight:bold;
   border:2px solid var(--ink);border-radius:10px;padding:6px 8px;background:var(--cream);}
 #mapNote{margin:8px 0 0;}
 .ctl{margin-top:10px;}
@@ -634,62 +646,63 @@ body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
           <aside id="panel">
             <p class="hint panel-lede">Change anything while you walk — you stay where you
               are standing. Switch to 🗺 Map to move somewhere else.</p>
-            <div class="sect">
-              <h2>🗺️ Trail map</h2>
-              <label class="dropzone" id="dropzone" for="worldFile">
-                <span class="dz-main">Drop your <code>.geojson</code> layers here<br>or tap to browse</span>
-                <span class="dz-sub">trails, points &amp; areas &mdash; <code>.txt</code> is fine too</span>
-              </label>
-              <!-- .txt and text/plain are here for iPadOS, which appends .txt to anything it
-                   downloads and gives you no way to take it off again. The picker filters by
-                   name; loadFiles has never cared about the name, so widening the filter is
-                   the whole fix. If a device still greys the file out, the link box below
-                   skips the download entirely. -->
-              <input type="file" id="worldFile" accept=".geojson,.json,.txt,application/geo+json,application/json,text/plain" multiple hidden>
-              <div id="fileChips" class="file-chips"></div>
-              <div class="io-row" id="mapListRow" hidden>
-                <select id="mapList" aria-label="Map list"></select>
-                <button class="btn small" id="mapListBtn">Open map</button>
+            <div class="sect" id="mapSect">
+              <div class="sect-head">
+                <h2>🗺️ Trail map</h2>
+                <button class="sect-toggle" id="mapSectToggle" type="button"
+                        aria-expanded="true" aria-controls="mapSectBody"
+                        title="Collapse" aria-label="Collapse trail map settings">▾</button>
               </div>
-              <div class="io-row">
-                <input type="url" id="mapUrl" class="url-in" inputmode="url" autocapitalize="off"
-                       autocorrect="off" spellcheck="false"
-                       placeholder="Paste a GitHub link to a .geojson">
-                <button class="btn small" id="mapUrlBtn">Load link</button>
+              <!-- Lives outside #mapSectBody on purpose: collapsing the section hides the
+                   file drop zone, sliders and stats, but switching maps has to keep working
+                   with it collapsed, or collapsing becomes a trap for anyone who only wanted
+                   the clutter gone. THE OPTIONS COME FROM data/maps.json (see loadMapList in
+                   main.js); the three below are the offline/file:// fallback only. -->
+              <div class="io-row" id="mapListRow">
+                <select id="mapList" aria-label="Choose a map">
+                  <option value="../data/world.json">Garden of the Gods</option>
+                  <option value="../data/rrworld.json">Red Rocks</option>
+                  <option value="../data/pikesworld.json">Pikes Peak</option>
+                </select>
               </div>
-              <div class="io-row">
-                <button class="btn small" id="saveCombinedBtn">↓ Save combined</button>
-                <button class="btn small" id="clearLayersBtn">Clear map</button>
+              <div id="mapSectBody">
+                <label class="dropzone" id="dropzone" for="worldFile">
+                  <span class="dz-main">Drop your <code>.geojson</code> layers here<br>or tap to browse</span>
+                  <span class="dz-sub">trails, points &amp; areas &mdash; <code>.txt</code> is fine too</span>
+                </label>
+                <!-- .txt and text/plain are here for iPadOS, which appends .txt to anything it
+                     downloads and gives you no way to take it off again. The picker filters by
+                     name; loadFiles has never cared about the name, so widening the filter is
+                     the whole fix. -->
+                <input type="file" id="worldFile" accept=".geojson,.json,.txt,application/geo+json,application/json,text/plain" multiple hidden>
+                <div id="fileChips" class="file-chips"></div>
+                <div class="io-row">
+                  <button class="btn small" id="saveCombinedBtn">↓ Save combined</button>
+                  <button class="btn small" id="clearLayersBtn">Clear map</button>
+                </div>
+                <div class="ctl">
+                  <label>World scale <span class="val" id="worldScaleVal">1 : 1</span></label>
+                  <input type="range" id="worldScale" min="0" max="1000" step="1" value="0">
+                </div>
+                <div class="ctl">
+                  <label>Hill exaggeration <span class="val" id="vertScaleVal">1.00×</span></label>
+                  <input type="range" id="vertScale" min="0" max="1000" step="1" value="707">
+                </div>
+                <div class="ctl">
+                  <label>Contour step <span class="val" id="contourVal">3.0 m</span></label>
+                  <input type="range" id="contourStep" min="0.5" max="12" step="0.5" value="3">
+                </div>
+                <p class="hint">1:1 is true size; a bigger N packs the map into a shorter walk.
+                  Hill exaggeration follows it automatically so slopes stay true — nudge it
+                  yourself afterwards if you want them flatter or wilder. Contour step is metres
+                  of real elevation per terrace.</p>
+                <div class="statbox" id="mapStats"></div>
+                <div id="trailList" class="trail-list"></div>
+                <p class="hint" id="mapNote">Loading map…</p>
+                <p class="hint">Pick a map above, or drop your own <code>.geojson</code> layers on
+                  top of it. Pass <code>?world=…</code> in the URL to open one directly. Maps
+                  listed in <code>data/maps.json</code> show up in the dropdown on every device.</p>
               </div>
-              <div class="ctl">
-                <label>World scale <span class="val" id="worldScaleVal">1 : 1</span></label>
-                <input type="range" id="worldScale" min="0" max="1000" step="1" value="0">
-              </div>
-              <div class="ctl">
-                <label>Hill exaggeration <span class="val" id="vertScaleVal">1.00×</span></label>
-                <input type="range" id="vertScale" min="0" max="1000" step="1" value="707">
-              </div>
-              <div class="ctl">
-                <label>Contour step <span class="val" id="contourVal">3.0 m</span></label>
-                <input type="range" id="contourStep" min="0.5" max="12" step="0.5" value="3">
-              </div>
-              <p class="hint">1:1 is true size; a bigger N packs the map into a shorter walk.
-                Hill exaggeration follows it automatically so slopes stay true — nudge it
-                yourself afterwards if you want them flatter or wilder. Contour step is metres
-                of real elevation per terrace.</p>
-              <div class="statbox" id="mapStats"></div>
-              <div id="trailList" class="trail-list"></div>
-              <p class="hint" id="mapNote">Loading map…</p>
-              <div class="io-row">
-                <button class="btn small" id="defaultMapBtn">🏜️ Default map</button>
-              </div>
-              <p class="hint">Garden of the Gods loads by default. Drop a
-                <code>pup-world/1</code> bundle for real elevation, or pass
-                <code>?world=…</code> in the URL.</p>
-              <p class="hint">On a tablet, use the link box rather than downloading: paste the
-                <b>github.com</b> page link for a map file and it is fetched straight from the
-                repo — no file, no renaming. Maps listed in <code>data/maps.json</code> show up
-                in the list above on every device.</p>
             </div>
             <div class="sect">
               <h2>🏞️ Landscape</h2>
@@ -15842,7 +15855,11 @@ async function boot(bundleUrl){
     onTrailhead: i => showHereHead(i),
     onSpot: sp => { placeAtSpot(sp); if(!playing) enterPlay(); showPane(null); },
   });
-  await loadMap(bundleUrl || DEFAULT_WORLD, !bundleUrl);
+  await loadMapList();
+  const startUrl = bundleUrl || DEFAULT_WORLD;
+  const mapSel = $('#mapList');
+  if(mapSel && [...mapSel.options].some(o => o.value === startUrl)) mapSel.value = startUrl;
+  await loadMap(startUrl, !bundleUrl);
   renderRoster();
   refreshMapUI();
   // seat an avatar unconditionally. With a map that means the chosen trailhead; without
@@ -15892,13 +15909,72 @@ async function loadMap(url, isDefault){
   }
 }
 
-$('#defaultMapBtn')?.addEventListener('click', async ()=>{
-  // the default map is a DEM bundle, not dropped GeoJSON files -- it doesn't belong in
-  // the file-chip list, and replaces whatever chips/EXTRA layers were there
+/* THE MAP LIST COMES FROM data/maps.json, not this file. Adding a map to the game is a
+   commit and one line in that manifest -- see its own comment for the format -- and
+   nothing here needs to know a map exists until this fetch finds it. The three <option>s
+   already sitting in trails/index.html are the fallback for a plain file:// open or an
+   offline dev server where the fetch can't land: on failure they are left exactly as
+   they are, so the dropdown still has something in it and still works, it just doesn't
+   show anything added since. On success they are replaced outright, in the manifest's
+   own order, and whichever value the dropdown already shows is preserved as the current
+   selection if the new list still contains it. (Mirrors loadMapList in src/neon/main.js.) */
+async function loadMapList(){
+  const sel = $('#mapList');
+  if(!sel) return;
+  const keep = sel.value;
+  try{
+    const res = await fetch('../data/maps.json');
+    if(!res.ok) throw new Error('maps.json ' + res.status);
+    const manifest = await res.json();
+    const list = Array.isArray(manifest && manifest.maps) ? manifest.maps : null;
+    if(!list || !list.length) throw new Error('maps.json has no maps');
+    sel.textContent = '';
+    for(const m of list){
+      if(!m || !m.url) continue;
+      const o = document.createElement('option');
+      o.value = m.url;
+      o.textContent = m.name || m.url.replace(/^.*\//, '');
+      sel.appendChild(o);
+    }
+    if(!sel.options.length) throw new Error('maps.json had no usable entries');
+    if([...sel.options].some(o => o.value === keep)) sel.value = keep;
+  }catch(err){
+    // offline, no server, or a malformed file: keep the three built-in options as they are
+    console.warn('could not load ../data/maps.json, using the built-in map list:', err);
+  }
+}
+$('#mapList')?.addEventListener('change', async e=>{
+  const url = e.target.value;
+  if(!url) return;
+  // picking a map is a whole new DEM bundle, not dropped GeoJSON files -- it doesn't
+  // belong in the file-chip list, and replaces whatever chips/EXTRA layers were there
   loadedFiles=[];
   renderFileChips();
-  if(await loadMap(DEFAULT_WORLD, true)){ refreshMapUI(); placeAtHead(pickDefaultHead()); }
+  if(await loadMap(url, url === DEFAULT_WORLD)){ refreshMapUI(); placeAtHead(pickDefaultHead()); }
 });
+
+/* Collapse/expand for the Trail map section. #mapListRow (the map picker) sits outside
+   #mapSectBody in the markup for exactly this reason -- collapsing hides the drop zone,
+   sliders and stats, but switching maps has to keep working regardless, or collapsing
+   becomes a trap. State is remembered per browser the same way sound/detail/sky are. */
+const MAP_SECT_KEY = 'pupMapSectOpen';
+const mapSectToggle = $('#mapSectToggle');
+const mapSectBody = $('#mapSectBody');
+function setMapSectOpen(open, remember){
+  if(!mapSectBody || !mapSectToggle) return;
+  mapSectBody.hidden = !open;
+  mapSectToggle.textContent = open ? '▾' : '▸';
+  mapSectToggle.title = open ? 'Collapse' : 'Expand';
+  mapSectToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  mapSectToggle.setAttribute('aria-label', (open ? 'Collapse' : 'Expand') + ' trail map settings');
+  if(remember){ try{ localStorage.setItem(MAP_SECT_KEY, open ? '1' : '0'); }catch(err){} }
+}
+if(mapSectToggle && mapSectBody){
+  let startOpen = true;
+  try{ startOpen = localStorage.getItem(MAP_SECT_KEY) !== '0'; }catch(err){}
+  setMapSectOpen(startOpen, false);
+  mapSectToggle.addEventListener('click', ()=> setMapSectOpen(mapSectBody.hidden, true));
+}
 tapBtn($('#touchBarkBtn'), doBark);
 tapBtn($('#tJump'), trailJump);
 tapBtn($('#tSneak'), toggleSneak);
