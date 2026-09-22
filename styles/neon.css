@@ -41,6 +41,31 @@ select{font:inherit; color:var(--text); background:#0a1026; border:1px solid var
 body[data-screen="menu"] #menu{display:flex;}
 body[data-screen="finish"] #finish{display:flex;}
 body[data-screen="pause"] #pause{display:flex;}
+body[data-screen="build"] #build{display:flex;}
+
+/* --- BUILD: the map is the screen --- */
+#buildCard{width:min(1100px,100%); height:100%; display:flex; flex-direction:column; gap:10px;
+  background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px;}
+#buildCard header{display:flex; align-items:baseline; gap:14px; flex-wrap:wrap;}
+#buildTitle{margin:0; font-size:13px; letter-spacing:.2em; color:var(--cyan);}
+#buildInfo{margin:0; color:var(--dim); font-size:13px;}
+#buildMapWrap{position:relative; flex:1 1 auto; min-height:0;}
+/* touch-action:none on BOTH the canvas and its wrapper: a drag that starts on the canvas
+   and crosses onto the wrapper's padding otherwise cancels the pointer mid-pan. */
+#buildMapWrap, #buildMap{touch-action:none;}
+#buildMap{width:100%; height:100%; display:block; border:1px solid var(--line);
+  border-radius:4px; background:#05081a; cursor:crosshair;}
+#buildZoom{position:absolute; right:10px; top:10px; display:flex; flex-direction:column; gap:6px;}
+#buildZoom .btn{min-width:42px; padding:8px 10px; background:rgba(8,12,26,.85);}
+#buildBar{display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+#buildName{flex:1 1 200px; min-width:140px; font:inherit; color:var(--text); background:#0a1026;
+  border:1px solid var(--line); border-radius:4px; padding:8px 10px;}
+#buildBar .btn{padding:8px 12px;}
+
+@media (max-width:720px){
+  #buildCard{padding:10px 12px;}
+  #buildName{flex-basis:100%;}
+}
 
 #menuCard{width:min(980px,100%); max-height:100%; display:flex; flex-direction:column;
   background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px 18px;}
@@ -71,6 +96,20 @@ h2{margin:0 0 8px; font-size:12px; letter-spacing:.2em; color:var(--dim); font-w
 #startBtn{position:sticky; top:0; z-index:2; width:100%; margin:2px 0 4px; font-size:17px;
   letter-spacing:.28em; background:var(--panel);}
 .row{display:flex; align-items:center; justify-content:space-between; gap:10px;}
+/* .row sets display, and a bare [hidden] is only a UA default -- without this, hiding the
+   custom-mode bar does nothing at all. Same trap the pup grid hit in Pup Trails. */
+.row[hidden]{display:none;}
+.row input[type=range]{width:55%; max-width:220px; accent-color:var(--cyan);}
+/* The colour slider's track is the colour wheel itself, so the thumb shows where you are
+   on it. appearance:none is what lets the gradient through; the thumb is restyled to
+   match because it loses its default look with it. */
+.row input.gridHue{-webkit-appearance:none; appearance:none; height:8px; border-radius:4px;
+  background:linear-gradient(to right,#1a2cff,#b01aff,#ff1a8c,#ff5a1a,#ffe11a,#3cff1a,#1affd0,#1a8cff,#1a2cff);}
+.row input.gridHue::-webkit-slider-thumb{-webkit-appearance:none; width:16px; height:16px; border-radius:50%;
+  background:var(--text); border:2px solid var(--panel);}
+.row input.gridHue::-moz-range-thumb{width:14px; height:14px; border-radius:50%; background:var(--text);
+  border:2px solid var(--panel);}
+#customBar{justify-content:flex-start; margin:0 0 8px;}
 .seg{display:inline-flex; gap:4px;}
 .stepper{display:inline-flex; align-items:center; gap:10px;}
 .stepper b{min-width:1.5em; text-align:center; color:var(--cyan);}
@@ -101,24 +140,30 @@ body[data-screen="race"] #hud, body[data-screen="count"] #hud, body[data-screen=
 #hudB{left:50%; bottom:calc(14px + var(--safe-b)); transform:translateX(-50%); text-align:center; text-shadow:0 0 8px #000;}
 #speedVal{font-size:44px; line-height:1; color:var(--text);}
 #speedUnit{font-size:11px; letter-spacing:.3em; color:var(--dim);}
-/* THE ROCKET RACK. Each rocket is one element: a body, a nose (the ::before triangle) and
-   fins (::after), drawn in CSS so the HUD stays a DOM overlay with no canvas of its own.
-   Spent ones keep their outline, so the rack shows what you had as well as what is left. */
-#fuelRack{display:flex; gap:14px; justify-content:center; margin:12px 0 4px; height:30px;}
-.rocket{position:relative; width:11px; height:21px; border-radius:3px 3px 1px 1px;
-  border:1.5px solid var(--line); background:transparent; opacity:.55;}
-.rocket::before{content:""; position:absolute; left:50%; top:-9px; transform:translateX(-50%);
-  border-left:5.5px solid transparent; border-right:5.5px solid transparent; border-bottom:9px solid var(--line);}
-.rocket::after{content:""; position:absolute; left:-5px; right:-5px; bottom:0; height:7px;
-  border-left:1.5px solid var(--line); border-right:1.5px solid var(--line);
-  clip-path:polygon(0 100%, 30% 0, 70% 0, 100% 100%);}
-.rocket.on{opacity:1; border-color:var(--lime); background:rgba(182,255,60,.22);
+/* THE NITRO RACK. Each tank is one element: a rounded capsule body with a band across it,
+   a valve on top (::before) and a fill gauge window down the middle (::after), drawn in
+   CSS so the HUD stays a DOM overlay with no canvas of its own. Spent ones keep their
+   outline, so the rack shows what you had as well as what is left. */
+#fuelRack{display:flex; gap:12px; justify-content:center; margin:14px 0 4px; height:30px;}
+.tank{position:relative; width:14px; height:24px; margin-top:5px; border-radius:7px;
+  border:1.5px solid var(--line); background:transparent; opacity:.55;
+  background-image:linear-gradient(transparent 28%, var(--line) 28%, var(--line) 36%, transparent 36%);}
+.tank::before{content:""; position:absolute; left:50%; top:-7px; transform:translateX(-50%);
+  width:6px; height:4px; border:1.5px solid var(--line); border-bottom:none; border-radius:2px 2px 0 0;}
+.tank::after{content:""; position:absolute; left:50%; bottom:4px; transform:translateX(-50%);
+  width:3px; height:9px; border-radius:2px; background:transparent;}
+.tank.on{opacity:1; border-color:var(--lime); background-color:rgba(182,255,60,.18);
+  background-image:linear-gradient(transparent 28%, var(--lime) 28%, var(--lime) 36%, transparent 36%);
   box-shadow:0 0 8px rgba(182,255,60,.5);}
-.rocket.on::before{border-bottom-color:var(--lime);}
-.rocket.on::after{border-color:var(--lime);}
-.rocket.firing{opacity:1; border-color:var(--mag); box-shadow:0 0 12px var(--mag);
-  animation:rocketFire .28s linear infinite;}
-@keyframes rocketFire{ 50%{ box-shadow:0 0 4px var(--mag); } }
+.tank.on::before{border-color:var(--lime);}
+.tank.on::after{background:var(--lime); box-shadow:0 0 4px var(--lime);}
+.tank.firing{opacity:1; border-color:var(--mag); box-shadow:0 0 12px var(--mag);
+  background-image:linear-gradient(transparent 28%, var(--mag) 28%, var(--mag) 36%, transparent 36%);
+  animation:tankFire .28s linear infinite;}
+.tank.firing::before{border-color:var(--mag);}
+.tank.firing::after{background:var(--mag); animation:tankDrain 1.6s linear forwards;}
+@keyframes tankFire{ 50%{ box-shadow:0 0 4px var(--mag); } }
+@keyframes tankDrain{ to{ height:0; } }
 #burnPip{font-size:11px; letter-spacing:.2em; color:var(--dim); margin-top:4px; min-height:1.2em;}
 #burnPip.hot{color:var(--lime);}
 #slopeVal{font-size:12px; color:var(--dim); min-height:1.3em; margin-top:3px;}

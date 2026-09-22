@@ -40,18 +40,32 @@ const NEON = {
   bumpRestitution: 0.65,// how much of the into-wall angle comes back out
   bumpKick:   0.16,     // rad, minimum angle you leave the wall at
   bumpLock:   0.18,     // s of reduced steering after a hit, so it reads as a bounce
-  /* --- boost: a rack of rockets, one burn each ---
+  /* Repeat offenders. A wall hit inside bumpWindow of the last one is the SAME mistake
+     compounding, not a fresh one: the first costs bumpKeep as always, the second keeps
+     only bumpKeep2 of what is left, and the third spins you out to a standstill. Leave the
+     window and the count starts again at one. */
+  bumpWindow: 1.5,      // s between hits for them to count as a streak
+  bumpKeep2:  0.55,     // speed kept on the 2nd hit of a streak (1st hit uses bumpKeep)
+  spinS:      1.1,      // s spent spinning after the 3rd hit: no thrust, no steering
+  spinTurns:  2,        // full turns the rider makes in that time (visual only)
+  /* --- ghosts are solid --- a record you can lean on. A shove pushes one off its line
+     and knocks its playback clock back; it then eases back onto the recorded line, and
+     the time it lost is added to its finish. Never solid to its own rider. */
+  ghostKnock:   0.30,   // playback rate drops by at least this on contact
+  ghostRecoverS:1.2,    // s time constant for the rate to come back to 1
+  ghostRightW:  2.4,    // rad/s, critically damped spring pulling it back onto its line
+  /* --- boost: a rack of nitro tanks, one burn each ---
      Nothing recharges. You start with a couple and everything after that is picked up off
      the track, which is what makes the cells worth going out of your way for and a burn
      worth saving for the straight that matters. */
   burnS:      1.6,      // how long a burn lasts
   burnLock:   0.45,     // dead time after a burn, so it reads as a discrete shove
-  fuelStart:  2,        // rockets on the rack at the lights
+  fuelStart:  2,        // nitro tanks on the rack at the lights
   fuelMax:    5,
-  // --- rocket pickups sitting on the course ---
+  // --- nitro pickups sitting on the course ---
   cellEveryM: 240,      // one every so many metres of track
   cellGrab:   1.5,      // how close across the track you have to pass
-  cellBackS:  9,        // seconds before a taken rocket comes back
+  cellBackS:  9,        // seconds before a taken tank comes back
   // --- racers bumping each other ---
   bodyLen:    2.6,
   bodyWide:   1.5,

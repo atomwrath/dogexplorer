@@ -159,7 +159,7 @@ function makeRider(who, color, seed, sizeK){
 function poseRider(R, racer, x, y, z, pitch, t, dt){
   const hover = (Math.sin(t*3.1 + R.seed)*0.035 + Math.sin(t*7.7 + R.seed*2)*0.012)*R.K;
   R.root.position.set(x, y + hover, z);
-  R.root.rotation.y = racer.yaw;
+  R.root.rotation.y = racer.yaw + (racer.spinYaw || 0);     // a spin-out turns the rider, not the physics heading
   R.tilt.rotation.z = pitch;
   R.tilt.rotation.x = racer.lean*1.4 + (racer.bumpT > 0 ? -racer.bumpSide*racer.bumpT*1.6 : 0);
   // stance: paws planted wide, knees taking up the bumps, tucked low under boost

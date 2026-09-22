@@ -17,6 +17,7 @@ function makeRacer(o){
     bumpT: 0, bumpSide: 0, bumps: 0, lean: 0, time: 0, done: false, finishT: null,
     place: 0, isPlayer: false, name: '?', skill: null, lane: 0, seed: 1, wob: 0,
     steerIn: 0, slope: 0, speedK: 1, burnT: 0, lockT: 0, boostWasDown: false, cells: 0,
+    bumpStreak: 0, lastBumpT: -1e9, spinT: 0, spinYaw: 0, spins: 0, riderId: null,
   }, o || {});
 }
 
@@ -83,7 +84,17 @@ function stepRacer(r, T, input, env, dt){
   }else r.burnFired = false;
   r.boostWasDown = wants;
   const boosting = r.burnT > 0;
-  let a = NEON.thrust*k2*(r.done ? 0 : input.throttle) + (boosting ? NEON.boostThrust*k2 : 0);
+  /* SPUN OUT: no drive and no hands until it stops. The yaw offset is visual only (the
+     rider turns on the deck); physics heading is untouched so the board comes out of it
+     pointing down the track rather than wherever the spin happened to leave it. */
+  const spinning = r.spinT > 0;
+  if(spinning){
+    r.spinT = Math.max(0, r.spinT - dt);
+    const u = 1 - r.spinT/NEON.spinS;                 // 0 .. 1, fast then settling
+    r.spinYaw = 2*Math.PI*NEON.spinTurns*(1 - (1-u)*(1-u));
+    if(r.spinT <= 0) r.spinYaw = 0;
+  }
+  let a = NEON.thrust*k2*(r.done || spinning ? 0 : input.throttle) + (boosting && !spinning ? NEON.boostThrust*k2 : 0);
   a -= NEON.dragK*r.v*r.v + NEON.rollK*r.v;
   a -= NEON.brake*(r.done ? 0.6 : input.brake);
   if(env.gravity) a -= NEON.gravity*NEON.gravityGain*slopeAlong/Math.sqrt(1+slopeAlong*slopeAlong);
@@ -95,7 +106,7 @@ function stepRacer(r, T, input, env, dt){
   const grip = r.bumpT > 0 ? 0.35 : 1;
   const rate = NEON.steerRate/(1 + r.v*NEON.steerFade);
   const dsdt = r.v*Math.cos(theta)/Math.max(0.35, 1 - r.d*f.k);
-  r.yaw += input.steer*rate*grip*dt + NEON.railAssist*f.k*dsdt*dt;
+  r.yaw += (spinning ? 0 : input.steer)*rate*grip*dt + NEON.railAssist*f.k*dsdt*dt;
   r.steerIn = input.steer;
 
   // --- position ---
@@ -118,10 +129,20 @@ function stepRacer(r, T, input, env, dt){
     if(theta*side > 0 || r.bumpT <= 0){
       const into = Math.max(0, Math.sin(theta*side));          // 0 grazing .. 1 square on
       theta = -side*Math.max(NEON.bumpKick, Math.abs(theta)*NEON.bumpRestitution);
-      const keep = NEON.bumpKeep - 0.12*into;                   // square hits cost more
+      // a streak is hits close together in RACE time; out of the window it starts over
+      r.bumpStreak = (r.time - r.lastBumpT <= NEON.bumpWindow) ? r.bumpStreak + 1 : 1;
+      r.lastBumpT = r.time;
+      let keep = NEON.bumpKeep - 0.12*into;                     // square hits cost more
+      if(r.bumpStreak === 2) keep *= NEON.bumpKeep2;
+      let spin = false;
+      if(r.bumpStreak >= 3 && r.spinT <= 0){
+        keep = 0; spin = true;
+        r.spinT = NEON.spinS; r.spins++; r.bumpStreak = 0;
+        r.burnT = 0;                                            // a spin puts the burn out
+      }
       r.v *= keep;
       r.bumpT = NEON.bumpLock; r.bumpSide = side; r.bumps++;
-      ev = {bump: side, hard: Math.min(1, 0.35 + into)};
+      ev = {bump: side, hard: spin ? 1 : Math.min(1, 0.35 + into), streak: spin ? 3 : r.bumpStreak, spin};
     }
   }
   r.yaw = g.yaw + theta;
@@ -218,21 +239,62 @@ function resolveContacts(racers, T){
   for(let i = 0; i < racers.length; i++) for(let j = i+1; j < racers.length; j++){
     const a = racers[i], b = racers[j];
     if(a.done && b.done) continue;
-    if(a.isGhost || b.isGhost) continue;        // a ghost is a record, not a rider
+    if(!contactPair(a, b)) continue;
+    if(!overlapping(a, b, T)) continue;
+    // a ghost that spawned inside somebody is not solid until it has come clear of everyone
+    if((a.isGhost && !a.solid) || (b.isGhost && !b.solid)){ ghostsBlocked.add(a.isGhost && !a.solid ? a : b); continue; }
     let ds = b.s - a.s;
     if(T.closed){ ds = ((ds % T.L) + T.L) % T.L; if(ds > T.L/2) ds -= T.L; }
     const dd = b.d - a.d;
-    if(Math.abs(ds) >= bodyLenOf(T) || Math.abs(dd) >= bodyWideOf(T)) continue;
     const push = (bodyWideOf(T) - Math.abs(dd))*0.5 + 0.01;
     const sgn = dd >= 0 ? 1 : -1;
-    a.d -= sgn*push; b.d += sgn*push;
-    a.yaw += -sgn*0.04; b.yaw += sgn*0.04;
+    shove(a, -sgn*push); shove(b, sgn*push);
+    if(!a.isGhost) a.yaw += -sgn*0.04;
+    if(!b.isGhost) b.yaw += sgn*0.04;
     // the one behind loses a little, the one in front gains a little
     const front = ds >= 0 ? b : a, rear = ds >= 0 ? a : b;
-    if(rear.v > front.v){ const m = (rear.v - front.v)*0.5; rear.v -= m*0.8; front.v += m*0.5; }
+    let vr = rear.v, vf = front.v;
+    if(vr > vf){ const m = (vr - vf)*0.5; vr -= m*0.8; vf += m*0.5; }
+    setSpeed(rear, vr); setSpeed(front, vf);
     hits.push([a, b]);
   }
+  /* Any ghost that was not caught inside someone this step is clear, and solid from now on. */
+  for(const r of racers) if(r.isGhost && !r.solid && !r.done){
+    if(ghostsBlocked.has(r)) continue;
+    let inside = false;
+    for(const q of racers) if(q !== r && !q.isGhost && contactPair(r, q) && overlapping(r, q, T)){ inside = true; break; }
+    if(!inside) r.solid = true;
+  }
+  ghostsBlocked.clear();
   return hits;
+}
+const ghostsBlocked = new Set();
+/* Who can touch whom. Ghosts do not touch each other (two records cannot argue), a
+   finished ghost is parked on the line and out of the way, and a ghost is never solid to
+   the same animal -- you cannot bump your own record. */
+function contactPair(a, b){
+  if(a.isGhost && b.isGhost) return false;
+  if((a.isGhost && a.done) || (b.isGhost && b.done)) return false;
+  if((a.isGhost || b.isGhost) && a.riderId && a.riderId === b.riderId) return false;
+  return true;
+}
+function overlapping(a, b, T){
+  let ds = b.s - a.s;
+  if(T.closed){ ds = ((ds % T.L) + T.L) % T.L; if(ds > T.L/2) ds -= T.L; }
+  return Math.abs(ds) < bodyLenOf(T) && Math.abs(b.d - a.d) < bodyWideOf(T);
+}
+/* A rider is pushed sideways; a ghost is pushed OFF ITS LINE, which it then eases back
+   onto (ghosts.js). Either way it stays between the bumpers. */
+function shove(r, dd){
+  if(r.isGhost){ r.offD = (r.offD || 0) + dd; r.d += dd; }
+  else r.d += dd;
+}
+/* A rider's speed is just its speed. A ghost's is its playback rate: it never gains from
+   a shove, and any contact at all knocks it back by at least ghostKnock. */
+function setSpeed(r, v){
+  if(!r.isGhost){ r.v = v; return; }
+  const k = r.v > 0.5 ? Math.max(0.2, Math.min(1, v/r.v)) : 1;
+  r.rate = Math.min(r.rate == null ? 1 : r.rate, k, 1 - NEON.ghostKnock);
 }
 
 function rankRacers(racers){

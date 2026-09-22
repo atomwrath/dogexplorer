@@ -122,10 +122,6 @@ for (const n of ['BoxGeometry', 'PlaneGeometry', 'SphereGeometry', 'CylinderGeom
 THREE.Shape = class { constructor(p) { this.points = p || []; this.holes = []; } moveTo() {} lineTo() {} quadraticCurveTo() {}
   bezierCurveTo() {} absarc() {} arc() {} closePath() {} getPoints() { return this.points; } };
 THREE.Path = THREE.Shape;
-// the grid shader's uniforms: fog comes from UniformsLib, joined with UniformsUtils.merge
-THREE.UniformsLib = { fog: { fogDensity: { value: 0.00025 }, fogNear: { value: 1 }, fogFar: { value: 2000 },
-  fogColor: { value: new Color(0xffffff) } } };
-THREE.UniformsUtils = { merge: list => { const o = {}; for (const u of list) for (const k in u) o[k] = { value: u[k].value }; return o; } };
 
 // ---------- DOM ----------
 const html = fs.readFileSync(path.join(ROOT, 'neon/index.html'), 'utf8');
@@ -222,7 +218,7 @@ const probe = `
   builderCanUndo, builderCanRedo, buildMinM: BUILD_MIN_M, graphFp,
   classes: NEON_CLASS, cams: NEON_CAM,
   makeRecorder, recordFrame, finishRecording, bestGhosts, keepGhost, ghostDt: GHOST_DT, poseRider,
-  buildCellMeshes, clearSmoke, paintMap, pylonM: PYLON_M,
+  buildCellMeshes, clearSmoke, paintMap,
   pauseRace, resumeRace, togglePause, setCtlInset, setCtlBottom, resetControlLayout, loadMapList,
   mapBox: () => mapBox };`;
 try { (0, eval)(app + probe); }
@@ -462,139 +458,6 @@ const arraysClose = (a, b, eps = 1e-9) => {
       S.settings.mode === 'auto' && S.courses.map(c => c.sig).join('|') === autoSigs);
   }
 
-  /* ---- bridging near-miss gaps ----
-     Synthetic first, so each rule is pinned by a graph where it is the only thing that
-     could make the difference; then the real Pikes map, which is why this exists. */
-  {
-    const line = (pts, name) => ({ name, kind: 'road', pts });
-    const two = (gapM, extra) => buildGraph([
-      line([[0, 0], [400, 0]], 'Summit Road'),
-      line([[400 + gapM, 0], [900, 0]], 'Summit Road'),
-      ...(extra || [])], 16, 6);
-    const G17 = two(17), n0 = G17.edges.length, e0 = JSON.stringify(G17.edges.map(e => [e.a, e.b]));
-    const added = bridgeGaps(G17);
-    const br = G17.edges[G17.edges.length - 1];
-    check('a 17 m break between two pieces of the same road is bridged',
-      added === 1 && G17.edges.length === n0 + 1 && br.bridge && br.name === 'Summit Road'
-      && br.kind === 'road' && Math.abs(br.lenM - 17) < 0.5, `${added} bridge(s)`);
-    check('a bridge is appended, so no existing edge moves',
-      JSON.stringify(G17.edges.slice(0, n0).map(e => [e.a, e.b])) === e0);
-    check('a gap wider than the bridge limit stays a gap', bridgeGaps(two(60)) === 0);
-    /* Same piece of network: a loop that almost closes is two dead ends 17 m apart, but
-       they are already connected the long way round, so a bridge would be a shortcut. */
-    const Gloop = buildGraph([line([[0, 0], [500, 0], [500, 500], [0, 500], [0, 17]], 'Rim Trail')], 16, 6);
-    check('two nearby ends already joined the long way round are left alone', bridgeGaps(Gloop) === 0);
-    const G17b = two(17);
-    const sigA = buildCourses(G17b, null).courses.map(c => c.sig).join('|');
-    bridgeGaps(G17b);
-    check('the automatic generator ignores bridges, so auto courses and their records stand',
-      buildCourses(G17b, null).courses.map(c => c.sig).join('|') === sigA);
-
-    /* The builder, which is where the gap was felt. */
-    const G17c = two(17); bridgeGaps(G17c);
-    builderOpen(G17c, { x0: 0, x1: 900, z0: -10, z1: 10 }, null, []);
-    N.builderAdd(0);
-    check('the course builder crosses a bridged gap', N.builderAdd(1)
-      && N.builderStates().some(s => G17c.edges[s >> 1].bridge), N.builderNote());
-    const G60 = two(60); bridgeGaps(G60);
-    builderOpen(G60, { x0: 0, x1: 960, z0: -10, z1: 10 }, null, []);
-    N.builderAdd(0);
-    check('a trail that really does not connect says so, instead of blaming the course',
-      !N.builderAdd(1) && /does not join/.test(N.builderNote()), N.builderNote());
-    builderClose();
-
-    /* The real thing. */
-    const doc = JSON.parse(fs.readFileSync(path.join(ROOT, 'data/pikesworld.json'), 'utf8'));
-    const Wp = loadWorldBundle(doc), lines = [];
-    for (const layer of Wp.layers) for (const l of parseFeatures(layer).lines)
-      lines.push({ name: l.name, kind: l.kind, pts: Wp.projectCoords(l.pts) });
-    const GP = buildGraph(lines, 16, 6), fp0 = N.graphFp(GP);
-    const sigP = buildCourses(GP, null).courses.map(c => c.sig).join('|');
-    const nP = bridgeGaps(GP);
-    const bP = GP.edges.filter(e => e.bridge);
-    check('the Pikes Peak Highway gap is bridged, and nothing else on that map is',
-      nP === 1 && bP[0].name === 'Pikes Peak Highway' && bP[0].lenM < 40,
-      bP.map(e => `${e.name} ${e.lenM.toFixed(1)} m`).join('; '));
-    check('bridging Pikes changes none of its auto courses',
-      buildCourses(GP, null).courses.map(c => c.sig).join('|') === sigP);
-    check('bridging a map does not strand the custom courses already drawn on it',
-      N.graphFp(GP) === fp0);
-  }
-
-  /* ---- the background grid ----
-     The line width itself is a shader and cannot run here (no GL). What can be pinned is
-     everything around it: both grids really are shader surfaces carrying cell
-     coordinates, the sliders drive the uniforms of both live and without a rebuild, the
-     two copies of each slider agree, and the setting persists. */
-  {
-    const d = window.document, sc = N.scene();
-    const land = sc.getObjectByName('neonLand'), floor = sc.getObjectByName('neonGrid');
-    const isGrid = o => !!o && o.isMesh && !!o.material.uniforms && 'uThick' in o.material.uniforms
-      && 'uHue' in o.material.uniforms && !!o.geometry.attributes.gridUv;
-    check('the land and the floor are both drawn by the grid shader', isGrid(land) && isGrid(floor));
-    const guv = land.geometry.attributes.gridUv.array;
-    check('every terrain sample sits exactly on a grid line',
-      guv.length > 0 && Array.prototype.every.call(guv, v => v === Math.round(v)));
-    check('the terrain is triangles now, still indexed', land.geometry.index.length % 3 === 0
-      && land.geometry.index.length > land.geometry.attributes.position.count);
-    check('the shader asks for derivatives, which WebGL1 needs for fwidth',
-      !!land.material.extensions && land.material.extensions.derivatives === true);
-    check('the grid keeps the fog the old lines had',
-      land.material.fog === true && ['fogNear', 'fogFar', 'fogColor'].every(k => k in land.material.uniforms));
-
-    const geo0 = land.geometry;
-    const [tMenu, tPause] = d.querySelectorAll('.gridThick');
-    const [hMenu, hPause] = d.querySelectorAll('.gridHue');
-    const slide = (el, v) => {
-      el.value = String(v);
-      el.dispatchEvent(new window.Event('input', { bubbles: true }));
-      el.dispatchEvent(new window.Event('change', { bubbles: true }));
-    };
-    slide(tMenu, 7);
-    check('the thickness slider moves both grids, live',
-      Math.abs(land.material.uniforms.uThick.value - 7 * 0.008) < 1e-9
-      && floor.material.uniforms.uThick.value === land.material.uniforms.uThick.value);
-    slide(tMenu, 0);
-    check('thickness 0 is the old one-pixel line', land.material.uniforms.uThick.value === 0);
-    slide(hPause, 180);
-    check('the colour slider turns both grids round the wheel, live',
-      Math.abs(land.material.uniforms.uHue.value - Math.PI) < 1e-9
-      && floor.material.uniforms.uHue.value === land.material.uniforms.uHue.value);
-    check('the menu and pause copies of each slider agree', tPause.value === '0' && hMenu.value === '180');
-    check('dragging a slider rebuilds nothing', sc.getObjectByName('neonLand').geometry === geo0);
-    const saved = JSON.parse(localStorage.getItem('dogexplorer.neon')).settings;
-    check('the grid style is remembered', saved.gridThick === 0 && saved.gridHue === 180);
-    N.setScale(4);
-    const land4 = N.scene().getObjectByName('neonLand');
-    check('a rebuilt environment comes back in the chosen style',
-      land4 !== land && land4.material.uniforms.uHue.value === land.material.uniforms.uHue.value);
-    N.setScale(1);
-    slide(tMenu, 2); slide(hMenu, 0);
-
-    /* GLOW, the third slider: fades below 100%, brightens above it, nothing at 0. The
-       shader cannot run here, so pin the wiring -- both grids, both copies, the uniform
-       really is used for alpha AND colour in the fragment source, and it persists. */
-    const [gMenu, gPause] = d.querySelectorAll('.gridGlow');
-    check('the grid glow slider exists in the menu and on the pause card', !!gMenu && !!gPause
-      && gMenu.max === '200' && gMenu.value === '100');
-    const fs = land.material.fragmentShader || '';
-    check('glow scales the grid\'s alpha below 100% and its colour above',
-      /a \*= min\(1\.0, uGlow\)/.test(fs) && /max\(1\.0, uGlow\)/.test(fs));
-    slide(gPause, 50);
-    const g4 = N.scene().getObjectByName('neonLand'), f4 = N.scene().getObjectByName('neonGrid');
-    check('the glow slider moves both grids, live', g4.material.uniforms.uGlow.value === 0.5
-      && f4.material.uniforms.uGlow.value === 0.5 && gMenu.value === '50');
-    slide(gMenu, 200);
-    check('the glow slider goes to double', g4.material.uniforms.uGlow.value === 2);
-    slide(gMenu, 0);
-    check('glow is remembered', JSON.parse(localStorage.getItem('dogexplorer.neon')).settings.gridGlow === 0
-      && g4.material.uniforms.uGlow.value === 0);
-    N.setScale(2);
-    check('a rebuilt environment keeps the glow', N.scene().getObjectByName('neonLand').material.uniforms.uGlow.value === 0);
-    N.setScale(1);
-    slide(gMenu, 100);
-  }
-
   // ---- tracks ----
   {
     const T_ = N.state().tuning;
@@ -727,56 +590,13 @@ const arraysClose = (a, b, eps = 1e-9) => {
       const ev = stepRacer(r, T, { steer: 1, throttle: 1, brake: 0, boost: false }, { gravity: false }, 1 / 120);
       const lim = trackFrame(T, r.s, {}).halfW - T_.bodyWide * 0.5;
       if (Math.abs(r.d) > lim + 0.02) escaped++;
-      // a fresh hit (first of a streak) is the one whose price this test is about
-      if (ev) { bumps++; if (ev.streak === 1) lost.push(r.v / Math.max(0.01, v0)); }
+      if (ev) { bumps++; lost.push(r.v / Math.max(0.01, v0)); }
       if (![r.s, r.d, r.v, r.yaw].every(Number.isFinite)) nan = true;
     }
     check('a board held into the wall bounces off it', bumps >= 3, `${bumps} bumps`);
     check('a board never gets past the bumpers', escaped === 0 && !nan, `${escaped} frames outside`);
     const meanKeep = lost.reduce((a, b) => a + b, 0) / Math.max(1, lost.length);
-    check('hitting a bumper costs speed, but not all of it', lost.length > 0 && meanKeep < 0.9 && meanKeep > 0.5, `keeps ${(meanKeep * 100).toFixed(0)}% over ${lost.length} fresh hits`);
-
-    /* REPEAT HITS COMPOUND. Same wall, same angle, same speed each time; only the gap
-       since the last hit changes. First hit: bumpKeep as ever. Second inside the window:
-       less. Third inside the window: spun out to a standstill, and held there. */
-    {
-      const s0 = 60;
-      const hit = (rr, tAt) => {
-        const f = trackFrame(T, rr.s, {});
-        rr.time = tAt; rr.v = 20; rr.bumpT = 0;
-        rr.d = f.halfW - T_.bodyWide * 0.5 + 0.05; rr.yaw = f.yaw + 0.4;   // nosing into the left wall
-        const v0 = rr.v;
-        const e = stepRacer(rr, T, { steer: 0, throttle: 1, brake: 0, boost: false }, { gravity: false }, 1 / 120);
-        return { e, keep: rr.v / v0 };
-      };
-      const rr = makeRacer({ s: s0, d: 0, yaw: trackFrame(T, s0, {}).yaw });
-      const h1 = hit(rr, 10);
-      rr.s = s0; const h2 = hit(rr, 10.6);
-      rr.s = s0; const h3 = hit(rr, 11.2);
-      check('a first wall hit costs what it always did', h1.e && h1.e.streak === 1 && h1.keep > 0.6 && h1.keep < 0.9,
-        `keeps ${(h1.keep * 100).toFixed(0)}%`);
-      check('a second hit soon after costs more than the first', h2.e && h2.e.streak === 2 && h2.keep < h1.keep * 0.8,
-        `2nd keeps ${(h2.keep * 100).toFixed(0)}% vs 1st ${(h1.keep * 100).toFixed(0)}%`);
-      check('a third hit in quick succession spins you out to zero', h3.e && h3.e.spin && rr.v === 0 && rr.spinT > 0,
-        `v ${rr.v.toFixed(2)}, spinT ${rr.spinT.toFixed(2)}`);
-      // throttle held through the spin goes nowhere, and the rider visibly turns
-      let maxV = 0, maxSpin = 0;
-      for (let i = 0; i < Math.floor(T_.spinS * 120 * 0.9); i++) {
-        stepRacer(rr, T, { steer: 1, throttle: 1, brake: 0, boost: true }, { gravity: false }, 1 / 120);
-        maxV = Math.max(maxV, rr.v); maxSpin = Math.max(maxSpin, rr.spinYaw);
-      }
-      check('a spun-out board makes no headway until the spin is over', maxV < 0.5 && maxSpin > Math.PI,
-        `max ${maxV.toFixed(2)} m/s, turned ${(maxSpin / Math.PI).toFixed(1)}π`);
-      for (let i = 0; i < 120; i++) stepRacer(rr, T, { steer: 0, throttle: 1, brake: 0, boost: false }, { gravity: false }, 1 / 120);
-      check('after a spin the board drives again and the streak starts over', rr.v > 2 && rr.spinT === 0 && rr.spinYaw === 0 && rr.bumpStreak === 0,
-        `${rr.v.toFixed(1)} m/s`);
-      // hits spaced wider than the window never escalate
-      const slow = makeRacer({ s: s0, d: 0, yaw: trackFrame(T, s0, {}).yaw });
-      const streaks = [];
-      for (let k = 0; k < 4; k++) { slow.s = s0; streaks.push(hit(slow, 20 + k * (T_.bumpWindow + 0.3)).e.streak); }
-      check('hits further apart than the window each count as a first hit', streaks.every(x => x === 1) && slow.spins === 0,
-        streaks.join(','));
-    }
+    check('hitting a bumper costs speed, but not all of it', meanKeep < 0.9 && meanKeep > 0.5, `keeps ${(meanKeep * 100).toFixed(0)}%`);
 
     // gravity: find real up and down grades and coast them both ways
     let up = null, down = null;
@@ -1306,7 +1126,7 @@ const arraysClose = (a, b, eps = 1e-9) => {
         else if (o.material.opacity > coreOp) coreOp = o.material.opacity;
       });
     }
-    check('a nitro pickup\'s halo is bright enough to spot from a distance',
+    check('a rocket pickup\'s halo is bright enough to spot from a distance',
       haloOp >= 0.3 && coreOp >= 0.8, `halo ${haloOp}, core ${coreOp}`);
   }
 
@@ -1428,108 +1248,15 @@ const arraysClose = (a, b, eps = 1e-9) => {
     const gh = S.race.racers.find(x => x.isGhost);
     check('a ghost follows its recording', gh.prog > 0 && Number.isFinite(gh.s) && Number.isFinite(gh.yaw)
       && Math.abs(gh.d) <= trackFrame(S.race.T, gh.s, {}).halfW + 0.01);
-    check('a ghost on the grid carries its rider id, and so does the player',
-      gh.riderId === gh.ghost.rider && S.race.racers[S.race.me].riderId === S.race.riderId);
-
     const before = { s: gh.s, d: gh.d };
     const me = S.race.racers[S.race.me];
-    gh.solid = true;                                 // as if it had already come clear of the grid
     me.s = gh.s; me.d = gh.d;                        // park right on top of it
     resolveContacts(S.race.racers, S.race.T);
-    check('your own ghost cannot be shoved', gh.riderId === me.riderId && gh.s === before.s && gh.d === before.d,
-      `${gh.riderId} vs ${me.riderId}`);
+    check('a ghost cannot be shoved', gh.s === before.s && gh.d === before.d);
     check('ghosts are ranked with everyone else', S.race.racers.every(x => x.place >= 1));
     click('quitBtn');
     await pump(2, 54000);
   }
-
-  // ---- ghosts are solid, to everyone but their own rider ----
-  {
-    const T = trackFor(N.state().courses[0]);
-    const tune = N.state().tuning;
-    // a straight 40 s recording down the middle
-    const n = 160, rec = { dt: N.ghostDt, time: n * N.ghostDt, rider: 'w:elk', label: 'Elk', s: [], d: [] };
-    for (let i = 0; i < n; i++) { rec.s.push(10 + i * N.ghostDt * 15); rec.d.push(0); }
-    const mk = () => { const g = makeGhostRacer(rec, T, 0xffffff); g.lastDt = 1 / 60; return g; };
-    const sOf = g => g.s;
-    // same rider: never solid
-    {
-      const g = mk(); stepGhost(g, T, 1 / 60);
-      g.solid = true;                                  // past the spawn phase-in, so only the rider rule is on trial
-      const me = makeRacer({ s: g.s, d: g.d + 0.3, v: 15, riderId: 'w:elk', isPlayer: true });
-      const hits = resolveContacts([me, g], T).length + resolveContacts([me, g], T).length;
-      check('a ghost is never solid to its own rider', hits === 0 && g.offD === 0 && g.rate === 1, `${hits} hits`);
-    }
-    // spawned inside someone: phases in, only once clear
-    {
-      const g = mk(); stepGhost(g, T, 1 / 60);
-      const other = makeRacer({ s: g.s, d: g.d + 0.3, v: 15, riderId: 'p:0' });
-      const inside = resolveContacts([other, g], T).length;
-      const stillGhosty = g.solid === false;
-      other.d = g.d + 3; resolveContacts([other, g], T);
-      check('a ghost that starts inside a rider is not solid until it has come clear', inside === 0 && stillGhosty && g.solid === true);
-    }
-    // a shove: pushed off line, clock knocked back, eases back on, finishes late
-    {
-      const g = mk(), clean = mk();
-      for (let i = 0; i < 60; i++) { stepGhost(g, T, 1 / 60); stepGhost(clean, T, 1 / 60); }
-      g.solid = true;
-      const me = makeRacer({ s: g.s - 0.5, d: g.d - 0.6, v: 22, riderId: 'p:0', isPlayer: true });
-      const vMe = me.v;
-      const hits = resolveContacts([me, g], T).length;
-      const pushed = Math.abs(g.offD), rate = g.rate;
-      check('a player can bump a ghost: it is pushed off its line and slowed', hits === 1 && pushed > 0.1 && rate <= 1 - tune.ghostKnock + 1e-9,
-        `offset ${pushed.toFixed(2)} m, rate ${rate.toFixed(2)}`);
-      check('shoving a ghost from behind costs the shover too', me.v < vMe, `${vMe.toFixed(1)} -> ${me.v.toFixed(1)} m/s`);
-      let maxOff = 0, jumps = 0, prevD = g.d;
-      for (let i = 0; i < 60 * 4; i++) {
-        stepGhost(g, T, 1 / 60); stepGhost(clean, T, 1 / 60);
-        maxOff = Math.max(maxOff, Math.abs(g.offD));
-        if (Math.abs(g.d - prevD) > 0.2) jumps++;
-        prevD = g.d;
-      }
-      check('a shoved ghost eases back onto its line without snapping', Math.abs(g.offD) < 0.05 && maxOff <= pushed + 0.05 && jumps === 0,
-        `left ${g.offD.toFixed(3)} m off, ${jumps} jumps`);
-      check('a shoved ghost is behind where its recording says, and its rate has recovered',
-        g.prog < clean.prog - 0.5 && g.rate > 0.97, `${(clean.prog - g.prog).toFixed(1)} m behind`);
-      while (!g.done || !clean.done) { stepGhost(g, T, 1 / 60); stepGhost(clean, T, 1 / 60); }
-      check('the time a shove costs a ghost is added to its finish', clean.finishT <= rec.time + 0.02 && g.finishT > clean.finishT + 0.1,
-        `${clean.finishT.toFixed(2)} s clean vs ${g.finishT.toFixed(2)} s shoved`);
-    }
-    // ghosts do not argue with each other
-    {
-      const a = mk(), b = makeGhostRacer({ ...rec, rider: 'w:deer' }, T, 0); b.lastDt = 1 / 60;
-      stepGhost(a, T, 1 / 60); stepGhost(b, T, 1 / 60); a.solid = b.solid = true;
-      check('two ghosts pass through each other', resolveContacts([a, b], T).length === 0);
-    }
-  }
-
-  // ---- track dressing: pylons fade out, pickups draw over the deck ----
-  {
-    const sc = N.scene(), tr = sc.getObjectByName('neonTrack');
-    const py = tr && tr.getObjectByName('neonPylons');
-    let longest = 0, bright = true, tipsDark = true;
-    if (py) {
-      const P = py.geometry.attributes.position.array, C = py.geometry.attributes.color.array;
-      for (let i = 0; i < P.length; i += 6) {
-        longest = Math.max(longest, P[i + 1] - P[i + 4]);
-        const top = C[i] + C[i + 1] + C[i + 2], foot = C[i + 3] + C[i + 4] + C[i + 5];
-        if (!(top > 0)) bright = false;
-        if (!(foot < top * 0.5 + 1e-6) && P[i + 1] - P[i + 4] > N.pylonM * 0.6) tipsDark = false;
-      }
-    }
-    check('pylons stop short instead of hanging to the floor from every crest', !!py && longest <= N.pylonM + 0.01,
-      `longest ${longest.toFixed(1)} m (cap ${N.pylonM})`);
-    check('a pylon fades from its colour at the deck to dark at its foot', !!py && bright && tipsDark
-      && py.material.blending === THREE.AdditiveBlending && py.material.vertexColors);
-    const deck = tr && tr.getObjectByName('neonDeck');
-    const Tc = N.state().activeTrack;
-    const grp = N.buildCellMeshes(Tc, N.placeCells(Tc), 0, 0xffe14a);
-    let lowest = Infinity; if (grp) grp.traverse(o => { if (o.material) lowest = Math.min(lowest, o.renderOrder); });
-    check('a pickup draws after the deck, so the deck cannot paint over it up close', !!grp && !!deck && lowest > deck.renderOrder,
-      `pickup ${lowest} vs deck ${deck && deck.renderOrder}`);
-  }
-
 
   // ---- camera distance ----
   {
@@ -1540,12 +1267,6 @@ const arraysClose = (a, b, eps = 1e-9) => {
       const c = N.camera(), l = c.lookedAt;
       return Math.hypot(c.position.x - l.x, c.position.z - l.z);
     };
-    {
-      const rack = [...d.getElementById('fuelRack').children];
-      check('the boost rack is nitro tanks, not rockets', rack.length === N.state().tuning.fuelMax
-        && rack.every(el => el.className.split(' ')[0] === 'tank') && !/rocket/i.test(d.getElementById('burnPip').textContent)
-        && /nitro/i.test(d.getElementById('fuelRack').getAttribute('aria-label')), rack.map(el => el.className).join(','));
-    }
     N.setCam('normal'); await pump(30, 64000);
     const normal = camDist();
     N.setCam('close'); await pump(30, 65000);

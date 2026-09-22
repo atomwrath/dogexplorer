@@ -7,8 +7,14 @@
    along one automatically generated course (see routes.js), between two bumpers it
    cannot get past (see racer.js).
 
-   Screens are one attribute, body[data-screen] = menu | count | race | finish, the same
-   idea as trails/panes.js: one source of truth, CSS does the showing and hiding. */
+   Screens are one attribute, body[data-screen] = menu | build | count | race | finish, the
+   same idea as trails/panes.js: one source of truth, CSS does the showing and hiding.
+
+   COURSES COME FROM ONE OF TWO PLACES, and settings.mode says which. AUTO is routes.js
+   reading the trail graph. CUSTOM is a list you built yourself on the build screen and
+   that lives in localStorage; see the custom-courses section below. Everything downstream
+   -- tracks, ghosts, best times, rivals -- takes a course object and does not care which
+   end of this file it came from. */
 import { clamp, lerp, mulberry32 } from '../core/math.js';
 import { renderer, scene, camera, resize } from '../core/render.js';
 import { initAudio, countPip, goTone, bonkSound, cheerSound, thudSound } from '../core/audio.js';
@@ -18,10 +24,14 @@ import { kennelPups, loadKennel } from '../data/kennel.js';
 import { PRESETS } from '../creator/presets.js';
 import { parseFeatures, buildGraph } from '../trails/geo.js';
 import { NEON, NEON_SKILL, NEON_CLASS, NEON_CAM, miles, feet, mph } from './tuning.js';
-import { buildCourses } from './routes.js';
+import { buildCourses, routeTargetM, bridgeGaps, ROUTE_MAX_LAPS } from './routes.js';
+import { builderOpen, builderClose, builderAdd, builderPickAt, builderUndo, builderRedo,
+         builderClear, builderDraw, builderFit, builderZoom, builderPan, builderView,
+         builderStates, builderClosed, builderLenM, builderNote,
+         builderCanUndo, builderCanRedo } from './builder.js';
 import { buildTrack, reverseTrack, widthFactor, trackFrame, trackToWorld, deckY, calmestStart, rotateTrack, assembleLine } from './track.js';
 import { makeRacer, stepRacer, rivalInput, resolveContacts, rankRacers, raceDistance, topSpeed } from './racer.js';
-import { buildEnvironment, buildTrackMesh, clearTrackMesh, bumperPulse, updateScene, clearSmoke } from './neon-scene.js';
+import { buildEnvironment, buildTrackMesh, clearTrackMesh, bumperPulse, updateScene, clearSmoke, setGridStyle } from './neon-scene.js';
 import { makeRider, poseRider, disposeRider } from './riders.js';
 import { initNeonInput, readNeonInput, resetNeonInput } from './neon-input.js';
 import { startHum, setHum, stopHum, burnSound, cellSound } from './neon-sound.js';
@@ -36,6 +46,14 @@ const GHOST_COLORS = [0x8fd0ff, 0xc0a8ff, 0x9fe0c8, 0xd8d0a0, 0xb0c0e0, 0xe0b0d0
 const RIVAL_COLORS = [0xff2bd6, 0xff8a1f, 0xffe14a, 0x9a6bff, 0xff4466, 0x2bffc0, 0xff9ee6, 0x4f8cff];
 const PLAYER_COLOR = 0xb6ff3c;
 const PHYS_DT = 1/120;
+/* A hand-built course still has to be a race: this is its floor in TRACK metres, the same
+   judgement the generator makes in routeTargetM, just applied to something you drew. */
+const BUILD_MIN_M = 300;
+/* One slider step of grid thickness, as a fraction of a grid cell. At 10 steps a line is a
+   twelfth of the cell it borders -- bold up close, and still one pixel at a distance,
+   because the shader never draws a line thinner than a pixel (see neon-scene.js). */
+const GRID_THICK_STEP = 0.008;
+const GRID_THICK_MAX = 10;
 
 const $ = id => document.getElementById(id);
 const hex = n => '#' + n.toString(16).padStart(6, '0');
@@ -48,12 +66,19 @@ const trackCache = new Map();
 const trackMeta = new Map();    // sig|scale -> {L, climb, ok}: filled in by the menu scan
 let scanQueue = [];
 let activeTrack = null;         // the ribbon currently in the scene
-const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale: 1,
+const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale: 1, mode: 'auto',
                   cls: 'standard', cam: 'normal', ghosts: true, rider: 'p:0', course: '', map: DEFAULT_NEON_WORLD,
                   // touch control position: how far the steer pad and buttons sit from the
                   // screen edges (ctlInset) and above the bottom edge (ctlBottom), in px
-                  ctlInset: 24, ctlBottom: 16};   // ctlInset defaults AT the swipe-safe floor, not below it
+                  ctlInset: 24, ctlBottom: 16,    // ctlInset defaults AT the swipe-safe floor, not below it
+                  // background grid: line thickness in slider steps (0 = always one pixel)
+                  // and a hue turn in degrees (0 = the original colours)
+                  gridThick: 2, gridHue: 0, gridGlow: 100};   // gridGlow: percent, 0..200
 let bests = {}, ghostStore = {};
+let customStore = {};           // mapId -> [{name, states, fp}]: the courses you built
+let customStale = 0;            // saved courses that no longer fit this map's trail data
+let graphTotalM = 0;            // raceable metres on the current map, for lapping customs
+let buildIdx = -1;              // which stored course the build screen is editing, -1 = new
 let race = null;                // {T, racers, riders, me, phase, t, grav, scale, reverse, ...}
 let neonScreen = 'menu';   // NOT `screen`: the bundle is one classic script, and a
                             // top-level `let screen` would shadow window.screen for core/quality.js
@@ -67,16 +92,17 @@ function neonReadStore(){
     if(s && s.settings) Object.assign(settings, s.settings);
     if(s && s.bests) bests = s.bests;
     if(s && s.ghosts) ghostStore = s.ghosts;
+    if(s && s.custom) customStore = s.custom;
   }catch(e){ /* private mode: play without persistence */ }
 }
 function neonWriteStore(){
-  try{ localStorage.setItem(NEON_STORE, JSON.stringify({settings, bests, ghosts: ghostStore})); }
+  try{ localStorage.setItem(NEON_STORE, JSON.stringify({settings, bests, ghosts: ghostStore, custom: customStore})); }
   catch(e){
     /* Ghost recordings are the only thing here big enough to fill a quota. If they do,
        drop them all and keep the settings and the times, which are what the player would
        actually miss. */
     ghostStore = {};
-    try{ localStorage.setItem(NEON_STORE, JSON.stringify({settings, bests, ghosts: {}})); }catch(e2){}
+    try{ localStorage.setItem(NEON_STORE, JSON.stringify({settings, bests, ghosts: {}, custom: customStore})); }catch(e2){}
   }
 }
 function setScreen(name){ neonScreen = name; document.body.setAttribute('data-screen', name); }
@@ -173,13 +199,14 @@ async function loadNeonMap(src, label){
   }
   if(!lines.length) throw new Error('No trail lines in that file.');
   graph = buildGraph(lines, 16, 6);
+  bridgeGaps(graph);              // near-miss breaks in the mapping; see routes.js
   mapBox = {x0: Infinity, x1: -Infinity, z0: Infinity, z1: -Infinity};
   for(const e of graph.edges) for(const p of e.pts){
     mapBox.x0 = Math.min(mapBox.x0, p[0]); mapBox.x1 = Math.max(mapBox.x1, p[0]);
     mapBox.z0 = Math.min(mapBox.z0, p[1]); mapBox.z1 = Math.max(mapBox.z1, p[1]);
   }
-  const made = buildCourses(graph, dem ? (x, z) => dem.heightAt(x, z) : null, {scale: settings.scale});
-  courses = made.courses; coverInfo = made;
+  graphTotalM = graph.edges.reduce((a, e) => a + (e.bridge ? 0 : e.lenM), 0);
+  rebuildCourses();
   trackCache.clear();
   rebuildEnvironment();
   mapLabel = label || mapId;
@@ -192,6 +219,81 @@ async function loadNeonMap(src, label){
   startScan();
   selectCourse(selCourse);
   if(!courses.length) $('startBtn').disabled = true;
+}
+
+/* ---------- custom courses ----------
+   A course you built is stored as what you actually chose: the directed edge states, in
+   order, of the map's own trail graph. Not a polyline -- the line is re-derived from the
+   graph, so a course drawn on this map behaves exactly like a generated one (same
+   ribbon, same clipping, same everything) instead of being a second kind of thing.
+
+   THE PRICE OF THAT IS THAT EDGE INDICES ARE NOT PORTABLE. They are positions in an array
+   built by geo.js from the map file; refetch the DEM, resimplify, edit the GeoJSON, and
+   edge 114 is somewhere else entirely. So every saved course carries a fingerprint of the
+   graph it was drawn on, and one drawn on a graph that no longer exists is set aside
+   rather than raced -- a course whose indices have shifted under it would put you on a
+   line through trails you never picked, which is worse than losing it. The connectivity
+   check is the belt to the fingerprint's braces: a course that does not still join up is
+   not a course, whatever the fingerprint says. */
+/* Over geo.js's own edges only. Bridges are appended after them and so never move an
+   index, and a map that gains a bridge must not strand every course drawn on it before. A
+   course that USES a bridge is still held to chainOk, which is what catches one that
+   moved. */
+function graphFp(g){
+  if(!g) return '';
+  let m = 0, n = 0;
+  for(const e of g.edges) if(!e.bridge){ m += e.lenM; n++; }
+  return n + ':' + g.nodes.length + ':' + Math.round(m);
+}
+const stStart = s => { const e = graph.edges[s>>1]; return (s&1) ? e.b : e.a; };
+const stEnd   = s => { const e = graph.edges[s>>1]; return (s&1) ? e.a : e.b; };
+function chainOk(st){
+  const seen = new Set();
+  for(let i = 0; i < st.length; i++){
+    if(!Number.isInteger(st[i]) || st[i] < 0 || (st[i]>>1) >= graph.edges.length) return false;
+    if(seen.has(st[i]>>1)) return false;
+    seen.add(st[i]>>1);
+    if(i && stEnd(st[i-1]) !== stStart(st[i])) return false;
+  }
+  return st.length > 0;
+}
+const customEntries = () => (customStore[mapId] || []);
+function customCourse(en, st, idx){
+  const closed = st.length > 1 && stStart(st[0]) === stEnd(st[st.length-1]);
+  const lenM = st.reduce((a, s) => a + graph.edges[s>>1].lenM, 0);
+  /* A loop you drew gets laps for the same reason a generated one does: a 600 m circuit
+     raced once is a countdown, a corner and a finish line. */
+  const target = routeTargetM(graphTotalM, settings.scale);
+  return {kind: closed ? 'circuit' : 'sprint',
+          steps: st.map(s => ({ei: s>>1, fwd: !(s&1)})),
+          laps: closed ? Math.max(1, Math.min(ROUTE_MAX_LAPS, Math.round(target/lenM))) : 1,
+          lenM, clip: null, name: en.name || 'Course', sig: 'x:' + st.join('.'),
+          custom: true, idx};
+}
+function buildCustomCourses(){
+  const fp = graphFp(graph);
+  customStale = 0;
+  const out = [];
+  customEntries().forEach((en, i) => {
+    const st = (en && en.states) || [];
+    if(en && en.fp === fp && chainOk(st)) out.push(customCourse(en, st, i));
+    else customStale++;
+  });
+  out.forEach((c, i) => { c.id = i; });
+  return out;
+}
+/* The one place that decides what the course list IS. Every caller that changes the map,
+   the scale or the mode goes through here, so there is no path by which the list and the
+   mode can disagree. */
+function rebuildCourses(){
+  if(!graph){ courses = []; coverInfo = null; return; }
+  if(settings.mode === 'custom'){
+    courses = buildCustomCourses();
+    coverInfo = {custom: true, totalM: graphTotalM, stale: customStale, coverage: 0};
+  }else{
+    const made = buildCourses(graph, dem ? (x, z) => dem.heightAt(x, z) : null, {scale: settings.scale});
+    courses = made.courses; coverInfo = made;
+  }
 }
 
 /* Cached per course AND per (scale, direction): those are three different racetracks that
@@ -223,8 +325,15 @@ function rebuildEnvironment(){
 }
 function syncMapLine(){
   if(!coverInfo) return;
-  $('mapLine').textContent = mapLabel + ' · ' + courses.length + ' courses covering '
-    + Math.round(coverInfo.coverage*100) + '% of ' + fmtMi(coverInfo.totalM) + ' of trail'
+  /* Custom has nothing to say about coverage -- it is your list, however long it is --
+     but it does have to own up to anything set aside as no longer fitting the map. */
+  $('mapLine').textContent = mapLabel + ' · '
+    + (coverInfo.custom
+        ? (courses.length ? courses.length + (courses.length === 1 ? ' course you built' : ' courses you built')
+                          : 'no courses yet — tap New course')
+          + (coverInfo.stale ? ' · ' + coverInfo.stale + ' set aside: drawn on older trail data' : '')
+        : courses.length + ' courses covering ' + Math.round(coverInfo.coverage*100)
+          + '% of ' + fmtMi(coverInfo.totalM) + ' of trail')
     + (settings.scale > 1 ? ' · scaled 1:' + settings.scale : '')
     + (dem ? '' : ' · no elevation data: flat');
 }
@@ -391,6 +500,13 @@ function syncMenu(){
   document.querySelectorAll('#gravSeg .btn').forEach(b => b.classList.toggle('on', (b.dataset.grav === '1') === settings.gravity));
   document.querySelectorAll('#dirSeg .btn').forEach(b => b.classList.toggle('on', (b.dataset.dir === 'rev') === settings.reverse));
   document.querySelectorAll('#classSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.cls === settings.cls));
+  document.querySelectorAll('#modeSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.mode === settings.mode));
+  const custom = settings.mode === 'custom';
+  $('customBar').hidden = !custom;
+  $('editCourse').disabled = !(custom && courses[selCourse] && courses[selCourse].custom);
+  $('modeNote').textContent = custom
+    ? 'Custom: courses you built yourself on this map.'
+    : 'Auto: the map cut into races of a good length, covering everything.';
   document.querySelectorAll('#camSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.cam === settings.cam));
   $('scaleSel').value = String(settings.scale);
   document.querySelectorAll('#ghostSeg .btn').forEach(b => b.classList.toggle('on', (b.dataset.ghost === '1') === settings.ghosts));
@@ -467,13 +583,160 @@ function setScale(n){
   /* The course set itself depends on the scale: a good race is a few minutes long
      whatever the map is doing, so at 1:4 the generator looks for routes four times as
      long in real metres (see routeTargetM). */
-  const made = buildCourses(graph, dem ? (x, z) => dem.heightAt(x, z) : null, {scale: sc});
-  courses = made.courses; coverInfo = made;
+  rebuildCourses();
   const kept = courses.findIndex(c => c.sig === settings.course);
   if(kept >= 0) selCourse = kept;
   selCourse = clamp(selCourse, 0, Math.max(0, courses.length-1));
   syncMapLine(); rebuildEnvironment(); renderCourseList(); startScan(); selectCourse(selCourse);
 }
+/* THE COURSE MODE. Not a race setting -- it decides what the list of courses IS, so it
+   does the work a scale change does minus the geometry: rebuild the list, keep the track
+   caches (a track is keyed by signature, and a signature means the same racetrack whoever
+   proposed it), and hold onto the selected course if the new mode happens to offer it.
+   Deliberately NOT part of bestKey, for the same reason. */
+function setCourseMode(name){
+  if((name !== 'auto' && name !== 'custom') || settings.mode === name) return;
+  settings.mode = name;
+  rebuildCourses();
+  const kept = courses.findIndex(c => c.sig === settings.course);
+  selCourse = clamp(kept >= 0 ? kept : 0, 0, Math.max(0, courses.length-1));
+  syncMenu(); neonWriteStore(); syncMapLine(); renderCourseList(); startScan();
+  if(courses.length) selectCourse(selCourse);
+  else { $('startBtn').disabled = true; clearTrackMesh(); activeTrack = null; }
+}
+
+/* ---------- build screen ----------
+   Open it, tap the map, save. main.js owns the screen, the store and the naming; the
+   builder module owns the map, the picking and the undo stack, and nothing crosses. */
+function openBuild(idx){
+  if(!graph) return;
+  buildIdx = idx == null ? -1 : idx;
+  const en = buildIdx >= 0 ? customEntries()[buildIdx] : null;
+  builderOpen(graph, mapBox, $('buildMap'), en ? en.states : []);
+  $('buildName').value = en ? (en.name || '') : '';
+  $('buildTitle').textContent = en ? 'Edit course' : 'New course';
+  $('buildDelete').hidden = !en;
+  setScreen('build');
+  syncBuild();
+}
+function closeBuild(){
+  builderClose();
+  buildIdx = -1;
+  setScreen('menu');
+}
+function syncBuild(){
+  const n = builderStates().length;
+  const lenM = builderLenM();
+  const enough = n > 0 && lenM >= BUILD_MIN_M*settings.scale;
+  $('buildUndo').disabled = !builderCanUndo();
+  $('buildRedo').disabled = !builderCanRedo();
+  $('buildClear').disabled = !n;
+  $('buildSave').disabled = !enough;
+  const note = builderNote();
+  $('buildInfo').textContent = note ? note
+    : !n ? 'Tap a trail to start. Tap further along and the way there is filled in for you.'
+    : fmtMi(lenM/settings.scale) + ' · ' + n + (n === 1 ? ' stretch' : ' stretches')
+      + (builderClosed() ? ' · closes a loop' : '')
+      + (enough ? '' : ' · too short to race yet');
+  builderDraw();
+}
+/* Named after the trail it spends most of its length on, which is what you would call it
+   yourself, with a number if you have built that one before. */
+function buildDefaultName(st){
+  const by = new Map();
+  for(const s of st){
+    const e = graph.edges[s>>1];
+    const k = e.name || 'Trail';
+    by.set(k, (by.get(k) || 0) + e.lenM);
+  }
+  const top = [...by.entries()].sort((p, q) => q[1]-p[1] || (p[0] < q[0] ? -1 : 1));
+  const base = top.length ? top[0][0] : 'Course';
+  const taken = new Set(customEntries().map((en, i) => i === buildIdx ? '' : (en.name || '')));
+  let name = base, k = 2;
+  while(taken.has(name)) name = base + ' ' + (k++);
+  return name;
+}
+function saveBuild(){
+  const st = builderStates();
+  if(!st.length || builderLenM() < BUILD_MIN_M*settings.scale) return false;
+  const name = ($('buildName').value || '').trim() || buildDefaultName(st);
+  const list = customEntries().slice();
+  const en = {name, states: st, fp: graphFp(graph)};
+  if(buildIdx >= 0) list[buildIdx] = en; else list.push(en);
+  customStore[mapId] = list;
+  /* Select what you just built. By signature, like every other selection here, so it
+     survives the rebuild that is about to replace every course object in the list. */
+  settings.course = 'x:' + st.join('.');
+  neonWriteStore();
+  closeBuild();
+  setCourseListTo('custom');
+  return true;
+}
+function deleteBuild(){
+  if(buildIdx < 0) return false;
+  const list = customEntries().slice();
+  list.splice(buildIdx, 1);
+  customStore[mapId] = list;
+  neonWriteStore();
+  closeBuild();
+  setCourseListTo('custom');
+  return true;
+}
+/* Saving or deleting always lands you in Custom mode looking at the result, whichever
+   mode the menu was in when you opened the builder. */
+function setCourseListTo(name){
+  if(settings.mode !== name){ setCourseMode(name); return; }
+  rebuildCourses();
+  const kept = courses.findIndex(c => c.sig === settings.course);
+  selCourse = clamp(kept >= 0 ? kept : 0, 0, Math.max(0, courses.length-1));
+  syncMenu(); syncMapLine(); renderCourseList(); startScan();
+  if(courses.length) selectCourse(selCourse);
+  else { $('startBtn').disabled = true; clearTrackMesh(); activeTrack = null; }
+}
+/* A tap picks a segment; a drag pans the map. Distinguished by distance, not by which
+   button or how long: a thumb never lands perfectly still, and on a tablet every pick
+   would otherwise be a one-pixel pan. */
+function bindBuildMap(){
+  const cv = $('buildMap');
+  if(!cv) return;
+  let P = null;
+  cv.addEventListener('pointerdown', e => {
+    P = {id: e.pointerId, x: e.clientX, y: e.clientY, moved: 0};
+    if(cv.setPointerCapture) try{ cv.setPointerCapture(e.pointerId); }catch(err){ /* jsdom */ }
+  });
+  cv.addEventListener('pointermove', e => {
+    if(!P || e.pointerId !== P.id) return;
+    const dx = e.clientX - P.x, dy = e.clientY - P.y;
+    P.x = e.clientX; P.y = e.clientY; P.moved += Math.hypot(dx, dy);
+    if(P.moved > 6){ builderPan(dx, dy); builderDraw(); }
+  });
+  const end = e => {
+    if(!P || e.pointerId !== P.id) return;
+    if(P.moved <= 6){
+      const r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : {left: 0, top: 0};
+      builderAdd(builderPickAt(e.clientX - r.left, e.clientY - r.top));
+      syncBuild();
+    }
+    P = null;
+  };
+  cv.addEventListener('pointerup', end);
+  cv.addEventListener('pointercancel', e => { P = null; });
+  $('zoomIn').addEventListener('click', () => { builderZoom(1.6); builderDraw(); });
+  $('zoomOut').addEventListener('click', () => { builderZoom(1/1.6); builderDraw(); });
+  $('zoomFit').addEventListener('click', () => { builderFit(); builderDraw(); });
+  $('buildUndo').addEventListener('click', () => { builderUndo(); syncBuild(); });
+  $('buildRedo').addEventListener('click', () => { builderRedo(); syncBuild(); });
+  $('buildClear').addEventListener('click', () => { builderClear(); syncBuild(); });
+  $('buildSave').addEventListener('click', saveBuild);
+  $('buildDelete').addEventListener('click', deleteBuild);
+  $('buildCancel').addEventListener('click', closeBuild);
+  $('newCourse').addEventListener('click', () => openBuild(-1));
+  $('editCourse').addEventListener('click', () => {
+    const c = courses[selCourse];
+    if(c && c.custom) openBuild(c.idx);
+  });
+}
+
 function setClass(name){
   if(!NEON_CLASS[name] || settings.cls === name) return;
   settings.cls = name;
@@ -495,6 +758,7 @@ function cycleCam(){
 }
 function modeChip(){
   const bits = [NEON_CLASS[settings.cls].label.toUpperCase()];
+  if(settings.mode === 'custom') bits.push('CUSTOM');
   if(settings.scale > 1) bits.push('1:' + settings.scale);
   if(settings.reverse) bits.push('REVERSE');
   bits.push(settings.gravity ? 'GRAVITY' : 'NO GRAVITY');
@@ -548,17 +812,19 @@ function startRace(){
   };
   cast.forEach((c, i) => {
     racers.push(place(i, {name: c.name, skill: NEON_SKILL[settings.skill], paceMul: c.paceMul, speedK,
-      lane: ((i % 4) - 1.5)/2.2, seed: c.seed % 1000, color: c.color, emo: SPECIES[c.key].emo}));
+      lane: ((i % 4) - 1.5)/2.2, seed: c.seed % 1000, color: c.color, emo: SPECIES[c.key].emo,
+      riderId: 'w:' + c.key}));
     riders.push(makeRider({kind: 'wild', key: c.key}, c.color, c.seed, sizeK));
   });
-  racers.push(place(cast.length, {name: choice.label, isPlayer: true, color: PLAYER_COLOR, speedK}));
+  racers.push(place(cast.length, {name: choice.label, isPlayer: true, color: PLAYER_COLOR, speedK, riderId: choice.v}));
   riders.push(makeRider(choice.who, PLAYER_COLOR, 7, sizeK));
   riders[riders.length-1].tag.visible = false;
   for(const r of racers) if(!r.isGhost) r.prog = (r.lap|0)*T.L + r.s;
   /* GHOSTS RIDE AT FIERCE. They are the point of the setting: every rider who has set a
      time on exactly this course, in this class, this way round, at this scale, with this
-     gravity, lines up as the run that set it. They replay, so they cannot be blocked or
-     shoved, but they are ranked with everyone else -- beating a ghost is beating the time. */
+     gravity, lines up as the run that set it. They are SOLID to everyone but their own
+     rider (see racer.js resolveContacts): a shove costs them time, so blocking one is
+     fair play. They are ranked with everyone else -- beating a ghost is beating the time. */
   const ghosts = settings.ghosts ? bestGhosts(ghostStore, bestKey(course, settings)) : [];
   ghosts.forEach((g, i) => {
     const gr = makeGhostRacer(g, T, GHOST_COLORS[i % GHOST_COLORS.length]);
@@ -660,7 +926,11 @@ function onBump(r, ev){
   if(!r.isPlayer && gap > 160) return;
   const f = trackToWorld(T, r.s, ev.bump*(trackFrame(T, r.s, {}).halfW), {});
   bumperPulse(f.wx, deckY(T, f.elev, baseM()), f.wz, f.yaw, ev.bump, ev.hard);
-  if(r.isPlayer){ bonkSound(0.8 + ev.hard*0.6); shake = Math.max(shake, 0.25 + 0.5*ev.hard); }
+  if(r.isPlayer){
+    bonkSound(0.8 + ev.hard*0.6 + (ev.streak >= 2 ? 0.3 : 0));
+    shake = Math.max(shake, ev.spin ? 1.1 : 0.25 + 0.5*ev.hard + (ev.streak >= 2 ? 0.25 : 0));
+    if(ev.spin) thudSound();
+  }
 }
 
 function finishPlayer(){
@@ -696,7 +966,7 @@ function renderBoard(){
   }
 }
 
-/* THE ROCKET RACK. One icon per rocket on board, spent ones left as empty outlines so the
+/* THE NITRO RACK. One icon per tank on board, spent ones left as empty outlines so the
    rack reads as "two of five used" at a glance rather than a bar that could be anything.
    Rebuilt only when the count changes -- this runs every frame. */
 function paintFuel(me){
@@ -706,7 +976,7 @@ function paintFuel(me){
     box.textContent = '';
     for(let i = 0; i < max; i++){
       const el = document.createElement('i');
-      el.className = 'rocket';
+      el.className = 'tank';
       box.appendChild(el);
     }
     box.dataset.lit = '';
@@ -801,7 +1071,7 @@ function drawRace(dt){
   $('slopeVal').textContent = !R.gravity ? '' : pct > 1 ? '▲ ' + pct + '%' : pct < -1 ? '▼ ' + (-pct) + '%'
     : (dem ? Math.round(feet(f.elev)) + ' ft' : '');
   setHum(me.v, me.burnT > 0 ? Math.min(1, me.burnT/NEON.burnS + 0.35) : 0);
-  $('burnPip').textContent = me.burnT > 0 ? 'BURNING' : me.fuel ? '' : 'OUT OF ROCKETS';
+  $('burnPip').textContent = me.spinT > 0 ? 'SPUN OUT' : me.burnT > 0 ? 'NITRO' : me.fuel ? '' : 'OUT OF NITRO';
   $('burnPip').classList.toggle('hot', me.burnT > 0);
   const fit = paintMap($('minimap'), graph, mapBox, R.line, T.closed, 'mm|' + mapId + '|' + R.course.sig, true);
   const sc = R.scale;
@@ -863,6 +1133,9 @@ function wireUI(){
   document.querySelectorAll('#skillSeg .btn').forEach(b => b.addEventListener('click', () => { settings.skill = b.dataset.skill; syncMenu(); neonWriteStore(); }));
   document.querySelectorAll('#gravSeg .btn').forEach(b => b.addEventListener('click', () => setGravity(b.dataset.grav === '1')));
   document.querySelectorAll('#classSeg .btn').forEach(b => b.addEventListener('click', () => setClass(b.dataset.cls)));
+  document.querySelectorAll('#modeSeg .btn').forEach(b => b.addEventListener('click', () => setCourseMode(b.dataset.mode)));
+  bindGridSliders();
+  bindBuildMap();
   document.querySelectorAll('#camSeg .btn').forEach(b => b.addEventListener('click', () => setCam(b.dataset.cam)));
   document.querySelectorAll('#ghostSeg .btn').forEach(b => b.addEventListener('click', () => setGhosts(b.dataset.ghost === '1')));
   document.querySelectorAll('#dirSeg .btn').forEach(b => b.addEventListener('click', () => setReverse(b.dataset.dir === 'rev')));
@@ -886,11 +1159,14 @@ function wireUI(){
     // only on the menu: a race is run at the settings it started with
     gravity: () => { if(neonScreen === 'menu') setGravity(!settings.gravity); },
     reverse: () => { if(neonScreen === 'menu') setReverse(!settings.reverse); },
-    camera: cycleCam,                      // the one setting that is safe to change mid-race
-    pause: togglePause,
-    restart: () => { if(race && !race.paused) startRace(); },
-    quit: () => { if(neonScreen !== 'menu') quitToMenu(); },
-    confirm: () => { if(neonScreen === 'menu' && !$('startBtn').disabled) startRace();
+    // the one setting that is safe to change mid-race -- but not while you are building,
+    // where the camera is not even on screen and C is a letter someone is typing
+    camera: () => { if(neonScreen !== 'build') cycleCam(); },
+    pause: () => { if(neonScreen !== 'build') togglePause(); },
+    restart: () => { if(race && !race.paused && neonScreen !== 'build') startRace(); },
+    quit: () => { if(neonScreen === 'build') closeBuild(); else if(neonScreen !== 'menu') quitToMenu(); },
+    confirm: () => { if(neonScreen === 'build') saveBuild();
+      else if(neonScreen === 'menu' && !$('startBtn').disabled) startRace();
       else if(neonScreen === 'finish') startRace();
       else if(neonScreen === 'pause') resumeRace(); },
   });
@@ -898,9 +1174,31 @@ function wireUI(){
 function showLoadError(err){
   $('mapLine').textContent = '⚠ ' + (err && err.message ? err.message : 'Could not load that map.');
 }
+/* The three grid sliders exist twice, in the menu and on the pause card -- the pause card
+   because "hard to see up close" is a judgement you make on the track, not in the menu's
+   fly-over. Both are the same setting; every copy is found by class and kept in step. */
+function applyGrid(){
+  settings.gridThick = clamp(Math.round(+settings.gridThick || 0), 0, GRID_THICK_MAX);
+  settings.gridHue = ((Math.round(+settings.gridHue || 0) % 360) + 360) % 360;
+  settings.gridGlow = clamp(Math.round((settings.gridGlow == null ? 100 : +settings.gridGlow || 0)/5)*5, 0, 200);
+  setGridStyle(settings.gridThick*GRID_THICK_STEP, settings.gridHue*Math.PI/180, settings.gridGlow/100);
+  document.querySelectorAll('.gridThick').forEach(el => { el.value = settings.gridThick; });
+  document.querySelectorAll('.gridHue').forEach(el => { el.value = settings.gridHue; });
+  document.querySelectorAll('.gridGlow').forEach(el => { el.value = settings.gridGlow; });
+}
+function bindGridSliders(){
+  for(const [cls, key] of [['gridThick', 'gridThick'], ['gridHue', 'gridHue'], ['gridGlow', 'gridGlow']]){
+    document.querySelectorAll('.' + cls).forEach(el => {
+      el.addEventListener('input', () => { settings[key] = +el.value; applyGrid(); });   // live
+      el.addEventListener('change', () => neonWriteStore());                          // on release
+    });
+  }
+}
+
 async function bootNeon(){
   neonReadStore();
   applyControlLayout();
+  applyGrid();
   loadKennel();
   wireUI();
   fillRiderSelect();
@@ -923,10 +1221,11 @@ async function bootNeon(){
 /* test seam (tools/smoke-neon.js reads the bundle's globals directly, but one tidy
    snapshot keeps the assertions short) */
 function neonState(){
-  return {screen: neonScreen, tuning: NEON, graph, areas: mapAreas, mapId, courses, trackMeta, scanLeft: scanQueue.length, ghostStore, coverInfo, selCourse, settings, race, activeTrack, bests, hasDem: !!dem};
+  return {screen: neonScreen, tuning: NEON, graph, areas: mapAreas, mapId, courses, trackMeta, scanLeft: scanQueue.length, ghostStore, coverInfo, selCourse, settings, race, activeTrack, bests, hasDem: !!dem, customStore, customStale, buildIdx};
 }
 bootNeon();
 
 export { bootNeon, loadNeonMap, loadMapList, startRace, quitToMenu, setGravity, setReverse, setScale, setClass, setCam, setGhosts, cycleCam,
+         setCourseMode, openBuild, closeBuild, saveBuild, deleteBuild, syncBuild, neonReadStore, applyGrid,
          pauseRace, resumeRace, togglePause, setCtlInset, setCtlBottom, resetControlLayout,
          selectCourse, neonState, stepRace, trackFor, modeChip };

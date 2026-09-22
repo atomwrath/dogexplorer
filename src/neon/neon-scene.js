@@ -23,6 +23,7 @@ const NEON_COL = {
   gate:   0xb6ff3c,
 };
 /* The map's own furniture, by the kinds geo.js already sorts features into. */
+const PYLON_M = 22;          // how far a pylon reaches below the deck before it has faded out
 const NEON_PATH_COL = {road: 0x6a5cff, track: 0x2f6ec8, trail: 0x1f7fa8};
 const NEON_PATH_W   = {road: 2.6, track: 1.9, trail: 1.3};
 /* Deliberately NOT cyan or magenta: those two belong to the left and right bumpers, and
@@ -65,6 +66,94 @@ function lineMat(color, opacity, vertexColors){
   return new THREE.LineBasicMaterial({color, transparent:true, opacity: opacity == null ? 1 : opacity,
     vertexColors: !!vertexColors, depthWrite:false});
 }
+
+/* ---------- the background grids: drawn by a shader, not by lines ----------
+   WebGL ignores LineBasicMaterial.linewidth on nearly every platform: a GL line is one
+   pixel wide, full stop. One pixel is right at a kilometre and wrong at ten metres, where
+   the cells are hundreds of pixels across and the lines between them are threads. So the
+   land sheet and the floor are surfaces, and the fragment shader draws the lines.
+
+   THICKNESS is a fraction of a cell, converted to pixels per fragment through fwidth,
+   with a one-pixel floor. Far away a cell is a few pixels and the floor wins -- it looks
+   exactly as the old lines did. Close up the fraction wins and the line grows with the
+   cell. That is the whole point: the slider only changes what is near you.
+
+   Past about two pixels a cell, individually drawn lines turn to moire; the shader hands
+   over to their average coverage instead, which is the haze a dense 1 px grid made.
+
+   COLOUR is a hue rotation of whatever the grid was going to be, so the land keeps its
+   height ramp and contour bands and just turns them round the wheel. Both are uniforms,
+   so dragging a slider costs nothing -- no geometry is rebuilt. */
+/* GLOW is the third knob: how loud the wireframe world is. Below 1 it fades the lines
+   (alpha); above 1 it brightens them (colour, clamped per channel by the blend); 0 draws
+   nothing at all. Also a uniform, so it is as free to drag as the other two. */
+const gridStyle = {thick: 0.012, hue: 0, glow: 1};
+const gridMats = new Set();
+function gridMat(color, opacity, vertexColors){
+  const m = new THREE.ShaderMaterial({
+    uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
+      uColor: {value: new THREE.Color(color)}, uOpacity: {value: opacity},
+      uThick: {value: gridStyle.thick}, uHue: {value: gridStyle.hue}, uGlow: {value: gridStyle.glow},
+    }]),
+    vertexShader: `
+      attribute vec2 gridUv;
+      varying vec2 vUv;
+      varying vec3 vCol;
+      #include <fog_pars_vertex>
+      void main(){
+        vUv = gridUv;
+        #ifdef USE_COLOR
+          vCol = color;
+        #else
+          vCol = vec3(1.0);
+        #endif
+        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mvPosition;
+        #include <fog_vertex>
+      }`,
+    fragmentShader: `
+      uniform vec3 uColor;
+      uniform float uOpacity, uThick, uHue, uGlow;
+      varying vec2 vUv;
+      varying vec3 vCol;
+      #include <fog_pars_fragment>
+      vec3 hueShift(vec3 c, float a){
+        const vec3 k = vec3(0.57735);
+        float ca = cos(a);
+        return c*ca + cross(k, c)*sin(a) + k*dot(k, c)*(1.0 - ca);
+      }
+      void main(){
+        vec2 fw = max(fwidth(vUv), vec2(1e-6));
+        vec2 dpx = abs(fract(vUv - 0.5) - 0.5)/fw;          // pixels to the nearest line
+        vec2 wpx = max(vec2(1.0), uThick/fw);                // line width in pixels
+        vec2 on = 1.0 - smoothstep(wpx*0.5 - 0.5, wpx*0.5 + 0.5, dpx);
+        float a = max(on.x, on.y);
+        float dense = max(fw.x, fw.y);
+        a = mix(a, min(1.0, 2.0*dense + uThick), smoothstep(0.3, 0.8, dense));
+        a *= min(1.0, uGlow);
+        if(a < 0.01) discard;
+        gl_FragColor = vec4(max(hueShift(uColor*vCol, uHue), 0.0)*max(1.0, uGlow), a*uOpacity);
+        #include <fog_fragment>
+      }`,
+    transparent: true, depthWrite: false, fog: true, side: THREE.DoubleSide,
+    vertexColors: !!vertexColors,
+    extensions: {derivatives: true},
+  });
+  gridMats.add(m);
+  return m;
+}
+/* thick: fraction of a cell (0 = always one pixel). hue: radians round the colour wheel.
+   glow: 0..2, 1 = as built. */
+function setGridStyle(thick, hue, glow){
+  if(thick != null) gridStyle.thick = Math.max(0, thick);
+  if(hue != null) gridStyle.hue = hue;
+  if(glow != null) gridStyle.glow = Math.max(0, Math.min(2, glow));
+  for(const m of gridMats){
+    m.uniforms.uThick.value = gridStyle.thick; m.uniforms.uHue.value = gridStyle.hue;
+    m.uniforms.uGlow.value = gridStyle.glow;
+  }
+}
+const getGridStyle = () => ({thick: gridStyle.thick, hue: gridStyle.hue, glow: gridStyle.glow});
 
 /* ---------- environment: built once per MAP ---------- */
 /* Everything here is static, unlit and merged: the whole world is about half a dozen
@@ -117,6 +206,7 @@ function ribbonInto(pos, col, pts, width, yOf, c, fade){
 
 function buildEnvironment(W, graph, areas, bbox, scale){
   if(envGroup){ scene.remove(envGroup); disposeGroup(envGroup); }
+  gridMats.clear();               // the old ones went with the old group
   envGroup = new THREE.Group(); envGroup.name = 'neonEnv';
   scene.background = new THREE.Color(NEON_COL.bg);
   const sc = scale > 0 ? scale : 1;
@@ -138,13 +228,16 @@ function buildEnvironment(W, graph, areas, bbox, scale){
     for(const c of nice){ if(span/c <= 90){ cell = c; break; } }
     const pad = span*0.35;
     const x0 = bbox.x0-pad, x1 = bbox.x1+pad, z0 = bbox.z0-pad, z1 = bbox.z1+pad;
-    const pos = [];
-    for(let x = Math.floor(x0/cell)*cell; x <= x1; x += cell) pos.push(x, floorY, z0, x, floorY, z1);
-    for(let z = Math.floor(z0/cell)*cell; z <= z1; z += cell) pos.push(x0, floorY, z, x1, floorY, z);
+    /* One quad; the lines are in the shader, at every whole multiple of `cell`. */
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    const grid = new THREE.LineSegments(geo, lineMat(NEON_COL.grid, 0.8));
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(
+      [x0, floorY, z0,  x1, floorY, z0,  x1, floorY, z1,  x0, floorY, z1], 3));
+    geo.setAttribute('gridUv', new THREE.Float32BufferAttribute(
+      [x0/cell, z0/cell,  x1/cell, z0/cell,  x1/cell, z1/cell,  x0/cell, z1/cell], 2));
+    geo.setIndex([0, 2, 1, 0, 3, 2]);
+    const grid = new THREE.Mesh(geo, gridMat(NEON_COL.grid, 0.8));
     grid.name = 'neonGrid';
+    grid.userData.cell = cell;
     envGroup.add(grid);
   }
 
@@ -160,7 +253,7 @@ function buildEnvironment(W, graph, areas, bbox, scale){
     const stride = Math.max(1, Math.ceil(Math.max(W.width, W.height)/target));
     const w = Math.floor(W.width/stride), h = Math.floor(W.height/stride);
     const cellS = W.cell/sc;
-    const pos = new Float32Array(w*h*3), col = new Float32Array(w*h*3);
+    const pos = new Float32Array(w*h*3), col = new Float32Array(w*h*3), guv = new Float32Array(w*h*2);
     const lo = new THREE.Color(0x0c2a5e), mid = new THREE.Color(0x4a2ea0), hi = new THREE.Color(0xe04aff);
     const tmp = new THREE.Color();
     const range = Math.max(1, (W.maxM - W.minM)/sc);
@@ -171,6 +264,7 @@ function buildEnvironment(W, graph, areas, bbox, scale){
       pos[k*3]   = W.originX/sc + (i*stride+0.5)*cellS;
       pos[k*3+1] = (hm-baseM)*NEON.vertScale;
       pos[k*3+2] = W.originZ/sc + (j*stride+0.5)*cellS;
+      guv[k*2] = i; guv[k*2+1] = j;               // a whole number on every sample: the lines
       const t = (hm - W.minM/sc)/range;
       tmp.copy(t < 0.5 ? lo : mid).lerp(t < 0.5 ? mid : hi, t < 0.5 ? t*2 : (t-0.5)*2);
       // distance to the nearest contour line, 0 (on it) .. 1 (half an interval away)
@@ -181,17 +275,20 @@ function buildEnvironment(W, graph, areas, bbox, scale){
       const lift = 0.22 + 1.25*Math.pow(1-band, 8);
       col[k*3] = tmp.r*lift; col[k*3+1] = tmp.g*lift; col[k*3+2] = tmp.b*lift;
     }
+    /* Two triangles a cell. The surface itself is invisible; it exists so the shader has
+       somewhere to draw the lines, and the lines land exactly where the old segments ran:
+       sample to sample, along rows and columns. */
     const idx = [];
-    for(let j = 0; j < h; j++) for(let i = 0; i < w; i++){
+    for(let j = 0; j+1 < h; j++) for(let i = 0; i+1 < w; i++){
       const k = j*w + i;
-      if(i+1 < w){ idx.push(k, k+1); }
-      if(j+1 < h){ idx.push(k, k+w); }
+      idx.push(k, k+w, k+1,  k+1, k+w, k+w+1);
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    geo.setAttribute('gridUv', new THREE.BufferAttribute(guv, 2));
     geo.setIndex(idx);
-    const land = new THREE.LineSegments(geo, lineMat(0xffffff, 0.62, true));
+    const land = new THREE.Mesh(geo, gridMat(0xffffff, 0.62, true));
     land.name = 'neonLand';
     land.userData.samples = w*h;
     envGroup.add(land);
@@ -433,7 +530,12 @@ function buildTrackMesh(T, baseM){
   };
   wall(1, NEON_COL.left); wall(-1, NEON_COL.right);
 
-  // centre dashes + pylons down to the floor grid
+  /* Centre dashes, and pylons under the edges. A PYLON FADES OUT, it does not reach the
+     floor: over a steep descent the deck can be a hundred exaggerated metres above the
+     grid, and a full-height line every 48 m turns the side of the course into a curtain
+     of hairlines. Each one now runs at most PYLON_M down and goes from its colour at the
+     deck to black at the foot -- additive, so black adds nothing and the line simply
+     dissolves. */
   {
     const dash = [], py = [];
     const every = Math.max(1, Math.round(12/T.ds));
@@ -442,16 +544,29 @@ function buildTrackMesh(T, baseM){
       dash.push(T.x[i], deckY(T, T.elev[i], baseM)+0.04, T.z[i], T.x[j], deckY(T, T.elev[j], baseM)+0.04, T.z[j]);
     }
     const pEvery = Math.max(1, Math.round(48/T.ds));
+    const pc = new THREE.Color(NEON_COL.pylon), pcol = [];
+    const floorY = -18/Math.sqrt(T.scale || 1);
     for(let i = 0; i < T.n; i += pEvery){
       for(const sign of [-1, 1]){
         const x = T.x[i] - Math.sin(T.yaw[i])*sign*T.halfW[i], z = T.z[i] - Math.cos(T.yaw[i])*sign*T.halfW[i];
-        py.push(x, deckY(T, T.elev[i], baseM), z, x, -18, z);
+        const y0 = deckY(T, T.elev[i], baseM);
+        const y1 = Math.max(floorY, y0 - PYLON_M*K);
+        if(y0 - y1 < 0.05) continue;
+        // a short pylon (low deck) keeps some colour at the floor; a long one ends black
+        const tail = Math.max(0, 1 - (y0 - y1)/(PYLON_M*K));
+        py.push(x, y0, z, x, y1, z);
+        pcol.push(pc.r, pc.g, pc.b, pc.r*tail, pc.g*tail, pc.b*tail);
       }
     }
     const dg = new THREE.BufferGeometry(); dg.setAttribute('position', new THREE.Float32BufferAttribute(dash, 3));
     const pg = new THREE.BufferGeometry(); pg.setAttribute('position', new THREE.Float32BufferAttribute(py, 3));
+    pg.setAttribute('color', new THREE.Float32BufferAttribute(pcol, 3));
     const dashes = new THREE.LineSegments(dg, lineMat(NEON_COL.dash, 0.9)); dashes.renderOrder = 3;
-    trackGroup.add(dashes, new THREE.LineSegments(pg, lineMat(NEON_COL.pylon, 0.8)));
+    const pm = lineMat(0xffffff, 0.8, true);
+    pm.blending = THREE.AdditiveBlending;
+    const pylons = new THREE.LineSegments(pg, pm);
+    pylons.name = 'neonPylons';
+    trackGroup.add(dashes, pylons);
   }
 
   trackGroup.add(gateAt(T, baseM, 0, NEON_COL.gate, K));
@@ -571,5 +686,5 @@ function updateScene(dt){
   if(starField) starField.position.copy(camera.position);
 }
 
-export { NEON_COL, glowTexture, addMat, buildEnvironment, buildTrackMesh, clearTrackMesh,
+export { NEON_COL, PYLON_M, glowTexture, addMat, buildEnvironment, buildTrackMesh, clearTrackMesh, setGridStyle, getGridStyle,
          bumperPulse, updateScene, stripGeometry, offsetLine, puffSmoke, clearSmoke };

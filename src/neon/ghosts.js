@@ -3,13 +3,17 @@
 
    One ghost per RIDER per course setting: your fastest lap as the corgi and your fastest
    as the elk are different records, and at Fierce they all line up together. A ghost is a
-   replay, not a driver -- it never steers, never collides and cannot be blocked -- so it
-   is honest about what it is: the exact run that set the time.
+   replay, not a driver -- it never steers -- but it is SOLID to everyone except its own
+   rider: shoulder one and it is pushed off its line and knocked back on its clock, then
+   eases back onto the recording. The time a shove costs it is added to its finish, so
+   blocking a ghost is a real way to beat it. It still replays the exact line that set the
+   time; it just replays it a little late.
 
    STORED SMALL, because localStorage is a few megabytes for everything the three games
    keep. Position along and across the track, four times a second, rounded to a decimetre
    and a centimetre; heading is not stored at all but recovered from where the line went,
    which is what heading means anyway. That is about 1.2 kB of JSON per minute of racing. */
+import { NEON } from './tuning.js';
 import { trackFrame } from './track.js';
 import { makeRacer } from './racer.js';
 
@@ -51,14 +55,27 @@ function keepGhost(store, key, ghost){
    to know nothing about it, but driven by the recording instead of by physics. */
 function makeGhostRacer(g, T, color){
   const r = makeRacer({name: g.label + ' ghost', isGhost: true, color, ghost: g,
-                       skill: null, lane: 0, seed: 1});
+                       skill: null, lane: 0, seed: 1, riderId: g.rider,
+                       // playback clock, its rate, and how far it has been shoved off its line
+                       gt: 0, rate: 1, offD: 0, offV: 0, solid: false});
   applyGhost(r, T, 0);
   return r;
 }
 function stepGhost(r, T, dt){
   r.time += dt;
-  applyGhost(r, T, r.time);
-  if(!r.done && r.time >= r.ghost.time){ r.done = true; r.finishT = r.ghost.time; }
+  /* The clock runs at `rate`, which a shove knocks down and which comes back to 1 on its
+     own. Every second it spends below 1 is time it arrives late. */
+  if(r.rate == null) r.rate = 1;
+  r.rate += (1 - r.rate)*Math.min(1, dt/NEON.ghostRecoverS);
+  if(r.rate > 0.9995) r.rate = 1;
+  r.gt = (r.gt || 0) + dt*r.rate;
+  /* Back onto the line on a critically damped spring: no snap, no overshoot. */
+  const w = NEON.ghostRightW;
+  r.offV = (r.offV || 0) + (-w*w*(r.offD || 0) - 2*w*(r.offV || 0))*dt;
+  r.offD = (r.offD || 0) + r.offV*dt;
+  if(Math.abs(r.offD) < 1e-3 && Math.abs(r.offV) < 1e-3){ r.offD = 0; r.offV = 0; }
+  applyGhost(r, T, r.gt);
+  if(!r.done && r.gt >= r.ghost.time){ r.done = true; r.finishT = r.time; }
 }
 function applyGhost(r, T, t){
   const g = r.ghost, n = g.s.length;
@@ -68,9 +85,12 @@ function applyGhost(r, T, t){
   const d = g.d[i] + (g.d[j]-g.d[i])*f;
   const prev = r.prog;
   r.prog = prog;
-  r.d = d;
   r.lap = T.closed ? Math.floor(prog/T.L) : 0;
   r.s = T.closed ? prog - r.lap*T.L : Math.min(prog, T.L);
+  // recorded line plus however far it has been shoved, never through a bumper
+  const lim = trackFrame(T, r.s, {}).halfW - (T.bodyWide || NEON.bodyWide)*0.5;
+  r.d = Math.max(-lim, Math.min(lim, d + (r.offD || 0)));
+  if(Math.abs(d + (r.offD || 0)) > lim){ r.offD = r.d - d; r.offV = 0; }
   r.v = Math.max(0, (prog - prev)/Math.max(1e-4, r.lastDt || 0.016));
   // heading from the direction the recorded line is going, not from a stored angle
   const ahead = Math.min(n-1, u + 1.2);
@@ -78,7 +98,8 @@ function applyGhost(r, T, t){
   const pa = g.s[ai] + (g.s[aj]-g.s[ai])*af, da = g.d[ai] + (g.d[aj]-g.d[ai])*af;
   const ds = Math.max(0.05, pa - prog), dd = da - d;
   const fr = trackFrame(T, r.s, {});
-  r.yaw = fr.yaw + Math.atan2(dd, ds);
+  // the drift back onto the line shows in the heading too
+  r.yaw = fr.yaw + Math.atan2(dd, ds) + Math.atan2(r.offV || 0, Math.max(2, r.v));
   r.slope = 0;
   r.boosting = false;
   r.lean += ((-Math.atan2(dd, ds)*0.5) - r.lean)*0.1;

@@ -55,6 +55,31 @@ select{font:inherit; color:var(--text); background:#0a1026; border:1px solid var
 body[data-screen="menu"] #menu{display:flex;}
 body[data-screen="finish"] #finish{display:flex;}
 body[data-screen="pause"] #pause{display:flex;}
+body[data-screen="build"] #build{display:flex;}
+
+/* --- BUILD: the map is the screen --- */
+#buildCard{width:min(1100px,100%); height:100%; display:flex; flex-direction:column; gap:10px;
+  background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px;}
+#buildCard header{display:flex; align-items:baseline; gap:14px; flex-wrap:wrap;}
+#buildTitle{margin:0; font-size:13px; letter-spacing:.2em; color:var(--cyan);}
+#buildInfo{margin:0; color:var(--dim); font-size:13px;}
+#buildMapWrap{position:relative; flex:1 1 auto; min-height:0;}
+/* touch-action:none on BOTH the canvas and its wrapper: a drag that starts on the canvas
+   and crosses onto the wrapper's padding otherwise cancels the pointer mid-pan. */
+#buildMapWrap, #buildMap{touch-action:none;}
+#buildMap{width:100%; height:100%; display:block; border:1px solid var(--line);
+  border-radius:4px; background:#05081a; cursor:crosshair;}
+#buildZoom{position:absolute; right:10px; top:10px; display:flex; flex-direction:column; gap:6px;}
+#buildZoom .btn{min-width:42px; padding:8px 10px; background:rgba(8,12,26,.85);}
+#buildBar{display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+#buildName{flex:1 1 200px; min-width:140px; font:inherit; color:var(--text); background:#0a1026;
+  border:1px solid var(--line); border-radius:4px; padding:8px 10px;}
+#buildBar .btn{padding:8px 12px;}
+
+@media (max-width:720px){
+  #buildCard{padding:10px 12px;}
+  #buildName{flex-basis:100%;}
+}
 
 #menuCard{width:min(980px,100%); max-height:100%; display:flex; flex-direction:column;
   background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px 18px;}
@@ -85,6 +110,20 @@ h2{margin:0 0 8px; font-size:12px; letter-spacing:.2em; color:var(--dim); font-w
 #startBtn{position:sticky; top:0; z-index:2; width:100%; margin:2px 0 4px; font-size:17px;
   letter-spacing:.28em; background:var(--panel);}
 .row{display:flex; align-items:center; justify-content:space-between; gap:10px;}
+/* .row sets display, and a bare [hidden] is only a UA default -- without this, hiding the
+   custom-mode bar does nothing at all. Same trap the pup grid hit in Pup Trails. */
+.row[hidden]{display:none;}
+.row input[type=range]{width:55%; max-width:220px; accent-color:var(--cyan);}
+/* The colour slider's track is the colour wheel itself, so the thumb shows where you are
+   on it. appearance:none is what lets the gradient through; the thumb is restyled to
+   match because it loses its default look with it. */
+.row input.gridHue{-webkit-appearance:none; appearance:none; height:8px; border-radius:4px;
+  background:linear-gradient(to right,#1a2cff,#b01aff,#ff1a8c,#ff5a1a,#ffe11a,#3cff1a,#1affd0,#1a8cff,#1a2cff);}
+.row input.gridHue::-webkit-slider-thumb{-webkit-appearance:none; width:16px; height:16px; border-radius:50%;
+  background:var(--text); border:2px solid var(--panel);}
+.row input.gridHue::-moz-range-thumb{width:14px; height:14px; border-radius:50%; background:var(--text);
+  border:2px solid var(--panel);}
+#customBar{justify-content:flex-start; margin:0 0 8px;}
 .seg{display:inline-flex; gap:4px;}
 .stepper{display:inline-flex; align-items:center; gap:10px;}
 .stepper b{min-width:1.5em; text-align:center; color:var(--cyan);}
@@ -115,24 +154,30 @@ body[data-screen="race"] #hud, body[data-screen="count"] #hud, body[data-screen=
 #hudB{left:50%; bottom:calc(14px + var(--safe-b)); transform:translateX(-50%); text-align:center; text-shadow:0 0 8px #000;}
 #speedVal{font-size:44px; line-height:1; color:var(--text);}
 #speedUnit{font-size:11px; letter-spacing:.3em; color:var(--dim);}
-/* THE ROCKET RACK. Each rocket is one element: a body, a nose (the ::before triangle) and
-   fins (::after), drawn in CSS so the HUD stays a DOM overlay with no canvas of its own.
-   Spent ones keep their outline, so the rack shows what you had as well as what is left. */
-#fuelRack{display:flex; gap:14px; justify-content:center; margin:12px 0 4px; height:30px;}
-.rocket{position:relative; width:11px; height:21px; border-radius:3px 3px 1px 1px;
-  border:1.5px solid var(--line); background:transparent; opacity:.55;}
-.rocket::before{content:""; position:absolute; left:50%; top:-9px; transform:translateX(-50%);
-  border-left:5.5px solid transparent; border-right:5.5px solid transparent; border-bottom:9px solid var(--line);}
-.rocket::after{content:""; position:absolute; left:-5px; right:-5px; bottom:0; height:7px;
-  border-left:1.5px solid var(--line); border-right:1.5px solid var(--line);
-  clip-path:polygon(0 100%, 30% 0, 70% 0, 100% 100%);}
-.rocket.on{opacity:1; border-color:var(--lime); background:rgba(182,255,60,.22);
+/* THE NITRO RACK. Each tank is one element: a rounded capsule body with a band across it,
+   a valve on top (::before) and a fill gauge window down the middle (::after), drawn in
+   CSS so the HUD stays a DOM overlay with no canvas of its own. Spent ones keep their
+   outline, so the rack shows what you had as well as what is left. */
+#fuelRack{display:flex; gap:12px; justify-content:center; margin:14px 0 4px; height:30px;}
+.tank{position:relative; width:14px; height:24px; margin-top:5px; border-radius:7px;
+  border:1.5px solid var(--line); background:transparent; opacity:.55;
+  background-image:linear-gradient(transparent 28%, var(--line) 28%, var(--line) 36%, transparent 36%);}
+.tank::before{content:""; position:absolute; left:50%; top:-7px; transform:translateX(-50%);
+  width:6px; height:4px; border:1.5px solid var(--line); border-bottom:none; border-radius:2px 2px 0 0;}
+.tank::after{content:""; position:absolute; left:50%; bottom:4px; transform:translateX(-50%);
+  width:3px; height:9px; border-radius:2px; background:transparent;}
+.tank.on{opacity:1; border-color:var(--lime); background-color:rgba(182,255,60,.18);
+  background-image:linear-gradient(transparent 28%, var(--lime) 28%, var(--lime) 36%, transparent 36%);
   box-shadow:0 0 8px rgba(182,255,60,.5);}
-.rocket.on::before{border-bottom-color:var(--lime);}
-.rocket.on::after{border-color:var(--lime);}
-.rocket.firing{opacity:1; border-color:var(--mag); box-shadow:0 0 12px var(--mag);
-  animation:rocketFire .28s linear infinite;}
-@keyframes rocketFire{ 50%{ box-shadow:0 0 4px var(--mag); } }
+.tank.on::before{border-color:var(--lime);}
+.tank.on::after{background:var(--lime); box-shadow:0 0 4px var(--lime);}
+.tank.firing{opacity:1; border-color:var(--mag); box-shadow:0 0 12px var(--mag);
+  background-image:linear-gradient(transparent 28%, var(--mag) 28%, var(--mag) 36%, transparent 36%);
+  animation:tankFire .28s linear infinite;}
+.tank.firing::before{border-color:var(--mag);}
+.tank.firing::after{background:var(--mag); animation:tankDrain 1.6s linear forwards;}
+@keyframes tankFire{ 50%{ box-shadow:0 0 4px var(--mag); } }
+@keyframes tankDrain{ to{ height:0; } }
 #burnPip{font-size:11px; letter-spacing:.2em; color:var(--dim); margin-top:4px; min-height:1.2em;}
 #burnPip.hot{color:var(--lime);}
 #slopeVal{font-size:12px; color:var(--dim); min-height:1.3em; margin-top:3px;}
@@ -226,6 +271,11 @@ body[data-screen="count"] #count{display:flex;}
     <div id="menuCols">
       <section id="colCourses">
         <h2>Courses</h2>
+        <!-- Only in Custom mode: the automatic list has nothing to add to or edit. -->
+        <div class="row" id="customBar" hidden>
+          <button class="btn" id="newCourse">+ New course</button>
+          <button class="btn" id="editCourse" disabled>Edit</button>
+        </div>
         <div id="courseList" role="listbox" aria-label="Courses"></div>
       </section>
       <section id="colSetup">
@@ -236,6 +286,15 @@ body[data-screen="count"] #count{display:flex;}
              immediately; it stays reachable without scrolling past class, pace, gravity,
              direction, camera, ghosts, scale and the map picker to find it. -->
         <button class="btn go" id="startBtn" disabled>START</button>
+        <!-- Mode comes first of the rows because it is the only setting that changes the
+             LIST on the left rather than the race on the right. -->
+        <div class="row">Courses
+          <span class="seg" id="modeSeg">
+            <button class="btn on" data-mode="auto">Auto</button>
+            <button class="btn" data-mode="custom">Custom</button>
+          </span>
+        </div>
+        <p class="hint" id="modeNote"></p>
         <label class="row">Rider
           <select id="riderSel"></select>
         </label>
@@ -276,6 +335,15 @@ body[data-screen="count"] #count{display:flex;}
             <button class="btn" data-cam="far">Far</button>
           </span>
         </div>
+        <label class="row">Grid lines
+          <input type="range" class="gridThick" min="0" max="10" step="1" aria-label="Background grid line thickness">
+        </label>
+        <label class="row">Grid glow
+          <input type="range" class="gridGlow" min="0" max="200" step="5" aria-label="Background grid glow">
+        </label>
+        <label class="row">Grid colour
+          <input type="range" class="gridHue" min="0" max="360" step="5" aria-label="Background grid colour">
+        </label>
         <div class="row">Direction
           <span class="seg" id="dirSeg">
             <button class="btn on" data-dir="fwd">Forward</button>
@@ -303,9 +371,37 @@ body[data-screen="count"] #count{display:flex;}
         </label>
         <input type="file" id="worldFile" accept=".geojson,.json,.txt,application/geo+json,application/json,text/plain" multiple hidden>
         <p class="hint" id="ghostNote"></p>
-        <p class="hint">W/↑ go · S/↓ brake · A D steer · Shift fire a rocket (one burn per press) · C camera · P pause · R restart · Esc quit<br>
+        <p class="hint">W/↑ go · S/↓ brake · A D steer · Shift nitro (one burn per press) · C camera · P pause · R restart · Esc quit<br>
       In the menu: G gravity · V reverse. Class, gravity, direction and scale are fixed once a race starts.</p>
       </section>
+    </div>
+  </div>
+</div>
+
+<!-- BUILD: tap the map, segment by segment, and a course comes out. The map takes the
+     whole card because that is the job; everything else is one bar along the bottom. -->
+<div id="build" class="overlay">
+  <div id="buildCard">
+    <header>
+      <h2 id="buildTitle">New course</h2>
+      <p id="buildInfo">Tap a trail to start.</p>
+    </header>
+    <div id="buildMapWrap">
+      <canvas id="buildMap"></canvas>
+      <div id="buildZoom">
+        <button class="btn" id="zoomIn" aria-label="Zoom in">+</button>
+        <button class="btn" id="zoomOut" aria-label="Zoom out">−</button>
+        <button class="btn" id="zoomFit">Fit</button>
+      </div>
+    </div>
+    <div id="buildBar">
+      <input id="buildName" type="text" maxlength="40" placeholder="Course name" aria-label="Course name">
+      <button class="btn" id="buildUndo" disabled>Undo</button>
+      <button class="btn" id="buildRedo" disabled>Redo</button>
+      <button class="btn" id="buildClear">Clear</button>
+      <button class="btn" id="buildDelete" hidden>Delete</button>
+      <button class="btn" id="buildCancel">Cancel</button>
+      <button class="btn go" id="buildSave" disabled>Save</button>
     </div>
   </div>
 </div>
@@ -326,13 +422,13 @@ body[data-screen="count"] #count{display:flex;}
   <div id="hudR"><canvas id="minimap"></canvas></div>
   <div id="hudB">
     <div id="speedVal">0</div><div id="speedUnit">mph</div>
-    <div id="fuelRack" aria-label="Rockets"></div>
+    <div id="fuelRack" aria-label="Nitro"></div>
     <div id="burnPip"></div>
     <div id="slopeVal"></div>
   </div>
   <div id="touchCtl">
     <div id="tSteer"><span>◀</span><b>STEER</b><span>▶</span></div>
-    <div class="tgrp"><button class="tbtn" id="tBrake">BRAKE</button><button class="tbtn hot" id="tBoost">BURN</button></div>
+    <div class="tgrp"><button class="tbtn" id="tBrake">BRAKE</button><button class="tbtn hot" id="tBoost">NITRO</button></div>
   </div>
 </div>
 <div id="count"></div>
@@ -355,7 +451,17 @@ body[data-screen="count"] #count{display:flex;}
       <b id="ctlUpVal">16px</b><button class="btn" id="ctlUpUp" aria-label="Move controls up">+</button></span>
     </div>
     <button class="btn" id="ctlResetBtn">Reset control position</button>
-    <p class="hint">Only affects the on-screen touch controls. Sliders live here, not mid-race, so
+    <label class="row">Grid lines
+      <input type="range" class="gridThick" min="0" max="10" step="1" aria-label="Background grid line thickness">
+    </label>
+    <label class="row">Grid glow
+      <input type="range" class="gridGlow" min="0" max="200" step="5" aria-label="Background grid glow">
+    </label>
+    <label class="row">Grid colour
+      <input type="range" class="gridHue" min="0" max="360" step="5" aria-label="Background grid colour">
+    </label>
+    <p class="hint">The control sliders only move the on-screen touch controls; the grid sliders
+      restyle the background you can see behind this card. They live here, not mid-race, so
       adjusting them never costs you a frame of driving.</p>
     <div class="actions">
       <button class="btn go" id="resumeBtn">▶ Resume</button>
@@ -2829,18 +2935,32 @@ const NEON = {
   bumpRestitution: 0.65,// how much of the into-wall angle comes back out
   bumpKick:   0.16,     // rad, minimum angle you leave the wall at
   bumpLock:   0.18,     // s of reduced steering after a hit, so it reads as a bounce
-  /* --- boost: a rack of rockets, one burn each ---
+  /* Repeat offenders. A wall hit inside bumpWindow of the last one is the SAME mistake
+     compounding, not a fresh one: the first costs bumpKeep as always, the second keeps
+     only bumpKeep2 of what is left, and the third spins you out to a standstill. Leave the
+     window and the count starts again at one. */
+  bumpWindow: 1.5,      // s between hits for them to count as a streak
+  bumpKeep2:  0.55,     // speed kept on the 2nd hit of a streak (1st hit uses bumpKeep)
+  spinS:      1.1,      // s spent spinning after the 3rd hit: no thrust, no steering
+  spinTurns:  2,        // full turns the rider makes in that time (visual only)
+  /* --- ghosts are solid --- a record you can lean on. A shove pushes one off its line
+     and knocks its playback clock back; it then eases back onto the recorded line, and
+     the time it lost is added to its finish. Never solid to its own rider. */
+  ghostKnock:   0.30,   // playback rate drops by at least this on contact
+  ghostRecoverS:1.2,    // s time constant for the rate to come back to 1
+  ghostRightW:  2.4,    // rad/s, critically damped spring pulling it back onto its line
+  /* --- boost: a rack of nitro tanks, one burn each ---
      Nothing recharges. You start with a couple and everything after that is picked up off
      the track, which is what makes the cells worth going out of your way for and a burn
      worth saving for the straight that matters. */
   burnS:      1.6,      // how long a burn lasts
   burnLock:   0.45,     // dead time after a burn, so it reads as a discrete shove
-  fuelStart:  2,        // rockets on the rack at the lights
+  fuelStart:  2,        // nitro tanks on the rack at the lights
   fuelMax:    5,
-  // --- rocket pickups sitting on the course ---
+  // --- nitro pickups sitting on the course ---
   cellEveryM: 240,      // one every so many metres of track
   cellGrab:   1.5,      // how close across the track you have to pass
-  cellBackS:  9,        // seconds before a taken rocket comes back
+  cellBackS:  9,        // seconds before a taken tank comes back
   // --- racers bumping each other ---
   bodyLen:    2.6,
   bodyWide:   1.5,
@@ -3166,15 +3286,73 @@ function courseName(ctx, states, circuit, taken){
   return name;
 }
 
+/* ---------- bridging near-miss gaps ----------
+   geo.js joins line ends within its snap tolerance (16 m) and no further. Real map data
+   is not that tidy: on the Pikes map the highway is two ways whose ends stop 17 m apart,
+   so the graph has two pieces of road where the world has one, and the course builder
+   honestly reports there is no way across.
+
+   A bridge is a short straight edge from a DEAD END to the nearest node in a DIFFERENT
+   connected piece of the network, within BRIDGE_M. Both conditions are deliberate:
+     - dead ends only, because a line that stops short is the signature of a mapping gap;
+       a junction that happens to sit near another trail is two trails, not a break;
+     - different pieces only, because inside one connected piece a bridge is not a repair,
+       it is a shortcut nobody mapped, and it would change the shape of every course near
+       it. Kruskal-style, shortest first, so a map in three pieces gets two bridges, not
+       every pair of nearby ends.
+
+   Bridges are APPENDED after every edge geo.js made, so no existing edge index moves --
+   which is what keeps saved custom courses and best times valid on a map that gains one.
+   They carry the name and kind of the trail they continue, and `bridge: true`, which the
+   automatic generator uses to ignore them: auto courses on a bridged map are exactly what
+   they were before, and every record set on them still stands. */
+const BRIDGE_M = 40;
+
+function bridgeGaps(graph, maxM){
+  const lim = maxM == null ? BRIDGE_M : maxM;
+  const {nodes, edges} = graph;
+  const deg = nodes.map(() => 0);
+  edges.forEach(e => { deg[e.a]++; if(e.b !== e.a) deg[e.b]++; });
+  const par = nodes.map((_, i) => i);
+  const find = i => { while(par[i] !== i){ par[i] = par[par[i]]; i = par[i]; } return i; };
+  edges.forEach(e => { const a = find(e.a), b = find(e.b); if(a !== b) par[a] = b; });
+
+  const cand = [];
+  nodes.forEach((n, i) => {
+    if(deg[i] !== 1) return;
+    nodes.forEach((m, j) => {
+      if(j === i || find(j) === find(i)) return;
+      const d = Math.hypot(m.p[0]-n.p[0], m.p[1]-n.p[1]);
+      if(d <= lim) cand.push({i, j, d});
+    });
+  });
+  cand.sort((p, q) => p.d - q.d || p.i - q.i || p.j - q.j);
+  let added = 0;
+  for(const c of cand){
+    const a = find(c.i), b = find(c.j);
+    if(a === b) continue;
+    par[a] = b;
+    const from = edges.find(e => e.a === c.i || e.b === c.i);
+    edges.push({a: c.i, b: c.j, pts: [nodes[c.i].p.slice(), nodes[c.j].p.slice()],
+                name: from.name, route: from.route, named: from.named, lenM: Math.max(0.5, c.d),
+                color: from.color, kind: from.kind, paved: from.paved, ford: false, bridge: true});
+    added++;
+  }
+  return added;
+}
+
 /* heightAt(x,z) is optional; with it, sprints are pointed downhill-ish start to finish
    only when neither end is a trailhead -- a dead-end is the natural place to line up. */
 function buildCourses(graph, heightAt, opts){
   const o = opts || {};
   const edges = graph.edges, nodes = graph.nodes;
   const adj = nodes.map(() => []);
-  edges.forEach((e, ei) => { adj[e.a].push({ei}); if(e.b !== e.a) adj[e.b].push({ei}); });
+  /* Bridges are invisible here: not in the adjacency, skipped for coverage. The generator
+     sees exactly the graph geo.js built, so a bridged map offers the same auto courses. */
+  edges.forEach((e, ei) => { if(e.bridge) return; adj[e.a].push({ei}); if(e.b !== e.a) adj[e.b].push({ei}); });
   const deg = nodes.map((_, i) => adj[i].length);
   const skip = new Uint8Array(edges.length);
+  edges.forEach((e, ei) => { if(e.bridge) skip[ei] = 1; });
   // prune short dead-end twigs, repeatedly: removing one can expose the next
   for(let round = 0; round < 6; round++){
     let any = false;
@@ -3260,6 +3438,271 @@ function buildCourses(graph, heightAt, opts){
   return {courses, targetM: target, totalM, coveredM: covered,
           coverage: totalM ? covered/totalM : 0};
 }
+
+/* routeSearch and unwind are exported for the course builder: a hand-built course is
+   connected between two picks by the same directed-edge search, with the same turn
+   limits, that the automatic generator uses. One idea of what counts as a way on. */
+
+/* ==== src/neon/builder.js ==== */
+/* THE COURSE BUILDER. A map you tap, one trail segment at a time, and a course comes out.
+
+   The whole module is about ONE idea: you point at where you want to go, not at how to
+   get there. A tap names a segment; everything between the end of the course so far and
+   that segment is found for you, by the same directed-edge search the automatic
+   generator uses (routeSearch in routes.js), so a hand-built course obeys exactly the
+   same rules about what counts as a way on -- no hairpin at a junction where a straighter
+   way exists, no edge walked twice. Tapping the far end of the map from one trailhead is
+   a legitimate way to build a course; you just get the sensible line between them.
+
+   What it does NOT do is own any state the game cares about. The builder holds a list of
+   directed edge states and an undo stack, and hands that list back on save. main.js turns
+   it into a course object and stores it. Nothing here knows about tracks, racers, THREE
+   or localStorage.
+
+   NO CANVAS TRANSFORM. Every world point is projected by hand through `view`, because the
+   same projection has to run backwards for hit testing, and a ctx.setTransform that the
+   picker has to invert separately is two descriptions of one thing waiting to disagree. */
+
+
+const B_PAD = 40;                  // world metres of breathing room when fitting the map
+const B_PICK_PX = 22;              // how near a tap has to land, in CSS pixels
+const B_ZOOM_MIN = 0.4, B_ZOOM_MAX = 40;   // multiples of the fit-the-whole-map scale
+
+const B_COL = {
+  net:    'rgba(70,110,200,0.55)',
+  netHot: 'rgba(120,170,255,0.9)',
+  glow:   'rgba(25,240,255,0.28)',
+  line:   '#19f0ff',
+  start:  '#b6ff3c',
+  end:    '#ff2bd6',
+  reach:  'rgba(182,255,60,0.35)',
+};
+
+let bGraph = null, bCtx = null, bCanvas = null, bBox = null;
+let bStates = [], bHist = [[]], bAt = 0;
+let view = {cx: 0, cz: 0, k: 1, fit: 1};
+let bNote = '';
+
+/* ---------- the graph context routeSearch wants ---------- */
+function makeCtx(graph){
+  const adj = graph.nodes.map(() => []);
+  graph.edges.forEach((e, ei) => { adj[e.a].push({ei}); if(e.b !== e.a) adj[e.b].push({ei}); });
+  /* cover and skip are the generator's bookkeeping about which trail is already spoken
+     for and which twigs are too short to race. Neither applies here: you asked for this
+     segment, so every segment is on the table and none of them is "already used up". */
+  return {edges: graph.edges, nodes: graph.nodes, adj,
+          cover: new Uint16Array(graph.edges.length), skip: new Uint8Array(graph.edges.length)};
+}
+
+/* ---------- view ---------- */
+function dpr(){ return Math.min(2, (typeof window !== 'undefined' && window.devicePixelRatio) || 1); }
+function bSizeCanvas(cv){
+  const d = dpr();
+  const w = Math.round((cv.clientWidth || 640)*d), h = Math.round((cv.clientHeight || 420)*d);
+  if(cv.width !== w || cv.height !== h){ cv.width = w; cv.height = h; return true; }
+  return false;
+}
+const bX = x => (x - view.cx)*view.k + (bCanvas ? bCanvas.width : 0)/2;
+const bY = z => (z - view.cz)*view.k + (bCanvas ? bCanvas.height : 0)/2;
+/* CSS pixels in (that is what a pointer event gives), world metres out. */
+function bWorld(px, py){
+  const d = dpr();
+  return [(px*d - (bCanvas ? bCanvas.width : 0)/2)/view.k + view.cx,
+          (py*d - (bCanvas ? bCanvas.height : 0)/2)/view.k + view.cz];
+}
+function builderFit(){
+  if(!bCanvas || !bBox) return;
+  bSizeCanvas(bCanvas);
+  const w = bBox.x1 - bBox.x0 + B_PAD*2, h = bBox.z1 - bBox.z0 + B_PAD*2;
+  view.fit = Math.min(bCanvas.width/Math.max(1, w), bCanvas.height/Math.max(1, h));
+  view.k = view.fit;
+  view.cx = (bBox.x0 + bBox.x1)/2;
+  view.cz = (bBox.z0 + bBox.z1)/2;
+}
+/* Zoom about the CENTRE of the map view, not about a pinch point: the zoom control is a
+   pair of buttons, and a button has no position on the map to zoom towards. */
+function builderZoom(mul){
+  const k = view.k*mul;
+  view.k = Math.max(view.fit*B_ZOOM_MIN, Math.min(view.fit*B_ZOOM_MAX, k));
+  return view.k;
+}
+function builderPan(dxPx, dyPx){
+  const d = dpr();
+  view.cx -= dxPx*d/view.k;
+  view.cz -= dyPx*d/view.k;
+}
+const builderView = () => ({cx: view.cx, cz: view.cz, k: view.k, fit: view.fit});
+
+/* ---------- picking ---------- */
+function segDist(px, pz, ax, az, bx, bz){
+  const vx = bx-ax, vz = bz-az;
+  const L2 = vx*vx + vz*vz;
+  let t = L2 > 0 ? ((px-ax)*vx + (pz-az)*vz)/L2 : 0;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  return Math.hypot(px - (ax + vx*t), pz - (az + vz*t));
+}
+/* Nearest edge to a tap, or -1. The threshold is in screen pixels converted to metres, so
+   it stays a thumb's width whatever the zoom: zoomed out, trails are close together and
+   you have to be accurate; zoomed in, you do not. */
+function builderPickAt(pxCss, pyCss){
+  if(!bGraph) return -1;
+  const [wx, wz] = bWorld(pxCss, pyCss);
+  const lim = B_PICK_PX*dpr()/view.k;
+  let best = -1, bestD = lim;
+  bGraph.edges.forEach((e, ei) => {
+    const pts = e.pts;
+    for(let i = 1; i < pts.length; i++){
+      const d = segDist(wx, wz, pts[i-1][0], pts[i-1][1], pts[i][0], pts[i][1]);
+      if(d < bestD){ bestD = d; best = ei; }
+    }
+  });
+  return best;
+}
+
+/* ---------- the course so far ---------- */
+const stateEnd   = s => { const e = bGraph.edges[s>>1]; return (s&1) ? e.a : e.b; };
+const stateStart = s => { const e = bGraph.edges[s>>1]; return (s&1) ? e.b : e.a; };
+function builderStates(){ return bStates.slice(); }
+function builderLenM(){ return bStates.reduce((a, s) => a + bGraph.edges[s>>1].lenM, 0); }
+function builderClosed(){
+  return bStates.length > 1 && stateStart(bStates[0]) === stateEnd(bStates[bStates.length-1]);
+}
+function builderNote(){ return bNote; }
+function builderCanUndo(){ return bAt > 0; }
+function builderCanRedo(){ return bAt < bHist.length-1; }
+
+function push(states){
+  bHist = bHist.slice(0, bAt+1);
+  bHist.push(states.slice());
+  bAt = bHist.length-1;
+  bStates = states.slice();
+}
+
+/* THE ONE INTERESTING FUNCTION. Add the segment you tapped, and whatever it takes to get
+   there from where the course currently ends.
+
+   The first tap is special: a lone segment has no direction yet, because direction is
+   only meaningful once there is somewhere to go next. So it is stored a->b and the SECOND
+   tap gets to flip it -- the search is run from both orientations of the first segment and
+   the cheaper one wins. Without that, starting a course on a segment and then tapping
+   "backwards" along the trail would either fail or leave the course facing the wrong way
+   with no way to say so. */
+function builderAdd(ei){
+  bNote = '';
+  if(!bGraph || ei < 0 || ei >= bGraph.edges.length){ bNote = 'Tap a trail.'; return false; }
+  const e = bGraph.edges[ei];
+  if(bStates.some(s => (s>>1) === ei)){
+    bNote = 'That stretch is already on the course.';
+    return false;
+  }
+  if(!bStates.length){ push([ei*2]); return true; }
+
+  const banned = new Uint8Array(bGraph.edges.length);
+  for(const s of bStates) banned[s>>1] = 1;
+  const starts = bStates.length === 1 ? [bStates[0], bStates[0]^1] : [bStates[bStates.length-1]];
+  let best = null;
+  for(const from of starts){
+    const R = routeSearch(bCtx, from, banned, null);
+    for(const t of [ei*2, ei*2+1]){
+      if(!isFinite(R.dist[t])) continue;
+      if(!best || R.dist[t] < best.d - 1e-9){
+        best = {d: R.dist[t], add: unwind(R.prev, t, from), from};
+      }
+    }
+  }
+  if(!best){
+    /* Two different failures, and they want different advice: the course may be in its
+       own way, or that trail may simply not join this one anywhere on the map. Ask the
+       search again with nothing banned to tell which. */
+    const free = new Uint8Array(bGraph.edges.length);
+    const R = routeSearch(bCtx, starts[0], free, null);
+    bNote = (isFinite(R.dist[ei*2]) || isFinite(R.dist[ei*2+1]))
+      ? 'No way to get there without crossing the course. Try a nearer stretch.'
+      : 'That trail does not join this one anywhere on the map.';
+    return false;
+  }
+  const head = bStates.slice(0, -1).concat([best.from]);   // the flip, if the search took it
+  push(head.concat(best.add));
+  return true;
+}
+function builderUndo(){ if(bAt > 0){ bAt--; bStates = bHist[bAt].slice(); bNote = ''; return true; } return false; }
+function builderRedo(){ if(bAt < bHist.length-1){ bAt++; bStates = bHist[bAt].slice(); bNote = ''; return true; } return false; }
+function builderClear(){ push([]); bNote = ''; }
+
+/* The course as a polyline, for the preview and for drawing. */
+function builderLine(){
+  const out = [];
+  for(const s of bStates){
+    const pts = bGraph.edges[s>>1].pts;
+    const seq = (s&1) ? pts.slice().reverse() : pts;
+    for(let i = (out.length ? 1 : 0); i < seq.length; i++) out.push(seq[i]);
+  }
+  return out;
+}
+
+/* ---------- drawing ---------- */
+function builderDraw(){
+  if(!bCanvas) return;
+  bSizeCanvas(bCanvas);
+  const g = bCanvas.getContext('2d');
+  if(!g) return;
+  const S = bCanvas.width/900;                   // one scale for every stroke width
+  g.clearRect(0, 0, bCanvas.width, bCanvas.height);
+  g.lineCap = 'round'; g.lineJoin = 'round';
+
+  /* The network, and then the segments you could add next in a brighter shade. Knowing
+     what is tappable without tapping is most of what makes this feel like a map rather
+     than a guessing game. */
+  const hot = new Set();
+  if(bStates.length){
+    const at = stateEnd(bStates[bStates.length-1]);
+    bGraph.edges.forEach((e, ei) => {
+      if(bStates.some(s => (s>>1) === ei)) return;
+      if(e.a === at || e.b === at) hot.add(ei);
+    });
+  }
+  const pass = (want, col, w) => {
+    g.strokeStyle = col; g.lineWidth = Math.max(1, w*S);
+    g.beginPath();
+    bGraph.edges.forEach((e, ei) => {
+      if(!want(ei)) return;
+      e.pts.forEach((p, i) => { if(i) g.lineTo(bX(p[0]), bY(p[1])); else g.moveTo(bX(p[0]), bY(p[1])); });
+    });
+    g.stroke();
+  };
+  pass(ei => !hot.has(ei), B_COL.net, 1.4);
+  pass(ei => hot.has(ei), B_COL.netHot, 2.2);
+
+  const line = builderLine();
+  if(line.length > 1){
+    for(const [color, w] of [[B_COL.glow, 9], [B_COL.line, 3]]){
+      g.strokeStyle = color; g.lineWidth = Math.max(1, w*S);
+      g.beginPath();
+      line.forEach((p, i) => { if(i) g.lineTo(bX(p[0]), bY(p[1])); else g.moveTo(bX(p[0]), bY(p[1])); });
+      g.stroke();
+    }
+  }
+  if(line.length){
+    const closed = builderClosed();
+    const s = line[0], f = line[line.length-1];
+    g.fillStyle = B_COL.start;
+    g.beginPath(); g.arc(bX(s[0]), bY(s[1]), 6*S, 0, 7); g.fill();
+    if(!closed){
+      g.fillStyle = B_COL.end;
+      g.beginPath(); g.arc(bX(f[0]), bY(f[1]), 6*S, 0, 7); g.fill();
+    }
+  }
+}
+
+function builderOpen(graph, box, canvas, states){
+  bGraph = graph; bBox = box; bCanvas = canvas;
+  bCtx = makeCtx(graph);
+  bStates = (states || []).filter(s => (s>>1) < graph.edges.length);
+  bHist = [bStates.slice()]; bAt = 0; bNote = '';
+  builderFit();
+  builderDraw();
+}
+function builderClose(){ bGraph = null; bCtx = null; bCanvas = null; bStates = []; bHist = [[]]; bAt = 0; }
 
 /* ==== src/neon/track.js ==== */
 /* A course -> a raceable centreline. Pure: no THREE, no DOM.
@@ -3783,6 +4226,7 @@ function makeRacer(o){
     bumpT: 0, bumpSide: 0, bumps: 0, lean: 0, time: 0, done: false, finishT: null,
     place: 0, isPlayer: false, name: '?', skill: null, lane: 0, seed: 1, wob: 0,
     steerIn: 0, slope: 0, speedK: 1, burnT: 0, lockT: 0, boostWasDown: false, cells: 0,
+    bumpStreak: 0, lastBumpT: -1e9, spinT: 0, spinYaw: 0, spins: 0, riderId: null,
   }, o || {});
 }
 
@@ -3849,7 +4293,17 @@ function stepRacer(r, T, input, env, dt){
   }else r.burnFired = false;
   r.boostWasDown = wants;
   const boosting = r.burnT > 0;
-  let a = NEON.thrust*k2*(r.done ? 0 : input.throttle) + (boosting ? NEON.boostThrust*k2 : 0);
+  /* SPUN OUT: no drive and no hands until it stops. The yaw offset is visual only (the
+     rider turns on the deck); physics heading is untouched so the board comes out of it
+     pointing down the track rather than wherever the spin happened to leave it. */
+  const spinning = r.spinT > 0;
+  if(spinning){
+    r.spinT = Math.max(0, r.spinT - dt);
+    const u = 1 - r.spinT/NEON.spinS;                 // 0 .. 1, fast then settling
+    r.spinYaw = 2*Math.PI*NEON.spinTurns*(1 - (1-u)*(1-u));
+    if(r.spinT <= 0) r.spinYaw = 0;
+  }
+  let a = NEON.thrust*k2*(r.done || spinning ? 0 : input.throttle) + (boosting && !spinning ? NEON.boostThrust*k2 : 0);
   a -= NEON.dragK*r.v*r.v + NEON.rollK*r.v;
   a -= NEON.brake*(r.done ? 0.6 : input.brake);
   if(env.gravity) a -= NEON.gravity*NEON.gravityGain*slopeAlong/Math.sqrt(1+slopeAlong*slopeAlong);
@@ -3861,7 +4315,7 @@ function stepRacer(r, T, input, env, dt){
   const grip = r.bumpT > 0 ? 0.35 : 1;
   const rate = NEON.steerRate/(1 + r.v*NEON.steerFade);
   const dsdt = r.v*Math.cos(theta)/Math.max(0.35, 1 - r.d*f.k);
-  r.yaw += input.steer*rate*grip*dt + NEON.railAssist*f.k*dsdt*dt;
+  r.yaw += (spinning ? 0 : input.steer)*rate*grip*dt + NEON.railAssist*f.k*dsdt*dt;
   r.steerIn = input.steer;
 
   // --- position ---
@@ -3884,10 +4338,20 @@ function stepRacer(r, T, input, env, dt){
     if(theta*side > 0 || r.bumpT <= 0){
       const into = Math.max(0, Math.sin(theta*side));          // 0 grazing .. 1 square on
       theta = -side*Math.max(NEON.bumpKick, Math.abs(theta)*NEON.bumpRestitution);
-      const keep = NEON.bumpKeep - 0.12*into;                   // square hits cost more
+      // a streak is hits close together in RACE time; out of the window it starts over
+      r.bumpStreak = (r.time - r.lastBumpT <= NEON.bumpWindow) ? r.bumpStreak + 1 : 1;
+      r.lastBumpT = r.time;
+      let keep = NEON.bumpKeep - 0.12*into;                     // square hits cost more
+      if(r.bumpStreak === 2) keep *= NEON.bumpKeep2;
+      let spin = false;
+      if(r.bumpStreak >= 3 && r.spinT <= 0){
+        keep = 0; spin = true;
+        r.spinT = NEON.spinS; r.spins++; r.bumpStreak = 0;
+        r.burnT = 0;                                            // a spin puts the burn out
+      }
       r.v *= keep;
       r.bumpT = NEON.bumpLock; r.bumpSide = side; r.bumps++;
-      ev = {bump: side, hard: Math.min(1, 0.35 + into)};
+      ev = {bump: side, hard: spin ? 1 : Math.min(1, 0.35 + into), streak: spin ? 3 : r.bumpStreak, spin};
     }
   }
   r.yaw = g.yaw + theta;
@@ -3984,21 +4448,62 @@ function resolveContacts(racers, T){
   for(let i = 0; i < racers.length; i++) for(let j = i+1; j < racers.length; j++){
     const a = racers[i], b = racers[j];
     if(a.done && b.done) continue;
-    if(a.isGhost || b.isGhost) continue;        // a ghost is a record, not a rider
+    if(!contactPair(a, b)) continue;
+    if(!overlapping(a, b, T)) continue;
+    // a ghost that spawned inside somebody is not solid until it has come clear of everyone
+    if((a.isGhost && !a.solid) || (b.isGhost && !b.solid)){ ghostsBlocked.add(a.isGhost && !a.solid ? a : b); continue; }
     let ds = b.s - a.s;
     if(T.closed){ ds = ((ds % T.L) + T.L) % T.L; if(ds > T.L/2) ds -= T.L; }
     const dd = b.d - a.d;
-    if(Math.abs(ds) >= bodyLenOf(T) || Math.abs(dd) >= bodyWideOf(T)) continue;
     const push = (bodyWideOf(T) - Math.abs(dd))*0.5 + 0.01;
     const sgn = dd >= 0 ? 1 : -1;
-    a.d -= sgn*push; b.d += sgn*push;
-    a.yaw += -sgn*0.04; b.yaw += sgn*0.04;
+    shove(a, -sgn*push); shove(b, sgn*push);
+    if(!a.isGhost) a.yaw += -sgn*0.04;
+    if(!b.isGhost) b.yaw += sgn*0.04;
     // the one behind loses a little, the one in front gains a little
     const front = ds >= 0 ? b : a, rear = ds >= 0 ? a : b;
-    if(rear.v > front.v){ const m = (rear.v - front.v)*0.5; rear.v -= m*0.8; front.v += m*0.5; }
+    let vr = rear.v, vf = front.v;
+    if(vr > vf){ const m = (vr - vf)*0.5; vr -= m*0.8; vf += m*0.5; }
+    setSpeed(rear, vr); setSpeed(front, vf);
     hits.push([a, b]);
   }
+  /* Any ghost that was not caught inside someone this step is clear, and solid from now on. */
+  for(const r of racers) if(r.isGhost && !r.solid && !r.done){
+    if(ghostsBlocked.has(r)) continue;
+    let inside = false;
+    for(const q of racers) if(q !== r && !q.isGhost && contactPair(r, q) && overlapping(r, q, T)){ inside = true; break; }
+    if(!inside) r.solid = true;
+  }
+  ghostsBlocked.clear();
   return hits;
+}
+const ghostsBlocked = new Set();
+/* Who can touch whom. Ghosts do not touch each other (two records cannot argue), a
+   finished ghost is parked on the line and out of the way, and a ghost is never solid to
+   the same animal -- you cannot bump your own record. */
+function contactPair(a, b){
+  if(a.isGhost && b.isGhost) return false;
+  if((a.isGhost && a.done) || (b.isGhost && b.done)) return false;
+  if((a.isGhost || b.isGhost) && a.riderId && a.riderId === b.riderId) return false;
+  return true;
+}
+function overlapping(a, b, T){
+  let ds = b.s - a.s;
+  if(T.closed){ ds = ((ds % T.L) + T.L) % T.L; if(ds > T.L/2) ds -= T.L; }
+  return Math.abs(ds) < bodyLenOf(T) && Math.abs(b.d - a.d) < bodyWideOf(T);
+}
+/* A rider is pushed sideways; a ghost is pushed OFF ITS LINE, which it then eases back
+   onto (ghosts.js). Either way it stays between the bumpers. */
+function shove(r, dd){
+  if(r.isGhost){ r.offD = (r.offD || 0) + dd; r.d += dd; }
+  else r.d += dd;
+}
+/* A rider's speed is just its speed. A ghost's is its playback rate: it never gains from
+   a shove, and any contact at all knocks it back by at least ghostKnock. */
+function setSpeed(r, v){
+  if(!r.isGhost){ r.v = v; return; }
+  const k = r.v > 0.5 ? Math.max(0.2, Math.min(1, v/r.v)) : 1;
+  r.rate = Math.min(r.rate == null ? 1 : r.rate, k, 1 - NEON.ghostKnock);
 }
 
 function rankRacers(racers){
@@ -4037,6 +4542,7 @@ const NEON_COL = {
   gate:   0xb6ff3c,
 };
 /* The map's own furniture, by the kinds geo.js already sorts features into. */
+const PYLON_M = 22;          // how far a pylon reaches below the deck before it has faded out
 const NEON_PATH_COL = {road: 0x6a5cff, track: 0x2f6ec8, trail: 0x1f7fa8};
 const NEON_PATH_W   = {road: 2.6, track: 1.9, trail: 1.3};
 /* Deliberately NOT cyan or magenta: those two belong to the left and right bumpers, and
@@ -4079,6 +4585,94 @@ function lineMat(color, opacity, vertexColors){
   return new THREE.LineBasicMaterial({color, transparent:true, opacity: opacity == null ? 1 : opacity,
     vertexColors: !!vertexColors, depthWrite:false});
 }
+
+/* ---------- the background grids: drawn by a shader, not by lines ----------
+   WebGL ignores LineBasicMaterial.linewidth on nearly every platform: a GL line is one
+   pixel wide, full stop. One pixel is right at a kilometre and wrong at ten metres, where
+   the cells are hundreds of pixels across and the lines between them are threads. So the
+   land sheet and the floor are surfaces, and the fragment shader draws the lines.
+
+   THICKNESS is a fraction of a cell, converted to pixels per fragment through fwidth,
+   with a one-pixel floor. Far away a cell is a few pixels and the floor wins -- it looks
+   exactly as the old lines did. Close up the fraction wins and the line grows with the
+   cell. That is the whole point: the slider only changes what is near you.
+
+   Past about two pixels a cell, individually drawn lines turn to moire; the shader hands
+   over to their average coverage instead, which is the haze a dense 1 px grid made.
+
+   COLOUR is a hue rotation of whatever the grid was going to be, so the land keeps its
+   height ramp and contour bands and just turns them round the wheel. Both are uniforms,
+   so dragging a slider costs nothing -- no geometry is rebuilt. */
+/* GLOW is the third knob: how loud the wireframe world is. Below 1 it fades the lines
+   (alpha); above 1 it brightens them (colour, clamped per channel by the blend); 0 draws
+   nothing at all. Also a uniform, so it is as free to drag as the other two. */
+const gridStyle = {thick: 0.012, hue: 0, glow: 1};
+const gridMats = new Set();
+function gridMat(color, opacity, vertexColors){
+  const m = new THREE.ShaderMaterial({
+    uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
+      uColor: {value: new THREE.Color(color)}, uOpacity: {value: opacity},
+      uThick: {value: gridStyle.thick}, uHue: {value: gridStyle.hue}, uGlow: {value: gridStyle.glow},
+    }]),
+    vertexShader: `
+      attribute vec2 gridUv;
+      varying vec2 vUv;
+      varying vec3 vCol;
+      #include <fog_pars_vertex>
+      void main(){
+        vUv = gridUv;
+        #ifdef USE_COLOR
+          vCol = color;
+        #else
+          vCol = vec3(1.0);
+        #endif
+        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mvPosition;
+        #include <fog_vertex>
+      }`,
+    fragmentShader: `
+      uniform vec3 uColor;
+      uniform float uOpacity, uThick, uHue, uGlow;
+      varying vec2 vUv;
+      varying vec3 vCol;
+      #include <fog_pars_fragment>
+      vec3 hueShift(vec3 c, float a){
+        const vec3 k = vec3(0.57735);
+        float ca = cos(a);
+        return c*ca + cross(k, c)*sin(a) + k*dot(k, c)*(1.0 - ca);
+      }
+      void main(){
+        vec2 fw = max(fwidth(vUv), vec2(1e-6));
+        vec2 dpx = abs(fract(vUv - 0.5) - 0.5)/fw;          // pixels to the nearest line
+        vec2 wpx = max(vec2(1.0), uThick/fw);                // line width in pixels
+        vec2 on = 1.0 - smoothstep(wpx*0.5 - 0.5, wpx*0.5 + 0.5, dpx);
+        float a = max(on.x, on.y);
+        float dense = max(fw.x, fw.y);
+        a = mix(a, min(1.0, 2.0*dense + uThick), smoothstep(0.3, 0.8, dense));
+        a *= min(1.0, uGlow);
+        if(a < 0.01) discard;
+        gl_FragColor = vec4(max(hueShift(uColor*vCol, uHue), 0.0)*max(1.0, uGlow), a*uOpacity);
+        #include <fog_fragment>
+      }`,
+    transparent: true, depthWrite: false, fog: true, side: THREE.DoubleSide,
+    vertexColors: !!vertexColors,
+    extensions: {derivatives: true},
+  });
+  gridMats.add(m);
+  return m;
+}
+/* thick: fraction of a cell (0 = always one pixel). hue: radians round the colour wheel.
+   glow: 0..2, 1 = as built. */
+function setGridStyle(thick, hue, glow){
+  if(thick != null) gridStyle.thick = Math.max(0, thick);
+  if(hue != null) gridStyle.hue = hue;
+  if(glow != null) gridStyle.glow = Math.max(0, Math.min(2, glow));
+  for(const m of gridMats){
+    m.uniforms.uThick.value = gridStyle.thick; m.uniforms.uHue.value = gridStyle.hue;
+    m.uniforms.uGlow.value = gridStyle.glow;
+  }
+}
+const getGridStyle = () => ({thick: gridStyle.thick, hue: gridStyle.hue, glow: gridStyle.glow});
 
 /* ---------- environment: built once per MAP ---------- */
 /* Everything here is static, unlit and merged: the whole world is about half a dozen
@@ -4131,6 +4725,7 @@ function ribbonInto(pos, col, pts, width, yOf, c, fade){
 
 function buildEnvironment(W, graph, areas, bbox, scale){
   if(envGroup){ scene.remove(envGroup); disposeGroup(envGroup); }
+  gridMats.clear();               // the old ones went with the old group
   envGroup = new THREE.Group(); envGroup.name = 'neonEnv';
   scene.background = new THREE.Color(NEON_COL.bg);
   const sc = scale > 0 ? scale : 1;
@@ -4152,13 +4747,16 @@ function buildEnvironment(W, graph, areas, bbox, scale){
     for(const c of nice){ if(span/c <= 90){ cell = c; break; } }
     const pad = span*0.35;
     const x0 = bbox.x0-pad, x1 = bbox.x1+pad, z0 = bbox.z0-pad, z1 = bbox.z1+pad;
-    const pos = [];
-    for(let x = Math.floor(x0/cell)*cell; x <= x1; x += cell) pos.push(x, floorY, z0, x, floorY, z1);
-    for(let z = Math.floor(z0/cell)*cell; z <= z1; z += cell) pos.push(x0, floorY, z, x1, floorY, z);
+    /* One quad; the lines are in the shader, at every whole multiple of `cell`. */
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    const grid = new THREE.LineSegments(geo, lineMat(NEON_COL.grid, 0.8));
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(
+      [x0, floorY, z0,  x1, floorY, z0,  x1, floorY, z1,  x0, floorY, z1], 3));
+    geo.setAttribute('gridUv', new THREE.Float32BufferAttribute(
+      [x0/cell, z0/cell,  x1/cell, z0/cell,  x1/cell, z1/cell,  x0/cell, z1/cell], 2));
+    geo.setIndex([0, 2, 1, 0, 3, 2]);
+    const grid = new THREE.Mesh(geo, gridMat(NEON_COL.grid, 0.8));
     grid.name = 'neonGrid';
+    grid.userData.cell = cell;
     envGroup.add(grid);
   }
 
@@ -4174,7 +4772,7 @@ function buildEnvironment(W, graph, areas, bbox, scale){
     const stride = Math.max(1, Math.ceil(Math.max(W.width, W.height)/target));
     const w = Math.floor(W.width/stride), h = Math.floor(W.height/stride);
     const cellS = W.cell/sc;
-    const pos = new Float32Array(w*h*3), col = new Float32Array(w*h*3);
+    const pos = new Float32Array(w*h*3), col = new Float32Array(w*h*3), guv = new Float32Array(w*h*2);
     const lo = new THREE.Color(0x0c2a5e), mid = new THREE.Color(0x4a2ea0), hi = new THREE.Color(0xe04aff);
     const tmp = new THREE.Color();
     const range = Math.max(1, (W.maxM - W.minM)/sc);
@@ -4185,6 +4783,7 @@ function buildEnvironment(W, graph, areas, bbox, scale){
       pos[k*3]   = W.originX/sc + (i*stride+0.5)*cellS;
       pos[k*3+1] = (hm-baseM)*NEON.vertScale;
       pos[k*3+2] = W.originZ/sc + (j*stride+0.5)*cellS;
+      guv[k*2] = i; guv[k*2+1] = j;               // a whole number on every sample: the lines
       const t = (hm - W.minM/sc)/range;
       tmp.copy(t < 0.5 ? lo : mid).lerp(t < 0.5 ? mid : hi, t < 0.5 ? t*2 : (t-0.5)*2);
       // distance to the nearest contour line, 0 (on it) .. 1 (half an interval away)
@@ -4195,17 +4794,20 @@ function buildEnvironment(W, graph, areas, bbox, scale){
       const lift = 0.22 + 1.25*Math.pow(1-band, 8);
       col[k*3] = tmp.r*lift; col[k*3+1] = tmp.g*lift; col[k*3+2] = tmp.b*lift;
     }
+    /* Two triangles a cell. The surface itself is invisible; it exists so the shader has
+       somewhere to draw the lines, and the lines land exactly where the old segments ran:
+       sample to sample, along rows and columns. */
     const idx = [];
-    for(let j = 0; j < h; j++) for(let i = 0; i < w; i++){
+    for(let j = 0; j+1 < h; j++) for(let i = 0; i+1 < w; i++){
       const k = j*w + i;
-      if(i+1 < w){ idx.push(k, k+1); }
-      if(j+1 < h){ idx.push(k, k+w); }
+      idx.push(k, k+w, k+1,  k+1, k+w, k+w+1);
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    geo.setAttribute('gridUv', new THREE.BufferAttribute(guv, 2));
     geo.setIndex(idx);
-    const land = new THREE.LineSegments(geo, lineMat(0xffffff, 0.62, true));
+    const land = new THREE.Mesh(geo, gridMat(0xffffff, 0.62, true));
     land.name = 'neonLand';
     land.userData.samples = w*h;
     envGroup.add(land);
@@ -4447,7 +5049,12 @@ function buildTrackMesh(T, baseM){
   };
   wall(1, NEON_COL.left); wall(-1, NEON_COL.right);
 
-  // centre dashes + pylons down to the floor grid
+  /* Centre dashes, and pylons under the edges. A PYLON FADES OUT, it does not reach the
+     floor: over a steep descent the deck can be a hundred exaggerated metres above the
+     grid, and a full-height line every 48 m turns the side of the course into a curtain
+     of hairlines. Each one now runs at most PYLON_M down and goes from its colour at the
+     deck to black at the foot -- additive, so black adds nothing and the line simply
+     dissolves. */
   {
     const dash = [], py = [];
     const every = Math.max(1, Math.round(12/T.ds));
@@ -4456,16 +5063,29 @@ function buildTrackMesh(T, baseM){
       dash.push(T.x[i], deckY(T, T.elev[i], baseM)+0.04, T.z[i], T.x[j], deckY(T, T.elev[j], baseM)+0.04, T.z[j]);
     }
     const pEvery = Math.max(1, Math.round(48/T.ds));
+    const pc = new THREE.Color(NEON_COL.pylon), pcol = [];
+    const floorY = -18/Math.sqrt(T.scale || 1);
     for(let i = 0; i < T.n; i += pEvery){
       for(const sign of [-1, 1]){
         const x = T.x[i] - Math.sin(T.yaw[i])*sign*T.halfW[i], z = T.z[i] - Math.cos(T.yaw[i])*sign*T.halfW[i];
-        py.push(x, deckY(T, T.elev[i], baseM), z, x, -18, z);
+        const y0 = deckY(T, T.elev[i], baseM);
+        const y1 = Math.max(floorY, y0 - PYLON_M*K);
+        if(y0 - y1 < 0.05) continue;
+        // a short pylon (low deck) keeps some colour at the floor; a long one ends black
+        const tail = Math.max(0, 1 - (y0 - y1)/(PYLON_M*K));
+        py.push(x, y0, z, x, y1, z);
+        pcol.push(pc.r, pc.g, pc.b, pc.r*tail, pc.g*tail, pc.b*tail);
       }
     }
     const dg = new THREE.BufferGeometry(); dg.setAttribute('position', new THREE.Float32BufferAttribute(dash, 3));
     const pg = new THREE.BufferGeometry(); pg.setAttribute('position', new THREE.Float32BufferAttribute(py, 3));
+    pg.setAttribute('color', new THREE.Float32BufferAttribute(pcol, 3));
     const dashes = new THREE.LineSegments(dg, lineMat(NEON_COL.dash, 0.9)); dashes.renderOrder = 3;
-    trackGroup.add(dashes, new THREE.LineSegments(pg, lineMat(NEON_COL.pylon, 0.8)));
+    const pm = lineMat(0xffffff, 0.8, true);
+    pm.blending = THREE.AdditiveBlending;
+    const pylons = new THREE.LineSegments(pg, pm);
+    pylons.name = 'neonPylons';
+    trackGroup.add(dashes, pylons);
   }
 
   trackGroup.add(gateAt(T, baseM, 0, NEON_COL.gate, K));
@@ -5121,7 +5741,7 @@ function makeRider(who, color, seed, sizeK){
 function poseRider(R, racer, x, y, z, pitch, t, dt){
   const hover = (Math.sin(t*3.1 + R.seed)*0.035 + Math.sin(t*7.7 + R.seed*2)*0.012)*R.K;
   R.root.position.set(x, y + hover, z);
-  R.root.rotation.y = racer.yaw;
+  R.root.rotation.y = racer.yaw + (racer.spinYaw || 0);     // a spin-out turns the rider, not the physics heading
   R.tilt.rotation.z = pitch;
   R.tilt.rotation.x = racer.lean*1.4 + (racer.bumpT > 0 ? -racer.bumpSide*racer.bumpT*1.6 : 0);
   // stance: paws planted wide, knees taking up the bumps, tucked low under boost
@@ -5489,7 +6109,7 @@ function stopHum(){
 }
 
 /* ==== src/neon/cells.js ==== */
-/* BOOST CELLS. Free charge lying on the racing line, and the reason the line is worth
+/* BOOST CELLS (drawn as nitro tanks). Free charge lying on the racing line, and the reason the line is worth
    arguing about: the fast way through a corner and the way past the cell on its outside
    are rarely the same, so a lap is a series of small bargains.
 
@@ -5561,38 +6181,34 @@ function buildCellMeshes(T, cells, baseM, color){
   if(typeof THREE === 'undefined') return null;
   cellGroup = new THREE.Group(); cellGroup.name = 'neonCells';
   const K = 1/(T.widthK || 1);
-  /* A PICKUP LOOKS LIKE WHAT IT GIVES YOU: the same rocket that sits on the HUD rack and
-     lights under the board. A ring would have been cheaper to draw and told you nothing
-     about what was in it. */
-  const bodyGeo = new THREE.CylinderGeometry(0.22*K, 0.26*K, 1.0*K, 10);
-  const noseGeo = new THREE.ConeGeometry(0.22*K, 0.45*K, 10);
-  const finGeo  = new THREE.BoxGeometry(0.06*K, 0.3*K, 0.34*K);
-  const flameGeo = new THREE.ConeGeometry(0.17*K, 0.5*K, 8);
+  /* A PICKUP LOOKS LIKE WHAT IT GIVES YOU: the same nitro tank that sits on the HUD rack.
+     A capsule body with a band, a valve on top and a glowing gauge window down its side,
+     inside a halo ring that is what you actually spot from 200 m. */
+  const bodyGeo = new THREE.CylinderGeometry(0.28*K, 0.28*K, 0.9*K, 14);
+  const capGeo  = new THREE.SphereGeometry(0.28*K, 14, 8);
+  const bandGeo = new THREE.CylinderGeometry(0.31*K, 0.31*K, 0.12*K, 14);
+  const neckGeo = new THREE.CylinderGeometry(0.09*K, 0.11*K, 0.22*K, 8);
+  const valveGeo = new THREE.BoxGeometry(0.34*K, 0.08*K, 0.08*K);
+  const gaugeGeo = new THREE.BoxGeometry(0.06*K, 0.5*K, 0.14*K);
   const haloGeo = new THREE.TorusGeometry(1.25*K, 0.11*K, 6, 16);
   const mat = new THREE.MeshBasicMaterial({color, transparent:true, opacity:0.95,
     blending: THREE.AdditiveBlending, depthWrite:false});
   const softMat = new THREE.MeshBasicMaterial({color, transparent:true, opacity:0.38,
     blending: THREE.AdditiveBlending, depthWrite:false});
-  const flameMat = new THREE.MeshBasicMaterial({color: 0xff7a3c, transparent:true, opacity:0.8,
+  const gaugeMat = new THREE.MeshBasicMaterial({color: 0x19f0ff, transparent:true, opacity:0.8,
     blending: THREE.AdditiveBlending, depthWrite:false});
   for(const c of cells){
     const f = trackFrame(T, c.s, {});
     const g = new THREE.Group();
     const core = new THREE.Group();
     const body = new THREE.Mesh(bodyGeo, mat);
-    const nose = new THREE.Mesh(noseGeo, mat);
-    nose.position.y = 0.72*K;
-    const flame = new THREE.Mesh(flameGeo, flameMat);
-    flame.position.y = -0.72*K; flame.rotation.z = Math.PI;
-    core.add(body, nose, flame);
-    for(let q = 0; q < 3; q++){
-      const fin = new THREE.Mesh(finGeo, mat);
-      fin.position.y = -0.42*K;
-      fin.position.x = Math.cos(q*2.094)*0.2*K;
-      fin.position.z = Math.sin(q*2.094)*0.2*K;
-      fin.rotation.y = -q*2.094;
-      core.add(fin);
-    }
+    const top = new THREE.Mesh(capGeo, mat); top.position.y = 0.45*K; top.scale.y = 0.6;
+    const bot = new THREE.Mesh(capGeo, mat); bot.position.y = -0.45*K; bot.scale.y = 0.6;
+    const band = new THREE.Mesh(bandGeo, mat); band.position.y = 0.18*K;
+    const neck = new THREE.Mesh(neckGeo, mat); neck.position.y = 0.7*K;
+    const valve = new THREE.Mesh(valveGeo, mat); valve.position.y = 0.82*K;
+    const gauge = new THREE.Mesh(gaugeGeo, gaugeMat); gauge.position.set(0.27*K, -0.08*K, 0);
+    core.add(body, top, bot, band, neck, valve, gauge);
     const halo = new THREE.Mesh(haloGeo, softMat);
     halo.rotation.x = Math.PI/2;
     g.add(core, halo);
@@ -5600,10 +6216,16 @@ function buildCellMeshes(T, cells, baseM, color){
     g.rotation.y = f.yaw + Math.PI/2;
     g.userData.cell = c;
     g.userData.core = core;
-    g.userData.flame = flame;
+    g.userData.gauge = gauge;
     cellGroup.add(g);
     cellMeshes.push(g);
   }
+  /* DRAWN AFTER THE DECK. Every part is additive with depthWrite off, and the deck is a
+     0.94-opacity sheet at renderOrder 1 that DOES write depth. At the default renderOrder
+     of 0 the pickup went first and the deck was then painted over it: invisible against
+     sky at a distance, it simply faded out as you closed in and the deck came to fill the
+     pixels behind it. After the deck and the bumpers (4), it sits on top as it should. */
+  cellGroup.traverse(o => { o.renderOrder = 7; });
   cellGroup.traverse(o => { o.frustumCulled = false; });
   scene.add(cellGroup);
   return cellGroup;
@@ -5617,7 +6239,7 @@ function updateCellMeshes(t){
     g.scale.setScalar(0.35 + 0.65*coming);
     g.userData.core.rotation.y = t*1.6;
     g.userData.core.rotation.z = Math.sin(t*1.1 + c.i)*0.18;
-    g.userData.flame.scale.set(1, 0.7 + 0.5*Math.abs(Math.sin(t*14 + c.i)), 1);
+    g.userData.gauge.scale.set(1, 0.6 + 0.4*Math.abs(Math.sin(t*3 + c.i)), 1);
     g.position.y += Math.sin(t*2 + c.i)*0.004;
   }
 }
@@ -5632,13 +6254,17 @@ function clearCells(){
 
    One ghost per RIDER per course setting: your fastest lap as the corgi and your fastest
    as the elk are different records, and at Fierce they all line up together. A ghost is a
-   replay, not a driver -- it never steers, never collides and cannot be blocked -- so it
-   is honest about what it is: the exact run that set the time.
+   replay, not a driver -- it never steers -- but it is SOLID to everyone except its own
+   rider: shoulder one and it is pushed off its line and knocked back on its clock, then
+   eases back onto the recording. The time a shove costs it is added to its finish, so
+   blocking a ghost is a real way to beat it. It still replays the exact line that set the
+   time; it just replays it a little late.
 
    STORED SMALL, because localStorage is a few megabytes for everything the three games
    keep. Position along and across the track, four times a second, rounded to a decimetre
    and a centimetre; heading is not stored at all but recovered from where the line went,
    which is what heading means anyway. That is about 1.2 kB of JSON per minute of racing. */
+
 
 
 
@@ -5680,14 +6306,27 @@ function keepGhost(store, key, ghost){
    to know nothing about it, but driven by the recording instead of by physics. */
 function makeGhostRacer(g, T, color){
   const r = makeRacer({name: g.label + ' ghost', isGhost: true, color, ghost: g,
-                       skill: null, lane: 0, seed: 1});
+                       skill: null, lane: 0, seed: 1, riderId: g.rider,
+                       // playback clock, its rate, and how far it has been shoved off its line
+                       gt: 0, rate: 1, offD: 0, offV: 0, solid: false});
   applyGhost(r, T, 0);
   return r;
 }
 function stepGhost(r, T, dt){
   r.time += dt;
-  applyGhost(r, T, r.time);
-  if(!r.done && r.time >= r.ghost.time){ r.done = true; r.finishT = r.ghost.time; }
+  /* The clock runs at `rate`, which a shove knocks down and which comes back to 1 on its
+     own. Every second it spends below 1 is time it arrives late. */
+  if(r.rate == null) r.rate = 1;
+  r.rate += (1 - r.rate)*Math.min(1, dt/NEON.ghostRecoverS);
+  if(r.rate > 0.9995) r.rate = 1;
+  r.gt = (r.gt || 0) + dt*r.rate;
+  /* Back onto the line on a critically damped spring: no snap, no overshoot. */
+  const w = NEON.ghostRightW;
+  r.offV = (r.offV || 0) + (-w*w*(r.offD || 0) - 2*w*(r.offV || 0))*dt;
+  r.offD = (r.offD || 0) + r.offV*dt;
+  if(Math.abs(r.offD) < 1e-3 && Math.abs(r.offV) < 1e-3){ r.offD = 0; r.offV = 0; }
+  applyGhost(r, T, r.gt);
+  if(!r.done && r.gt >= r.ghost.time){ r.done = true; r.finishT = r.time; }
 }
 function applyGhost(r, T, t){
   const g = r.ghost, n = g.s.length;
@@ -5697,9 +6336,12 @@ function applyGhost(r, T, t){
   const d = g.d[i] + (g.d[j]-g.d[i])*f;
   const prev = r.prog;
   r.prog = prog;
-  r.d = d;
   r.lap = T.closed ? Math.floor(prog/T.L) : 0;
   r.s = T.closed ? prog - r.lap*T.L : Math.min(prog, T.L);
+  // recorded line plus however far it has been shoved, never through a bumper
+  const lim = trackFrame(T, r.s, {}).halfW - (T.bodyWide || NEON.bodyWide)*0.5;
+  r.d = Math.max(-lim, Math.min(lim, d + (r.offD || 0)));
+  if(Math.abs(d + (r.offD || 0)) > lim){ r.offD = r.d - d; r.offV = 0; }
   r.v = Math.max(0, (prog - prev)/Math.max(1e-4, r.lastDt || 0.016));
   // heading from the direction the recorded line is going, not from a stored angle
   const ahead = Math.min(n-1, u + 1.2);
@@ -5707,7 +6349,8 @@ function applyGhost(r, T, t){
   const pa = g.s[ai] + (g.s[aj]-g.s[ai])*af, da = g.d[ai] + (g.d[aj]-g.d[ai])*af;
   const ds = Math.max(0.05, pa - prog), dd = da - d;
   const fr = trackFrame(T, r.s, {});
-  r.yaw = fr.yaw + Math.atan2(dd, ds);
+  // the drift back onto the line shows in the heading too
+  r.yaw = fr.yaw + Math.atan2(dd, ds) + Math.atan2(r.offV || 0, Math.max(2, r.v));
   r.slope = 0;
   r.boosting = false;
   r.lean += ((-Math.atan2(dd, ds)*0.5) - r.lean)*0.1;
@@ -5805,8 +6448,15 @@ function paintDots(cv, fit, dots){
    along one automatically generated course (see routes.js), between two bumpers it
    cannot get past (see racer.js).
 
-   Screens are one attribute, body[data-screen] = menu | count | race | finish, the same
-   idea as trails/panes.js: one source of truth, CSS does the showing and hiding. */
+   Screens are one attribute, body[data-screen] = menu | build | count | race | finish, the
+   same idea as trails/panes.js: one source of truth, CSS does the showing and hiding.
+
+   COURSES COME FROM ONE OF TWO PLACES, and settings.mode says which. AUTO is routes.js
+   reading the trail graph. CUSTOM is a list you built yourself on the build screen and
+   that lives in localStorage; see the custom-courses section below. Everything downstream
+   -- tracks, ghosts, best times, rivals -- takes a course object and does not care which
+   end of this file it came from. */
+
 
 
 
@@ -5833,6 +6483,14 @@ const GHOST_COLORS = [0x8fd0ff, 0xc0a8ff, 0x9fe0c8, 0xd8d0a0, 0xb0c0e0, 0xe0b0d0
 const RIVAL_COLORS = [0xff2bd6, 0xff8a1f, 0xffe14a, 0x9a6bff, 0xff4466, 0x2bffc0, 0xff9ee6, 0x4f8cff];
 const PLAYER_COLOR = 0xb6ff3c;
 const PHYS_DT = 1/120;
+/* A hand-built course still has to be a race: this is its floor in TRACK metres, the same
+   judgement the generator makes in routeTargetM, just applied to something you drew. */
+const BUILD_MIN_M = 300;
+/* One slider step of grid thickness, as a fraction of a grid cell. At 10 steps a line is a
+   twelfth of the cell it borders -- bold up close, and still one pixel at a distance,
+   because the shader never draws a line thinner than a pixel (see neon-scene.js). */
+const GRID_THICK_STEP = 0.008;
+const GRID_THICK_MAX = 10;
 
 const $ = id => document.getElementById(id);
 const hex = n => '#' + n.toString(16).padStart(6, '0');
@@ -5845,12 +6503,19 @@ const trackCache = new Map();
 const trackMeta = new Map();    // sig|scale -> {L, climb, ok}: filled in by the menu scan
 let scanQueue = [];
 let activeTrack = null;         // the ribbon currently in the scene
-const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale: 1,
+const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale: 1, mode: 'auto',
                   cls: 'standard', cam: 'normal', ghosts: true, rider: 'p:0', course: '', map: DEFAULT_NEON_WORLD,
                   // touch control position: how far the steer pad and buttons sit from the
                   // screen edges (ctlInset) and above the bottom edge (ctlBottom), in px
-                  ctlInset: 24, ctlBottom: 16};   // ctlInset defaults AT the swipe-safe floor, not below it
+                  ctlInset: 24, ctlBottom: 16,    // ctlInset defaults AT the swipe-safe floor, not below it
+                  // background grid: line thickness in slider steps (0 = always one pixel)
+                  // and a hue turn in degrees (0 = the original colours)
+                  gridThick: 2, gridHue: 0, gridGlow: 100};   // gridGlow: percent, 0..200
 let bests = {}, ghostStore = {};
+let customStore = {};           // mapId -> [{name, states, fp}]: the courses you built
+let customStale = 0;            // saved courses that no longer fit this map's trail data
+let graphTotalM = 0;            // raceable metres on the current map, for lapping customs
+let buildIdx = -1;              // which stored course the build screen is editing, -1 = new
 let race = null;                // {T, racers, riders, me, phase, t, grav, scale, reverse, ...}
 let neonScreen = 'menu';   // NOT `screen`: the bundle is one classic script, and a
                             // top-level `let screen` would shadow window.screen for core/quality.js
@@ -5864,16 +6529,17 @@ function neonReadStore(){
     if(s && s.settings) Object.assign(settings, s.settings);
     if(s && s.bests) bests = s.bests;
     if(s && s.ghosts) ghostStore = s.ghosts;
+    if(s && s.custom) customStore = s.custom;
   }catch(e){ /* private mode: play without persistence */ }
 }
 function neonWriteStore(){
-  try{ localStorage.setItem(NEON_STORE, JSON.stringify({settings, bests, ghosts: ghostStore})); }
+  try{ localStorage.setItem(NEON_STORE, JSON.stringify({settings, bests, ghosts: ghostStore, custom: customStore})); }
   catch(e){
     /* Ghost recordings are the only thing here big enough to fill a quota. If they do,
        drop them all and keep the settings and the times, which are what the player would
        actually miss. */
     ghostStore = {};
-    try{ localStorage.setItem(NEON_STORE, JSON.stringify({settings, bests, ghosts: {}})); }catch(e2){}
+    try{ localStorage.setItem(NEON_STORE, JSON.stringify({settings, bests, ghosts: {}, custom: customStore})); }catch(e2){}
   }
 }
 function setScreen(name){ neonScreen = name; document.body.setAttribute('data-screen', name); }
@@ -5970,13 +6636,14 @@ async function loadNeonMap(src, label){
   }
   if(!lines.length) throw new Error('No trail lines in that file.');
   graph = buildGraph(lines, 16, 6);
+  bridgeGaps(graph);              // near-miss breaks in the mapping; see routes.js
   mapBox = {x0: Infinity, x1: -Infinity, z0: Infinity, z1: -Infinity};
   for(const e of graph.edges) for(const p of e.pts){
     mapBox.x0 = Math.min(mapBox.x0, p[0]); mapBox.x1 = Math.max(mapBox.x1, p[0]);
     mapBox.z0 = Math.min(mapBox.z0, p[1]); mapBox.z1 = Math.max(mapBox.z1, p[1]);
   }
-  const made = buildCourses(graph, dem ? (x, z) => dem.heightAt(x, z) : null, {scale: settings.scale});
-  courses = made.courses; coverInfo = made;
+  graphTotalM = graph.edges.reduce((a, e) => a + (e.bridge ? 0 : e.lenM), 0);
+  rebuildCourses();
   trackCache.clear();
   rebuildEnvironment();
   mapLabel = label || mapId;
@@ -5989,6 +6656,81 @@ async function loadNeonMap(src, label){
   startScan();
   selectCourse(selCourse);
   if(!courses.length) $('startBtn').disabled = true;
+}
+
+/* ---------- custom courses ----------
+   A course you built is stored as what you actually chose: the directed edge states, in
+   order, of the map's own trail graph. Not a polyline -- the line is re-derived from the
+   graph, so a course drawn on this map behaves exactly like a generated one (same
+   ribbon, same clipping, same everything) instead of being a second kind of thing.
+
+   THE PRICE OF THAT IS THAT EDGE INDICES ARE NOT PORTABLE. They are positions in an array
+   built by geo.js from the map file; refetch the DEM, resimplify, edit the GeoJSON, and
+   edge 114 is somewhere else entirely. So every saved course carries a fingerprint of the
+   graph it was drawn on, and one drawn on a graph that no longer exists is set aside
+   rather than raced -- a course whose indices have shifted under it would put you on a
+   line through trails you never picked, which is worse than losing it. The connectivity
+   check is the belt to the fingerprint's braces: a course that does not still join up is
+   not a course, whatever the fingerprint says. */
+/* Over geo.js's own edges only. Bridges are appended after them and so never move an
+   index, and a map that gains a bridge must not strand every course drawn on it before. A
+   course that USES a bridge is still held to chainOk, which is what catches one that
+   moved. */
+function graphFp(g){
+  if(!g) return '';
+  let m = 0, n = 0;
+  for(const e of g.edges) if(!e.bridge){ m += e.lenM; n++; }
+  return n + ':' + g.nodes.length + ':' + Math.round(m);
+}
+const stStart = s => { const e = graph.edges[s>>1]; return (s&1) ? e.b : e.a; };
+const stEnd   = s => { const e = graph.edges[s>>1]; return (s&1) ? e.a : e.b; };
+function chainOk(st){
+  const seen = new Set();
+  for(let i = 0; i < st.length; i++){
+    if(!Number.isInteger(st[i]) || st[i] < 0 || (st[i]>>1) >= graph.edges.length) return false;
+    if(seen.has(st[i]>>1)) return false;
+    seen.add(st[i]>>1);
+    if(i && stEnd(st[i-1]) !== stStart(st[i])) return false;
+  }
+  return st.length > 0;
+}
+const customEntries = () => (customStore[mapId] || []);
+function customCourse(en, st, idx){
+  const closed = st.length > 1 && stStart(st[0]) === stEnd(st[st.length-1]);
+  const lenM = st.reduce((a, s) => a + graph.edges[s>>1].lenM, 0);
+  /* A loop you drew gets laps for the same reason a generated one does: a 600 m circuit
+     raced once is a countdown, a corner and a finish line. */
+  const target = routeTargetM(graphTotalM, settings.scale);
+  return {kind: closed ? 'circuit' : 'sprint',
+          steps: st.map(s => ({ei: s>>1, fwd: !(s&1)})),
+          laps: closed ? Math.max(1, Math.min(ROUTE_MAX_LAPS, Math.round(target/lenM))) : 1,
+          lenM, clip: null, name: en.name || 'Course', sig: 'x:' + st.join('.'),
+          custom: true, idx};
+}
+function buildCustomCourses(){
+  const fp = graphFp(graph);
+  customStale = 0;
+  const out = [];
+  customEntries().forEach((en, i) => {
+    const st = (en && en.states) || [];
+    if(en && en.fp === fp && chainOk(st)) out.push(customCourse(en, st, i));
+    else customStale++;
+  });
+  out.forEach((c, i) => { c.id = i; });
+  return out;
+}
+/* The one place that decides what the course list IS. Every caller that changes the map,
+   the scale or the mode goes through here, so there is no path by which the list and the
+   mode can disagree. */
+function rebuildCourses(){
+  if(!graph){ courses = []; coverInfo = null; return; }
+  if(settings.mode === 'custom'){
+    courses = buildCustomCourses();
+    coverInfo = {custom: true, totalM: graphTotalM, stale: customStale, coverage: 0};
+  }else{
+    const made = buildCourses(graph, dem ? (x, z) => dem.heightAt(x, z) : null, {scale: settings.scale});
+    courses = made.courses; coverInfo = made;
+  }
 }
 
 /* Cached per course AND per (scale, direction): those are three different racetracks that
@@ -6020,8 +6762,15 @@ function rebuildEnvironment(){
 }
 function syncMapLine(){
   if(!coverInfo) return;
-  $('mapLine').textContent = mapLabel + ' · ' + courses.length + ' courses covering '
-    + Math.round(coverInfo.coverage*100) + '% of ' + fmtMi(coverInfo.totalM) + ' of trail'
+  /* Custom has nothing to say about coverage -- it is your list, however long it is --
+     but it does have to own up to anything set aside as no longer fitting the map. */
+  $('mapLine').textContent = mapLabel + ' · '
+    + (coverInfo.custom
+        ? (courses.length ? courses.length + (courses.length === 1 ? ' course you built' : ' courses you built')
+                          : 'no courses yet — tap New course')
+          + (coverInfo.stale ? ' · ' + coverInfo.stale + ' set aside: drawn on older trail data' : '')
+        : courses.length + ' courses covering ' + Math.round(coverInfo.coverage*100)
+          + '% of ' + fmtMi(coverInfo.totalM) + ' of trail')
     + (settings.scale > 1 ? ' · scaled 1:' + settings.scale : '')
     + (dem ? '' : ' · no elevation data: flat');
 }
@@ -6188,6 +6937,13 @@ function syncMenu(){
   document.querySelectorAll('#gravSeg .btn').forEach(b => b.classList.toggle('on', (b.dataset.grav === '1') === settings.gravity));
   document.querySelectorAll('#dirSeg .btn').forEach(b => b.classList.toggle('on', (b.dataset.dir === 'rev') === settings.reverse));
   document.querySelectorAll('#classSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.cls === settings.cls));
+  document.querySelectorAll('#modeSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.mode === settings.mode));
+  const custom = settings.mode === 'custom';
+  $('customBar').hidden = !custom;
+  $('editCourse').disabled = !(custom && courses[selCourse] && courses[selCourse].custom);
+  $('modeNote').textContent = custom
+    ? 'Custom: courses you built yourself on this map.'
+    : 'Auto: the map cut into races of a good length, covering everything.';
   document.querySelectorAll('#camSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.cam === settings.cam));
   $('scaleSel').value = String(settings.scale);
   document.querySelectorAll('#ghostSeg .btn').forEach(b => b.classList.toggle('on', (b.dataset.ghost === '1') === settings.ghosts));
@@ -6264,13 +7020,160 @@ function setScale(n){
   /* The course set itself depends on the scale: a good race is a few minutes long
      whatever the map is doing, so at 1:4 the generator looks for routes four times as
      long in real metres (see routeTargetM). */
-  const made = buildCourses(graph, dem ? (x, z) => dem.heightAt(x, z) : null, {scale: sc});
-  courses = made.courses; coverInfo = made;
+  rebuildCourses();
   const kept = courses.findIndex(c => c.sig === settings.course);
   if(kept >= 0) selCourse = kept;
   selCourse = clamp(selCourse, 0, Math.max(0, courses.length-1));
   syncMapLine(); rebuildEnvironment(); renderCourseList(); startScan(); selectCourse(selCourse);
 }
+/* THE COURSE MODE. Not a race setting -- it decides what the list of courses IS, so it
+   does the work a scale change does minus the geometry: rebuild the list, keep the track
+   caches (a track is keyed by signature, and a signature means the same racetrack whoever
+   proposed it), and hold onto the selected course if the new mode happens to offer it.
+   Deliberately NOT part of bestKey, for the same reason. */
+function setCourseMode(name){
+  if((name !== 'auto' && name !== 'custom') || settings.mode === name) return;
+  settings.mode = name;
+  rebuildCourses();
+  const kept = courses.findIndex(c => c.sig === settings.course);
+  selCourse = clamp(kept >= 0 ? kept : 0, 0, Math.max(0, courses.length-1));
+  syncMenu(); neonWriteStore(); syncMapLine(); renderCourseList(); startScan();
+  if(courses.length) selectCourse(selCourse);
+  else { $('startBtn').disabled = true; clearTrackMesh(); activeTrack = null; }
+}
+
+/* ---------- build screen ----------
+   Open it, tap the map, save. main.js owns the screen, the store and the naming; the
+   builder module owns the map, the picking and the undo stack, and nothing crosses. */
+function openBuild(idx){
+  if(!graph) return;
+  buildIdx = idx == null ? -1 : idx;
+  const en = buildIdx >= 0 ? customEntries()[buildIdx] : null;
+  builderOpen(graph, mapBox, $('buildMap'), en ? en.states : []);
+  $('buildName').value = en ? (en.name || '') : '';
+  $('buildTitle').textContent = en ? 'Edit course' : 'New course';
+  $('buildDelete').hidden = !en;
+  setScreen('build');
+  syncBuild();
+}
+function closeBuild(){
+  builderClose();
+  buildIdx = -1;
+  setScreen('menu');
+}
+function syncBuild(){
+  const n = builderStates().length;
+  const lenM = builderLenM();
+  const enough = n > 0 && lenM >= BUILD_MIN_M*settings.scale;
+  $('buildUndo').disabled = !builderCanUndo();
+  $('buildRedo').disabled = !builderCanRedo();
+  $('buildClear').disabled = !n;
+  $('buildSave').disabled = !enough;
+  const note = builderNote();
+  $('buildInfo').textContent = note ? note
+    : !n ? 'Tap a trail to start. Tap further along and the way there is filled in for you.'
+    : fmtMi(lenM/settings.scale) + ' · ' + n + (n === 1 ? ' stretch' : ' stretches')
+      + (builderClosed() ? ' · closes a loop' : '')
+      + (enough ? '' : ' · too short to race yet');
+  builderDraw();
+}
+/* Named after the trail it spends most of its length on, which is what you would call it
+   yourself, with a number if you have built that one before. */
+function buildDefaultName(st){
+  const by = new Map();
+  for(const s of st){
+    const e = graph.edges[s>>1];
+    const k = e.name || 'Trail';
+    by.set(k, (by.get(k) || 0) + e.lenM);
+  }
+  const top = [...by.entries()].sort((p, q) => q[1]-p[1] || (p[0] < q[0] ? -1 : 1));
+  const base = top.length ? top[0][0] : 'Course';
+  const taken = new Set(customEntries().map((en, i) => i === buildIdx ? '' : (en.name || '')));
+  let name = base, k = 2;
+  while(taken.has(name)) name = base + ' ' + (k++);
+  return name;
+}
+function saveBuild(){
+  const st = builderStates();
+  if(!st.length || builderLenM() < BUILD_MIN_M*settings.scale) return false;
+  const name = ($('buildName').value || '').trim() || buildDefaultName(st);
+  const list = customEntries().slice();
+  const en = {name, states: st, fp: graphFp(graph)};
+  if(buildIdx >= 0) list[buildIdx] = en; else list.push(en);
+  customStore[mapId] = list;
+  /* Select what you just built. By signature, like every other selection here, so it
+     survives the rebuild that is about to replace every course object in the list. */
+  settings.course = 'x:' + st.join('.');
+  neonWriteStore();
+  closeBuild();
+  setCourseListTo('custom');
+  return true;
+}
+function deleteBuild(){
+  if(buildIdx < 0) return false;
+  const list = customEntries().slice();
+  list.splice(buildIdx, 1);
+  customStore[mapId] = list;
+  neonWriteStore();
+  closeBuild();
+  setCourseListTo('custom');
+  return true;
+}
+/* Saving or deleting always lands you in Custom mode looking at the result, whichever
+   mode the menu was in when you opened the builder. */
+function setCourseListTo(name){
+  if(settings.mode !== name){ setCourseMode(name); return; }
+  rebuildCourses();
+  const kept = courses.findIndex(c => c.sig === settings.course);
+  selCourse = clamp(kept >= 0 ? kept : 0, 0, Math.max(0, courses.length-1));
+  syncMenu(); syncMapLine(); renderCourseList(); startScan();
+  if(courses.length) selectCourse(selCourse);
+  else { $('startBtn').disabled = true; clearTrackMesh(); activeTrack = null; }
+}
+/* A tap picks a segment; a drag pans the map. Distinguished by distance, not by which
+   button or how long: a thumb never lands perfectly still, and on a tablet every pick
+   would otherwise be a one-pixel pan. */
+function bindBuildMap(){
+  const cv = $('buildMap');
+  if(!cv) return;
+  let P = null;
+  cv.addEventListener('pointerdown', e => {
+    P = {id: e.pointerId, x: e.clientX, y: e.clientY, moved: 0};
+    if(cv.setPointerCapture) try{ cv.setPointerCapture(e.pointerId); }catch(err){ /* jsdom */ }
+  });
+  cv.addEventListener('pointermove', e => {
+    if(!P || e.pointerId !== P.id) return;
+    const dx = e.clientX - P.x, dy = e.clientY - P.y;
+    P.x = e.clientX; P.y = e.clientY; P.moved += Math.hypot(dx, dy);
+    if(P.moved > 6){ builderPan(dx, dy); builderDraw(); }
+  });
+  const end = e => {
+    if(!P || e.pointerId !== P.id) return;
+    if(P.moved <= 6){
+      const r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : {left: 0, top: 0};
+      builderAdd(builderPickAt(e.clientX - r.left, e.clientY - r.top));
+      syncBuild();
+    }
+    P = null;
+  };
+  cv.addEventListener('pointerup', end);
+  cv.addEventListener('pointercancel', e => { P = null; });
+  $('zoomIn').addEventListener('click', () => { builderZoom(1.6); builderDraw(); });
+  $('zoomOut').addEventListener('click', () => { builderZoom(1/1.6); builderDraw(); });
+  $('zoomFit').addEventListener('click', () => { builderFit(); builderDraw(); });
+  $('buildUndo').addEventListener('click', () => { builderUndo(); syncBuild(); });
+  $('buildRedo').addEventListener('click', () => { builderRedo(); syncBuild(); });
+  $('buildClear').addEventListener('click', () => { builderClear(); syncBuild(); });
+  $('buildSave').addEventListener('click', saveBuild);
+  $('buildDelete').addEventListener('click', deleteBuild);
+  $('buildCancel').addEventListener('click', closeBuild);
+  $('newCourse').addEventListener('click', () => openBuild(-1));
+  $('editCourse').addEventListener('click', () => {
+    const c = courses[selCourse];
+    if(c && c.custom) openBuild(c.idx);
+  });
+}
+
 function setClass(name){
   if(!NEON_CLASS[name] || settings.cls === name) return;
   settings.cls = name;
@@ -6292,6 +7195,7 @@ function cycleCam(){
 }
 function modeChip(){
   const bits = [NEON_CLASS[settings.cls].label.toUpperCase()];
+  if(settings.mode === 'custom') bits.push('CUSTOM');
   if(settings.scale > 1) bits.push('1:' + settings.scale);
   if(settings.reverse) bits.push('REVERSE');
   bits.push(settings.gravity ? 'GRAVITY' : 'NO GRAVITY');
@@ -6345,17 +7249,19 @@ function startRace(){
   };
   cast.forEach((c, i) => {
     racers.push(place(i, {name: c.name, skill: NEON_SKILL[settings.skill], paceMul: c.paceMul, speedK,
-      lane: ((i % 4) - 1.5)/2.2, seed: c.seed % 1000, color: c.color, emo: SPECIES[c.key].emo}));
+      lane: ((i % 4) - 1.5)/2.2, seed: c.seed % 1000, color: c.color, emo: SPECIES[c.key].emo,
+      riderId: 'w:' + c.key}));
     riders.push(makeRider({kind: 'wild', key: c.key}, c.color, c.seed, sizeK));
   });
-  racers.push(place(cast.length, {name: choice.label, isPlayer: true, color: PLAYER_COLOR, speedK}));
+  racers.push(place(cast.length, {name: choice.label, isPlayer: true, color: PLAYER_COLOR, speedK, riderId: choice.v}));
   riders.push(makeRider(choice.who, PLAYER_COLOR, 7, sizeK));
   riders[riders.length-1].tag.visible = false;
   for(const r of racers) if(!r.isGhost) r.prog = (r.lap|0)*T.L + r.s;
   /* GHOSTS RIDE AT FIERCE. They are the point of the setting: every rider who has set a
      time on exactly this course, in this class, this way round, at this scale, with this
-     gravity, lines up as the run that set it. They replay, so they cannot be blocked or
-     shoved, but they are ranked with everyone else -- beating a ghost is beating the time. */
+     gravity, lines up as the run that set it. They are SOLID to everyone but their own
+     rider (see racer.js resolveContacts): a shove costs them time, so blocking one is
+     fair play. They are ranked with everyone else -- beating a ghost is beating the time. */
   const ghosts = settings.ghosts ? bestGhosts(ghostStore, bestKey(course, settings)) : [];
   ghosts.forEach((g, i) => {
     const gr = makeGhostRacer(g, T, GHOST_COLORS[i % GHOST_COLORS.length]);
@@ -6457,7 +7363,11 @@ function onBump(r, ev){
   if(!r.isPlayer && gap > 160) return;
   const f = trackToWorld(T, r.s, ev.bump*(trackFrame(T, r.s, {}).halfW), {});
   bumperPulse(f.wx, deckY(T, f.elev, baseM()), f.wz, f.yaw, ev.bump, ev.hard);
-  if(r.isPlayer){ bonkSound(0.8 + ev.hard*0.6); shake = Math.max(shake, 0.25 + 0.5*ev.hard); }
+  if(r.isPlayer){
+    bonkSound(0.8 + ev.hard*0.6 + (ev.streak >= 2 ? 0.3 : 0));
+    shake = Math.max(shake, ev.spin ? 1.1 : 0.25 + 0.5*ev.hard + (ev.streak >= 2 ? 0.25 : 0));
+    if(ev.spin) thudSound();
+  }
 }
 
 function finishPlayer(){
@@ -6493,7 +7403,7 @@ function renderBoard(){
   }
 }
 
-/* THE ROCKET RACK. One icon per rocket on board, spent ones left as empty outlines so the
+/* THE NITRO RACK. One icon per tank on board, spent ones left as empty outlines so the
    rack reads as "two of five used" at a glance rather than a bar that could be anything.
    Rebuilt only when the count changes -- this runs every frame. */
 function paintFuel(me){
@@ -6503,7 +7413,7 @@ function paintFuel(me){
     box.textContent = '';
     for(let i = 0; i < max; i++){
       const el = document.createElement('i');
-      el.className = 'rocket';
+      el.className = 'tank';
       box.appendChild(el);
     }
     box.dataset.lit = '';
@@ -6598,7 +7508,7 @@ function drawRace(dt){
   $('slopeVal').textContent = !R.gravity ? '' : pct > 1 ? '▲ ' + pct + '%' : pct < -1 ? '▼ ' + (-pct) + '%'
     : (dem ? Math.round(feet(f.elev)) + ' ft' : '');
   setHum(me.v, me.burnT > 0 ? Math.min(1, me.burnT/NEON.burnS + 0.35) : 0);
-  $('burnPip').textContent = me.burnT > 0 ? 'BURNING' : me.fuel ? '' : 'OUT OF ROCKETS';
+  $('burnPip').textContent = me.spinT > 0 ? 'SPUN OUT' : me.burnT > 0 ? 'NITRO' : me.fuel ? '' : 'OUT OF NITRO';
   $('burnPip').classList.toggle('hot', me.burnT > 0);
   const fit = paintMap($('minimap'), graph, mapBox, R.line, T.closed, 'mm|' + mapId + '|' + R.course.sig, true);
   const sc = R.scale;
@@ -6660,6 +7570,9 @@ function wireUI(){
   document.querySelectorAll('#skillSeg .btn').forEach(b => b.addEventListener('click', () => { settings.skill = b.dataset.skill; syncMenu(); neonWriteStore(); }));
   document.querySelectorAll('#gravSeg .btn').forEach(b => b.addEventListener('click', () => setGravity(b.dataset.grav === '1')));
   document.querySelectorAll('#classSeg .btn').forEach(b => b.addEventListener('click', () => setClass(b.dataset.cls)));
+  document.querySelectorAll('#modeSeg .btn').forEach(b => b.addEventListener('click', () => setCourseMode(b.dataset.mode)));
+  bindGridSliders();
+  bindBuildMap();
   document.querySelectorAll('#camSeg .btn').forEach(b => b.addEventListener('click', () => setCam(b.dataset.cam)));
   document.querySelectorAll('#ghostSeg .btn').forEach(b => b.addEventListener('click', () => setGhosts(b.dataset.ghost === '1')));
   document.querySelectorAll('#dirSeg .btn').forEach(b => b.addEventListener('click', () => setReverse(b.dataset.dir === 'rev')));
@@ -6683,11 +7596,14 @@ function wireUI(){
     // only on the menu: a race is run at the settings it started with
     gravity: () => { if(neonScreen === 'menu') setGravity(!settings.gravity); },
     reverse: () => { if(neonScreen === 'menu') setReverse(!settings.reverse); },
-    camera: cycleCam,                      // the one setting that is safe to change mid-race
-    pause: togglePause,
-    restart: () => { if(race && !race.paused) startRace(); },
-    quit: () => { if(neonScreen !== 'menu') quitToMenu(); },
-    confirm: () => { if(neonScreen === 'menu' && !$('startBtn').disabled) startRace();
+    // the one setting that is safe to change mid-race -- but not while you are building,
+    // where the camera is not even on screen and C is a letter someone is typing
+    camera: () => { if(neonScreen !== 'build') cycleCam(); },
+    pause: () => { if(neonScreen !== 'build') togglePause(); },
+    restart: () => { if(race && !race.paused && neonScreen !== 'build') startRace(); },
+    quit: () => { if(neonScreen === 'build') closeBuild(); else if(neonScreen !== 'menu') quitToMenu(); },
+    confirm: () => { if(neonScreen === 'build') saveBuild();
+      else if(neonScreen === 'menu' && !$('startBtn').disabled) startRace();
       else if(neonScreen === 'finish') startRace();
       else if(neonScreen === 'pause') resumeRace(); },
   });
@@ -6695,9 +7611,31 @@ function wireUI(){
 function showLoadError(err){
   $('mapLine').textContent = '⚠ ' + (err && err.message ? err.message : 'Could not load that map.');
 }
+/* The three grid sliders exist twice, in the menu and on the pause card -- the pause card
+   because "hard to see up close" is a judgement you make on the track, not in the menu's
+   fly-over. Both are the same setting; every copy is found by class and kept in step. */
+function applyGrid(){
+  settings.gridThick = clamp(Math.round(+settings.gridThick || 0), 0, GRID_THICK_MAX);
+  settings.gridHue = ((Math.round(+settings.gridHue || 0) % 360) + 360) % 360;
+  settings.gridGlow = clamp(Math.round((settings.gridGlow == null ? 100 : +settings.gridGlow || 0)/5)*5, 0, 200);
+  setGridStyle(settings.gridThick*GRID_THICK_STEP, settings.gridHue*Math.PI/180, settings.gridGlow/100);
+  document.querySelectorAll('.gridThick').forEach(el => { el.value = settings.gridThick; });
+  document.querySelectorAll('.gridHue').forEach(el => { el.value = settings.gridHue; });
+  document.querySelectorAll('.gridGlow').forEach(el => { el.value = settings.gridGlow; });
+}
+function bindGridSliders(){
+  for(const [cls, key] of [['gridThick', 'gridThick'], ['gridHue', 'gridHue'], ['gridGlow', 'gridGlow']]){
+    document.querySelectorAll('.' + cls).forEach(el => {
+      el.addEventListener('input', () => { settings[key] = +el.value; applyGrid(); });   // live
+      el.addEventListener('change', () => neonWriteStore());                          // on release
+    });
+  }
+}
+
 async function bootNeon(){
   neonReadStore();
   applyControlLayout();
+  applyGrid();
   loadKennel();
   wireUI();
   fillRiderSelect();
@@ -6720,7 +7658,7 @@ async function bootNeon(){
 /* test seam (tools/smoke-neon.js reads the bundle's globals directly, but one tidy
    snapshot keeps the assertions short) */
 function neonState(){
-  return {screen: neonScreen, tuning: NEON, graph, areas: mapAreas, mapId, courses, trackMeta, scanLeft: scanQueue.length, ghostStore, coverInfo, selCourse, settings, race, activeTrack, bests, hasDem: !!dem};
+  return {screen: neonScreen, tuning: NEON, graph, areas: mapAreas, mapId, courses, trackMeta, scanLeft: scanQueue.length, ghostStore, coverInfo, selCourse, settings, race, activeTrack, bests, hasDem: !!dem, customStore, customStale, buildIdx};
 }
 bootNeon();
 </script>

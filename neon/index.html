@@ -28,6 +28,11 @@
     <div id="menuCols">
       <section id="colCourses">
         <h2>Courses</h2>
+        <!-- Only in Custom mode: the automatic list has nothing to add to or edit. -->
+        <div class="row" id="customBar" hidden>
+          <button class="btn" id="newCourse">+ New course</button>
+          <button class="btn" id="editCourse" disabled>Edit</button>
+        </div>
         <div id="courseList" role="listbox" aria-label="Courses"></div>
       </section>
       <section id="colSetup">
@@ -38,6 +43,15 @@
              immediately; it stays reachable without scrolling past class, pace, gravity,
              direction, camera, ghosts, scale and the map picker to find it. -->
         <button class="btn go" id="startBtn" disabled>START</button>
+        <!-- Mode comes first of the rows because it is the only setting that changes the
+             LIST on the left rather than the race on the right. -->
+        <div class="row">Courses
+          <span class="seg" id="modeSeg">
+            <button class="btn on" data-mode="auto">Auto</button>
+            <button class="btn" data-mode="custom">Custom</button>
+          </span>
+        </div>
+        <p class="hint" id="modeNote"></p>
         <label class="row">Rider
           <select id="riderSel"></select>
         </label>
@@ -78,6 +92,15 @@
             <button class="btn" data-cam="far">Far</button>
           </span>
         </div>
+        <label class="row">Grid lines
+          <input type="range" class="gridThick" min="0" max="10" step="1" aria-label="Background grid line thickness">
+        </label>
+        <label class="row">Grid glow
+          <input type="range" class="gridGlow" min="0" max="200" step="5" aria-label="Background grid glow">
+        </label>
+        <label class="row">Grid colour
+          <input type="range" class="gridHue" min="0" max="360" step="5" aria-label="Background grid colour">
+        </label>
         <div class="row">Direction
           <span class="seg" id="dirSeg">
             <button class="btn on" data-dir="fwd">Forward</button>
@@ -105,9 +128,37 @@
         </label>
         <input type="file" id="worldFile" accept=".geojson,.json,.txt,application/geo+json,application/json,text/plain" multiple hidden>
         <p class="hint" id="ghostNote"></p>
-        <p class="hint">W/↑ go · S/↓ brake · A D steer · Shift fire a rocket (one burn per press) · C camera · P pause · R restart · Esc quit<br>
+        <p class="hint">W/↑ go · S/↓ brake · A D steer · Shift nitro (one burn per press) · C camera · P pause · R restart · Esc quit<br>
       In the menu: G gravity · V reverse. Class, gravity, direction and scale are fixed once a race starts.</p>
       </section>
+    </div>
+  </div>
+</div>
+
+<!-- BUILD: tap the map, segment by segment, and a course comes out. The map takes the
+     whole card because that is the job; everything else is one bar along the bottom. -->
+<div id="build" class="overlay">
+  <div id="buildCard">
+    <header>
+      <h2 id="buildTitle">New course</h2>
+      <p id="buildInfo">Tap a trail to start.</p>
+    </header>
+    <div id="buildMapWrap">
+      <canvas id="buildMap"></canvas>
+      <div id="buildZoom">
+        <button class="btn" id="zoomIn" aria-label="Zoom in">+</button>
+        <button class="btn" id="zoomOut" aria-label="Zoom out">−</button>
+        <button class="btn" id="zoomFit">Fit</button>
+      </div>
+    </div>
+    <div id="buildBar">
+      <input id="buildName" type="text" maxlength="40" placeholder="Course name" aria-label="Course name">
+      <button class="btn" id="buildUndo" disabled>Undo</button>
+      <button class="btn" id="buildRedo" disabled>Redo</button>
+      <button class="btn" id="buildClear">Clear</button>
+      <button class="btn" id="buildDelete" hidden>Delete</button>
+      <button class="btn" id="buildCancel">Cancel</button>
+      <button class="btn go" id="buildSave" disabled>Save</button>
     </div>
   </div>
 </div>
@@ -128,13 +179,13 @@
   <div id="hudR"><canvas id="minimap"></canvas></div>
   <div id="hudB">
     <div id="speedVal">0</div><div id="speedUnit">mph</div>
-    <div id="fuelRack" aria-label="Rockets"></div>
+    <div id="fuelRack" aria-label="Nitro"></div>
     <div id="burnPip"></div>
     <div id="slopeVal"></div>
   </div>
   <div id="touchCtl">
     <div id="tSteer"><span>◀</span><b>STEER</b><span>▶</span></div>
-    <div class="tgrp"><button class="tbtn" id="tBrake">BRAKE</button><button class="tbtn hot" id="tBoost">BURN</button></div>
+    <div class="tgrp"><button class="tbtn" id="tBrake">BRAKE</button><button class="tbtn hot" id="tBoost">NITRO</button></div>
   </div>
 </div>
 <div id="count"></div>
@@ -157,7 +208,17 @@
       <b id="ctlUpVal">16px</b><button class="btn" id="ctlUpUp" aria-label="Move controls up">+</button></span>
     </div>
     <button class="btn" id="ctlResetBtn">Reset control position</button>
-    <p class="hint">Only affects the on-screen touch controls. Sliders live here, not mid-race, so
+    <label class="row">Grid lines
+      <input type="range" class="gridThick" min="0" max="10" step="1" aria-label="Background grid line thickness">
+    </label>
+    <label class="row">Grid glow
+      <input type="range" class="gridGlow" min="0" max="200" step="5" aria-label="Background grid glow">
+    </label>
+    <label class="row">Grid colour
+      <input type="range" class="gridHue" min="0" max="360" step="5" aria-label="Background grid colour">
+    </label>
+    <p class="hint">The control sliders only move the on-screen touch controls; the grid sliders
+      restyle the background you can see behind this card. They live here, not mid-race, so
       adjusting them never costs you a frame of driving.</p>
     <div class="actions">
       <button class="btn go" id="resumeBtn">▶ Resume</button>

@@ -281,15 +281,73 @@ function courseName(ctx, states, circuit, taken){
   return name;
 }
 
+/* ---------- bridging near-miss gaps ----------
+   geo.js joins line ends within its snap tolerance (16 m) and no further. Real map data
+   is not that tidy: on the Pikes map the highway is two ways whose ends stop 17 m apart,
+   so the graph has two pieces of road where the world has one, and the course builder
+   honestly reports there is no way across.
+
+   A bridge is a short straight edge from a DEAD END to the nearest node in a DIFFERENT
+   connected piece of the network, within BRIDGE_M. Both conditions are deliberate:
+     - dead ends only, because a line that stops short is the signature of a mapping gap;
+       a junction that happens to sit near another trail is two trails, not a break;
+     - different pieces only, because inside one connected piece a bridge is not a repair,
+       it is a shortcut nobody mapped, and it would change the shape of every course near
+       it. Kruskal-style, shortest first, so a map in three pieces gets two bridges, not
+       every pair of nearby ends.
+
+   Bridges are APPENDED after every edge geo.js made, so no existing edge index moves --
+   which is what keeps saved custom courses and best times valid on a map that gains one.
+   They carry the name and kind of the trail they continue, and `bridge: true`, which the
+   automatic generator uses to ignore them: auto courses on a bridged map are exactly what
+   they were before, and every record set on them still stands. */
+const BRIDGE_M = 40;
+
+function bridgeGaps(graph, maxM){
+  const lim = maxM == null ? BRIDGE_M : maxM;
+  const {nodes, edges} = graph;
+  const deg = nodes.map(() => 0);
+  edges.forEach(e => { deg[e.a]++; if(e.b !== e.a) deg[e.b]++; });
+  const par = nodes.map((_, i) => i);
+  const find = i => { while(par[i] !== i){ par[i] = par[par[i]]; i = par[i]; } return i; };
+  edges.forEach(e => { const a = find(e.a), b = find(e.b); if(a !== b) par[a] = b; });
+
+  const cand = [];
+  nodes.forEach((n, i) => {
+    if(deg[i] !== 1) return;
+    nodes.forEach((m, j) => {
+      if(j === i || find(j) === find(i)) return;
+      const d = Math.hypot(m.p[0]-n.p[0], m.p[1]-n.p[1]);
+      if(d <= lim) cand.push({i, j, d});
+    });
+  });
+  cand.sort((p, q) => p.d - q.d || p.i - q.i || p.j - q.j);
+  let added = 0;
+  for(const c of cand){
+    const a = find(c.i), b = find(c.j);
+    if(a === b) continue;
+    par[a] = b;
+    const from = edges.find(e => e.a === c.i || e.b === c.i);
+    edges.push({a: c.i, b: c.j, pts: [nodes[c.i].p.slice(), nodes[c.j].p.slice()],
+                name: from.name, route: from.route, named: from.named, lenM: Math.max(0.5, c.d),
+                color: from.color, kind: from.kind, paved: from.paved, ford: false, bridge: true});
+    added++;
+  }
+  return added;
+}
+
 /* heightAt(x,z) is optional; with it, sprints are pointed downhill-ish start to finish
    only when neither end is a trailhead -- a dead-end is the natural place to line up. */
 function buildCourses(graph, heightAt, opts){
   const o = opts || {};
   const edges = graph.edges, nodes = graph.nodes;
   const adj = nodes.map(() => []);
-  edges.forEach((e, ei) => { adj[e.a].push({ei}); if(e.b !== e.a) adj[e.b].push({ei}); });
+  /* Bridges are invisible here: not in the adjacency, skipped for coverage. The generator
+     sees exactly the graph geo.js built, so a bridged map offers the same auto courses. */
+  edges.forEach((e, ei) => { if(e.bridge) return; adj[e.a].push({ei}); if(e.b !== e.a) adj[e.b].push({ei}); });
   const deg = nodes.map((_, i) => adj[i].length);
   const skip = new Uint8Array(edges.length);
+  edges.forEach((e, ei) => { if(e.bridge) skip[ei] = 1; });
   // prune short dead-end twigs, repeatedly: removing one can expose the next
   for(let round = 0; round < 6; round++){
     let any = false;
@@ -376,4 +434,8 @@ function buildCourses(graph, heightAt, opts){
           coverage: totalM ? covered/totalM : 0};
 }
 
-export { buildCourses, routeTargetM, edgeHeading, turnCost, ROUTE_MIN_M, ROUTE_STUB_M };
+/* routeSearch and unwind are exported for the course builder: a hand-built course is
+   connected between two picks by the same directed-edge search, with the same turn
+   limits, that the automatic generator uses. One idea of what counts as a way on. */
+export { buildCourses, routeTargetM, edgeHeading, turnCost, routeSearch, unwind, bridgeGaps,
+         ROUTE_MIN_M, ROUTE_STUB_M, ROUTE_MAX_LAPS, BRIDGE_M };
