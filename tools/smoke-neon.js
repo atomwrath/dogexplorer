@@ -164,6 +164,10 @@ window.document.createElement = (tag, ...rest) => {
 {
   const pad = window.document.getElementById('tSteer');
   if (pad) pad.getBoundingClientRect = () => ({ left: 100, top: 600, width: 240, height: 84, right: 340, bottom: 684 });
+  // same footprint as the pad above, so a clientX that would be "left of the pad's middle"
+  // is also "left of the button pair's middle" -- the two controls are tested the same way
+  const btns = window.document.getElementById('tSteerBtns');
+  if (btns) btns.getBoundingClientRect = () => ({ left: 100, top: 600, width: 240, height: 84, right: 340, bottom: 684 });
 }
 for (const id of ['c', 'preview', 'minimap', 'buildMap']) {
   const cv = window.document.getElementById(id);
@@ -1654,6 +1658,14 @@ const arraysClose = (a, b, eps = 1e-9) => {
     check('the steer-mode CSS shows exactly one of the pad or the buttons at a time',
       /body\.steer-buttons #tSteer\{[^}]*display:none/.test(css)
       && /#tSteerBtns\{[^}]*display:none/.test(css) && /body\.steer-buttons #tSteerBtns\{[^}]*display:flex/.test(css));
+    check('the steer buttons are rectangular, not the round .tbtn default',
+      /#tSteerBtns \.tbtn\{[^}]*border-radius:16px/.test(css));
+    check('the button pair catches every event itself; its two buttons are purely visual',
+      /#tSteerBtns\{[^}]*pointer-events:auto/.test(css) && /#tSteerBtns \.tbtn\{[^}]*pointer-events:none/.test(css));
+    check('gas, brake and nitro are simple icons, not words, each with an aria-label',
+      d.getElementById('tAccel').textContent.trim() === '▲' && d.getElementById('tAccel').getAttribute('aria-label')
+      && d.getElementById('tBrake').textContent.trim() === '▼' && d.getElementById('tBrake').getAttribute('aria-label')
+      && d.getElementById('tBoost').textContent.trim() === '⚡\uFE0E' && d.getElementById('tBoost').getAttribute('aria-label'));
     check('pad is the default steer mode, on at boot',
       N.state().settings.steerMode === 'pad' && !d.body.classList.contains('steer-buttons'));
     const press = (id, down) => {
@@ -1661,26 +1673,55 @@ const arraysClose = (a, b, eps = 1e-9) => {
       e.pointerId = 2;
       d.getElementById(id).dispatchEvent(e);
     };
-    press('tLeft', true);
+
+    /* THE SLIDE. tLeft and tRight are one drag surface (see bindSteerButtons): a pointer
+       that goes down on one side and moves to the other, without ever lifting, has to
+       switch which side is held -- that's the whole point of this section. The button
+       pair is mocked to the same rect as the pad above (left 100, width 240, so its
+       midpoint sits at 220), and btn() below plays the identical down/move/up shape the
+       pad's own at() does, just aimed at #tSteerBtns. */
+    const btns = d.getElementById('tSteerBtns');
+    const btn = (x, type, id) => {
+      const e = new window.Event(type, { bubbles: true, cancelable: true });
+      e.clientX = x; e.clientY = 640; e.pointerId = id == null ? 3 : id;
+      btns.dispatchEvent(e);
+    };
+    btn(150, 'pointerdown');                        // left half
     const leftV = steerNow();
-    press('tLeft', false);
-    press('tRight', true);
-    const rightV = steerNow();
-    press('tRight', false);
+    const leftPressed = d.getElementById('tLeft').classList.contains('pressed')
+      && !d.getElementById('tRight').classList.contains('pressed');
+    btn(300, 'pointermove');                         // slide across the midpoint (220), still down
+    const afterSlideV = steerNow();
+    const rightPressed = d.getElementById('tRight').classList.contains('pressed')
+      && !d.getElementById('tLeft').classList.contains('pressed');
+    btn(300, 'pointerup');
     const releasedV = steerNow();
-    check('the steer buttons drive left and right, digitally eased like a key',
-      leftV > 0.8 && rightV < -0.8 && Math.abs(releasedV) < 0.05,
-      `${leftV.toFixed(2)} / ${rightV.toFixed(2)} / ${releasedV.toFixed(2)}`);
+    const releasedPressed = !d.getElementById('tLeft').classList.contains('pressed')
+      && !d.getElementById('tRight').classList.contains('pressed');
+    check('a finger down on the left button steers left', leftV > 0.8 && leftPressed, leftV.toFixed(2));
+    check('sliding across to the right button, without lifting, switches to steering right',
+      afterSlideV < -0.8 && rightPressed, afterSlideV.toFixed(2));
+    check('lifting off releases steering and the pressed look on both buttons',
+      Math.abs(releasedV) < 0.05 && releasedPressed, releasedV.toFixed(2));
+    // a plain tap on the right side alone, no slide, still works
+    btn(300, 'pointerdown'); const tapRight = steerNow(); btn(300, 'pointerup');
+    check('a tap on the right side (no slide) steers right too', tapRight < -0.8, tapRight.toFixed(2));
+
     N.setSteerMode('buttons');
     check('switching to Buttons flips the body class and both copies of the segmented control',
       d.body.classList.contains('steer-buttons') && d.querySelectorAll('.steerSeg .btn.on').length === 2
       && [...d.querySelectorAll('.steerSeg .btn.on')].every(b => b.dataset.steer === 'buttons'));
-    press('tLeft', true);
+    btn(150, 'pointerdown');
     N.setSteerMode('pad');           // switch mid-press
-    check('switching mode releases a button that was held at the moment of the switch',
+    check('switching mode releases a button held at the moment of the switch, pressed look included',
       N.touch.steerL === false && !d.body.classList.contains('steer-buttons')
+      && !d.getElementById('tLeft').classList.contains('pressed')
       && d.querySelectorAll('.steerSeg .btn.on').length === 2
       && [...d.querySelectorAll('.steerSeg .btn.on')].every(b => b.dataset.steer === 'pad'));
+    // a stray move on the id that switch just orphaned must not revive it
+    btn(300, 'pointermove');
+    check('a move that arrives after the switch, on the old pointer id, is ignored',
+      N.touch.steerL === false && N.touch.steerR === false, `L ${N.touch.steerL}, R ${N.touch.steerR}`);
     check('the pad still drives after a switch away and back', (at(340, 'pointerdown'), at(220, 'pointerup'), true)
       && steerNow() === 0);   // released, so back at centre -- the drag itself is covered above
 

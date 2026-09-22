@@ -186,8 +186,15 @@ body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
 .tbtn{font:inherit; font-size:20px; width:84px; height:84px; border-radius:50%; color:var(--cyan);
   background:rgba(8,12,28,.55); border:2px solid var(--cyan); touch-action:none;}
 .tbtn.hot{color:var(--mag); border-color:var(--mag);}
-.tbtn:active{background:rgba(25,240,255,.2);}
-#tBrake{font-size:13px;} #tBoost{font-size:13px;} #tAccel{font-size:13px;}
+/* .pressed mirrors :active for a button that can never actually be :active -- see
+   #tSteerBtns below, where pointer-events:none on tLeft/tRight means neither one is ever
+   really the event target to begin with. */
+.tbtn:active, .tbtn.pressed{background:rgba(25,240,255,.2);}
+/* Simple, bold icons rather than words: a triangle up/down reads faster than "BRAKE" at a
+   glance, and pairs with the lightning bolt the same way the fuel rack's own icon does.
+   \uFE0E (text presentation selector) on the bolt stops phones swapping it for a full-
+   colour emoji glyph, which would ignore `color` and break the neon look. */
+#tAccel, #tBrake, #tBoost{font-size:30px;}
 
 /* STEERING: either the drag pad or the two buttons, never both -- settings.steerMode
    (see main.js applySteerMode) toggles a body class, and that is the only thing either
@@ -206,10 +213,18 @@ body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
 #tSteer span{font-size:20px;}
 #tSteer:active{border-color:#fff;}
 body.steer-buttons #tSteer{display:none;}
-/* The two-button alternative: plain .tbtn circles, an arrow each, digital not analog
-   (see readNeonInput) -- a tap is a nudge, a hold is full lock, same as the arrow keys. */
-#tSteerBtns{display:none; gap:12px; pointer-events:auto;}
+/* The two-button alternative: same footprint as the pad, split into two rectangles
+   instead of one pill. It LOOKS like two buttons but acts as one drag surface (see
+   bindSteerButtons in neon-input.js): the container catches every pointer event
+   (pointer-events:auto), the buttons inside are purely visual (pointer-events:none), and
+   which one lights up follows the pointer's x position, live, so a finger can land on
+   Left and slide across into Right without lifting -- the same slide-to-steer feel the
+   pad has, just split into two digital zones instead of one analog one. */
+#tSteerBtns{display:none; gap:8px; pointer-events:auto; touch-action:none;
+  width:min(46vw,240px); height:84px;}
 body.steer-buttons #tSteerBtns{display:flex;}
+#tSteerBtns .tbtn{flex:1 1 0; width:auto; height:100%; border-radius:16px; font-size:26px;
+  pointer-events:none;}
 .tgrp{display:grid; grid-template-columns:auto auto; column-gap:12px; row-gap:10px;
   align-items:center; pointer-events:auto;}
 /* The throttle cluster: gas to the left and vertically centred, nitro above brake in the
@@ -219,7 +234,7 @@ body.steer-buttons #tSteerBtns{display:flex;}
 #tAccel{grid-column:1; grid-row:1 / span 2;}
 #tBoost{grid-column:2; grid-row:1;}
 #tBrake{grid-column:2; grid-row:2;}
-@media (max-height:520px){ #tSteer, #tSteerBtns, .tbtn{height:66px;} .tbtn{width:66px;} }
+@media (max-height:520px){ #tSteer, #tSteerBtns, .tbtn{height:66px;} .tbtn{width:66px;} #tSteerBtns .tbtn{width:auto;} }
 @media (max-width:720px){ #minimap{width:112px; height:112px;} #hudPlace b{font-size:40px;} }
 /* A tablet has the screen real estate a phone doesn't, and a thumb reaching for a phone-
    sized button on a 10" screen has to travel farther relatively to land on the same
@@ -230,7 +245,9 @@ body.steer-buttons #tSteerBtns{display:flex;}
   .tbtn{width:104px; height:104px; font-size:23px;}
   #tSteer{width:min(50vw,320px); height:104px;}
   #tSteer span{font-size:24px;}
-  #tSteerBtns{gap:16px;}
+  #tSteerBtns{width:min(50vw,320px); height:104px; gap:12px;}
+  #tSteerBtns .tbtn{width:auto; font-size:32px;}
+  #tAccel, #tBrake, #tBoost{font-size:36px;}
 }
 
 #count{position:fixed; inset:0; display:none; align-items:center; justify-content:center; pointer-events:none;

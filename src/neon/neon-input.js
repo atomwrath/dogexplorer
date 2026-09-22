@@ -4,9 +4,10 @@
 
    Touch has two independent choices, both live in settings (see main.js applySteerMode):
    steering by a drag pad (analog, see bindSteerPad below) or by a pair of left/right
-   buttons (digital, eased exactly like the arrow keys); and, either way, an explicit gas
-   button -- touch used to throttle automatically the instant a finger was down, but that
-   makes a real accel button pointless to add, so it is now held like brake and boost are. */
+   buttons (digital, eased exactly like the arrow keys, see bindSteerButtons below); and,
+   either way, an explicit gas button -- touch used to throttle automatically the instant
+   a finger was down, but that makes a real accel button pointless to add, so it is now
+   held like brake and boost are. */
 const neonKeys = new Set();
 const neonTouch = {brake:false, boost:false, accel:false, steerL:false, steerR:false};
 let neonIsTouch = false;
@@ -17,6 +18,14 @@ let steerSmooth = 0;
    treats it as one, but a thumb that rolls fifteen degrees into a corner gets fifteen
    degrees of steering instead of everything. */
 let touchSteer = 0, steerPointer = null;
+/* The button pair is ONE drag surface too, not two independent buttons: both children
+   have pointer-events:none (see the CSS) so every event lands on the shared container
+   regardless of which button the finger is over, and bindSteerButtons below picks a side
+   from where the pointer actually is. That's what lets a finger slide from one button to
+   the other and have the game notice -- two separately-listening buttons would each only
+   hear their own pointerdown, and a slide between them (implicit touch capture keeps a
+   touch bound to whichever element it started on) would never reach the second one. */
+let btnSteerPointer = null, steerBtnL = null, steerBtnR = null;
 const neonHandlers = {};
 
 function initNeonInput(handlers){
@@ -55,7 +64,7 @@ function initNeonInput(handlers){
     el.addEventListener('contextmenu', e => e.preventDefault());
   };
   hold('tBrake', 'brake'); hold('tBoost', 'boost'); hold('tAccel', 'accel');
-  hold('tLeft', 'steerL'); hold('tRight', 'steerR');
+  bindSteerButtons(document.getElementById('tSteerBtns'), document.getElementById('tLeft'), document.getElementById('tRight'));
   bindSteerPad(document.getElementById('tSteer'));
   blockZoomGestures();
   if(window.matchMedia && window.matchMedia('(pointer: coarse)').matches) markTouch();
@@ -104,6 +113,60 @@ function bindSteerPad(pad){
   pad.addEventListener('pointercancel', up);
   pad.addEventListener('lostpointercapture', up);
   pad.addEventListener('contextmenu', e => e.preventDefault());
+}
+
+/* The two-button alternative to the pad above. Same shape of listener (raw touch events
+   prevented for the same edge-swipe reason, a captured pointer tracked by id, released on
+   up/cancel/loss) but the payload is a SIDE, not an offset: whichever half of the
+   container the pointer is over gets steerL/steerR, and crossing the midpoint while still
+   down switches which one -- that's the slide this exists for. A tap anywhere on a side
+   is already full lock (there's no partial position within a side), so unlike the pad
+   there's nothing analog to compute; the digital easing in readNeonInput does the rest,
+   exactly as it does for a keyboard arrow. */
+function bindSteerButtons(container, left, right){
+  if(!container || !left || !right) return;
+  steerBtnL = left; steerBtnR = right;
+  const sideAt = e => {
+    const r = container.getBoundingClientRect();
+    const half = r.width/2;
+    if(!half) return null;
+    return (e.clientX - r.left) < half ? 'L' : 'R';
+  };
+  const setSide = side => {
+    neonTouch.steerL = side === 'L';
+    neonTouch.steerR = side === 'R';
+    left.classList.toggle('pressed', side === 'L');
+    right.classList.toggle('pressed', side === 'R');
+  };
+  container.addEventListener('touchstart', e => { if(e.cancelable) e.preventDefault(); }, {passive:false});
+  container.addEventListener('touchmove', e => { if(e.cancelable) e.preventDefault(); }, {passive:false});
+  container.addEventListener('pointerdown', e => {
+    e.preventDefault(); markTouch();
+    btnSteerPointer = e.pointerId;
+    if(container.setPointerCapture) try{ container.setPointerCapture(e.pointerId); }catch(err){}
+    const side = sideAt(e);
+    if(side) setSide(side);
+  });
+  container.addEventListener('pointermove', e => {
+    if(btnSteerPointer !== e.pointerId) return;
+    e.preventDefault();
+    const side = sideAt(e);
+    if(side) setSide(side);
+  });
+  const up = e => {
+    if(btnSteerPointer !== e.pointerId) return;
+    e.preventDefault();
+    btnSteerPointer = null; clearSteerButtons();
+  };
+  container.addEventListener('pointerup', up);
+  container.addEventListener('pointercancel', up);
+  container.addEventListener('lostpointercapture', up);
+  container.addEventListener('contextmenu', e => e.preventDefault());
+}
+function clearSteerButtons(){
+  neonTouch.steerL = false; neonTouch.steerR = false;
+  if(steerBtnL) steerBtnL.classList.remove('pressed');
+  if(steerBtnR) steerBtnR.classList.remove('pressed');
 }
 
 /* THE ZOOM GESTURES touch-action CANNOT REACH. Same fix as Pup Trails, same reason: iOS
@@ -171,6 +234,9 @@ function resetNeonInput(){ steerSmooth = 0; touchSteer = 0; steerPointer = null;
    button held down at the moment of the switch can't stick. Leaves steerSmooth itself
    alone -- the mode only changes which control feeds it, not the value already eased
    towards, and the switch happens from a menu or a paused race, never mid-corner. */
-function resetSteerTouch(){ touchSteer = 0; steerPointer = null; neonTouch.steerL = false; neonTouch.steerR = false; }
+function resetSteerTouch(){
+  touchSteer = 0; steerPointer = null; btnSteerPointer = null;
+  clearSteerButtons();
+}
 
 export { initNeonInput, readNeonInput, resetNeonInput, resetSteerTouch, neonKeys, neonTouch };
