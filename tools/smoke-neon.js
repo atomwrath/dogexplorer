@@ -215,7 +215,7 @@ const probe = `
 ;globalThis.__neon = { state: neonState, scene: () => scene, camera: () => camera,
   keys: neonKeys, touch: neonTouch, skills: NEON_SKILL, setScale, setReverse, setGravity,
   reverseTrack, trackFrame, trackFor, buildTrack, mph, miles, feet,
-  setClass, setCam, setGhosts, cycleCam, topSpeed, gradeTopSpeed, placeCells, stepCells,
+  setClass, setCam, setGhosts, setSteerMode, cycleCam, topSpeed, gradeTopSpeed, placeCells, stepCells,
   setCourseMode, openBuild, closeBuild, saveBuild, deleteBuild, syncBuild, readStore: neonReadStore,
   builderAdd, builderPickAt, builderStates, builderUndo, builderRedo, builderClear,
   builderView, builderZoom, builderFit, builderLine, builderClosed, builderLenM, builderNote,
@@ -1588,7 +1588,8 @@ const arraysClose = (a, b, eps = 1e-9) => {
   {
     const d = window.document;
     const pad = d.getElementById('tSteer');
-    check('there is one steering pad, not two buttons', !!pad && !d.getElementById('tLeft'));
+    check('the drag pad and the button pair both exist, for the setting to switch between',
+      !!pad && !!d.getElementById('tSteerBtns') && !!d.getElementById('tLeft') && !!d.getElementById('tRight'));
     const css = fs.readFileSync(path.join(ROOT, 'styles/neon.css'), 'utf8');
     check('the speed readout stays at the bottom on a touch screen',
       /body\.touch #hudB\{[^}]*bottom:calc\(10px/.test(css) && !/body\.touch #hudB\{[^}]*bottom:calc\(112px/.test(css));
@@ -1637,6 +1638,70 @@ const arraysClose = (a, b, eps = 1e-9) => {
       /#touchCtl\{[^}]*touch-action:none/.test(css));
     check('the page still blocks the browser\'s own overscroll navigation',
       /html,body\{[^}]*overscroll-behavior:none/.test(css));
+
+    /* STEER MODE. Pad is the default (unchanged behaviour for anyone who never touches
+       the setting); Buttons hides the pad and shows tLeft/tRight instead (CSS, checked
+       below by its text -- jsdom does no layout, so which element a real touch can land
+       on is not something a dispatched event here can prove either way; that half is on
+       the two rendered screenshots at the end of this file). What IS provable headlessly
+       is the JS both modes share: pressing a steer button always feeds the same digital-
+       eased path a keyboard arrow does, switching modes is exactly a body class plus the
+       segmented control, and a press held at the moment of a switch can't stick. */
+    check('the throttle cluster puts gas to the left and centred, nitro over brake',
+      /#tAccel\{[^}]*grid-column:1[^}]*grid-row:1 \/ span 2/.test(css)
+      && /#tBoost\{[^}]*grid-column:2[^}]*grid-row:1/.test(css)
+      && /#tBrake\{[^}]*grid-column:2[^}]*grid-row:2/.test(css));
+    check('the steer-mode CSS shows exactly one of the pad or the buttons at a time',
+      /body\.steer-buttons #tSteer\{[^}]*display:none/.test(css)
+      && /#tSteerBtns\{[^}]*display:none/.test(css) && /body\.steer-buttons #tSteerBtns\{[^}]*display:flex/.test(css));
+    check('pad is the default steer mode, on at boot',
+      N.state().settings.steerMode === 'pad' && !d.body.classList.contains('steer-buttons'));
+    const press = (id, down) => {
+      const e = new window.Event(down ? 'pointerdown' : 'pointerup', { bubbles: true, cancelable: true });
+      e.pointerId = 2;
+      d.getElementById(id).dispatchEvent(e);
+    };
+    press('tLeft', true);
+    const leftV = steerNow();
+    press('tLeft', false);
+    press('tRight', true);
+    const rightV = steerNow();
+    press('tRight', false);
+    const releasedV = steerNow();
+    check('the steer buttons drive left and right, digitally eased like a key',
+      leftV > 0.8 && rightV < -0.8 && Math.abs(releasedV) < 0.05,
+      `${leftV.toFixed(2)} / ${rightV.toFixed(2)} / ${releasedV.toFixed(2)}`);
+    N.setSteerMode('buttons');
+    check('switching to Buttons flips the body class and both copies of the segmented control',
+      d.body.classList.contains('steer-buttons') && d.querySelectorAll('.steerSeg .btn.on').length === 2
+      && [...d.querySelectorAll('.steerSeg .btn.on')].every(b => b.dataset.steer === 'buttons'));
+    press('tLeft', true);
+    N.setSteerMode('pad');           // switch mid-press
+    check('switching mode releases a button that was held at the moment of the switch',
+      N.touch.steerL === false && !d.body.classList.contains('steer-buttons')
+      && d.querySelectorAll('.steerSeg .btn.on').length === 2
+      && [...d.querySelectorAll('.steerSeg .btn.on')].every(b => b.dataset.steer === 'pad'));
+    check('the pad still drives after a switch away and back', (at(340, 'pointerdown'), at(220, 'pointerup'), true)
+      && steerNow() === 0);   // released, so back at centre -- the drag itself is covered above
+
+    /* THE GAS BUTTON. Touch used to throttle automatically the moment a finger was on the
+       glass; now it needs tAccel held, the same as W does on a keyboard. */
+    const throttleNow = () => readNeonInput(1 / 60).throttle;
+    d.body.classList.add('touch');            // markTouch() would also do this; assert it directly
+    check('touch does not auto-throttle any more -- gas has to be held', throttleNow() === 0);
+    press('tAccel', true);
+    check('holding the gas button throttles', throttleNow() === 1);
+    press('tAccel', false);
+    check('releasing it stops', throttleNow() === 0);
+    /* Both held together read exactly as W+S would: readNeonInput hands both flags
+       through unchanged, and it's the physics (racer.js stepRacer) that nets brake
+       against throttle -- gas is not special-cased into zeroing itself here, so a held
+       gas button and a held W key end up in the exact same place downstream. */
+    press('tAccel', true); press('tBrake', true);
+    const both = readNeonInput(1 / 60);
+    press('tAccel', false); press('tBrake', false);
+    check('gas and brake read through independently, same as W and S do',
+      both.brake === 1 && both.throttle === 1, `brake ${both.brake}, throttle ${both.throttle}`);
   }
 
   // ---- steering never sits in the swipe-gesture danger zone ----

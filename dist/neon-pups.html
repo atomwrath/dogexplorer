@@ -197,7 +197,17 @@ body.touch #hudB{bottom:calc(10px + var(--safe-b)); z-index:1;}
 body.touch #speedVal{font-size:30px;}
 body.touch #fuelRack{gap:10px; height:24px; transform:scale(.8);}
 body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
-.tgrp{display:flex; gap:12px; pointer-events:auto;}
+.tbtn{font:inherit; font-size:20px; width:84px; height:84px; border-radius:50%; color:var(--cyan);
+  background:rgba(8,12,28,.55); border:2px solid var(--cyan); touch-action:none;}
+.tbtn.hot{color:var(--mag); border-color:var(--mag);}
+.tbtn:active{background:rgba(25,240,255,.2);}
+#tBrake{font-size:13px;} #tBoost{font-size:13px;} #tAccel{font-size:13px;}
+
+/* STEERING: either the drag pad or the two buttons, never both -- settings.steerMode
+   (see main.js applySteerMode) toggles a body class, and that is the only thing either
+   rule below reads. The hidden one stays out of the layout (display:none), not just
+   invisible, so it can't be dragged or tapped by accident and #touchCtl's own
+   space-between still balances against whichever one is showing. */
 /* The steering pad is ONE control: where the thumb is across it sets the lock, and
    sliding changes it without lifting (see bindSteerPad). Wide and short, so a thumb
    resting on the bottom-left corner can reach full lock either way without stretching. */
@@ -209,12 +219,21 @@ body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
 #tSteer b{font-weight:600; font-size:11px; letter-spacing:.2em; color:var(--dim);}
 #tSteer span{font-size:20px;}
 #tSteer:active{border-color:#fff;}
-.tbtn{font:inherit; font-size:20px; width:84px; height:84px; border-radius:50%; color:var(--cyan);
-  background:rgba(8,12,28,.55); border:2px solid var(--cyan); touch-action:none;}
-.tbtn.hot{color:var(--mag); border-color:var(--mag);}
-.tbtn:active{background:rgba(25,240,255,.2);}
-#tBrake{font-size:13px;} #tBoost{font-size:13px;}
-@media (max-height:520px){ #tSteer, .tbtn{height:66px;} .tbtn{width:66px;} }
+body.steer-buttons #tSteer{display:none;}
+/* The two-button alternative: plain .tbtn circles, an arrow each, digital not analog
+   (see readNeonInput) -- a tap is a nudge, a hold is full lock, same as the arrow keys. */
+#tSteerBtns{display:none; gap:12px; pointer-events:auto;}
+body.steer-buttons #tSteerBtns{display:flex;}
+.tgrp{display:grid; grid-template-columns:auto auto; column-gap:12px; row-gap:10px;
+  align-items:center; pointer-events:auto;}
+/* The throttle cluster: gas to the left and vertically centred, nitro above brake in the
+   column beside it -- a thumb resting in the middle can roll up, left or down without
+   crossing the others. Placement is explicit so DOM order (accel, brake, boost) can stay
+   whatever reads best top-to-bottom in the markup. */
+#tAccel{grid-column:1; grid-row:1 / span 2;}
+#tBoost{grid-column:2; grid-row:1;}
+#tBrake{grid-column:2; grid-row:2;}
+@media (max-height:520px){ #tSteer, #tSteerBtns, .tbtn{height:66px;} .tbtn{width:66px;} }
 @media (max-width:720px){ #minimap{width:112px; height:112px;} #hudPlace b{font-size:40px;} }
 /* A tablet has the screen real estate a phone doesn't, and a thumb reaching for a phone-
    sized button on a 10" screen has to travel farther relatively to land on the same
@@ -225,6 +244,7 @@ body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
   .tbtn{width:104px; height:104px; font-size:23px;}
   #tSteer{width:min(50vw,320px); height:104px;}
   #tSteer span{font-size:24px;}
+  #tSteerBtns{gap:16px;}
 }
 
 #count{position:fixed; inset:0; display:none; align-items:center; justify-content:center; pointer-events:none;
@@ -335,6 +355,12 @@ body[data-screen="count"] #count{display:flex;}
             <button class="btn" data-cam="far">Far</button>
           </span>
         </div>
+        <div class="row">Steering
+          <span class="seg steerSeg">
+            <button class="btn on" data-steer="pad">Pad</button>
+            <button class="btn" data-steer="buttons">Buttons</button>
+          </span>
+        </div>
         <label class="row">Grid lines
           <input type="range" class="gridThick" min="0" max="10" step="1" aria-label="Background grid line thickness">
         </label>
@@ -428,7 +454,8 @@ body[data-screen="count"] #count{display:flex;}
   </div>
   <div id="touchCtl">
     <div id="tSteer"><span>◀</span><b>STEER</b><span>▶</span></div>
-    <div class="tgrp"><button class="tbtn" id="tBrake">BRAKE</button><button class="tbtn hot" id="tBoost">NITRO</button></div>
+    <div id="tSteerBtns"><button class="tbtn" id="tLeft" aria-label="Steer left">◀</button><button class="tbtn" id="tRight" aria-label="Steer right">▶</button></div>
+    <div class="tgrp"><button class="tbtn" id="tAccel" aria-label="Accelerate">GAS</button><button class="tbtn" id="tBrake">BRAKE</button><button class="tbtn hot" id="tBoost">NITRO</button></div>
   </div>
 </div>
 <div id="count"></div>
@@ -436,12 +463,19 @@ body[data-screen="count"] #count{display:flex;}
 <!-- PAUSE: a hold on the race in progress, not a screen of its own -- the HUD stays up
      behind it (frozen: physics stops advancing while this is open, see main.js), so the
      translucent panel is a genuine pause rather than a trip back to a menu. Doubles as
-     where touch players fit the on-screen controls to their own hands: the steer pad and
-     the two buttons move together (In/Out) and as a bar (Up/Down), previewed live behind
-     this panel since the overlay is translucent, not opaque. -->
+     where touch players fit the controls to their own hands: pad or buttons for steering,
+     and the whole cluster (steer, gas, brake, nitro) moves together (In/Out) and as a bar
+     (Up/Down), previewed live behind this panel since the overlay is translucent, not
+     opaque. -->
 <div id="pause" class="overlay">
   <div id="pauseCard">
     <h2>PAUSED</h2>
+    <div class="row">Steering
+      <span class="seg steerSeg">
+        <button class="btn on" data-steer="pad">Pad</button>
+        <button class="btn" data-steer="buttons">Buttons</button>
+      </span>
+    </div>
     <div class="row">Controls: In / Out
       <span class="stepper"><button class="btn" id="ctlInDn" aria-label="Move controls out">−</button>
       <b id="ctlInVal">16px</b><button class="btn" id="ctlInUp" aria-label="Move controls in">+</button></span>
@@ -5822,10 +5856,13 @@ function disposeRider(R){
    that module is Pup City's (it imports the city player, modes and pickups), and a board
    has a different vocabulary anyway -- no jump, no bark, no sneak.
 
-   Touch drives with auto-throttle: two thumbs have enough to do steering and boosting,
-   and "hold a button the entire race" is not a control, it is a tax. Brake overrides it. */
+   Touch has two independent choices, both live in settings (see main.js applySteerMode):
+   steering by a drag pad (analog, see bindSteerPad below) or by a pair of left/right
+   buttons (digital, eased exactly like the arrow keys); and, either way, an explicit gas
+   button -- touch used to throttle automatically the instant a finger was down, but that
+   makes a real accel button pointless to add, so it is now held like brake and boost are. */
 const neonKeys = new Set();
-const neonTouch = {brake:false, boost:false};
+const neonTouch = {brake:false, boost:false, accel:false, steerL:false, steerR:false};
 let neonIsTouch = false;
 let steerSmooth = 0;
 /* Analog touch steering. The steering pad is one control, not two buttons: where the
@@ -5871,7 +5908,8 @@ function initNeonInput(handlers){
     el.addEventListener('pointerleave', off);
     el.addEventListener('contextmenu', e => e.preventDefault());
   };
-  hold('tBrake', 'brake'); hold('tBoost', 'boost');
+  hold('tBrake', 'brake'); hold('tBoost', 'boost'); hold('tAccel', 'accel');
+  hold('tLeft', 'steerL'); hold('tRight', 'steerR');
   bindSteerPad(document.getElementById('tSteer'));
   blockZoomGestures();
   if(window.matchMedia && window.matchMedia('(pointer: coarse)').matches) markTouch();
@@ -5959,26 +5997,35 @@ function markTouch(){
 }
 function readNeonInput(dt){
   const K = k => neonKeys.has(k);
-  const left  = K('a') || K('ArrowLeft');
-  const right = K('d') || K('ArrowRight');
+  // the left/right steer BUTTONS feed the same digital path a keyboard arrow does
+  const left  = K('a') || K('ArrowLeft') || neonTouch.steerL;
+  const right = K('d') || K('ArrowRight') || neonTouch.steerR;
   const want = (left ? 1 : 0) - (right ? 1 : 0);
   if(steerPointer !== null){
     /* The pad is already analog, so it only needs enough smoothing to take the stair-step
        out of a dragging thumb. The key easing below must NOT also run here: it pulls
        towards zero every frame, and the two together settle about three quarters of the
-       way to full lock -- a pad that can never quite reach the stops. */
+       way to full lock -- a pad that can never quite reach the stops. Only a drag on the
+       pad itself sets steerPointer, so the buttons -- and a keyboard -- always fall to
+       the digital branch below, pad mode or not. */
     steerSmooth += (touchSteer - steerSmooth)*Math.min(1, dt*18);
   }else{
-    // a key is all-or-nothing; ease it so a tap is a nudge and a hold is full lock
+    // a key (or a steer button) is all-or-nothing; ease it so a tap is a nudge and a
+    // hold is full lock
     const rate = want === 0 ? 7 : 4.5;
     steerSmooth += Math.max(-rate*dt, Math.min(rate*dt, want - steerSmooth));
   }
   const steer = steerSmooth;
   const brake = (K('s') || K('ArrowDown') || neonTouch.brake) ? 1 : 0;
-  const gas = (K('w') || K('ArrowUp') || (neonIsTouch && !brake)) ? 1 : 0;
+  const gas = (K('w') || K('ArrowUp') || neonTouch.accel) ? 1 : 0;
   return {steer, throttle: gas, brake, boost: K('Shift') || K(' ') || neonTouch.boost};
 }
 function resetNeonInput(){ steerSmooth = 0; touchSteer = 0; steerPointer = null; }
+/* Called when the player switches steer mode (see main.js setSteerMode), so a drag or a
+   button held down at the moment of the switch can't stick. Leaves steerSmooth itself
+   alone -- the mode only changes which control feeds it, not the value already eased
+   towards, and the switch happens from a menu or a paused race, never mid-corner. */
+function resetSteerTouch(){ touchSteer = 0; steerPointer = null; neonTouch.steerL = false; neonTouch.steerR = false; }
 
 /* ==== src/neon/neon-sound.js ==== */
 /* THE BOARD'S ENGINE, as a jet rather than a motor.
@@ -6508,6 +6555,7 @@ const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale
                   // touch control position: how far the steer pad and buttons sit from the
                   // screen edges (ctlInset) and above the bottom edge (ctlBottom), in px
                   ctlInset: 24, ctlBottom: 16,    // ctlInset defaults AT the swipe-safe floor, not below it
+                  steerMode: 'pad',               // 'pad' (drag) or 'buttons' (left/right)
                   // background grid: line thickness in slider steps (0 = always one pixel)
                   // and a hue turn in degrees (0 = the original colours)
                   gridThick: 2, gridHue: 0, gridGlow: 100};   // gridGlow: percent, 0..200
@@ -6995,6 +7043,21 @@ function syncPauseCard(){
   $('ctlInUp').disabled = settings.ctlInset >= CTL_INSET_MAX;
   $('ctlUpDn').disabled = settings.ctlBottom <= CTL_BOTTOM_MIN;
   $('ctlUpUp').disabled = settings.ctlBottom >= CTL_BOTTOM_MAX;
+}
+/* STEER MODE: the drag pad or the two buttons -- a body class picks which one #touchCtl
+   shows (see the CSS), so switching repaints instantly with nothing here to rebuild. Two
+   copies of the seg exist (menu and pause, like the grid sliders), kept in step by class
+   rather than id. Unlike gravity/direction/scale this is just which control is on screen,
+   not what the course is, so -- also unlike them -- it is free to change mid-race. */
+function applySteerMode(){
+  document.body.classList.toggle('steer-buttons', settings.steerMode === 'buttons');
+  document.querySelectorAll('.steerSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.steer === settings.steerMode));
+}
+function setSteerMode(mode){
+  if((mode !== 'pad' && mode !== 'buttons') || settings.steerMode === mode) return;
+  settings.steerMode = mode;
+  resetSteerTouch();               // a drag or a button held at the moment of the switch can't stick
+  applySteerMode(); neonWriteStore();
 }
 /* Gravity, direction and scale are set BEFORE the lights go out and hold for the whole
    race. They change what the course is, not how you are driving it, so mid-race they
@@ -7576,6 +7639,7 @@ function wireUI(){
   document.querySelectorAll('#camSeg .btn').forEach(b => b.addEventListener('click', () => setCam(b.dataset.cam)));
   document.querySelectorAll('#ghostSeg .btn').forEach(b => b.addEventListener('click', () => setGhosts(b.dataset.ghost === '1')));
   document.querySelectorAll('#dirSeg .btn').forEach(b => b.addEventListener('click', () => setReverse(b.dataset.dir === 'rev')));
+  document.querySelectorAll('.steerSeg .btn').forEach(b => b.addEventListener('click', () => setSteerMode(b.dataset.steer)));
   $('scaleSel').addEventListener('change', e => setScale(+e.target.value));
   $('riderSel').addEventListener('change', e => { settings.rider = e.target.value; neonWriteStore(); });
   $('mapSel').addEventListener('change', e => {
@@ -7636,6 +7700,7 @@ async function bootNeon(){
   neonReadStore();
   applyControlLayout();
   applyGrid();
+  applySteerMode();
   loadKennel();
   wireUI();
   fillRiderSelect();

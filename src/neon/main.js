@@ -33,7 +33,7 @@ import { buildTrack, reverseTrack, widthFactor, trackFrame, trackToWorld, deckY,
 import { makeRacer, stepRacer, rivalInput, resolveContacts, rankRacers, raceDistance, topSpeed } from './racer.js';
 import { buildEnvironment, buildTrackMesh, clearTrackMesh, bumperPulse, updateScene, clearSmoke, setGridStyle } from './neon-scene.js';
 import { makeRider, poseRider, disposeRider } from './riders.js';
-import { initNeonInput, readNeonInput, resetNeonInput } from './neon-input.js';
+import { initNeonInput, readNeonInput, resetNeonInput, resetSteerTouch } from './neon-input.js';
 import { startHum, setHum, stopHum, burnSound, cellSound } from './neon-sound.js';
 import { placeCells, stepCells, buildCellMeshes, updateCellMeshes, clearCells } from './cells.js';
 import { makeRecorder, recordFrame, finishRecording, bestGhosts, keepGhost,
@@ -71,6 +71,7 @@ const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale
                   // touch control position: how far the steer pad and buttons sit from the
                   // screen edges (ctlInset) and above the bottom edge (ctlBottom), in px
                   ctlInset: 24, ctlBottom: 16,    // ctlInset defaults AT the swipe-safe floor, not below it
+                  steerMode: 'pad',               // 'pad' (drag) or 'buttons' (left/right)
                   // background grid: line thickness in slider steps (0 = always one pixel)
                   // and a hue turn in degrees (0 = the original colours)
                   gridThick: 2, gridHue: 0, gridGlow: 100};   // gridGlow: percent, 0..200
@@ -558,6 +559,21 @@ function syncPauseCard(){
   $('ctlInUp').disabled = settings.ctlInset >= CTL_INSET_MAX;
   $('ctlUpDn').disabled = settings.ctlBottom <= CTL_BOTTOM_MIN;
   $('ctlUpUp').disabled = settings.ctlBottom >= CTL_BOTTOM_MAX;
+}
+/* STEER MODE: the drag pad or the two buttons -- a body class picks which one #touchCtl
+   shows (see the CSS), so switching repaints instantly with nothing here to rebuild. Two
+   copies of the seg exist (menu and pause, like the grid sliders), kept in step by class
+   rather than id. Unlike gravity/direction/scale this is just which control is on screen,
+   not what the course is, so -- also unlike them -- it is free to change mid-race. */
+function applySteerMode(){
+  document.body.classList.toggle('steer-buttons', settings.steerMode === 'buttons');
+  document.querySelectorAll('.steerSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.steer === settings.steerMode));
+}
+function setSteerMode(mode){
+  if((mode !== 'pad' && mode !== 'buttons') || settings.steerMode === mode) return;
+  settings.steerMode = mode;
+  resetSteerTouch();               // a drag or a button held at the moment of the switch can't stick
+  applySteerMode(); neonWriteStore();
 }
 /* Gravity, direction and scale are set BEFORE the lights go out and hold for the whole
    race. They change what the course is, not how you are driving it, so mid-race they
@@ -1139,6 +1155,7 @@ function wireUI(){
   document.querySelectorAll('#camSeg .btn').forEach(b => b.addEventListener('click', () => setCam(b.dataset.cam)));
   document.querySelectorAll('#ghostSeg .btn').forEach(b => b.addEventListener('click', () => setGhosts(b.dataset.ghost === '1')));
   document.querySelectorAll('#dirSeg .btn').forEach(b => b.addEventListener('click', () => setReverse(b.dataset.dir === 'rev')));
+  document.querySelectorAll('.steerSeg .btn').forEach(b => b.addEventListener('click', () => setSteerMode(b.dataset.steer)));
   $('scaleSel').addEventListener('change', e => setScale(+e.target.value));
   $('riderSel').addEventListener('change', e => { settings.rider = e.target.value; neonWriteStore(); });
   $('mapSel').addEventListener('change', e => {
@@ -1199,6 +1216,7 @@ async function bootNeon(){
   neonReadStore();
   applyControlLayout();
   applyGrid();
+  applySteerMode();
   loadKennel();
   wireUI();
   fillRiderSelect();
@@ -1227,5 +1245,5 @@ bootNeon();
 
 export { bootNeon, loadNeonMap, loadMapList, startRace, quitToMenu, setGravity, setReverse, setScale, setClass, setCam, setGhosts, cycleCam,
          setCourseMode, openBuild, closeBuild, saveBuild, deleteBuild, syncBuild, neonReadStore, applyGrid,
-         pauseRace, resumeRace, togglePause, setCtlInset, setCtlBottom, resetControlLayout,
+         pauseRace, resumeRace, togglePause, setCtlInset, setCtlBottom, resetControlLayout, setSteerMode,
          selectCourse, neonState, stepRace, trackFor, modeChip };

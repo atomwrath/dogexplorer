@@ -92,6 +92,12 @@
             <button class="btn" data-cam="far">Far</button>
           </span>
         </div>
+        <div class="row">Steering
+          <span class="seg steerSeg">
+            <button class="btn on" data-steer="pad">Pad</button>
+            <button class="btn" data-steer="buttons">Buttons</button>
+          </span>
+        </div>
         <label class="row">Grid lines
           <input type="range" class="gridThick" min="0" max="10" step="1" aria-label="Background grid line thickness">
         </label>
@@ -185,7 +191,8 @@
   </div>
   <div id="touchCtl">
     <div id="tSteer"><span>◀</span><b>STEER</b><span>▶</span></div>
-    <div class="tgrp"><button class="tbtn" id="tBrake">BRAKE</button><button class="tbtn hot" id="tBoost">NITRO</button></div>
+    <div id="tSteerBtns"><button class="tbtn" id="tLeft" aria-label="Steer left">◀</button><button class="tbtn" id="tRight" aria-label="Steer right">▶</button></div>
+    <div class="tgrp"><button class="tbtn" id="tAccel" aria-label="Accelerate">GAS</button><button class="tbtn" id="tBrake">BRAKE</button><button class="tbtn hot" id="tBoost">NITRO</button></div>
   </div>
 </div>
 <div id="count"></div>
@@ -193,12 +200,19 @@
 <!-- PAUSE: a hold on the race in progress, not a screen of its own -- the HUD stays up
      behind it (frozen: physics stops advancing while this is open, see main.js), so the
      translucent panel is a genuine pause rather than a trip back to a menu. Doubles as
-     where touch players fit the on-screen controls to their own hands: the steer pad and
-     the two buttons move together (In/Out) and as a bar (Up/Down), previewed live behind
-     this panel since the overlay is translucent, not opaque. -->
+     where touch players fit the controls to their own hands: pad or buttons for steering,
+     and the whole cluster (steer, gas, brake, nitro) moves together (In/Out) and as a bar
+     (Up/Down), previewed live behind this panel since the overlay is translucent, not
+     opaque. -->
 <div id="pause" class="overlay">
   <div id="pauseCard">
     <h2>PAUSED</h2>
+    <div class="row">Steering
+      <span class="seg steerSeg">
+        <button class="btn on" data-steer="pad">Pad</button>
+        <button class="btn" data-steer="buttons">Buttons</button>
+      </span>
+    </div>
     <div class="row">Controls: In / Out
       <span class="stepper"><button class="btn" id="ctlInDn" aria-label="Move controls out">−</button>
       <b id="ctlInVal">16px</b><button class="btn" id="ctlInUp" aria-label="Move controls in">+</button></span>

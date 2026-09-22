@@ -183,7 +183,17 @@ body.touch #hudB{bottom:calc(10px + var(--safe-b)); z-index:1;}
 body.touch #speedVal{font-size:30px;}
 body.touch #fuelRack{gap:10px; height:24px; transform:scale(.8);}
 body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
-.tgrp{display:flex; gap:12px; pointer-events:auto;}
+.tbtn{font:inherit; font-size:20px; width:84px; height:84px; border-radius:50%; color:var(--cyan);
+  background:rgba(8,12,28,.55); border:2px solid var(--cyan); touch-action:none;}
+.tbtn.hot{color:var(--mag); border-color:var(--mag);}
+.tbtn:active{background:rgba(25,240,255,.2);}
+#tBrake{font-size:13px;} #tBoost{font-size:13px;} #tAccel{font-size:13px;}
+
+/* STEERING: either the drag pad or the two buttons, never both -- settings.steerMode
+   (see main.js applySteerMode) toggles a body class, and that is the only thing either
+   rule below reads. The hidden one stays out of the layout (display:none), not just
+   invisible, so it can't be dragged or tapped by accident and #touchCtl's own
+   space-between still balances against whichever one is showing. */
 /* The steering pad is ONE control: where the thumb is across it sets the lock, and
    sliding changes it without lifting (see bindSteerPad). Wide and short, so a thumb
    resting on the bottom-left corner can reach full lock either way without stretching. */
@@ -195,12 +205,21 @@ body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
 #tSteer b{font-weight:600; font-size:11px; letter-spacing:.2em; color:var(--dim);}
 #tSteer span{font-size:20px;}
 #tSteer:active{border-color:#fff;}
-.tbtn{font:inherit; font-size:20px; width:84px; height:84px; border-radius:50%; color:var(--cyan);
-  background:rgba(8,12,28,.55); border:2px solid var(--cyan); touch-action:none;}
-.tbtn.hot{color:var(--mag); border-color:var(--mag);}
-.tbtn:active{background:rgba(25,240,255,.2);}
-#tBrake{font-size:13px;} #tBoost{font-size:13px;}
-@media (max-height:520px){ #tSteer, .tbtn{height:66px;} .tbtn{width:66px;} }
+body.steer-buttons #tSteer{display:none;}
+/* The two-button alternative: plain .tbtn circles, an arrow each, digital not analog
+   (see readNeonInput) -- a tap is a nudge, a hold is full lock, same as the arrow keys. */
+#tSteerBtns{display:none; gap:12px; pointer-events:auto;}
+body.steer-buttons #tSteerBtns{display:flex;}
+.tgrp{display:grid; grid-template-columns:auto auto; column-gap:12px; row-gap:10px;
+  align-items:center; pointer-events:auto;}
+/* The throttle cluster: gas to the left and vertically centred, nitro above brake in the
+   column beside it -- a thumb resting in the middle can roll up, left or down without
+   crossing the others. Placement is explicit so DOM order (accel, brake, boost) can stay
+   whatever reads best top-to-bottom in the markup. */
+#tAccel{grid-column:1; grid-row:1 / span 2;}
+#tBoost{grid-column:2; grid-row:1;}
+#tBrake{grid-column:2; grid-row:2;}
+@media (max-height:520px){ #tSteer, #tSteerBtns, .tbtn{height:66px;} .tbtn{width:66px;} }
 @media (max-width:720px){ #minimap{width:112px; height:112px;} #hudPlace b{font-size:40px;} }
 /* A tablet has the screen real estate a phone doesn't, and a thumb reaching for a phone-
    sized button on a 10" screen has to travel farther relatively to land on the same
@@ -211,6 +230,7 @@ body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
   .tbtn{width:104px; height:104px; font-size:23px;}
   #tSteer{width:min(50vw,320px); height:104px;}
   #tSteer span{font-size:24px;}
+  #tSteerBtns{gap:16px;}
 }
 
 #count{position:fixed; inset:0; display:none; align-items:center; justify-content:center; pointer-events:none;

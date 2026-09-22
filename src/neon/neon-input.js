@@ -2,10 +2,13 @@
    that module is Pup City's (it imports the city player, modes and pickups), and a board
    has a different vocabulary anyway -- no jump, no bark, no sneak.
 
-   Touch drives with auto-throttle: two thumbs have enough to do steering and boosting,
-   and "hold a button the entire race" is not a control, it is a tax. Brake overrides it. */
+   Touch has two independent choices, both live in settings (see main.js applySteerMode):
+   steering by a drag pad (analog, see bindSteerPad below) or by a pair of left/right
+   buttons (digital, eased exactly like the arrow keys); and, either way, an explicit gas
+   button -- touch used to throttle automatically the instant a finger was down, but that
+   makes a real accel button pointless to add, so it is now held like brake and boost are. */
 const neonKeys = new Set();
-const neonTouch = {brake:false, boost:false};
+const neonTouch = {brake:false, boost:false, accel:false, steerL:false, steerR:false};
 let neonIsTouch = false;
 let steerSmooth = 0;
 /* Analog touch steering. The steering pad is one control, not two buttons: where the
@@ -51,7 +54,8 @@ function initNeonInput(handlers){
     el.addEventListener('pointerleave', off);
     el.addEventListener('contextmenu', e => e.preventDefault());
   };
-  hold('tBrake', 'brake'); hold('tBoost', 'boost');
+  hold('tBrake', 'brake'); hold('tBoost', 'boost'); hold('tAccel', 'accel');
+  hold('tLeft', 'steerL'); hold('tRight', 'steerR');
   bindSteerPad(document.getElementById('tSteer'));
   blockZoomGestures();
   if(window.matchMedia && window.matchMedia('(pointer: coarse)').matches) markTouch();
@@ -139,25 +143,34 @@ function markTouch(){
 }
 function readNeonInput(dt){
   const K = k => neonKeys.has(k);
-  const left  = K('a') || K('ArrowLeft');
-  const right = K('d') || K('ArrowRight');
+  // the left/right steer BUTTONS feed the same digital path a keyboard arrow does
+  const left  = K('a') || K('ArrowLeft') || neonTouch.steerL;
+  const right = K('d') || K('ArrowRight') || neonTouch.steerR;
   const want = (left ? 1 : 0) - (right ? 1 : 0);
   if(steerPointer !== null){
     /* The pad is already analog, so it only needs enough smoothing to take the stair-step
        out of a dragging thumb. The key easing below must NOT also run here: it pulls
        towards zero every frame, and the two together settle about three quarters of the
-       way to full lock -- a pad that can never quite reach the stops. */
+       way to full lock -- a pad that can never quite reach the stops. Only a drag on the
+       pad itself sets steerPointer, so the buttons -- and a keyboard -- always fall to
+       the digital branch below, pad mode or not. */
     steerSmooth += (touchSteer - steerSmooth)*Math.min(1, dt*18);
   }else{
-    // a key is all-or-nothing; ease it so a tap is a nudge and a hold is full lock
+    // a key (or a steer button) is all-or-nothing; ease it so a tap is a nudge and a
+    // hold is full lock
     const rate = want === 0 ? 7 : 4.5;
     steerSmooth += Math.max(-rate*dt, Math.min(rate*dt, want - steerSmooth));
   }
   const steer = steerSmooth;
   const brake = (K('s') || K('ArrowDown') || neonTouch.brake) ? 1 : 0;
-  const gas = (K('w') || K('ArrowUp') || (neonIsTouch && !brake)) ? 1 : 0;
+  const gas = (K('w') || K('ArrowUp') || neonTouch.accel) ? 1 : 0;
   return {steer, throttle: gas, brake, boost: K('Shift') || K(' ') || neonTouch.boost};
 }
 function resetNeonInput(){ steerSmooth = 0; touchSteer = 0; steerPointer = null; }
+/* Called when the player switches steer mode (see main.js setSteerMode), so a drag or a
+   button held down at the moment of the switch can't stick. Leaves steerSmooth itself
+   alone -- the mode only changes which control feeds it, not the value already eased
+   towards, and the switch happens from a menu or a paused race, never mid-corner. */
+function resetSteerTouch(){ touchSteer = 0; steerPointer = null; neonTouch.steerL = false; neonTouch.steerR = false; }
 
-export { initNeonInput, readNeonInput, resetNeonInput, neonKeys, neonTouch };
+export { initNeonInput, readNeonInput, resetNeonInput, resetSteerTouch, neonKeys, neonTouch };
