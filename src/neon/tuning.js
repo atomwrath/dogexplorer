@@ -54,6 +54,13 @@ const NEON = {
   ghostKnock:   0.30,   // playback rate drops by at least this on contact
   ghostRecoverS:1.2,    // s time constant for the rate to come back to 1
   ghostRightW:  2.4,    // rad/s, critically damped spring pulling it back onto its line
+  /* A ghost is a record, and a record cannot wait in traffic: it looks ahead along its
+     own line and moves its offset round whoever is there, and if it is still wedged
+     against the same body after ghostStuckS it slips through them rather than hanging up
+     (non-solid until it has come clear, the same phase-in it starts the race with). */
+  ghostLookM:   9,      // m ahead along its recorded line it checks for a body in the way
+  ghostStuckS:  0.9,    // s of unbroken contact before it slips through
+  ghostKnockGap:0.6,    // s a contact has to be broken for before it can knock the clock again
   /* --- boost: a rack of nitro tanks, one burn each ---
      Nothing recharges. You start with a couple and everything after that is picked up off
      the track, which is what makes the cells worth going out of your way for and a burn
@@ -85,6 +92,43 @@ const NEON_SKILL = {
   fierce: {pace: 1.22, corner: 1.34, wobble: 0.04, label: 'Fierce'},
 };
 
+/* DRIVING STYLES. The field is animals, and they should not all drive one algorithm
+   with different paint. Each species maps to a style; the style bends rivalInput and
+   the contact physics:
+     pace     top-speed multiplier on top of the Pace setting
+     corner   how hot it takes a bend (above 1 means it WILL find the bumper sometimes)
+     wobble   how much its line wanders (multiplies the Pace setting's wobble)
+     avoid    how early and how wide it goes round someone (0.5 barely bothers, 1.6 gives
+              a wide berth and eases off rather than squeeze by)
+     aggro    0..1, how much it steers AT someone beside or just ahead instead of round
+     mass     share of a shove it keeps (heavier gets pushed less and pushes more)
+     hunt     how far out it will change lane for a nitro tank, and how full a rack it
+              will still go for one (0 never, 1 normal, 1.6 goes out of its way)
+     burn     'straight' burns only out of a corner onto something straight; 'any'
+              burns whenever it has a tank and room to gain
+     sight    how far ahead it reads the bend (below 1 brakes late and runs wide)
+     edge     margin it keeps from the bumpers (1 normal; below 0 it rides them)
+     apex     how hard it cuts to the inside of a bend (0.55 was everyone's)
+   Bruisers are the big grazers; the skilled are the predators; the timid are the small
+   prey animals; the reckless are the ones that climb cliffs and raid bins. */
+const NEON_STYLE = {
+  bruiser:  {pace: 0.98, corner: 1.00, wobble: 0.8, avoid: 0.45, aggro: 0.75, mass: 1.7, hunt: 0.6, burn: 'straight', sight: 1.0, edge: 1, apex: 0.45, label: 'Bruiser'},
+  skilled:  {pace: 1.05, corner: 1.06, wobble: 0.45, avoid: 1.15, aggro: 0.10, mass: 1.0, hunt: 1.0, burn: 'straight', sight: 0.6, edge: 1, apex: 0.6, label: 'Racer'},
+  timid:    {pace: 1.00, corner: 0.93, wobble: 0.9, avoid: 1.65, aggro: 0.00, mass: 0.7, hunt: 1.2, burn: 'straight', sight: 1.2, edge: 1.4, apex: 0.4, label: 'Skittish'},
+  reckless: {pace: 0.93, corner: 1.08, wobble: 2.2, avoid: 0.75, aggro: 0.35, mass: 1.1, hunt: 1.0, burn: 'any', sight: 0.9, edge: -0.6, apex: 1.0, label: 'Reckless'},
+  steady:   {pace: 0.99, corner: 0.97, wobble: 0.5, avoid: 1.25, aggro: 0.00, mass: 1.0, hunt: 1.0, burn: 'straight', sight: 1.1, edge: 1.2, apex: 0.5, label: 'Steady'},
+  hunter:   {pace: 1.01, corner: 1.02, wobble: 0.7, avoid: 1.0, aggro: 0.20, mass: 0.9, hunt: 1.7, burn: 'any', sight: 0.9, edge: 1, apex: 0.55, label: 'Scavenger'},
+};
+const SPECIES_STYLE = {
+  bear: 'bruiser', moose: 'bruiser', bighorn: 'bruiser',
+  deer: 'skilled', fox: 'skilled', coyote: 'skilled', bobcat: 'skilled',
+  rabbit: 'timid', chipmunk: 'timid', squirrel: 'timid',
+  goat: 'reckless', raccoon: 'reckless',
+  possum: 'steady',
+  cat: 'hunter',
+};
+const styleFor = key => NEON_STYLE[SPECIES_STYLE[key] || 'steady'];
+
 /* Speed classes. The multiplier is on TOP SPEED; thrust goes as its square so the class
    keeps the same shape of acceleration curve rather than just a different ceiling. Rivals
    race the class you picked, since their pace is a fraction of what your board can do. */
@@ -107,4 +151,4 @@ const miles = m => m/M_PER_MILE;
 const feet  = m => m*FT_PER_M;
 const mph   = ms => ms*3600/M_PER_MILE;
 
-export { NEON, NEON_SKILL, NEON_CLASS, NEON_CAM, miles, feet, mph, M_PER_MILE, FT_PER_M };
+export { NEON, NEON_SKILL, NEON_STYLE, SPECIES_STYLE, styleFor, NEON_CLASS, NEON_CAM, miles, feet, mph, M_PER_MILE, FT_PER_M };

@@ -23,7 +23,7 @@ import { SPECIES } from '../data/species.js';
 import { kennelPups, loadKennel } from '../data/kennel.js';
 import { PRESETS } from '../creator/presets.js';
 import { parseFeatures, buildGraph } from '../trails/geo.js';
-import { NEON, NEON_SKILL, NEON_CLASS, NEON_CAM, miles, feet, mph } from './tuning.js';
+import { NEON, NEON_SKILL, NEON_CLASS, NEON_CAM, styleFor, miles, feet, mph } from './tuning.js';
 import { buildCourses, routeTargetM, bridgeGaps, ROUTE_MAX_LAPS } from './routes.js';
 import { builderOpen, builderClose, builderAdd, builderPickAt, builderUndo, builderRedo,
          builderClear, builderDraw, builderFit, builderZoom, builderPan, builderView,
@@ -34,7 +34,7 @@ import { makeRacer, stepRacer, rivalInput, resolveContacts, rankRacers, raceDist
 import { buildEnvironment, buildTrackMesh, clearTrackMesh, bumperPulse, updateScene, clearSmoke, setGridStyle } from './neon-scene.js';
 import { makeRider, poseRider, disposeRider } from './riders.js';
 import { initNeonInput, readNeonInput, resetNeonInput, resetSteerTouch } from './neon-input.js';
-import { startHum, setHum, stopHum, burnSound, cellSound } from './neon-sound.js';
+import { startHum, setHum, stopHum, burnSound, cellSound, setWind } from './neon-sound.js';
 import { placeCells, stepCells, buildCellMeshes, updateCellMeshes, clearCells } from './cells.js';
 import { makeRecorder, recordFrame, finishRecording, bestGhosts, keepGhost,
          makeGhostRacer, stepGhost } from './ghosts.js';
@@ -67,7 +67,7 @@ const trackMeta = new Map();    // sig|scale -> {L, climb, ok}: filled in by the
 let scanQueue = [];
 let activeTrack = null;         // the ribbon currently in the scene
 const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale: 1, mode: 'auto',
-                  cls: 'standard', cam: 'normal', ghosts: true, rider: 'p:0', course: '', map: DEFAULT_NEON_WORLD,
+                  cls: 'standard', cam: 'normal', ghosts: true, ghostHit: true, rider: 'p:0', course: '', map: DEFAULT_NEON_WORLD,
                   // touch control position: how far the steer pad and buttons sit from the
                   // screen edges (ctlInset) and above the bottom edge (ctlBottom), in px
                   ctlInset: 24, ctlBottom: 16,    // ctlInset defaults AT the swipe-safe floor, not below it
@@ -511,9 +511,12 @@ function syncMenu(){
   document.querySelectorAll('#camSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.cam === settings.cam));
   $('scaleSel').value = String(settings.scale);
   document.querySelectorAll('#ghostSeg .btn').forEach(b => b.classList.toggle('on', (b.dataset.ghost === '1') === settings.ghosts));
-  $('ghostNote').textContent = settings.ghosts
-    ? 'The fastest ghost of every rider who has raced this course lines up with the field.'
-    : '';
+  document.querySelectorAll('#ghostHitSeg .btn').forEach(b => b.classList.toggle('on', (b.dataset.hit === '1') === (settings.ghostHit !== false)));
+  $('ghostHitRow').hidden = !settings.ghosts;
+  $('ghostNote').textContent = !settings.ghosts ? ''
+    : settings.ghostHit !== false
+      ? 'The fastest ghost of every rider who has raced this course lines up with the field. They are solid: bump one and it loses time.'
+      : 'The fastest ghost of every rider who has raced this course lines up with the field, replaying its run untouched.';
 }
 
 /* CONTROL LAYOUT. Where the steer pad and the brake/burn buttons sit is a CSS custom
@@ -763,6 +766,13 @@ function setGhosts(on){
   settings.ghosts = !!on;
   syncMenu(); neonWriteStore();
 }
+/* Ghost bumps: whether ghosts are solid (and dodge) or pure replays. Fixed for a race at
+   the lights, like gravity -- it changes what a ghost's time means. */
+function setGhostHit(on){
+  if(settings.ghostHit === !!on) return;
+  settings.ghostHit = !!on;
+  syncMenu(); neonWriteStore();
+}
 function setCam(name){
   if(!NEON_CAM[name] || settings.cam === name) return;
   settings.cam = name;
@@ -829,7 +839,7 @@ function startRace(){
   cast.forEach((c, i) => {
     racers.push(place(i, {name: c.name, skill: NEON_SKILL[settings.skill], paceMul: c.paceMul, speedK,
       lane: ((i % 4) - 1.5)/2.2, seed: c.seed % 1000, color: c.color, emo: SPECIES[c.key].emo,
-      riderId: 'w:' + c.key}));
+      riderId: 'w:' + c.key, style: styleFor(c.key), styleKey: c.key}));
     riders.push(makeRider({kind: 'wild', key: c.key}, c.color, c.seed, sizeK));
   });
   racers.push(place(cast.length, {name: choice.label, isPlayer: true, color: PLAYER_COLOR, speedK, riderId: choice.v}));
@@ -858,7 +868,7 @@ function startRace(){
           t: 0, finishShown: false, doneCount: 0, line, cells, rec: makeRecorder(),
           riderId: choice.v, riderLabel: choice.label, ghosts: ghosts.length,
           gravity: settings.gravity, scale: settings.scale, reverse: settings.reverse,
-          cls: settings.cls, sizeK};
+          cls: settings.cls, sizeK, ghostHit: settings.ghostHit !== false};
   rankRacers(racers);
   resetNeonInput();
   camYaw = racers[race.me].yaw;
@@ -901,7 +911,7 @@ function togglePause(){
 }
 
 function stepRace(dt){
-  const R = race, T = R.T, env = {gravity: R.gravity};
+  const R = race, T = R.T, env = {gravity: R.gravity, ghostContact: R.ghostHit !== false};
   if(R.phase === 'count'){
     R.countT -= dt;
     const n = Math.ceil(R.countT - 0.4);
@@ -917,7 +927,7 @@ function stepRace(dt){
   const input = readNeonInput(dt);
   env.cells = R.cells;
   for(const r of R.racers){
-    if(r.isGhost){ r.lastDt = dt; stepGhost(r, T, dt); continue; }
+    if(r.isGhost){ r.lastDt = dt; stepGhost(r, T, dt, R.racers, env); continue; }
     const inp = r.isPlayer ? input : rivalInput(r, T, R.racers, env, R.t);
     // rubber band, gently: nobody should be a dot on the horizon either way
     if(!r.isPlayer && !r.done){
@@ -932,7 +942,7 @@ function stepRace(dt){
     if(ev) onBump(r, ev);
     if(r.burnFired && r === me) burnSound();
   }
-  resolveContacts(R.racers, T);
+  resolveContacts(R.racers, T, env);
   for(const t of stepCells(R.cells, R.racers, T, dt)) if(t.racer === me) cellSound();
   if(!me.done) recordFrame(R.rec, me, dt);
 }
@@ -1087,6 +1097,7 @@ function drawRace(dt){
   $('slopeVal').textContent = !R.gravity ? '' : pct > 1 ? '▲ ' + pct + '%' : pct < -1 ? '▼ ' + (-pct) + '%'
     : (dem ? Math.round(feet(f.elev)) + ' ft' : '');
   setHum(me.v, me.burnT > 0 ? Math.min(1, me.burnT/NEON.burnS + 0.35) : 0);
+  setWind(me.done || me.spinT > 0 ? 0 : me.steerIn, me.v);
   $('burnPip').textContent = me.spinT > 0 ? 'SPUN OUT' : me.burnT > 0 ? 'NITRO' : me.fuel ? '' : 'OUT OF NITRO';
   $('burnPip').classList.toggle('hot', me.burnT > 0);
   const fit = paintMap($('minimap'), graph, mapBox, R.line, T.closed, 'mm|' + mapId + '|' + R.course.sig, true);
@@ -1154,6 +1165,7 @@ function wireUI(){
   bindBuildMap();
   document.querySelectorAll('#camSeg .btn').forEach(b => b.addEventListener('click', () => setCam(b.dataset.cam)));
   document.querySelectorAll('#ghostSeg .btn').forEach(b => b.addEventListener('click', () => setGhosts(b.dataset.ghost === '1')));
+  document.querySelectorAll('#ghostHitSeg .btn').forEach(b => b.addEventListener('click', () => setGhostHit(b.dataset.hit === '1')));
   document.querySelectorAll('#dirSeg .btn').forEach(b => b.addEventListener('click', () => setReverse(b.dataset.dir === 'rev')));
   document.querySelectorAll('.steerSeg .btn').forEach(b => b.addEventListener('click', () => setSteerMode(b.dataset.steer)));
   $('scaleSel').addEventListener('change', e => setScale(+e.target.value));
@@ -1243,7 +1255,7 @@ function neonState(){
 }
 bootNeon();
 
-export { bootNeon, loadNeonMap, loadMapList, startRace, quitToMenu, setGravity, setReverse, setScale, setClass, setCam, setGhosts, cycleCam,
+export { bootNeon, loadNeonMap, loadMapList, startRace, quitToMenu, setGravity, setReverse, setScale, setClass, setCam, setGhosts, setGhostHit, cycleCam,
          setCourseMode, openBuild, closeBuild, saveBuild, deleteBuild, syncBuild, neonReadStore, applyGrid,
          pauseRace, resumeRace, togglePause, setCtlInset, setCtlBottom, resetControlLayout, setSteerMode,
          selectCourse, neonState, stepRace, trackFor, modeChip };

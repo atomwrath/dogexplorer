@@ -168,37 +168,86 @@ function raceDistance(T){ return T.closed ? T.L*T.laps : T.L; }
    lane, and steers for it. `others` is every racer (itself included). */
 function rivalInput(r, T, others, env, t){
   const sk = r.skill;
+  // a rival with no style (the tests build bare ones) drives the old neutral algorithm
+  const st = r.style || NEUTRAL_STYLE;
   const f = trackFrame(T, r.s, {});
   const look = 10 + r.v*1.1;
-  const bend = bendAhead(T, r.s, look*1.8);
+  const bend = bendAhead(T, r.s, look*1.8*(st.sight || 1));
   // corner speed from lateral grip; straights are flat out
   /* Judgement drifts a little from corner to corner, more for a Chill rider: now and then
      one arrives too hot and meets the bumper, which is the whole reason bumpers exist. */
-  const nerve = 1 + sk.wobble*0.45*Math.sin(t*0.23 + r.seed*2.1);
-  const vCorner = Math.sqrt((15*sk.corner*nerve)/Math.max(bend.k, 1e-4));
+  const wob = sk.wobble*st.wobble;
+  const nerve = 1 + wob*0.45*Math.sin(t*0.23 + r.seed*2.1);
+  const vCorner = Math.sqrt((15*sk.corner*st.corner*nerve)/Math.max(bend.k, 1e-4));
   /* The ceiling the hill allows, not the flat-ground one -- otherwise a rival brakes all
      the way down a descent to hold a number that gravity has already made meaningless. */
-  const vTop = gradeTopSpeed(r, slopeAhead(T, r.s, look*1.5), env.gravity)*sk.pace*r.paceMul;
+  const vTop = gradeTopSpeed(r, slopeAhead(T, r.s, look*1.5), env.gravity)*sk.pace*st.pace*r.paceMul;
   let vWant = Math.min(vTop, vCorner);
   // lane: own lane on the straights, inside of the bend when one is coming
   // the narrower of here and where we are about to be: a road necks down into a trail
-  const lim = Math.min(f.halfW, trackFrame(T, r.s + look, {}).halfW) - bodyWideOf(T)*0.5 - 0.6/(T.widthK || 1);
+  const edge = st.edge == null ? 1 : st.edge;
+  const lim = Math.min(f.halfW, trackFrame(T, r.s + look, {}).halfW) - bodyWideOf(T)*0.5 - 0.6*edge/(T.widthK || 1);
   const apex = Math.min(1, bend.k*28);
-  let dWant = r.lane*lim*(1-apex) + bend.sign*lim*0.55*apex;
+  let dWant = r.lane*lim*(1-apex) + bend.sign*lim*(st.apex == null ? 0.55 : st.apex)*apex;
   // a slow wobble so they do not all trace one perfect line
-  r.wob += (Math.sin(t*0.6 + r.seed*1.7) + Math.sin(t*1.31 + r.seed))*0.5*sk.wobble*0.02;
+  r.wob += (Math.sin(t*0.6 + r.seed*1.7) + Math.sin(t*1.31 + r.seed))*0.5*wob*0.02;
   r.wob *= 0.98;
   dWant += r.wob*lim;
-  // go round whoever is right in front
+
+  /* NITRO TANKS, before anything else decides the line -- this used to run AFTER the
+     steering sum below, so the lane it chose was thrown away and rivals only ever took a
+     tank that happened to sit on their line. A hunter changes lane from further out and
+     tops up a rack that is nearly full; a bruiser only takes one that is in its way. */
+  /* How far ahead the steering aims. Normally the look distance; going for a tank it aims
+     at a point well short of the tank, or the long look arrives beside it too late. */
+  let aim = look;
+  const wantsTank = r.fuel < NEON.fuelMax - (st.hunt < 1 ? 1 : 0);   // an indifferent one leaves a spare slot
+  if(env.cells && st.hunt > 0 && wantsTank){
+    const reach = 45*st.hunt;
+    let best = null, bestGap = Infinity;
+    for(const c of env.cells){
+      if(!c.live) continue;
+      let gap = c.s - r.s;
+      if(T.closed){ gap = ((gap % T.L) + T.L) % T.L; if(gap > T.L/2) gap -= T.L; }
+      if(gap <= 2 || gap >= reach || gap >= bestGap) continue;
+      // the lane change has to be makeable in the distance there is
+      const shift = Math.abs(c.d - r.d);
+      if(shift > Math.max(1.2, gap*0.28*st.hunt)) continue;
+      // and it is never worth a corner, except to the reckless
+      if(st.burn !== 'any' && bendAhead(T, r.s, gap).k >= 0.02) continue;
+      best = c; bestGap = gap;
+    }
+    if(best){ dWant = best.d; r.hunting = best; aim = Math.max(6, Math.min(look, bestGap*0.5)); }
+    else r.hunting = null;
+  }
+
+  /* TRAFFIC. Everyone solid in front of or beside us, by style: the timid see people
+     from further off and give them a wide berth, a bruiser leans into them instead. */
+  const W = bodyWideOf(T);
+  let blockedV = Infinity;
   for(const q of others){
     if(q === r || q.done) continue;
+    if(q.isGhost && !env.ghostContact) continue;          // a ghost you cannot touch is not traffic
+    if(q.isGhost && q.riderId && q.riderId === r.riderId) continue;
     let gap = q.prog - r.prog;
     if(T.closed){ gap = ((q.s - r.s) % T.L + T.L) % T.L; if(gap > T.L/2) gap -= T.L; }
-    if(gap > 0 && gap < 5 + r.v*0.6 && Math.abs(q.d - r.d) < bodyWideOf(T)*1.3 && q.v < r.v + 1){
-      dWant = q.d + (q.d > 0 ? -1 : 1)*bodyWideOf(T)*1.8;
-      if(gap < 4) vWant = Math.min(vWant, q.v + 0.5);
+    const side = Math.abs(q.d - r.d);
+    // an aggressive rider shoulders whoever is alongside or just ahead
+    if(st.aggro > 0 && gap > -bodyLenOf(T) && gap < 6 && side < W*2.6 && !q.isGhost){
+      const lean = st.aggro*(1 - 0.5*side/(W*2.6));
+      dWant += (q.d - dWant)*lean;
+      continue;
+    }
+    const range = (5 + r.v*0.6)*st.avoid;
+    if(gap > 0 && gap < range && side < W*(1.1 + 0.4*st.avoid) && q.v < r.v + 1){
+      // go round on whichever side has more room, and by more if skittish
+      const roomL = lim - q.d, roomR = q.d + lim;
+      const dir = roomL >= roomR ? 1 : -1;
+      dWant = q.d + dir*W*(1.4 + 0.5*st.avoid);
+      if(gap < 4*st.avoid) blockedV = Math.min(blockedV, q.v + (st.avoid > 1.4 ? -0.5 : 0.5));
     }
   }
+  if(blockedV < Infinity) vWant = Math.min(vWant, blockedV);
   dWant = Math.max(-lim, Math.min(lim, dWant));
   /* Steer in TRACK space, not world space. The wanted slip angle is the one that carries
      the board from d to dWant over the look distance; the bend itself is fed forward as
@@ -206,39 +255,33 @@ function rivalInput(r, T, others, env, t){
      the tangent 20 m ahead instead, which turns in long before the corner arrives and
      drives straight into the inside wall.) */
   const theta = angNorm(r.yaw - f.yaw);
-  const thetaWant = Math.atan2(dWant - r.d, look);
+  const thetaWant = Math.atan2(dWant - r.d, aim);
   const rate = NEON.steerRate/(1 + r.v*NEON.steerFade);
   const need = (thetaWant - theta)*4.0 + (1 - NEON.railAssist)*f.k*r.v;
   const steer = Math.max(-1, Math.min(1, need/rate));
-  /* Boost cells: worth a metre or two of lane, never worth a corner. A rival with a full
-     pack drives its line and leaves the cells for whoever needs them. */
-  if(env.cells && r.fuel < NEON.fuelMax){
-    for(const c of env.cells){
-      if(!c.live) continue;
-      let gap = c.s - r.s;
-      if(T.closed){ gap = ((gap % T.L) + T.L) % T.L; if(gap > T.L/2) gap -= T.L; }
-      if(gap > 4 && gap < 45 && Math.abs(c.d - dWant) < lim*1.2 && bendAhead(T, r.s, gap).k < 0.02){
-        dWant = Math.max(-lim, Math.min(lim, c.d));
-        break;
-      }
-    }
-  }
   const dv = vWant - r.v;
+  const room = st.burn === 'any' ? bend.k < 0.03 : bend.k < 0.012;
   return {
     steer,
     throttle: dv > -0.5 ? 1 : 0,
     brake: dv < -2.5 ? Math.min(1, (-dv-2.5)/6) : 0,
     // one press, and only where it pays: out of a corner onto something straight
-    boost: r.burnT <= 0 && r.lockT <= 0 && r.fuel >= 1 && dv > 2 && bend.k < 0.012,
+    boost: r.burnT <= 0 && r.lockT <= 0 && r.fuel >= 1 && dv > 2 && room,
   };
 }
+const NEUTRAL_STYLE = {pace: 1, corner: 1, wobble: 1, avoid: 1, aggro: 0, mass: 1, hunt: 1, burn: 'straight', sight: 1, edge: 1, apex: 0.55};
 
 /* Boards shouldering each other. Track space again: overlap in s and in d. */
-function resolveContacts(racers, T){
+/* opts.ghostContact (default on): with it off, ghosts are pure replays that nothing
+   touches and that touch nothing -- the menu's "Ghost bumps" toggle. */
+function resolveContacts(racers, T, opts){
+  const ghostsOn = !opts || opts.ghostContact !== false;
   const hits = [];
+  for(const r of racers) if(r.isGhost) r._touched = false;
   for(let i = 0; i < racers.length; i++) for(let j = i+1; j < racers.length; j++){
     const a = racers[i], b = racers[j];
     if(a.done && b.done) continue;
+    if(!ghostsOn && (a.isGhost || b.isGhost)) continue;
     if(!contactPair(a, b)) continue;
     if(!overlapping(a, b, T)) continue;
     // a ghost that spawned inside somebody is not solid until it has come clear of everyone
@@ -248,15 +291,29 @@ function resolveContacts(racers, T){
     const dd = b.d - a.d;
     const push = (bodyWideOf(T) - Math.abs(dd))*0.5 + 0.01;
     const sgn = dd >= 0 ? 1 : -1;
-    shove(a, -sgn*push); shove(b, sgn*push);
-    if(!a.isGhost) a.yaw += -sgn*0.04;
-    if(!b.isGhost) b.yaw += sgn*0.04;
+    /* Mass: a moose shoulders a chipmunk aside and barely moves; two equals split it.
+       The total separation is unchanged, only who does the moving. */
+    const ma = massOf(a), mb = massOf(b);
+    shove(a, -sgn*push*2*mb/(ma + mb)); shove(b, sgn*push*2*ma/(ma + mb));
+    if(!a.isGhost) a.yaw += -sgn*0.04*mb/ma;
+    if(!b.isGhost) b.yaw += sgn*0.04*ma/mb;
     // the one behind loses a little, the one in front gains a little
     const front = ds >= 0 ? b : a, rear = ds >= 0 ? a : b;
     let vr = rear.v, vf = front.v;
-    if(vr > vf){ const m = (vr - vf)*0.5; vr -= m*0.8; vf += m*0.5; }
-    setSpeed(rear, vr); setSpeed(front, vf);
+    if(vr > vf){
+      const m = (vr - vf)*0.5, mr = massOf(rear), mf = massOf(front);
+      vr -= m*0.8*(2*mf/(mr + mf)); vf += m*0.5*(2*mr/(mr + mf));
+    }
+    setSpeed(rear, vr, front); setSpeed(front, vf, rear);
     hits.push([a, b]);
+  }
+  /* STUCK GHOSTS. A ghost in unbroken contact for ghostStuckS slips through whoever it
+     is wedged against: it goes non-solid, and the phase-in below makes it solid again
+     only once it has come clear of everyone. A record can be slowed; it cannot be parked. */
+  for(const r of racers) if(r.isGhost){
+    if(r._touched) r.stuckT = (r.stuckT || 0) + (r.lastDt || 1/60);
+    else r.stuckT = 0;
+    if(r.stuckT > NEON.ghostStuckS){ r.solid = false; r.stuckT = 0; r.slips = (r.slips || 0) + 1; }
   }
   /* Any ghost that was not caught inside someone this step is clear, and solid from now on. */
   for(const r of racers) if(r.isGhost && !r.solid && !r.done){
@@ -289,12 +346,22 @@ function shove(r, dd){
   if(r.isGhost){ r.offD = (r.offD || 0) + dd; r.d += dd; }
   else r.d += dd;
 }
+const massOf = r => r.isGhost ? 1 : (r.style && r.style.mass) || 1;
 /* A rider's speed is just its speed. A ghost's is its playback rate: it never gains from
-   a shove, and any contact at all knocks it back by at least ghostKnock. */
-function setSpeed(r, v){
+   a shove, and a NEW contact knocks it back by at least ghostKnock. Staying in contact
+   does not knock it again every frame -- that is what used to wedge a ghost against a
+   rival, its clock held at 70% for as long as the two stayed touching. */
+function setSpeed(r, v, other){
   if(!r.isGhost){ r.v = v; return; }
+  r._touched = true;
   const k = r.v > 0.5 ? Math.max(0.2, Math.min(1, v/r.v)) : 1;
-  r.rate = Math.min(r.rate == null ? 1 : r.rate, k, 1 - NEON.ghostKnock);
+  let rate = Math.min(r.rate == null ? 1 : r.rate, k);
+  if(!r.lastTouch) r.lastTouch = new Map();
+  const last = r.lastTouch.get(other);
+  const now = r.time || 0;
+  if(last == null || now - last > NEON.ghostKnockGap) rate = Math.min(rate, 1 - NEON.ghostKnock);
+  r.lastTouch.set(other, now);
+  r.rate = rate;
 }
 
 function rankRacers(racers){

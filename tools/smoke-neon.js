@@ -196,6 +196,7 @@ global.AudioContext = window.AudioContext = class {
   createOscillator() { return new FakeNode('osc'); }
   createBiquadFilter() { const n = new FakeNode('filter'); audioLog.filters.push(n); return n; }
   createGain() { return new FakeNode('gain'); } createBufferSource() { return new FakeNode('buffersource'); }
+  createStereoPanner() { const n = new FakeNode('pan'); n.pan = new FakeParam(); return n; }
   createBuffer(c, l) {
     // ONE array per buffer, kept: the app fills it, and the assertions read what it wrote
     const data = new Float32Array(l);
@@ -219,7 +220,7 @@ const probe = `
 ;globalThis.__neon = { state: neonState, scene: () => scene, camera: () => camera,
   keys: neonKeys, touch: neonTouch, skills: NEON_SKILL, setScale, setReverse, setGravity,
   reverseTrack, trackFrame, trackFor, buildTrack, mph, miles, feet,
-  setClass, setCam, setGhosts, setSteerMode, cycleCam, topSpeed, gradeTopSpeed, placeCells, stepCells,
+  setClass, setCam, setGhosts, setGhostHit, setSteerMode, styles: NEON_STYLE, styleFor, speciesStyle: SPECIES_STYLE, cycleCam, topSpeed, gradeTopSpeed, placeCells, stepCells,
   setCourseMode, openBuild, closeBuild, saveBuild, deleteBuild, syncBuild, readStore: neonReadStore,
   builderAdd, builderPickAt, builderStates, builderUndo, builderRedo, builderClear,
   builderView, builderZoom, builderFit, builderLine, builderClosed, builderLenM, builderNote,
@@ -1588,6 +1589,232 @@ const arraysClose = (a, b, eps = 1e-9) => {
       `${noise.length} noise buffer(s) of ${log.samples.length}, ${log.filters.length} filters`);
   }
 
+  // ---- rival driving styles, nitro pickups, ghosts that do not hang up ----
+  {
+    const Sx = N.state();
+    const cc = Sx.courses.find(x => x.kind === 'circuit') || Sx.courses[0];
+    const TT = trackFor(cc);
+    const W = TT.bodyWide || Sx.tuning.bodyWide;
+    // every species has a style, and the styles are really different
+    const sp = Object.keys(N.speciesStyle);
+    check('every wildlife species has a driving style', sp.length >= 14 && sp.every(k => !!N.styles[N.speciesStyle[k]]),
+      [...new Set(Object.values(N.speciesStyle))].join(','));
+    check('bruisers are heavy and pushy, the timid light and wary',
+      N.styleFor('moose').mass > N.styleFor('rabbit').mass && N.styleFor('bear').aggro > 0.5
+      && N.styleFor('chipmunk').avoid > N.styleFor('bear').avoid && N.styleFor('deer').corner > N.styleFor('rabbit').corner);
+
+    // mass: a moose moves a chipmunk more than the chipmunk moves the moose
+    {
+      const s0 = 40;
+      const moose = makeRacer({ s: s0, d: 0, v: 15, style: N.styleFor('moose') });
+      const chip = makeRacer({ s: s0, d: W * 0.5, v: 15, style: N.styleFor('chipmunk') });
+      resolveContacts([moose, chip], TT);
+      check('in a shove the heavier animal moves less', Math.abs(chip.d - W * 0.5) > Math.abs(moose.d) * 1.8,
+        `chipmunk ${Math.abs(chip.d - W * 0.5).toFixed(2)} m, moose ${Math.abs(moose.d).toFixed(2)} m`);
+    }
+
+    // NITRO: a rival with room on a straight changes lane to take a tank beside its line
+    {
+      let s0 = null;
+      for (let s1 = 20; s1 < raceDistance(TT) - 120; s1 += 5) if (bendAhead(TT, s1, 90).k < 0.004) { s0 = s1; break; }
+      check('there is a straight to test tank-hunting on', s0 != null);
+      if (s0 != null) {
+        const f = trackFrame(TT, s0, {});
+        const lim = f.halfW - W;
+        const tryOne = (style) => {
+          const r = makeRacer({ s: s0, d: -lim * 0.7, v: 15, yaw: f.yaw, skill: N.skills.fair, paceMul: 1, lane: -0.7, seed: 3, fuel: 0, style });
+          const cells = [{ s: s0 + 40, d: lim * 0.6, live: true, i: 0, backT: 0 }];
+          for (let i = 0; i < 60 * 5 && r.s < s0 + 60; i++) {
+            stepRacer(r, TT, rivalInput(r, TT, [r], { gravity: false, cells }, i / 60), { gravity: false }, 1 / 60);
+            stepCells(cells, [r], TT, 1 / 60);
+          }
+          return r.cells || 0;      // taken, whether or not it has been burned since
+        };
+        check('a rival changes lane to pick up a nitro tank', tryOne(undefined) === 1);
+        check('a scavenger goes for a tank too', tryOne(N.styleFor('cat')) === 1);
+      }
+    }
+
+    // a field of every style finishes cleanly, and the styles show in how they race
+    {
+      const keys = ['bear', 'moose', 'deer', 'rabbit', 'goat', 'cat'];
+      const field = keys.map((k, i) => {
+        const s0 = 5 + Math.floor(i / 2) * 7;
+        return makeRacer({ s: s0, d: (i % 2 ? -1 : 1) * 1.5, yaw: trackFrame(TT, s0, {}).yaw, key: k,
+          skill: N.skills.fair, paceMul: 1, lane: (i % 3 - 1) * 0.5, seed: i + 11, style: N.styleFor(k), riderId: 'w:' + k });
+      });
+      const touches = new Map(field.map(r => [r, 0]));
+      let t = 0, bad = false, outside = 0;
+      const cells = placeCells(TT);
+      while (t < 900 && !field.every(r => r.done)) {
+        for (const r of field) {
+          stepRacer(r, TT, rivalInput(r, TT, field, { gravity: true, cells }, t), { gravity: true }, 1 / 60);
+          if (![r.s, r.d, r.v, r.yaw].every(Number.isFinite)) bad = true;
+          if (Math.abs(r.d) > trackFrame(TT, r.s, {}).halfW) outside++;
+        }
+        for (const [a, b] of resolveContacts(field, TT)) { touches.set(a, touches.get(a) + 1); touches.set(b, touches.get(b) + 1); }
+        stepCells(cells, field, TT, 1 / 60);
+        t += 1 / 60;
+      }
+      const by = k => field.find(r => r.key === k);
+      check('a field of every driving style finishes cleanly', field.every(r => r.done) && !bad && outside === 0,
+        field.map(r => `${r.key} ${r.finishT ? r.finishT.toFixed(0) : '-'}s`).join(', '));
+      const slowest = Math.max(...field.map(r => r.finishT || Infinity));
+      const wallRate = field.reduce((a, r) => a + r.bumps, 0) / field.length / (slowest / 60);
+      check('a styled field is not pinballing off the bumpers either', wallRate < 6,
+        `${wallRate.toFixed(1)} wall hits/min each; ` + field.map(r => r.key + ' ' + r.bumps).join(', '));
+      check('the skilled racer is the quickest, the reckless one quick but wild, the skittish one slowest',
+        by('deer').finishT < by('goat').finishT && by('goat').bumps > by('deer').bumps
+        && field.every(r => r === by('rabbit') || r.finishT < by('rabbit').finishT),
+        field.map(r => `${r.key} ${r.finishT.toFixed(0)}s/${r.bumps}`).join(', '));
+      const cellsTaken = field.reduce((a, r) => a + (r.cells || 0), 0);
+      check('rivals pick nitro tanks up off the track in a real race', cellsTaken >= 3, `${cellsTaken} tanks taken`);
+    }
+
+    /* RECKLESS vs SKILLED through the tightest bends on every course: same entry speed,
+       the goat takes them hotter and finds the bumper more often than the deer. */
+    {
+      let goatHits = 0, deerHits = 0, goatT = 0, deerT = 0;
+      for (const c2 of Sx.courses) {
+        const T2 = trackFor(c2);
+        const run = (key) => {
+          const r = makeRacer({ s: 5, d: 0, v: 10, yaw: trackFrame(T2, 5, {}).yaw, skill: N.skills.fierce, paceMul: 1, lane: 0, seed: 21, style: N.styleFor(key) });
+          let t = 0;
+          while (!r.done && t < 400) { stepRacer(r, T2, rivalInput(r, T2, [r], { gravity: true }, t), { gravity: true }, 1 / 60); t += 1 / 60; }
+          return r;
+        };
+        const g = run('goat'), dd = run('deer');
+        goatHits += g.bumps; deerHits += dd.bumps; goatT += g.finishT || 400; deerT += dd.finishT || 400;
+      }
+      check('a reckless rider hits the bumpers more than a skilled one over the same courses', goatHits > deerHits,
+        `goat ${goatHits} hits in ${goatT.toFixed(0)} s, deer ${deerHits} in ${deerT.toFixed(0)} s`);
+    }
+
+    /* AGGRESSION, head to head. The same neutral rider alongside a bear, then alongside a
+       rabbit, on the same straight for the same four seconds: the bear leans in and
+       trades paint, the rabbit keeps its distance. */
+    {
+      let s0 = null;
+      for (let s1 = 20; s1 < raceDistance(TT) - 150; s1 += 5) if (bendAhead(TT, s1, 110).k < 0.004) { s0 = s1; break; }
+      const pairUp = (key) => {
+        const f = trackFrame(TT, s0, {});
+        const them = makeRacer({ s: s0, d: -W * 1.2, v: 16, yaw: f.yaw, skill: N.skills.fair, paceMul: 1, lane: -0.3, seed: 7, fuel: 0, style: N.styleFor(key) });
+        const ref = makeRacer({ s: s0 + 1, d: W * 1.2, v: 16, yaw: f.yaw, skill: N.skills.fair, paceMul: 1, lane: 0.3, seed: 8, fuel: 0 });
+        let hits = 0;
+        for (let i = 0; i < 60 * 4; i++) {
+          for (const r of [them, ref]) stepRacer(r, TT, rivalInput(r, TT, [them, ref], { gravity: false }, i / 60), { gravity: false }, 1 / 60);
+          hits += resolveContacts([them, ref], TT).length;
+        }
+        return hits;
+      };
+      if (s0 != null) {
+        const bear = pairUp('bear'), rabbit = pairUp('rabbit');
+        check('a bruiser leans into the rider beside it; a skittish one keeps clear', bear > 0 && bear > rabbit * 3 + 2,
+          `bear ${bear} contact frames, rabbit ${rabbit}`);
+      }
+    }
+
+    /* GHOSTS DO NOT HANG UP. A straight recording down the middle, and a rival parked on
+       it: the ghost sees them coming and goes round, rather than rear-ending them and
+       sitting there with its clock knocked back every frame. */
+    const n = 200, rec = { dt: N.ghostDt, time: n * N.ghostDt, rider: 'w:elk', label: 'Elk', s: [], d: [] };
+    const sStart = 30;
+    for (let i = 0; i < n; i++) { rec.s.push(sStart + i * N.ghostDt * 15); rec.d.push(0); }
+    const mk = () => { const g = makeGhostRacer(rec, TT, 0xffffff); g.lastDt = 1 / 60; g.solid = true; return g; };
+    {
+      const g = mk();
+      const park = makeRacer({ s: sStart + 25, d: 0, v: 0, riderId: 'w:bear' });
+      let contact = 0, maxOff = 0;
+      for (let i = 0; i < 60 * 5; i++) {
+        stepGhost(g, TT, 1 / 60, [g, park], { ghostContact: true });
+        park.v = 0; park.s = sStart + 25; park.d = 0;       // it stays parked
+        contact += resolveContacts([g, park], TT, { ghostContact: true }).length;
+        maxOff = Math.max(maxOff, Math.abs(g.offD));
+      }
+      check('a ghost steers round a rider sitting on its line instead of hitting them',
+        g.s > park.s + 5 && contact <= 3 && maxOff > W * 0.8,
+        `${contact} contact frames, swung ${maxOff.toFixed(2)} m wide`);
+      let back = 0; for (let i = 0; i < 60 * 3; i++) stepGhost(g, TT, 1 / 60, [g, park], { ghostContact: true });
+      back = Math.abs(g.offD);
+      check('once past, the ghost goes back onto its own line', back < 0.1, `${back.toFixed(2)} m off`);
+    }
+    {
+      // a body that shadows the ghost, glued to its side: it must not be held there
+      const g = mk();
+      const glue = makeRacer({ s: 0, d: 0, v: 15, riderId: 'w:bear' });
+      let minRate = 1, rateAtHalf = null;
+      for (let i = 0; i < 60 * 2; i++) {
+        stepGhost(g, TT, 1 / 60, [g], { ghostContact: true });   // it cannot see the glue coming
+        glue.s = g.s; glue.d = g.d + W * 0.6; glue.v = g.v;
+        resolveContacts([g, glue], TT, { ghostContact: true });
+        minRate = Math.min(minRate, g.rate);
+        if (i === 30) rateAtHalf = g.rate;
+      }
+      check('staying in contact does not keep knocking a ghost\'s clock back', rateAtHalf > 0.76,
+        `rate ${rateAtHalf.toFixed(2)} after 0.5 s of contact (a fresh knock takes it to ${(1 - Sx.tuning.ghostKnock).toFixed(2)})`);
+      check('a ghost wedged against someone slips through rather than hanging up', (g.slips || 0) >= 1, `${g.slips || 0} slips`);
+    }
+    {
+      // ghost bumps OFF: pure replay, nothing touches it and it swerves for nobody
+      const g = mk();
+      g.offD = 1.5; g.offV = 0;
+      const me = makeRacer({ s: g.s, d: g.d, v: 15, riderId: 'p:0', isPlayer: true });
+      const hits = resolveContacts([me, g], TT, { ghostContact: false }).length;
+      stepGhost(g, TT, 1 / 60, [g, me], { ghostContact: false });
+      check('with ghost bumps off, a ghost is not solid and follows its recording exactly',
+        hits === 0 && g.offD === 0 && Math.abs(g.d - 0) < 1e-6 && g.rate === 1, `${hits} hits, off ${g.offD}`);
+      const r = makeRacer({ s: g.s - 8, d: g.d, v: 15, yaw: trackFrame(TT, g.s - 8, {}).yaw, skill: N.skills.fair, paceMul: 1, lane: 0, seed: 5 });
+      g.v = 5;
+      // rivalInput advances the rider's wobble on every call; zero it so the three compare like for like
+      const alone = (r.wob = 0, rivalInput(r, TT, [r], { gravity: false }, 1).steer);
+      const off = (r.wob = 0, rivalInput(r, TT, [r, g], { gravity: false, ghostContact: false }, 1).steer);
+      const on = (r.wob = 0, rivalInput(r, TT, [r, g], { gravity: false, ghostContact: true }, 1).steer);
+      check('rivals ignore ghosts that cannot be touched, and go round ones that can',
+        Math.abs(off - alone) < 1e-9 && Math.abs(on - alone) > 0.05, `alone ${alone.toFixed(2)}, off ${off.toFixed(2)}, on ${on.toFixed(2)}`);
+    }
+
+    // the toggle itself
+    {
+      const d = window.document;
+      const seg = d.getElementById('ghostHitSeg');
+      check('there is a Ghost bumps toggle, on (solid) by default', !!seg && Sx.settings.ghostHit === true
+        && seg.querySelector('.btn.on').dataset.hit === '1');
+      seg.querySelector('[data-hit="0"]').click();
+      check('Pass through turns ghost bumps off and is saved', N.state().settings.ghostHit === false
+        && JSON.parse(localStorage.getItem('dogexplorer.neon')).settings.ghostHit === false);
+      N.setGhosts(false);
+      check('the Ghost bumps row hides when ghosts are off', d.getElementById('ghostHitRow').hidden === true);
+      N.setGhosts(true);
+      check('and shows again with ghosts on', d.getElementById('ghostHitRow').hidden === false);
+      seg.querySelector('[data-hit="1"]').click();
+    }
+
+    /* STEERING WIND. Quiet going straight, a rush when carving, louder with speed, and
+       panned towards the side of the turn. */
+    {
+      check('the steering wind is near-silent going straight and swells in a turn',
+        windLevel(0, 20) < 0.01 && windLevel(1, 20) > windLevel(0, 20) * 8 && windLevel(0.5, 20) < windLevel(1, 20),
+        `straight ${windLevel(0, 20).toFixed(4)}, half ${windLevel(0.5, 20).toFixed(4)}, full ${windLevel(1, 20).toFixed(4)}`);
+      check('no wind standing still, more wind at speed', windLevel(1, 0) === 0 && windLevel(1, 24) > windLevel(1, 10));
+      startHum();
+      const w = windState();
+      check('the wind is a filtered noise loop of its own, panned', !!w && w.band && w.pan && w.src.loop === true);
+      if (w) {
+        setWind(1, 20);
+        const leftPan = w.pan.pan.value, gLeft = w.gain.gain.value;
+        setWind(-1, 20);
+        const rightPan = w.pan.pan.value;
+        setWind(0, 20);
+        const gStraight = w.gain.gain.value;
+        check('a left turn pans the wind left, a right turn right', leftPan < -0.3 && rightPan > 0.3,
+          `${leftPan.toFixed(2)} / ${rightPan.toFixed(2)}`);
+        check('the wind gain follows the steering', gLeft > gStraight * 8, `${gLeft.toFixed(3)} vs ${gStraight.toFixed(4)}`);
+      }
+      const main = fs.readFileSync(path.join(ROOT, 'src/neon/main.js'), 'utf8');
+      check('the race loop drives the wind from the player\'s steering', /setWind\([^)]*me\.steerIn, me\.v\)/.test(main));
+    }
+  }
+
   // ---- touch ----
   {
     const d = window.document;
@@ -1662,10 +1889,12 @@ const arraysClose = (a, b, eps = 1e-9) => {
       /#tSteerBtns \.tbtn\{[^}]*border-radius:16px/.test(css));
     check('the button pair catches every event itself; its two buttons are purely visual',
       /#tSteerBtns\{[^}]*pointer-events:auto/.test(css) && /#tSteerBtns \.tbtn\{[^}]*pointer-events:none/.test(css));
-    check('gas, brake and nitro are simple icons, not words, each with an aria-label',
-      d.getElementById('tAccel').textContent.trim() === '▲' && d.getElementById('tAccel').getAttribute('aria-label')
-      && d.getElementById('tBrake').textContent.trim() === '▼' && d.getElementById('tBrake').getAttribute('aria-label')
-      && d.getElementById('tBoost').textContent.trim() === '⚡\uFE0E' && d.getElementById('tBoost').getAttribute('aria-label'));
+    check('gas, brake and nitro are drawn icons (pedals and a nitro bottle), not words, each with an aria-label',
+      ['tAccel', 'tBrake', 'tBoost'].every(id => {
+        const el = d.getElementById(id);
+        return el.querySelector('svg.ticon') && el.textContent.trim() === '' && el.getAttribute('aria-label');
+      }) && d.querySelector('#tBoost .fillIcon')
+      && /\.ticon\{[^}]*stroke:currentColor/.test(css));
     check('pad is the default steer mode, on at boot',
       N.state().settings.steerMode === 'pad' && !d.body.classList.contains('steer-buttons'));
     const press = (id, down) => {

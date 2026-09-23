@@ -190,11 +190,16 @@ body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
    #tSteerBtns below, where pointer-events:none on tLeft/tRight means neither one is ever
    really the event target to begin with. */
 .tbtn:active, .tbtn.pressed{background:rgba(25,240,255,.2);}
-/* Simple, bold icons rather than words: a triangle up/down reads faster than "BRAKE" at a
-   glance, and pairs with the lightning bolt the same way the fuel rack's own icon does.
-   \uFE0E (text presentation selector) on the bolt stops phones swapping it for a full-
-   colour emoji glyph, which would ignore `color` and break the neon look. */
-#tAccel, #tBrake, #tBoost{font-size:30px;}
+/* Icons rather than words: two pedals (gas tall, brake wide -- the shapes a driver's foot
+   already knows) and a nitro bottle, drawn as SVG strokes in currentColor so they glow in
+   the button's own colour and never fall back to an emoji font. */
+#tAccel, #tBrake, #tBoost{font-size:30px; display:flex; align-items:center; justify-content:center; padding:0;}
+.ticon{width:1.75em; height:1.75em; fill:none; stroke:currentColor; stroke-width:2.2;
+  stroke-linecap:round; stroke-linejoin:round; pointer-events:none; filter:drop-shadow(0 0 3px currentColor);}
+.ticon .fillIcon{fill:currentColor; stroke-width:1.2;}
+/* gas is the green one, so the two pedals are told apart by colour as well as shape */
+#tAccel{color:var(--lime); border-color:var(--lime);}
+#tAccel:active, #tAccel.pressed{background:rgba(182,255,60,.18);}
 
 /* STEERING: either the drag pad or the two buttons, never both -- settings.steerMode
    (see main.js applySteerMode) toggles a body class, and that is the only thing either

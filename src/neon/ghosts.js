@@ -61,7 +61,11 @@ function makeGhostRacer(g, T, color){
   applyGhost(r, T, 0);
   return r;
 }
-function stepGhost(r, T, dt){
+/* others/opts: the field, and whether ghosts are solid this race. With contact on, a
+   ghost looks along its own line and moves round a body in the way instead of driving
+   into it -- the spring's rest point becomes "clear of them" rather than "on the line"
+   until they are behind it. With contact off, it is a pure replay and sees nobody. */
+function stepGhost(r, T, dt, others, opts){
   r.time += dt;
   /* The clock runs at `rate`, which a shove knocks down and which comes back to 1 on its
      own. Every second it spends below 1 is time it arrives late. */
@@ -69,13 +73,47 @@ function stepGhost(r, T, dt){
   r.rate += (1 - r.rate)*Math.min(1, dt/NEON.ghostRecoverS);
   if(r.rate > 0.9995) r.rate = 1;
   r.gt = (r.gt || 0) + dt*r.rate;
-  /* Back onto the line on a critically damped spring: no snap, no overshoot. */
-  const w = NEON.ghostRightW;
-  r.offV = (r.offV || 0) + (-w*w*(r.offD || 0) - 2*w*(r.offV || 0))*dt;
+  r.lastDt = dt;
+  const contact = !opts || opts.ghostContact !== false;
+  const target = contact && others ? ghostDodge(r, T, others) : 0;
+  r.offTarget = target;
+  if(!contact){ r.offD = 0; r.offV = 0; r.rate = 1; }
+  /* Back onto the line -- or out round someone -- on a critically damped spring: no
+     snap, no overshoot. */
+  const w = NEON.ghostRightW*(target !== 0 ? 1.6 : 1);
+  r.offV = (r.offV || 0) + (-w*w*((r.offD || 0) - target) - 2*w*(r.offV || 0))*dt;
   r.offD = (r.offD || 0) + r.offV*dt;
   if(Math.abs(r.offD) < 1e-3 && Math.abs(r.offV) < 1e-3){ r.offD = 0; r.offV = 0; }
   applyGhost(r, T, r.gt);
   if(!r.done && r.gt >= r.ghost.time){ r.done = true; r.finishT = r.time; }
+}
+/* Where the ghost's offset wants to be: 0 (its own line) unless a solid body sits on or
+   near that line in the next ghostLookM metres, in which case just clear of them on the
+   side with more room. The nearest such body wins. */
+function ghostDodge(r, T, others){
+  if(r.done) return 0;
+  const W = T.bodyWide || NEON.bodyWide, L = T.bodyLen || NEON.bodyLen;
+  const f = trackFrame(T, r.s, {});
+  const lim = f.halfW - W*0.5;
+  const lineD = r.d - (r.offD || 0);          // where the recording has it this frame
+  let best = 0, bestGap = Infinity;
+  for(const q of others){
+    if(q === r || q.isGhost || q.done) continue;
+    if(q.riderId && q.riderId === r.riderId) continue;
+    let gap = q.s - r.s;
+    if(T.closed){ gap = ((gap % T.L) + T.L) % T.L; if(gap > T.L/2) gap -= T.L; }
+    if(gap < -L*0.6 || gap > NEON.ghostLookM || gap > bestGap) continue;
+    if(Math.abs(q.d - lineD) > W*1.25) continue;
+    const upD = q.d + W*1.3, dnD = q.d - W*1.3;
+    const upOk = upD <= lim, dnOk = dnD >= -lim;
+    let want;
+    if(upOk && dnOk) want = Math.abs(upD - r.d) <= Math.abs(dnD - r.d) ? upD : dnD;
+    else if(upOk) want = upD;
+    else if(dnOk) want = dnD;
+    else continue;                            // no room either side: stuck-slip handles it
+    best = want - lineD; bestGap = gap;
+  }
+  return best;
 }
 function applyGhost(r, T, t){
   const g = r.ghost, n = g.s.length;

@@ -11,6 +11,11 @@
 import { AC, out, whenRunning } from '../core/audio.js';
 
 let jet = null;
+/* THE WIND. A second noise loop, brighter than the jet, that is almost silent going
+   straight and swells as you lean into a turn -- the rush of air across a board carving
+   at speed. Louder the harder you steer and the faster you go, pitched up with both, and
+   panned to the side you are leaning towards, so a long sweeper sounds like one. */
+let wind = null;
 
 function noiseBuffer(){
   const n = Math.floor(AC.sampleRate);
@@ -57,7 +62,57 @@ function startHum(){
     src.start(AC.currentTime + 0.02);
     sub.start(AC.currentTime + 0.02);
     jet = {src, band, low, gain, sub, subGain};
+    buildWind(dest);
   });
+}
+function whiteBuffer(){
+  const n = Math.floor(AC.sampleRate*1.5);
+  const buf = AC.createBuffer(1, n, AC.sampleRate);
+  const ch = buf.getChannelData(0);
+  // pink-ish: white, lightly smoothed, so it is air and not static
+  let last = 0;
+  for(let i = 0; i < n; i++){ const w = Math.random()*2 - 1; last = last*0.55 + w*0.45; ch[i] = last; }
+  return buf;
+}
+function buildWind(dest){
+  if(wind) return;
+  const src = AC.createBufferSource();
+  src.buffer = whiteBuffer();
+  src.loop = true;
+  const band = AC.createBiquadFilter();
+  band.type = 'bandpass';
+  band.frequency.setValueAtTime(900, AC.currentTime);
+  band.Q.setValueAtTime(0.9, AC.currentTime);
+  const hi = AC.createBiquadFilter();
+  hi.type = 'highpass';
+  hi.frequency.setValueAtTime(260, AC.currentTime);
+  const gain = AC.createGain();
+  gain.gain.setValueAtTime(0.0001, AC.currentTime);
+  // a panner where the browser has one; plain mono where it does not
+  const pan = AC.createStereoPanner ? AC.createStereoPanner() : null;
+  let chain = src.connect(hi).connect(band).connect(gain);
+  if(pan) chain = chain.connect(pan);
+  chain.connect(dest);
+  src.start(AC.currentTime + 0.03);
+  wind = {src, band, hi, gain, pan};
+}
+/* steer: -1..1 as the board uses it (+ is left). v: m/s. */
+function windLevel(steer, v){
+  const spool = Math.max(0, Math.min(1, v/24));
+  const lean = Math.min(1, Math.abs(steer || 0));
+  // a breath of air at speed, and the rush on top of it when you carve
+  return spool*(0.004 + 0.075*Math.pow(lean, 1.3));
+}
+function setWind(steer, v){
+  if(!wind || !AC) return;
+  const tN = AC.currentTime + 0.07;
+  const spool = Math.max(0, Math.min(1, v/24));
+  const lean = Math.min(1, Math.abs(steer || 0));
+  const g = windLevel(steer, v);
+  wind.gain.gain.linearRampToValueAtTime(g < 0.0005 ? 0.0001 : g, tN);
+  wind.band.frequency.linearRampToValueAtTime(600 + spool*1300 + lean*1100, tN);
+  wind.band.Q.linearRampToValueAtTime(0.7 + lean*0.8, tN);
+  if(wind.pan) wind.pan.pan.linearRampToValueAtTime(Math.max(-0.7, Math.min(0.7, -(steer || 0)*0.7)), tN);
 }
 
 /* v: speed in m/s. burn: 0 (coasting) .. 1 (mid-burn). */
@@ -123,6 +178,8 @@ function stopHum(){
   if(!jet || !AC) return;
   jet.gain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.1);
   jet.subGain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.1);
+  if(wind) wind.gain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.1);
 }
+function windState(){ return wind; }
 
-export { startHum, setHum, stopHum, burnSound, cellSound };
+export { startHum, setHum, stopHum, burnSound, cellSound, setWind, windLevel, windState };

@@ -204,11 +204,16 @@ body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
    #tSteerBtns below, where pointer-events:none on tLeft/tRight means neither one is ever
    really the event target to begin with. */
 .tbtn:active, .tbtn.pressed{background:rgba(25,240,255,.2);}
-/* Simple, bold icons rather than words: a triangle up/down reads faster than "BRAKE" at a
-   glance, and pairs with the lightning bolt the same way the fuel rack's own icon does.
-   \uFE0E (text presentation selector) on the bolt stops phones swapping it for a full-
-   colour emoji glyph, which would ignore `color` and break the neon look. */
-#tAccel, #tBrake, #tBoost{font-size:30px;}
+/* Icons rather than words: two pedals (gas tall, brake wide -- the shapes a driver's foot
+   already knows) and a nitro bottle, drawn as SVG strokes in currentColor so they glow in
+   the button's own colour and never fall back to an emoji font. */
+#tAccel, #tBrake, #tBoost{font-size:30px; display:flex; align-items:center; justify-content:center; padding:0;}
+.ticon{width:1.75em; height:1.75em; fill:none; stroke:currentColor; stroke-width:2.2;
+  stroke-linecap:round; stroke-linejoin:round; pointer-events:none; filter:drop-shadow(0 0 3px currentColor);}
+.ticon .fillIcon{fill:currentColor; stroke-width:1.2;}
+/* gas is the green one, so the two pedals are told apart by colour as well as shape */
+#tAccel{color:var(--lime); border-color:var(--lime);}
+#tAccel:active, #tAccel.pressed{background:rgba(182,255,60,.18);}
 
 /* STEERING: either the drag pad or the two buttons, never both -- settings.steerMode
    (see main.js applySteerMode) toggles a body class, and that is the only thing either
@@ -365,6 +370,12 @@ body[data-screen="count"] #count{display:flex;}
             <button class="btn" data-ghost="0">Off</button>
           </span>
         </div>
+        <div class="row" id="ghostHitRow">Ghost bumps
+          <span class="seg" id="ghostHitSeg">
+            <button class="btn on" data-hit="1">Solid</button>
+            <button class="btn" data-hit="0">Pass through</button>
+          </span>
+        </div>
         <div class="row">Camera
           <span class="seg" id="camSeg">
             <button class="btn" data-cam="close">Close</button>
@@ -472,7 +483,19 @@ body[data-screen="count"] #count{display:flex;}
   <div id="touchCtl">
     <div id="tSteer"><span>◀</span><b>STEER</b><span>▶</span></div>
     <div id="tSteerBtns"><button class="tbtn" id="tLeft" aria-label="Steer left">◀</button><button class="tbtn" id="tRight" aria-label="Steer right">▶</button></div>
-    <div class="tgrp"><button class="tbtn" id="tAccel" aria-label="Accelerate">▲</button><button class="tbtn" id="tBrake" aria-label="Brake">▼</button><button class="tbtn hot" id="tBoost" aria-label="Nitro">⚡︎</button></div>
+    <div class="tgrp">
+      <!-- Icons are inline SVG in currentColor, so they take the button's neon colour and
+           scale with its font-size. Gas and brake are the two pedals a driver knows by
+           shape -- tall and narrow on the right, short and wide beside it -- and nitro is
+           the same bottle the HUD rack shows, with a bolt on it. -->
+      <button class="tbtn" id="tAccel" aria-label="Accelerate"><svg class="ticon" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="10" y="3" width="12" height="26" rx="3"/><path d="M13 8h6M13 12h6M13 16h6M13 20h6M13 24h6"/></svg></button>
+      <button class="tbtn" id="tBrake" aria-label="Brake"><svg class="ticon" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="4" y="9" width="24" height="15" rx="3"/><path d="M8 13.5h16M8 16.5h16M8 19.5h16"/></svg></button>
+      <button class="tbtn hot" id="tBoost" aria-label="Nitro"><svg class="ticon" viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M13 3h6v4h-6z"/><rect x="9" y="7" width="14" height="23" rx="5"/>
+        <path class="fillIcon" d="M17.5 11l-5 8h4l-1.5 7 5-8.5h-4z"/></svg></button>
+    </div>
   </div>
 </div>
 <div id="count"></div>
@@ -3000,6 +3023,13 @@ const NEON = {
   ghostKnock:   0.30,   // playback rate drops by at least this on contact
   ghostRecoverS:1.2,    // s time constant for the rate to come back to 1
   ghostRightW:  2.4,    // rad/s, critically damped spring pulling it back onto its line
+  /* A ghost is a record, and a record cannot wait in traffic: it looks ahead along its
+     own line and moves its offset round whoever is there, and if it is still wedged
+     against the same body after ghostStuckS it slips through them rather than hanging up
+     (non-solid until it has come clear, the same phase-in it starts the race with). */
+  ghostLookM:   9,      // m ahead along its recorded line it checks for a body in the way
+  ghostStuckS:  0.9,    // s of unbroken contact before it slips through
+  ghostKnockGap:0.6,    // s a contact has to be broken for before it can knock the clock again
   /* --- boost: a rack of nitro tanks, one burn each ---
      Nothing recharges. You start with a couple and everything after that is picked up off
      the track, which is what makes the cells worth going out of your way for and a burn
@@ -3030,6 +3060,43 @@ const NEON_SKILL = {
   fair:   {pace: 1.14, corner: 1.22, wobble: 0.09, label: 'Fair'},
   fierce: {pace: 1.22, corner: 1.34, wobble: 0.04, label: 'Fierce'},
 };
+
+/* DRIVING STYLES. The field is animals, and they should not all drive one algorithm
+   with different paint. Each species maps to a style; the style bends rivalInput and
+   the contact physics:
+     pace     top-speed multiplier on top of the Pace setting
+     corner   how hot it takes a bend (above 1 means it WILL find the bumper sometimes)
+     wobble   how much its line wanders (multiplies the Pace setting's wobble)
+     avoid    how early and how wide it goes round someone (0.5 barely bothers, 1.6 gives
+              a wide berth and eases off rather than squeeze by)
+     aggro    0..1, how much it steers AT someone beside or just ahead instead of round
+     mass     share of a shove it keeps (heavier gets pushed less and pushes more)
+     hunt     how far out it will change lane for a nitro tank, and how full a rack it
+              will still go for one (0 never, 1 normal, 1.6 goes out of its way)
+     burn     'straight' burns only out of a corner onto something straight; 'any'
+              burns whenever it has a tank and room to gain
+     sight    how far ahead it reads the bend (below 1 brakes late and runs wide)
+     edge     margin it keeps from the bumpers (1 normal; below 0 it rides them)
+     apex     how hard it cuts to the inside of a bend (0.55 was everyone's)
+   Bruisers are the big grazers; the skilled are the predators; the timid are the small
+   prey animals; the reckless are the ones that climb cliffs and raid bins. */
+const NEON_STYLE = {
+  bruiser:  {pace: 0.98, corner: 1.00, wobble: 0.8, avoid: 0.45, aggro: 0.75, mass: 1.7, hunt: 0.6, burn: 'straight', sight: 1.0, edge: 1, apex: 0.45, label: 'Bruiser'},
+  skilled:  {pace: 1.05, corner: 1.06, wobble: 0.45, avoid: 1.15, aggro: 0.10, mass: 1.0, hunt: 1.0, burn: 'straight', sight: 0.6, edge: 1, apex: 0.6, label: 'Racer'},
+  timid:    {pace: 1.00, corner: 0.93, wobble: 0.9, avoid: 1.65, aggro: 0.00, mass: 0.7, hunt: 1.2, burn: 'straight', sight: 1.2, edge: 1.4, apex: 0.4, label: 'Skittish'},
+  reckless: {pace: 0.93, corner: 1.08, wobble: 2.2, avoid: 0.75, aggro: 0.35, mass: 1.1, hunt: 1.0, burn: 'any', sight: 0.9, edge: -0.6, apex: 1.0, label: 'Reckless'},
+  steady:   {pace: 0.99, corner: 0.97, wobble: 0.5, avoid: 1.25, aggro: 0.00, mass: 1.0, hunt: 1.0, burn: 'straight', sight: 1.1, edge: 1.2, apex: 0.5, label: 'Steady'},
+  hunter:   {pace: 1.01, corner: 1.02, wobble: 0.7, avoid: 1.0, aggro: 0.20, mass: 0.9, hunt: 1.7, burn: 'any', sight: 0.9, edge: 1, apex: 0.55, label: 'Scavenger'},
+};
+const SPECIES_STYLE = {
+  bear: 'bruiser', moose: 'bruiser', bighorn: 'bruiser',
+  deer: 'skilled', fox: 'skilled', coyote: 'skilled', bobcat: 'skilled',
+  rabbit: 'timid', chipmunk: 'timid', squirrel: 'timid',
+  goat: 'reckless', raccoon: 'reckless',
+  possum: 'steady',
+  cat: 'hunter',
+};
+const styleFor = key => NEON_STYLE[SPECIES_STYLE[key] || 'steady'];
 
 /* Speed classes. The multiplier is on TOP SPEED; thrust goes as its square so the class
    keeps the same shape of acceleration curve rather than just a different ceiling. Rivals
@@ -4428,37 +4495,86 @@ function raceDistance(T){ return T.closed ? T.L*T.laps : T.L; }
    lane, and steers for it. `others` is every racer (itself included). */
 function rivalInput(r, T, others, env, t){
   const sk = r.skill;
+  // a rival with no style (the tests build bare ones) drives the old neutral algorithm
+  const st = r.style || NEUTRAL_STYLE;
   const f = trackFrame(T, r.s, {});
   const look = 10 + r.v*1.1;
-  const bend = bendAhead(T, r.s, look*1.8);
+  const bend = bendAhead(T, r.s, look*1.8*(st.sight || 1));
   // corner speed from lateral grip; straights are flat out
   /* Judgement drifts a little from corner to corner, more for a Chill rider: now and then
      one arrives too hot and meets the bumper, which is the whole reason bumpers exist. */
-  const nerve = 1 + sk.wobble*0.45*Math.sin(t*0.23 + r.seed*2.1);
-  const vCorner = Math.sqrt((15*sk.corner*nerve)/Math.max(bend.k, 1e-4));
+  const wob = sk.wobble*st.wobble;
+  const nerve = 1 + wob*0.45*Math.sin(t*0.23 + r.seed*2.1);
+  const vCorner = Math.sqrt((15*sk.corner*st.corner*nerve)/Math.max(bend.k, 1e-4));
   /* The ceiling the hill allows, not the flat-ground one -- otherwise a rival brakes all
      the way down a descent to hold a number that gravity has already made meaningless. */
-  const vTop = gradeTopSpeed(r, slopeAhead(T, r.s, look*1.5), env.gravity)*sk.pace*r.paceMul;
+  const vTop = gradeTopSpeed(r, slopeAhead(T, r.s, look*1.5), env.gravity)*sk.pace*st.pace*r.paceMul;
   let vWant = Math.min(vTop, vCorner);
   // lane: own lane on the straights, inside of the bend when one is coming
   // the narrower of here and where we are about to be: a road necks down into a trail
-  const lim = Math.min(f.halfW, trackFrame(T, r.s + look, {}).halfW) - bodyWideOf(T)*0.5 - 0.6/(T.widthK || 1);
+  const edge = st.edge == null ? 1 : st.edge;
+  const lim = Math.min(f.halfW, trackFrame(T, r.s + look, {}).halfW) - bodyWideOf(T)*0.5 - 0.6*edge/(T.widthK || 1);
   const apex = Math.min(1, bend.k*28);
-  let dWant = r.lane*lim*(1-apex) + bend.sign*lim*0.55*apex;
+  let dWant = r.lane*lim*(1-apex) + bend.sign*lim*(st.apex == null ? 0.55 : st.apex)*apex;
   // a slow wobble so they do not all trace one perfect line
-  r.wob += (Math.sin(t*0.6 + r.seed*1.7) + Math.sin(t*1.31 + r.seed))*0.5*sk.wobble*0.02;
+  r.wob += (Math.sin(t*0.6 + r.seed*1.7) + Math.sin(t*1.31 + r.seed))*0.5*wob*0.02;
   r.wob *= 0.98;
   dWant += r.wob*lim;
-  // go round whoever is right in front
+
+  /* NITRO TANKS, before anything else decides the line -- this used to run AFTER the
+     steering sum below, so the lane it chose was thrown away and rivals only ever took a
+     tank that happened to sit on their line. A hunter changes lane from further out and
+     tops up a rack that is nearly full; a bruiser only takes one that is in its way. */
+  /* How far ahead the steering aims. Normally the look distance; going for a tank it aims
+     at a point well short of the tank, or the long look arrives beside it too late. */
+  let aim = look;
+  const wantsTank = r.fuel < NEON.fuelMax - (st.hunt < 1 ? 1 : 0);   // an indifferent one leaves a spare slot
+  if(env.cells && st.hunt > 0 && wantsTank){
+    const reach = 45*st.hunt;
+    let best = null, bestGap = Infinity;
+    for(const c of env.cells){
+      if(!c.live) continue;
+      let gap = c.s - r.s;
+      if(T.closed){ gap = ((gap % T.L) + T.L) % T.L; if(gap > T.L/2) gap -= T.L; }
+      if(gap <= 2 || gap >= reach || gap >= bestGap) continue;
+      // the lane change has to be makeable in the distance there is
+      const shift = Math.abs(c.d - r.d);
+      if(shift > Math.max(1.2, gap*0.28*st.hunt)) continue;
+      // and it is never worth a corner, except to the reckless
+      if(st.burn !== 'any' && bendAhead(T, r.s, gap).k >= 0.02) continue;
+      best = c; bestGap = gap;
+    }
+    if(best){ dWant = best.d; r.hunting = best; aim = Math.max(6, Math.min(look, bestGap*0.5)); }
+    else r.hunting = null;
+  }
+
+  /* TRAFFIC. Everyone solid in front of or beside us, by style: the timid see people
+     from further off and give them a wide berth, a bruiser leans into them instead. */
+  const W = bodyWideOf(T);
+  let blockedV = Infinity;
   for(const q of others){
     if(q === r || q.done) continue;
+    if(q.isGhost && !env.ghostContact) continue;          // a ghost you cannot touch is not traffic
+    if(q.isGhost && q.riderId && q.riderId === r.riderId) continue;
     let gap = q.prog - r.prog;
     if(T.closed){ gap = ((q.s - r.s) % T.L + T.L) % T.L; if(gap > T.L/2) gap -= T.L; }
-    if(gap > 0 && gap < 5 + r.v*0.6 && Math.abs(q.d - r.d) < bodyWideOf(T)*1.3 && q.v < r.v + 1){
-      dWant = q.d + (q.d > 0 ? -1 : 1)*bodyWideOf(T)*1.8;
-      if(gap < 4) vWant = Math.min(vWant, q.v + 0.5);
+    const side = Math.abs(q.d - r.d);
+    // an aggressive rider shoulders whoever is alongside or just ahead
+    if(st.aggro > 0 && gap > -bodyLenOf(T) && gap < 6 && side < W*2.6 && !q.isGhost){
+      const lean = st.aggro*(1 - 0.5*side/(W*2.6));
+      dWant += (q.d - dWant)*lean;
+      continue;
+    }
+    const range = (5 + r.v*0.6)*st.avoid;
+    if(gap > 0 && gap < range && side < W*(1.1 + 0.4*st.avoid) && q.v < r.v + 1){
+      // go round on whichever side has more room, and by more if skittish
+      const roomL = lim - q.d, roomR = q.d + lim;
+      const dir = roomL >= roomR ? 1 : -1;
+      dWant = q.d + dir*W*(1.4 + 0.5*st.avoid);
+      if(gap < 4*st.avoid) blockedV = Math.min(blockedV, q.v + (st.avoid > 1.4 ? -0.5 : 0.5));
     }
   }
+  if(blockedV < Infinity) vWant = Math.min(vWant, blockedV);
   dWant = Math.max(-lim, Math.min(lim, dWant));
   /* Steer in TRACK space, not world space. The wanted slip angle is the one that carries
      the board from d to dWant over the look distance; the bend itself is fed forward as
@@ -4466,39 +4582,33 @@ function rivalInput(r, T, others, env, t){
      the tangent 20 m ahead instead, which turns in long before the corner arrives and
      drives straight into the inside wall.) */
   const theta = angNorm(r.yaw - f.yaw);
-  const thetaWant = Math.atan2(dWant - r.d, look);
+  const thetaWant = Math.atan2(dWant - r.d, aim);
   const rate = NEON.steerRate/(1 + r.v*NEON.steerFade);
   const need = (thetaWant - theta)*4.0 + (1 - NEON.railAssist)*f.k*r.v;
   const steer = Math.max(-1, Math.min(1, need/rate));
-  /* Boost cells: worth a metre or two of lane, never worth a corner. A rival with a full
-     pack drives its line and leaves the cells for whoever needs them. */
-  if(env.cells && r.fuel < NEON.fuelMax){
-    for(const c of env.cells){
-      if(!c.live) continue;
-      let gap = c.s - r.s;
-      if(T.closed){ gap = ((gap % T.L) + T.L) % T.L; if(gap > T.L/2) gap -= T.L; }
-      if(gap > 4 && gap < 45 && Math.abs(c.d - dWant) < lim*1.2 && bendAhead(T, r.s, gap).k < 0.02){
-        dWant = Math.max(-lim, Math.min(lim, c.d));
-        break;
-      }
-    }
-  }
   const dv = vWant - r.v;
+  const room = st.burn === 'any' ? bend.k < 0.03 : bend.k < 0.012;
   return {
     steer,
     throttle: dv > -0.5 ? 1 : 0,
     brake: dv < -2.5 ? Math.min(1, (-dv-2.5)/6) : 0,
     // one press, and only where it pays: out of a corner onto something straight
-    boost: r.burnT <= 0 && r.lockT <= 0 && r.fuel >= 1 && dv > 2 && bend.k < 0.012,
+    boost: r.burnT <= 0 && r.lockT <= 0 && r.fuel >= 1 && dv > 2 && room,
   };
 }
+const NEUTRAL_STYLE = {pace: 1, corner: 1, wobble: 1, avoid: 1, aggro: 0, mass: 1, hunt: 1, burn: 'straight', sight: 1, edge: 1, apex: 0.55};
 
 /* Boards shouldering each other. Track space again: overlap in s and in d. */
-function resolveContacts(racers, T){
+/* opts.ghostContact (default on): with it off, ghosts are pure replays that nothing
+   touches and that touch nothing -- the menu's "Ghost bumps" toggle. */
+function resolveContacts(racers, T, opts){
+  const ghostsOn = !opts || opts.ghostContact !== false;
   const hits = [];
+  for(const r of racers) if(r.isGhost) r._touched = false;
   for(let i = 0; i < racers.length; i++) for(let j = i+1; j < racers.length; j++){
     const a = racers[i], b = racers[j];
     if(a.done && b.done) continue;
+    if(!ghostsOn && (a.isGhost || b.isGhost)) continue;
     if(!contactPair(a, b)) continue;
     if(!overlapping(a, b, T)) continue;
     // a ghost that spawned inside somebody is not solid until it has come clear of everyone
@@ -4508,15 +4618,29 @@ function resolveContacts(racers, T){
     const dd = b.d - a.d;
     const push = (bodyWideOf(T) - Math.abs(dd))*0.5 + 0.01;
     const sgn = dd >= 0 ? 1 : -1;
-    shove(a, -sgn*push); shove(b, sgn*push);
-    if(!a.isGhost) a.yaw += -sgn*0.04;
-    if(!b.isGhost) b.yaw += sgn*0.04;
+    /* Mass: a moose shoulders a chipmunk aside and barely moves; two equals split it.
+       The total separation is unchanged, only who does the moving. */
+    const ma = massOf(a), mb = massOf(b);
+    shove(a, -sgn*push*2*mb/(ma + mb)); shove(b, sgn*push*2*ma/(ma + mb));
+    if(!a.isGhost) a.yaw += -sgn*0.04*mb/ma;
+    if(!b.isGhost) b.yaw += sgn*0.04*ma/mb;
     // the one behind loses a little, the one in front gains a little
     const front = ds >= 0 ? b : a, rear = ds >= 0 ? a : b;
     let vr = rear.v, vf = front.v;
-    if(vr > vf){ const m = (vr - vf)*0.5; vr -= m*0.8; vf += m*0.5; }
-    setSpeed(rear, vr); setSpeed(front, vf);
+    if(vr > vf){
+      const m = (vr - vf)*0.5, mr = massOf(rear), mf = massOf(front);
+      vr -= m*0.8*(2*mf/(mr + mf)); vf += m*0.5*(2*mr/(mr + mf));
+    }
+    setSpeed(rear, vr, front); setSpeed(front, vf, rear);
     hits.push([a, b]);
+  }
+  /* STUCK GHOSTS. A ghost in unbroken contact for ghostStuckS slips through whoever it
+     is wedged against: it goes non-solid, and the phase-in below makes it solid again
+     only once it has come clear of everyone. A record can be slowed; it cannot be parked. */
+  for(const r of racers) if(r.isGhost){
+    if(r._touched) r.stuckT = (r.stuckT || 0) + (r.lastDt || 1/60);
+    else r.stuckT = 0;
+    if(r.stuckT > NEON.ghostStuckS){ r.solid = false; r.stuckT = 0; r.slips = (r.slips || 0) + 1; }
   }
   /* Any ghost that was not caught inside someone this step is clear, and solid from now on. */
   for(const r of racers) if(r.isGhost && !r.solid && !r.done){
@@ -4549,12 +4673,22 @@ function shove(r, dd){
   if(r.isGhost){ r.offD = (r.offD || 0) + dd; r.d += dd; }
   else r.d += dd;
 }
+const massOf = r => r.isGhost ? 1 : (r.style && r.style.mass) || 1;
 /* A rider's speed is just its speed. A ghost's is its playback rate: it never gains from
-   a shove, and any contact at all knocks it back by at least ghostKnock. */
-function setSpeed(r, v){
+   a shove, and a NEW contact knocks it back by at least ghostKnock. Staying in contact
+   does not knock it again every frame -- that is what used to wedge a ghost against a
+   rival, its clock held at 70% for as long as the two stayed touching. */
+function setSpeed(r, v, other){
   if(!r.isGhost){ r.v = v; return; }
+  r._touched = true;
   const k = r.v > 0.5 ? Math.max(0.2, Math.min(1, v/r.v)) : 1;
-  r.rate = Math.min(r.rate == null ? 1 : r.rate, k, 1 - NEON.ghostKnock);
+  let rate = Math.min(r.rate == null ? 1 : r.rate, k);
+  if(!r.lastTouch) r.lastTouch = new Map();
+  const last = r.lastTouch.get(other);
+  const now = r.time || 0;
+  if(last == null || now - last > NEON.ghostKnockGap) rate = Math.min(rate, 1 - NEON.ghostKnock);
+  r.lastTouch.set(other, now);
+  r.rate = rate;
 }
 
 function rankRacers(racers){
@@ -6124,6 +6258,11 @@ function resetSteerTouch(){
 
 
 let jet = null;
+/* THE WIND. A second noise loop, brighter than the jet, that is almost silent going
+   straight and swells as you lean into a turn -- the rush of air across a board carving
+   at speed. Louder the harder you steer and the faster you go, pitched up with both, and
+   panned to the side you are leaning towards, so a long sweeper sounds like one. */
+let wind = null;
 
 function noiseBuffer(){
   const n = Math.floor(AC.sampleRate);
@@ -6170,7 +6309,57 @@ function startHum(){
     src.start(AC.currentTime + 0.02);
     sub.start(AC.currentTime + 0.02);
     jet = {src, band, low, gain, sub, subGain};
+    buildWind(dest);
   });
+}
+function whiteBuffer(){
+  const n = Math.floor(AC.sampleRate*1.5);
+  const buf = AC.createBuffer(1, n, AC.sampleRate);
+  const ch = buf.getChannelData(0);
+  // pink-ish: white, lightly smoothed, so it is air and not static
+  let last = 0;
+  for(let i = 0; i < n; i++){ const w = Math.random()*2 - 1; last = last*0.55 + w*0.45; ch[i] = last; }
+  return buf;
+}
+function buildWind(dest){
+  if(wind) return;
+  const src = AC.createBufferSource();
+  src.buffer = whiteBuffer();
+  src.loop = true;
+  const band = AC.createBiquadFilter();
+  band.type = 'bandpass';
+  band.frequency.setValueAtTime(900, AC.currentTime);
+  band.Q.setValueAtTime(0.9, AC.currentTime);
+  const hi = AC.createBiquadFilter();
+  hi.type = 'highpass';
+  hi.frequency.setValueAtTime(260, AC.currentTime);
+  const gain = AC.createGain();
+  gain.gain.setValueAtTime(0.0001, AC.currentTime);
+  // a panner where the browser has one; plain mono where it does not
+  const pan = AC.createStereoPanner ? AC.createStereoPanner() : null;
+  let chain = src.connect(hi).connect(band).connect(gain);
+  if(pan) chain = chain.connect(pan);
+  chain.connect(dest);
+  src.start(AC.currentTime + 0.03);
+  wind = {src, band, hi, gain, pan};
+}
+/* steer: -1..1 as the board uses it (+ is left). v: m/s. */
+function windLevel(steer, v){
+  const spool = Math.max(0, Math.min(1, v/24));
+  const lean = Math.min(1, Math.abs(steer || 0));
+  // a breath of air at speed, and the rush on top of it when you carve
+  return spool*(0.004 + 0.075*Math.pow(lean, 1.3));
+}
+function setWind(steer, v){
+  if(!wind || !AC) return;
+  const tN = AC.currentTime + 0.07;
+  const spool = Math.max(0, Math.min(1, v/24));
+  const lean = Math.min(1, Math.abs(steer || 0));
+  const g = windLevel(steer, v);
+  wind.gain.gain.linearRampToValueAtTime(g < 0.0005 ? 0.0001 : g, tN);
+  wind.band.frequency.linearRampToValueAtTime(600 + spool*1300 + lean*1100, tN);
+  wind.band.Q.linearRampToValueAtTime(0.7 + lean*0.8, tN);
+  if(wind.pan) wind.pan.pan.linearRampToValueAtTime(Math.max(-0.7, Math.min(0.7, -(steer || 0)*0.7)), tN);
 }
 
 /* v: speed in m/s. burn: 0 (coasting) .. 1 (mid-burn). */
@@ -6236,7 +6425,9 @@ function stopHum(){
   if(!jet || !AC) return;
   jet.gain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.1);
   jet.subGain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.1);
+  if(wind) wind.gain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.1);
 }
+function windState(){ return wind; }
 
 /* ==== src/neon/cells.js ==== */
 /* BOOST CELLS (drawn as nitro tanks). Free charge lying on the racing line, and the reason the line is worth
@@ -6442,7 +6633,11 @@ function makeGhostRacer(g, T, color){
   applyGhost(r, T, 0);
   return r;
 }
-function stepGhost(r, T, dt){
+/* others/opts: the field, and whether ghosts are solid this race. With contact on, a
+   ghost looks along its own line and moves round a body in the way instead of driving
+   into it -- the spring's rest point becomes "clear of them" rather than "on the line"
+   until they are behind it. With contact off, it is a pure replay and sees nobody. */
+function stepGhost(r, T, dt, others, opts){
   r.time += dt;
   /* The clock runs at `rate`, which a shove knocks down and which comes back to 1 on its
      own. Every second it spends below 1 is time it arrives late. */
@@ -6450,13 +6645,47 @@ function stepGhost(r, T, dt){
   r.rate += (1 - r.rate)*Math.min(1, dt/NEON.ghostRecoverS);
   if(r.rate > 0.9995) r.rate = 1;
   r.gt = (r.gt || 0) + dt*r.rate;
-  /* Back onto the line on a critically damped spring: no snap, no overshoot. */
-  const w = NEON.ghostRightW;
-  r.offV = (r.offV || 0) + (-w*w*(r.offD || 0) - 2*w*(r.offV || 0))*dt;
+  r.lastDt = dt;
+  const contact = !opts || opts.ghostContact !== false;
+  const target = contact && others ? ghostDodge(r, T, others) : 0;
+  r.offTarget = target;
+  if(!contact){ r.offD = 0; r.offV = 0; r.rate = 1; }
+  /* Back onto the line -- or out round someone -- on a critically damped spring: no
+     snap, no overshoot. */
+  const w = NEON.ghostRightW*(target !== 0 ? 1.6 : 1);
+  r.offV = (r.offV || 0) + (-w*w*((r.offD || 0) - target) - 2*w*(r.offV || 0))*dt;
   r.offD = (r.offD || 0) + r.offV*dt;
   if(Math.abs(r.offD) < 1e-3 && Math.abs(r.offV) < 1e-3){ r.offD = 0; r.offV = 0; }
   applyGhost(r, T, r.gt);
   if(!r.done && r.gt >= r.ghost.time){ r.done = true; r.finishT = r.time; }
+}
+/* Where the ghost's offset wants to be: 0 (its own line) unless a solid body sits on or
+   near that line in the next ghostLookM metres, in which case just clear of them on the
+   side with more room. The nearest such body wins. */
+function ghostDodge(r, T, others){
+  if(r.done) return 0;
+  const W = T.bodyWide || NEON.bodyWide, L = T.bodyLen || NEON.bodyLen;
+  const f = trackFrame(T, r.s, {});
+  const lim = f.halfW - W*0.5;
+  const lineD = r.d - (r.offD || 0);          // where the recording has it this frame
+  let best = 0, bestGap = Infinity;
+  for(const q of others){
+    if(q === r || q.isGhost || q.done) continue;
+    if(q.riderId && q.riderId === r.riderId) continue;
+    let gap = q.s - r.s;
+    if(T.closed){ gap = ((gap % T.L) + T.L) % T.L; if(gap > T.L/2) gap -= T.L; }
+    if(gap < -L*0.6 || gap > NEON.ghostLookM || gap > bestGap) continue;
+    if(Math.abs(q.d - lineD) > W*1.25) continue;
+    const upD = q.d + W*1.3, dnD = q.d - W*1.3;
+    const upOk = upD <= lim, dnOk = dnD >= -lim;
+    let want;
+    if(upOk && dnOk) want = Math.abs(upD - r.d) <= Math.abs(dnD - r.d) ? upD : dnD;
+    else if(upOk) want = upD;
+    else if(dnOk) want = dnD;
+    else continue;                            // no room either side: stuck-slip handles it
+    best = want - lineD; bestGap = gap;
+  }
+  return best;
 }
 function applyGhost(r, T, t){
   const g = r.ghost, n = g.s.length;
@@ -6634,7 +6863,7 @@ const trackMeta = new Map();    // sig|scale -> {L, climb, ok}: filled in by the
 let scanQueue = [];
 let activeTrack = null;         // the ribbon currently in the scene
 const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale: 1, mode: 'auto',
-                  cls: 'standard', cam: 'normal', ghosts: true, rider: 'p:0', course: '', map: DEFAULT_NEON_WORLD,
+                  cls: 'standard', cam: 'normal', ghosts: true, ghostHit: true, rider: 'p:0', course: '', map: DEFAULT_NEON_WORLD,
                   // touch control position: how far the steer pad and buttons sit from the
                   // screen edges (ctlInset) and above the bottom edge (ctlBottom), in px
                   ctlInset: 24, ctlBottom: 16,    // ctlInset defaults AT the swipe-safe floor, not below it
@@ -7078,9 +7307,12 @@ function syncMenu(){
   document.querySelectorAll('#camSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.cam === settings.cam));
   $('scaleSel').value = String(settings.scale);
   document.querySelectorAll('#ghostSeg .btn').forEach(b => b.classList.toggle('on', (b.dataset.ghost === '1') === settings.ghosts));
-  $('ghostNote').textContent = settings.ghosts
-    ? 'The fastest ghost of every rider who has raced this course lines up with the field.'
-    : '';
+  document.querySelectorAll('#ghostHitSeg .btn').forEach(b => b.classList.toggle('on', (b.dataset.hit === '1') === (settings.ghostHit !== false)));
+  $('ghostHitRow').hidden = !settings.ghosts;
+  $('ghostNote').textContent = !settings.ghosts ? ''
+    : settings.ghostHit !== false
+      ? 'The fastest ghost of every rider who has raced this course lines up with the field. They are solid: bump one and it loses time.'
+      : 'The fastest ghost of every rider who has raced this course lines up with the field, replaying its run untouched.';
 }
 
 /* CONTROL LAYOUT. Where the steer pad and the brake/burn buttons sit is a CSS custom
@@ -7330,6 +7562,13 @@ function setGhosts(on){
   settings.ghosts = !!on;
   syncMenu(); neonWriteStore();
 }
+/* Ghost bumps: whether ghosts are solid (and dodge) or pure replays. Fixed for a race at
+   the lights, like gravity -- it changes what a ghost's time means. */
+function setGhostHit(on){
+  if(settings.ghostHit === !!on) return;
+  settings.ghostHit = !!on;
+  syncMenu(); neonWriteStore();
+}
 function setCam(name){
   if(!NEON_CAM[name] || settings.cam === name) return;
   settings.cam = name;
@@ -7396,7 +7635,7 @@ function startRace(){
   cast.forEach((c, i) => {
     racers.push(place(i, {name: c.name, skill: NEON_SKILL[settings.skill], paceMul: c.paceMul, speedK,
       lane: ((i % 4) - 1.5)/2.2, seed: c.seed % 1000, color: c.color, emo: SPECIES[c.key].emo,
-      riderId: 'w:' + c.key}));
+      riderId: 'w:' + c.key, style: styleFor(c.key), styleKey: c.key}));
     riders.push(makeRider({kind: 'wild', key: c.key}, c.color, c.seed, sizeK));
   });
   racers.push(place(cast.length, {name: choice.label, isPlayer: true, color: PLAYER_COLOR, speedK, riderId: choice.v}));
@@ -7425,7 +7664,7 @@ function startRace(){
           t: 0, finishShown: false, doneCount: 0, line, cells, rec: makeRecorder(),
           riderId: choice.v, riderLabel: choice.label, ghosts: ghosts.length,
           gravity: settings.gravity, scale: settings.scale, reverse: settings.reverse,
-          cls: settings.cls, sizeK};
+          cls: settings.cls, sizeK, ghostHit: settings.ghostHit !== false};
   rankRacers(racers);
   resetNeonInput();
   camYaw = racers[race.me].yaw;
@@ -7468,7 +7707,7 @@ function togglePause(){
 }
 
 function stepRace(dt){
-  const R = race, T = R.T, env = {gravity: R.gravity};
+  const R = race, T = R.T, env = {gravity: R.gravity, ghostContact: R.ghostHit !== false};
   if(R.phase === 'count'){
     R.countT -= dt;
     const n = Math.ceil(R.countT - 0.4);
@@ -7484,7 +7723,7 @@ function stepRace(dt){
   const input = readNeonInput(dt);
   env.cells = R.cells;
   for(const r of R.racers){
-    if(r.isGhost){ r.lastDt = dt; stepGhost(r, T, dt); continue; }
+    if(r.isGhost){ r.lastDt = dt; stepGhost(r, T, dt, R.racers, env); continue; }
     const inp = r.isPlayer ? input : rivalInput(r, T, R.racers, env, R.t);
     // rubber band, gently: nobody should be a dot on the horizon either way
     if(!r.isPlayer && !r.done){
@@ -7499,7 +7738,7 @@ function stepRace(dt){
     if(ev) onBump(r, ev);
     if(r.burnFired && r === me) burnSound();
   }
-  resolveContacts(R.racers, T);
+  resolveContacts(R.racers, T, env);
   for(const t of stepCells(R.cells, R.racers, T, dt)) if(t.racer === me) cellSound();
   if(!me.done) recordFrame(R.rec, me, dt);
 }
@@ -7654,6 +7893,7 @@ function drawRace(dt){
   $('slopeVal').textContent = !R.gravity ? '' : pct > 1 ? '▲ ' + pct + '%' : pct < -1 ? '▼ ' + (-pct) + '%'
     : (dem ? Math.round(feet(f.elev)) + ' ft' : '');
   setHum(me.v, me.burnT > 0 ? Math.min(1, me.burnT/NEON.burnS + 0.35) : 0);
+  setWind(me.done || me.spinT > 0 ? 0 : me.steerIn, me.v);
   $('burnPip').textContent = me.spinT > 0 ? 'SPUN OUT' : me.burnT > 0 ? 'NITRO' : me.fuel ? '' : 'OUT OF NITRO';
   $('burnPip').classList.toggle('hot', me.burnT > 0);
   const fit = paintMap($('minimap'), graph, mapBox, R.line, T.closed, 'mm|' + mapId + '|' + R.course.sig, true);
@@ -7721,6 +7961,7 @@ function wireUI(){
   bindBuildMap();
   document.querySelectorAll('#camSeg .btn').forEach(b => b.addEventListener('click', () => setCam(b.dataset.cam)));
   document.querySelectorAll('#ghostSeg .btn').forEach(b => b.addEventListener('click', () => setGhosts(b.dataset.ghost === '1')));
+  document.querySelectorAll('#ghostHitSeg .btn').forEach(b => b.addEventListener('click', () => setGhostHit(b.dataset.hit === '1')));
   document.querySelectorAll('#dirSeg .btn').forEach(b => b.addEventListener('click', () => setReverse(b.dataset.dir === 'rev')));
   document.querySelectorAll('.steerSeg .btn').forEach(b => b.addEventListener('click', () => setSteerMode(b.dataset.steer)));
   $('scaleSel').addEventListener('change', e => setScale(+e.target.value));
