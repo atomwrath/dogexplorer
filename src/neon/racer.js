@@ -108,6 +108,7 @@ function stepRacer(r, T, input, env, dt){
   const dsdt = r.v*Math.cos(theta)/Math.max(0.35, 1 - r.d*f.k);
   r.yaw += (spinning ? 0 : input.steer)*rate*grip*dt + NEON.railAssist*f.k*dsdt*dt;
   r.steerIn = input.steer;
+  r.throttleIn = input.throttle || 0; r.brakeIn = input.brake || 0;   // for the engine and brake sounds
 
   // --- position ---
   theta = angNorm(r.yaw - f.yaw);
@@ -166,6 +167,17 @@ function raceDistance(T){ return T.closed ? T.L*T.laps : T.L; }
 
 /* A rival's hands on the controls. Looks down the track, picks a corner speed and a
    lane, and steers for it. `others` is every racer (itself included). */
+/* THE REAL CORNER LIMIT. A board follows a bend of curvature k at speed v when the steering
+   can supply the yaw rate the rail assist does not: (1 - railAssist)*k*v, against a lock
+   that fades with speed, steerRate/(1 + v*steerFade). Solving that for v gives the fastest
+   a bend can be taken at all. The old sum (sqrt(15/k)) was a guess that came out far below
+   this -- a flat-out rider with no brake at all beat every rival by 20-30%. */
+function cornerLimit(k){
+  const kk = Math.max(k, 1e-5);
+  const C = NEON.steerRate/((1 - NEON.railAssist)*kk);
+  const f = NEON.steerFade;
+  return (-1 + Math.sqrt(1 + 4*f*C))/(2*f);
+}
 function rivalInput(r, T, others, env, t){
   const sk = r.skill;
   // a rival with no style (the tests build bare ones) drives the old neutral algorithm
@@ -178,10 +190,13 @@ function rivalInput(r, T, others, env, t){
      one arrives too hot and meets the bumper, which is the whole reason bumpers exist. */
   const wob = sk.wobble*st.wobble;
   const nerve = 1 + wob*0.45*Math.sin(t*0.23 + r.seed*2.1);
-  const vCorner = Math.sqrt((15*sk.corner*st.corner*nerve)/Math.max(bend.k, 1e-4));
+  const vCorner = cornerLimit(bend.k)*sk.grip*st.corner*nerve;
   /* The ceiling the hill allows, not the flat-ground one -- otherwise a rival brakes all
      the way down a descent to hold a number that gravity has already made meaningless. */
-  const vTop = gradeTopSpeed(r, slopeAhead(T, r.s, look*1.5), env.gravity)*sk.pace*st.pace*r.paceMul;
+  /* The rival's own board already carries its pace (main.js gives it speedK x pace), so
+     the grade ceiling for THAT board is the target -- multiplying pace in again here
+     asked for a speed physics could never deliver, which just meant "flat out". */
+  const vTop = gradeTopSpeed(r, slopeAhead(T, r.s, look*1.5), env.gravity);
   let vWant = Math.min(vTop, vCorner);
   // lane: own lane on the straights, inside of the bend when one is coming
   // the narrower of here and where we are about to be: a road necks down into a trail
@@ -374,4 +389,4 @@ function rankRacers(racers){
   return order;
 }
 
-export { angNorm, makeRacer, stepRacer, topSpeed, gradeTopSpeed, slopeAhead, raceDistance, rivalInput, resolveContacts, rankRacers };
+export { cornerLimit, angNorm, makeRacer, stepRacer, topSpeed, gradeTopSpeed, slopeAhead, raceDistance, rivalInput, resolveContacts, rankRacers };

@@ -78,25 +78,27 @@ const NEON = {
   bodyWide:   1.5,
 };
 
-/* Rival pace as a fraction of what the player's board can do on the flat, and how much
-   of the grip the corner-speed sum thinks it has.
+/* Rival boards. `pace` multiplies the rival's own top speed (and thrust, as the square,
+   the same way a speed class does), so above 1 a rival genuinely out-runs your unboosted
+   board on the straights. `grip` is the fraction of the true corner limit (racer.js
+   cornerLimit) it dares to use: 1 is on the edge, below it lifts off early.
 
-   The whole ladder moved up one rung: what used to be the hardest setting is now the
-   easiest, because rivals that lose ground on every straight are not opponents, they are
-   scenery. `pace` above 1 means a rival out-runs the player's unboosted top speed, so on
-   Fair and Fierce a rocket is not a treat -- it is how you stay in touch, and picking
-   where to spend it is the race. */
+   Calibrated against a rider who holds full throttle and never touches the brake (the
+   simplest way a person drives this game): on the test circuits Chill finishes a little
+   behind that rider, Fair a touch ahead, Fierce clearly ahead -- so a clean run with no
+   nitro beats Chill, and Fair and Fierce need the nitro spent well. */
 const NEON_SKILL = {
-  chill:  {pace: 1.06, corner: 1.10, wobble: 0.16, label: 'Chill'},
-  fair:   {pace: 1.14, corner: 1.22, wobble: 0.09, label: 'Fair'},
-  fierce: {pace: 1.22, corner: 1.34, wobble: 0.04, label: 'Fierce'},
+  chill:  {pace: 0.90, grip: 0.86, wobble: 0.14, label: 'Chill'},
+  fair:   {pace: 1.0, grip: 0.93, wobble: 0.08, label: 'Fair'},
+  fierce: {pace: 1.05, grip: 0.98, wobble: 0.04, label: 'Fierce'},
 };
 
 /* DRIVING STYLES. The field is animals, and they should not all drive one algorithm
    with different paint. Each species maps to a style; the style bends rivalInput and
    the contact physics:
-     pace     top-speed multiplier on top of the Pace setting
-     corner   how hot it takes a bend (above 1 means it WILL find the bumper sometimes)
+     pace     its board's top speed, on top of the Pace setting's
+     corner   share of the Pace setting's grip it uses (above 1 goes past the real limit
+              and WILL find the bumper)
      wobble   how much its line wanders (multiplies the Pace setting's wobble)
      avoid    how early and how wide it goes round someone (0.5 barely bothers, 1.6 gives
               a wide berth and eases off rather than squeeze by)
@@ -112,12 +114,12 @@ const NEON_SKILL = {
    Bruisers are the big grazers; the skilled are the predators; the timid are the small
    prey animals; the reckless are the ones that climb cliffs and raid bins. */
 const NEON_STYLE = {
-  bruiser:  {pace: 0.98, corner: 1.00, wobble: 0.8, avoid: 0.45, aggro: 0.75, mass: 1.7, hunt: 0.6, burn: 'straight', sight: 1.0, edge: 1, apex: 0.45, label: 'Bruiser'},
-  skilled:  {pace: 1.05, corner: 1.06, wobble: 0.45, avoid: 1.15, aggro: 0.10, mass: 1.0, hunt: 1.0, burn: 'straight', sight: 0.6, edge: 1, apex: 0.6, label: 'Racer'},
-  timid:    {pace: 1.00, corner: 0.93, wobble: 0.9, avoid: 1.65, aggro: 0.00, mass: 0.7, hunt: 1.2, burn: 'straight', sight: 1.2, edge: 1.4, apex: 0.4, label: 'Skittish'},
-  reckless: {pace: 0.93, corner: 1.08, wobble: 2.2, avoid: 0.75, aggro: 0.35, mass: 1.1, hunt: 1.0, burn: 'any', sight: 0.9, edge: -0.6, apex: 1.0, label: 'Reckless'},
+  bruiser:  {pace: 0.99, corner: 1.00, wobble: 0.8, avoid: 0.45, aggro: 0.75, mass: 1.7, hunt: 0.6, burn: 'straight', sight: 1.0, edge: 1, apex: 0.45, label: 'Bruiser'},
+  skilled:  {pace: 1.03, corner: 1.02, wobble: 0.45, avoid: 1.15, aggro: 0.10, mass: 1.0, hunt: 1.0, burn: 'straight', sight: 0.6, edge: 1, apex: 0.6, label: 'Racer'},
+  timid:    {pace: 0.98, corner: 0.95, wobble: 0.9, avoid: 1.65, aggro: 0.00, mass: 0.7, hunt: 1.2, burn: 'straight', sight: 1.2, edge: 1.4, apex: 0.4, label: 'Skittish'},
+  reckless: {pace: 0.99, corner: 1.08, wobble: 2.2, avoid: 0.75, aggro: 0.35, mass: 1.1, hunt: 1.0, burn: 'any', sight: 0.9, edge: -0.6, apex: 1.0, label: 'Reckless'},
   steady:   {pace: 0.99, corner: 0.97, wobble: 0.5, avoid: 1.25, aggro: 0.00, mass: 1.0, hunt: 1.0, burn: 'straight', sight: 1.1, edge: 1.2, apex: 0.5, label: 'Steady'},
-  hunter:   {pace: 1.01, corner: 1.02, wobble: 0.7, avoid: 1.0, aggro: 0.20, mass: 0.9, hunt: 1.7, burn: 'any', sight: 0.9, edge: 1, apex: 0.55, label: 'Scavenger'},
+  hunter:   {pace: 1.00, corner: 1.00, wobble: 0.7, avoid: 1.0, aggro: 0.20, mass: 0.9, hunt: 1.7, burn: 'any', sight: 0.9, edge: 1, apex: 0.55, label: 'Scavenger'},
 };
 const SPECIES_STYLE = {
   bear: 'bruiser', moose: 'bruiser', bighorn: 'bruiser',

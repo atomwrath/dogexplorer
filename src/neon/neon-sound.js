@@ -16,6 +16,9 @@ let jet = null;
    at speed. Louder the harder you steer and the faster you go, pitched up with both, and
    panned to the side you are leaning towards, so a long sweeper sounds like one. */
 let wind = null;
+/* THE BRAKE: a bright scrub of noise, like a deck dragging on the track -- as loud as you
+   are braking hard and moving fast, silent the moment you let go or stop. */
+let brakeN = null;
 
 function noiseBuffer(){
   const n = Math.floor(AC.sampleRate);
@@ -95,6 +98,37 @@ function buildWind(dest){
   chain.connect(dest);
   src.start(AC.currentTime + 0.03);
   wind = {src, band, hi, gain, pan};
+  buildBrake(dest, src.buffer);
+}
+function buildBrake(dest, buffer){
+  if(brakeN) return;
+  const src = AC.createBufferSource();
+  src.buffer = buffer;
+  src.loop = true;
+  const hi = AC.createBiquadFilter();
+  hi.type = 'highpass';
+  hi.frequency.setValueAtTime(1400, AC.currentTime);
+  const band = AC.createBiquadFilter();
+  band.type = 'bandpass';
+  band.frequency.setValueAtTime(2600, AC.currentTime);
+  band.Q.setValueAtTime(1.1, AC.currentTime);
+  const gain = AC.createGain();
+  gain.gain.setValueAtTime(0.0001, AC.currentTime);
+  src.connect(hi).connect(band).connect(gain).connect(dest);
+  src.start(AC.currentTime + 0.03);
+  brakeN = {src, hi, band, gain};
+}
+function brakeLevel(brake, v){
+  const b = Math.max(0, Math.min(1, brake || 0));
+  const spool = Math.max(0, Math.min(1, v/20));
+  return v < 0.4 ? 0 : b*(0.015 + 0.06*spool);
+}
+function setBrakeSound(brake, v){
+  if(!brakeN || !AC) return;
+  const tN = AC.currentTime + 0.04;
+  const g = brakeLevel(brake, v);
+  brakeN.gain.gain.linearRampToValueAtTime(g < 0.0005 ? 0.0001 : g, tN);
+  brakeN.band.frequency.linearRampToValueAtTime(1800 + Math.min(1, v/24)*2200, tN);
 }
 /* steer: -1..1 as the board uses it (+ is left). v: m/s. */
 function windLevel(steer, v){
@@ -115,20 +149,29 @@ function setWind(steer, v){
   if(wind.pan) wind.pan.pan.linearRampToValueAtTime(Math.max(-0.7, Math.min(0.7, -(steer || 0)*0.7)), tN);
 }
 
-/* v: speed in m/s. burn: 0 (coasting) .. 1 (mid-burn). */
-function setHum(v, burn){
-  if(!jet || !AC) return;
-  const tN = AC.currentTime + 0.04;
+/* v: speed in m/s. burn: 0 (coasting) .. 1 (mid-burn). throttle: 0..1, the GAS -- the
+   motor is only audible while it is being driven, so letting off goes quiet and pressing
+   gas spools it back up. A burn roars regardless. (Omitted, throttle counts as held.) */
+function humLevel(v, burn, throttle){
   const b = Math.max(0, Math.min(1, burn || 0));
   const spool = Math.min(1, v/24);
+  const th = throttle == null ? 1 : Math.max(0, Math.min(1, throttle));
+  // at a standstill with the gas down you still hear it idle up, just quietly
+  const drive = th*(0.012 + spool*0.030) + (v < 0.3 && th > 0 ? 0.006 : 0);
+  return {jet: drive + b*0.055, sub: th*(0.008 + spool*0.012) + b*0.03, b, spool};
+}
+function setHum(v, burn, throttle){
+  if(!jet || !AC) return;
+  const tN = AC.currentTime + 0.06;
+  const L = humLevel(v, burn, throttle);
+  const b = L.b, spool = L.spool;
   jet.band.frequency.linearRampToValueAtTime(380 + spool*760 + b*900, tN);
   jet.band.Q.linearRampToValueAtTime(0.75 + b*0.9, tN);
   // the lowpass is what "opening the throttle" sounds like: the top end arrives with it
   jet.low.frequency.linearRampToValueAtTime(700 + spool*1900 + b*5200, tN);
-  jet.gain.gain.linearRampToValueAtTime(v < 0.3 && b <= 0 ? 0.0001
-    : 0.012 + spool*0.030 + b*0.055, tN);
+  jet.gain.gain.linearRampToValueAtTime(Math.max(0.0001, L.jet), tN);
   jet.sub.frequency.linearRampToValueAtTime(62 + spool*26 + b*22, tN);
-  jet.subGain.gain.linearRampToValueAtTime(v < 0.3 ? 0.0001 : 0.008 + spool*0.012 + b*0.03, tN);
+  jet.subGain.gain.linearRampToValueAtTime(Math.max(0.0001, L.sub), tN);
 }
 
 /* The moment a burn lights: a short upward whoosh laid over the running jet, so the
@@ -179,7 +222,11 @@ function stopHum(){
   jet.gain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.1);
   jet.subGain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.1);
   if(wind) wind.gain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.1);
+  if(brakeN) brakeN.gain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.1);
 }
+function brakeState(){ return brakeN; }
+function humState(){ return jet; }
 function windState(){ return wind; }
 
-export { startHum, setHum, stopHum, burnSound, cellSound, setWind, windLevel, windState };
+export { startHum, setHum, humLevel, stopHum, burnSound, cellSound, setWind, windLevel, windState,
+         setBrakeSound, brakeLevel, brakeState, humState };

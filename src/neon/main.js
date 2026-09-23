@@ -34,7 +34,7 @@ import { makeRacer, stepRacer, rivalInput, resolveContacts, rankRacers, raceDist
 import { buildEnvironment, buildTrackMesh, clearTrackMesh, bumperPulse, updateScene, clearSmoke, setGridStyle } from './neon-scene.js';
 import { makeRider, poseRider, disposeRider } from './riders.js';
 import { initNeonInput, readNeonInput, resetNeonInput, resetSteerTouch } from './neon-input.js';
-import { startHum, setHum, stopHum, burnSound, cellSound, setWind } from './neon-sound.js';
+import { startHum, setHum, stopHum, burnSound, cellSound, setWind, setBrakeSound } from './neon-sound.js';
 import { placeCells, stepCells, buildCellMeshes, updateCellMeshes, clearCells } from './cells.js';
 import { makeRecorder, recordFrame, finishRecording, bestGhosts, keepGhost,
          makeGhostRacer, stepGhost } from './ghosts.js';
@@ -72,6 +72,7 @@ const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale
                   // screen edges (ctlInset) and above the bottom edge (ctlBottom), in px
                   ctlInset: 24, ctlBottom: 16,    // ctlInset defaults AT the swipe-safe floor, not below it
                   steerMode: 'pad',               // 'pad' (drag) or 'buttons' (left/right)
+                  ctlSide: 'left',                // which corner the steering sits in; pedals take the other
                   // background grid: line thickness in slider steps (0 = always one pixel)
                   // and a hue turn in degrees (0 = the original colours)
                   gridThick: 2, gridHue: 0, gridGlow: 100};   // gridGlow: percent, 0..200
@@ -572,6 +573,17 @@ function applySteerMode(){
   document.body.classList.toggle('steer-buttons', settings.steerMode === 'buttons');
   document.querySelectorAll('.steerSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.steer === settings.steerMode));
 }
+/* STEER ON: which corner the steering is in. Just a body class (see the CSS), so like the
+   steer mode it can change mid-race from the pause card. */
+function applyCtlSide(){
+  document.body.classList.toggle('ctl-swap', settings.ctlSide === 'right');
+  document.querySelectorAll('.sideSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.side === settings.ctlSide));
+}
+function setCtlSide(side){
+  if((side !== 'left' && side !== 'right') || settings.ctlSide === side) return;
+  settings.ctlSide = side;
+  applyCtlSide(); neonWriteStore();
+}
 function setSteerMode(mode){
   if((mode !== 'pad' && mode !== 'buttons') || settings.steerMode === mode) return;
   settings.steerMode = mode;
@@ -801,7 +813,7 @@ function pickRivals(n, course, playerWho){
   return keys.slice(0, n).map((key, i) => ({
     key, name: SPECIES[key].nm, color: RIVAL_COLORS[i % RIVAL_COLORS.length],
     // a deer is quicker than a possum, but only just: this is a board race, not a footrace
-    paceMul: 0.95 + 0.07*(SPECIES[key].speed - lo)/Math.max(0.01, hi - lo),
+    paceMul: 0.98 + 0.03*(SPECIES[key].speed - lo)/Math.max(0.01, hi - lo),
     seed: 1 + Math.floor(rnd()*1e6),
   }));
 }
@@ -837,7 +849,9 @@ function startRace(){
       lap: T.closed ? -1 : 0}, o));
   };
   cast.forEach((c, i) => {
-    racers.push(place(i, {name: c.name, skill: NEON_SKILL[settings.skill], paceMul: c.paceMul, speedK,
+    // a rival's board is as quick as its pace: the class, its skill level, its style, its species
+    const sk = NEON_SKILL[settings.skill], st = styleFor(c.key);
+    racers.push(place(i, {name: c.name, skill: sk, paceMul: c.paceMul, speedK: speedK*sk.pace*st.pace*c.paceMul,
       lane: ((i % 4) - 1.5)/2.2, seed: c.seed % 1000, color: c.color, emo: SPECIES[c.key].emo,
       riderId: 'w:' + c.key, style: styleFor(c.key), styleKey: c.key}));
     riders.push(makeRider({kind: 'wild', key: c.key}, c.color, c.seed, sizeK));
@@ -1096,7 +1110,11 @@ function drawRace(dt){
   const pct = Math.round(me.slope*100);
   $('slopeVal').textContent = !R.gravity ? '' : pct > 1 ? '▲ ' + pct + '%' : pct < -1 ? '▼ ' + (-pct) + '%'
     : (dem ? Math.round(feet(f.elev)) + ' ft' : '');
-  setHum(me.v, me.burnT > 0 ? Math.min(1, me.burnT/NEON.burnS + 0.35) : 0);
+  /* The motor answers the GAS: no throttle, no hum (a burn still roars on its own). The
+     brake gets its own scrub, as loud as the braking is hard and the board is fast. */
+  const live = !me.done && R.phase !== 'count';
+  setHum(me.v, me.burnT > 0 ? Math.min(1, me.burnT/NEON.burnS + 0.35) : 0, live ? me.throttleIn || 0 : 0);
+  setBrakeSound(live ? me.brakeIn || 0 : 0, me.v);
   setWind(me.done || me.spinT > 0 ? 0 : me.steerIn, me.v);
   $('burnPip').textContent = me.spinT > 0 ? 'SPUN OUT' : me.burnT > 0 ? 'NITRO' : me.fuel ? '' : 'OUT OF NITRO';
   $('burnPip').classList.toggle('hot', me.burnT > 0);
@@ -1168,6 +1186,7 @@ function wireUI(){
   document.querySelectorAll('#ghostHitSeg .btn').forEach(b => b.addEventListener('click', () => setGhostHit(b.dataset.hit === '1')));
   document.querySelectorAll('#dirSeg .btn').forEach(b => b.addEventListener('click', () => setReverse(b.dataset.dir === 'rev')));
   document.querySelectorAll('.steerSeg .btn').forEach(b => b.addEventListener('click', () => setSteerMode(b.dataset.steer)));
+  document.querySelectorAll('.sideSeg .btn').forEach(b => b.addEventListener('click', () => setCtlSide(b.dataset.side)));
   $('scaleSel').addEventListener('change', e => setScale(+e.target.value));
   $('riderSel').addEventListener('change', e => { settings.rider = e.target.value; neonWriteStore(); });
   $('mapSel').addEventListener('change', e => {
@@ -1229,6 +1248,7 @@ async function bootNeon(){
   applyControlLayout();
   applyGrid();
   applySteerMode();
+  applyCtlSide();
   loadKennel();
   wireUI();
   fillRiderSelect();
@@ -1257,5 +1277,5 @@ bootNeon();
 
 export { bootNeon, loadNeonMap, loadMapList, startRace, quitToMenu, setGravity, setReverse, setScale, setClass, setCam, setGhosts, setGhostHit, cycleCam,
          setCourseMode, openBuild, closeBuild, saveBuild, deleteBuild, syncBuild, neonReadStore, applyGrid,
-         pauseRace, resumeRace, togglePause, setCtlInset, setCtlBottom, resetControlLayout, setSteerMode,
+         pauseRace, resumeRace, togglePause, setCtlInset, setCtlBottom, resetControlLayout, setSteerMode, setCtlSide,
          selectCourse, neonState, stepRace, trackFor, modeChip };

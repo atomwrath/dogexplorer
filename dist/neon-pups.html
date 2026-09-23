@@ -16,7 +16,7 @@
    nothing to say to a black screen. */
 :root{
   --bg:#04050d; --panel:rgba(8,12,28,.88); --line:#1b2a66;
-  --cyan:#19f0ff; --mag:#ff2bd6; --lime:#b6ff3c; --text:#cfe0ff; --dim:#6f82b8;
+  --cyan:#19f0ff; --mag:#ff2bd6; --lime:#b6ff3c; --red:#ff3b4e; --text:#cfe0ff; --dim:#6f82b8;
   --safe-b:env(safe-area-inset-bottom, 0px); --safe-l:env(safe-area-inset-left, 0px);
   --safe-r:env(safe-area-inset-right, 0px); --safe-t:env(safe-area-inset-top, 0px);
   /* Touch control position, adjustable on the pause screen (see #pauseCard, main.js
@@ -189,6 +189,12 @@ body[data-screen="race"] #hud, body[data-screen="count"] #hud, body[data-screen=
   justify-content:space-between; gap:12px; touch-action:none;
   padding:0 calc(var(--ctl-inset) + var(--safe-r)) 0 calc(var(--ctl-inset) + var(--safe-l)); pointer-events:none;}
 body.touch #touchCtl{display:flex;}
+/* STEER ON THE RIGHT (settings.ctlSide): the row flips, so the steering sits in the right
+   corner and gas/brake/nitro in the left, and the cluster mirrors too -- gas stays on the
+   side nearest the middle of the screen, where the thumb rests. */
+body.ctl-swap #touchCtl{flex-direction:row-reverse;}
+body.ctl-swap #tAccel{grid-column:2;}
+body.ctl-swap #tBoost, body.ctl-swap #tBrake{grid-column:1;}
 /* The speed readout STAYS AT THE BOTTOM on a touch screen. It used to be pushed up above
    the thumb controls, which put a 44px number across the middle of the road -- exactly
    where you are looking. The controls live in the two bottom corners, so the middle of
@@ -204,16 +210,12 @@ body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
    #tSteerBtns below, where pointer-events:none on tLeft/tRight means neither one is ever
    really the event target to begin with. */
 .tbtn:active, .tbtn.pressed{background:rgba(25,240,255,.2);}
-/* Icons rather than words: two pedals (gas tall, brake wide -- the shapes a driver's foot
-   already knows) and a nitro bottle, drawn as SVG strokes in currentColor so they glow in
-   the button's own colour and never fall back to an emoji font. */
-#tAccel, #tBrake, #tBoost{font-size:30px; display:flex; align-items:center; justify-content:center; padding:0;}
-.ticon{width:1.75em; height:1.75em; fill:none; stroke:currentColor; stroke-width:2.2;
-  stroke-linecap:round; stroke-linejoin:round; pointer-events:none; filter:drop-shadow(0 0 3px currentColor);}
-.ticon .fillIcon{fill:currentColor; stroke-width:1.2;}
-/* gas is the green one, so the two pedals are told apart by colour as well as shape */
+/* Words, coloured by job: GAS green, BRAKE red, NITRO the magenta it has always been. */
+#tAccel, #tBrake, #tBoost{font-size:14px; font-weight:700; letter-spacing:.06em;}
 #tAccel{color:var(--lime); border-color:var(--lime);}
-#tAccel:active, #tAccel.pressed{background:rgba(182,255,60,.18);}
+#tAccel:active, #tAccel.pressed{background:rgba(182,255,60,.2);}
+#tBrake{color:var(--red); border-color:var(--red);}
+#tBrake:active, #tBrake.pressed{background:rgba(255,59,78,.22);}
 
 /* STEERING: either the drag pad or the two buttons, never both -- settings.steerMode
    (see main.js applySteerMode) toggles a body class, and that is the only thing either
@@ -266,7 +268,7 @@ body.steer-buttons #tSteerBtns{display:flex;}
   #tSteer span{font-size:24px;}
   #tSteerBtns{width:min(50vw,320px); height:104px; gap:12px;}
   #tSteerBtns .tbtn{width:auto; font-size:32px;}
-  #tAccel, #tBrake, #tBoost{font-size:36px;}
+  #tAccel, #tBrake, #tBoost{font-size:16px;}
 }
 
 #count{position:fixed; inset:0; display:none; align-items:center; justify-content:center; pointer-events:none;
@@ -389,6 +391,12 @@ body[data-screen="count"] #count{display:flex;}
             <button class="btn" data-steer="buttons">Buttons</button>
           </span>
         </div>
+        <div class="row">Steer on
+          <span class="seg sideSeg">
+            <button class="btn on" data-side="left">Left</button>
+            <button class="btn" data-side="right">Right</button>
+          </span>
+        </div>
         <label class="row">Grid lines
           <input type="range" class="gridThick" min="0" max="10" step="1" aria-label="Background grid line thickness">
         </label>
@@ -484,17 +492,9 @@ body[data-screen="count"] #count{display:flex;}
     <div id="tSteer"><span>◀</span><b>STEER</b><span>▶</span></div>
     <div id="tSteerBtns"><button class="tbtn" id="tLeft" aria-label="Steer left">◀</button><button class="tbtn" id="tRight" aria-label="Steer right">▶</button></div>
     <div class="tgrp">
-      <!-- Icons are inline SVG in currentColor, so they take the button's neon colour and
-           scale with its font-size. Gas and brake are the two pedals a driver knows by
-           shape -- tall and narrow on the right, short and wide beside it -- and nitro is
-           the same bottle the HUD rack shows, with a bolt on it. -->
-      <button class="tbtn" id="tAccel" aria-label="Accelerate"><svg class="ticon" viewBox="0 0 32 32" aria-hidden="true">
-        <rect x="10" y="3" width="12" height="26" rx="3"/><path d="M13 8h6M13 12h6M13 16h6M13 20h6M13 24h6"/></svg></button>
-      <button class="tbtn" id="tBrake" aria-label="Brake"><svg class="ticon" viewBox="0 0 32 32" aria-hidden="true">
-        <rect x="4" y="9" width="24" height="15" rx="3"/><path d="M8 13.5h16M8 16.5h16M8 19.5h16"/></svg></button>
-      <button class="tbtn hot" id="tBoost" aria-label="Nitro"><svg class="ticon" viewBox="0 0 32 32" aria-hidden="true">
-        <path d="M13 3h6v4h-6z"/><rect x="9" y="7" width="14" height="23" rx="5"/>
-        <path class="fillIcon" d="M17.5 11l-5 8h4l-1.5 7 5-8.5h-4z"/></svg></button>
+      <button class="tbtn" id="tAccel">GAS</button>
+      <button class="tbtn" id="tBrake">BRAKE</button>
+      <button class="tbtn hot" id="tBoost">NITRO</button>
     </div>
   </div>
 </div>
@@ -514,6 +514,12 @@ body[data-screen="count"] #count{display:flex;}
       <span class="seg steerSeg">
         <button class="btn on" data-steer="pad">Pad</button>
         <button class="btn" data-steer="buttons">Buttons</button>
+      </span>
+    </div>
+    <div class="row">Steer on
+      <span class="seg sideSeg">
+        <button class="btn on" data-side="left">Left</button>
+        <button class="btn" data-side="right">Right</button>
       </span>
     </div>
     <div class="row">Controls: In / Out
@@ -3047,25 +3053,27 @@ const NEON = {
   bodyWide:   1.5,
 };
 
-/* Rival pace as a fraction of what the player's board can do on the flat, and how much
-   of the grip the corner-speed sum thinks it has.
+/* Rival boards. `pace` multiplies the rival's own top speed (and thrust, as the square,
+   the same way a speed class does), so above 1 a rival genuinely out-runs your unboosted
+   board on the straights. `grip` is the fraction of the true corner limit (racer.js
+   cornerLimit) it dares to use: 1 is on the edge, below it lifts off early.
 
-   The whole ladder moved up one rung: what used to be the hardest setting is now the
-   easiest, because rivals that lose ground on every straight are not opponents, they are
-   scenery. `pace` above 1 means a rival out-runs the player's unboosted top speed, so on
-   Fair and Fierce a rocket is not a treat -- it is how you stay in touch, and picking
-   where to spend it is the race. */
+   Calibrated against a rider who holds full throttle and never touches the brake (the
+   simplest way a person drives this game): on the test circuits Chill finishes a little
+   behind that rider, Fair a touch ahead, Fierce clearly ahead -- so a clean run with no
+   nitro beats Chill, and Fair and Fierce need the nitro spent well. */
 const NEON_SKILL = {
-  chill:  {pace: 1.06, corner: 1.10, wobble: 0.16, label: 'Chill'},
-  fair:   {pace: 1.14, corner: 1.22, wobble: 0.09, label: 'Fair'},
-  fierce: {pace: 1.22, corner: 1.34, wobble: 0.04, label: 'Fierce'},
+  chill:  {pace: 0.90, grip: 0.86, wobble: 0.14, label: 'Chill'},
+  fair:   {pace: 1.0, grip: 0.93, wobble: 0.08, label: 'Fair'},
+  fierce: {pace: 1.07, grip: 0.98, wobble: 0.04, label: 'Fierce'},
 };
 
 /* DRIVING STYLES. The field is animals, and they should not all drive one algorithm
    with different paint. Each species maps to a style; the style bends rivalInput and
    the contact physics:
-     pace     top-speed multiplier on top of the Pace setting
-     corner   how hot it takes a bend (above 1 means it WILL find the bumper sometimes)
+     pace     its board's top speed, on top of the Pace setting's
+     corner   share of the Pace setting's grip it uses (above 1 goes past the real limit
+              and WILL find the bumper)
      wobble   how much its line wanders (multiplies the Pace setting's wobble)
      avoid    how early and how wide it goes round someone (0.5 barely bothers, 1.6 gives
               a wide berth and eases off rather than squeeze by)
@@ -3081,12 +3089,12 @@ const NEON_SKILL = {
    Bruisers are the big grazers; the skilled are the predators; the timid are the small
    prey animals; the reckless are the ones that climb cliffs and raid bins. */
 const NEON_STYLE = {
-  bruiser:  {pace: 0.98, corner: 1.00, wobble: 0.8, avoid: 0.45, aggro: 0.75, mass: 1.7, hunt: 0.6, burn: 'straight', sight: 1.0, edge: 1, apex: 0.45, label: 'Bruiser'},
-  skilled:  {pace: 1.05, corner: 1.06, wobble: 0.45, avoid: 1.15, aggro: 0.10, mass: 1.0, hunt: 1.0, burn: 'straight', sight: 0.6, edge: 1, apex: 0.6, label: 'Racer'},
-  timid:    {pace: 1.00, corner: 0.93, wobble: 0.9, avoid: 1.65, aggro: 0.00, mass: 0.7, hunt: 1.2, burn: 'straight', sight: 1.2, edge: 1.4, apex: 0.4, label: 'Skittish'},
-  reckless: {pace: 0.93, corner: 1.08, wobble: 2.2, avoid: 0.75, aggro: 0.35, mass: 1.1, hunt: 1.0, burn: 'any', sight: 0.9, edge: -0.6, apex: 1.0, label: 'Reckless'},
+  bruiser:  {pace: 0.99, corner: 1.00, wobble: 0.8, avoid: 0.45, aggro: 0.75, mass: 1.7, hunt: 0.6, burn: 'straight', sight: 1.0, edge: 1, apex: 0.45, label: 'Bruiser'},
+  skilled:  {pace: 1.03, corner: 1.02, wobble: 0.45, avoid: 1.15, aggro: 0.10, mass: 1.0, hunt: 1.0, burn: 'straight', sight: 0.6, edge: 1, apex: 0.6, label: 'Racer'},
+  timid:    {pace: 0.98, corner: 0.95, wobble: 0.9, avoid: 1.65, aggro: 0.00, mass: 0.7, hunt: 1.2, burn: 'straight', sight: 1.2, edge: 1.4, apex: 0.4, label: 'Skittish'},
+  reckless: {pace: 0.99, corner: 1.08, wobble: 2.2, avoid: 0.75, aggro: 0.35, mass: 1.1, hunt: 1.0, burn: 'any', sight: 0.9, edge: -0.6, apex: 1.0, label: 'Reckless'},
   steady:   {pace: 0.99, corner: 0.97, wobble: 0.5, avoid: 1.25, aggro: 0.00, mass: 1.0, hunt: 1.0, burn: 'straight', sight: 1.1, edge: 1.2, apex: 0.5, label: 'Steady'},
-  hunter:   {pace: 1.01, corner: 1.02, wobble: 0.7, avoid: 1.0, aggro: 0.20, mass: 0.9, hunt: 1.7, burn: 'any', sight: 0.9, edge: 1, apex: 0.55, label: 'Scavenger'},
+  hunter:   {pace: 1.00, corner: 1.00, wobble: 0.7, avoid: 1.0, aggro: 0.20, mass: 0.9, hunt: 1.7, burn: 'any', sight: 0.9, edge: 1, apex: 0.55, label: 'Scavenger'},
 };
 const SPECIES_STYLE = {
   bear: 'bruiser', moose: 'bruiser', bighorn: 'bruiser',
@@ -4435,6 +4443,7 @@ function stepRacer(r, T, input, env, dt){
   const dsdt = r.v*Math.cos(theta)/Math.max(0.35, 1 - r.d*f.k);
   r.yaw += (spinning ? 0 : input.steer)*rate*grip*dt + NEON.railAssist*f.k*dsdt*dt;
   r.steerIn = input.steer;
+  r.throttleIn = input.throttle || 0; r.brakeIn = input.brake || 0;   // for the engine and brake sounds
 
   // --- position ---
   theta = angNorm(r.yaw - f.yaw);
@@ -4493,6 +4502,17 @@ function raceDistance(T){ return T.closed ? T.L*T.laps : T.L; }
 
 /* A rival's hands on the controls. Looks down the track, picks a corner speed and a
    lane, and steers for it. `others` is every racer (itself included). */
+/* THE REAL CORNER LIMIT. A board follows a bend of curvature k at speed v when the steering
+   can supply the yaw rate the rail assist does not: (1 - railAssist)*k*v, against a lock
+   that fades with speed, steerRate/(1 + v*steerFade). Solving that for v gives the fastest
+   a bend can be taken at all. The old sum (sqrt(15/k)) was a guess that came out far below
+   this -- a flat-out rider with no brake at all beat every rival by 20-30%. */
+function cornerLimit(k){
+  const kk = Math.max(k, 1e-5);
+  const C = NEON.steerRate/((1 - NEON.railAssist)*kk);
+  const f = NEON.steerFade;
+  return (-1 + Math.sqrt(1 + 4*f*C))/(2*f);
+}
 function rivalInput(r, T, others, env, t){
   const sk = r.skill;
   // a rival with no style (the tests build bare ones) drives the old neutral algorithm
@@ -4505,10 +4525,13 @@ function rivalInput(r, T, others, env, t){
      one arrives too hot and meets the bumper, which is the whole reason bumpers exist. */
   const wob = sk.wobble*st.wobble;
   const nerve = 1 + wob*0.45*Math.sin(t*0.23 + r.seed*2.1);
-  const vCorner = Math.sqrt((15*sk.corner*st.corner*nerve)/Math.max(bend.k, 1e-4));
+  const vCorner = cornerLimit(bend.k)*sk.grip*st.corner*nerve;
   /* The ceiling the hill allows, not the flat-ground one -- otherwise a rival brakes all
      the way down a descent to hold a number that gravity has already made meaningless. */
-  const vTop = gradeTopSpeed(r, slopeAhead(T, r.s, look*1.5), env.gravity)*sk.pace*st.pace*r.paceMul;
+  /* The rival's own board already carries its pace (main.js gives it speedK x pace), so
+     the grade ceiling for THAT board is the target -- multiplying pace in again here
+     asked for a speed physics could never deliver, which just meant "flat out". */
+  const vTop = gradeTopSpeed(r, slopeAhead(T, r.s, look*1.5), env.gravity);
   let vWant = Math.min(vTop, vCorner);
   // lane: own lane on the straights, inside of the bend when one is coming
   // the narrower of here and where we are about to be: a road necks down into a trail
@@ -6263,6 +6286,9 @@ let jet = null;
    at speed. Louder the harder you steer and the faster you go, pitched up with both, and
    panned to the side you are leaning towards, so a long sweeper sounds like one. */
 let wind = null;
+/* THE BRAKE: a bright scrub of noise, like a deck dragging on the track -- as loud as you
+   are braking hard and moving fast, silent the moment you let go or stop. */
+let brakeN = null;
 
 function noiseBuffer(){
   const n = Math.floor(AC.sampleRate);
@@ -6342,6 +6368,37 @@ function buildWind(dest){
   chain.connect(dest);
   src.start(AC.currentTime + 0.03);
   wind = {src, band, hi, gain, pan};
+  buildBrake(dest, src.buffer);
+}
+function buildBrake(dest, buffer){
+  if(brakeN) return;
+  const src = AC.createBufferSource();
+  src.buffer = buffer;
+  src.loop = true;
+  const hi = AC.createBiquadFilter();
+  hi.type = 'highpass';
+  hi.frequency.setValueAtTime(1400, AC.currentTime);
+  const band = AC.createBiquadFilter();
+  band.type = 'bandpass';
+  band.frequency.setValueAtTime(2600, AC.currentTime);
+  band.Q.setValueAtTime(1.1, AC.currentTime);
+  const gain = AC.createGain();
+  gain.gain.setValueAtTime(0.0001, AC.currentTime);
+  src.connect(hi).connect(band).connect(gain).connect(dest);
+  src.start(AC.currentTime + 0.03);
+  brakeN = {src, hi, band, gain};
+}
+function brakeLevel(brake, v){
+  const b = Math.max(0, Math.min(1, brake || 0));
+  const spool = Math.max(0, Math.min(1, v/20));
+  return v < 0.4 ? 0 : b*(0.015 + 0.06*spool);
+}
+function setBrakeSound(brake, v){
+  if(!brakeN || !AC) return;
+  const tN = AC.currentTime + 0.04;
+  const g = brakeLevel(brake, v);
+  brakeN.gain.gain.linearRampToValueAtTime(g < 0.0005 ? 0.0001 : g, tN);
+  brakeN.band.frequency.linearRampToValueAtTime(1800 + Math.min(1, v/24)*2200, tN);
 }
 /* steer: -1..1 as the board uses it (+ is left). v: m/s. */
 function windLevel(steer, v){
@@ -6362,20 +6419,29 @@ function setWind(steer, v){
   if(wind.pan) wind.pan.pan.linearRampToValueAtTime(Math.max(-0.7, Math.min(0.7, -(steer || 0)*0.7)), tN);
 }
 
-/* v: speed in m/s. burn: 0 (coasting) .. 1 (mid-burn). */
-function setHum(v, burn){
-  if(!jet || !AC) return;
-  const tN = AC.currentTime + 0.04;
+/* v: speed in m/s. burn: 0 (coasting) .. 1 (mid-burn). throttle: 0..1, the GAS -- the
+   motor is only audible while it is being driven, so letting off goes quiet and pressing
+   gas spools it back up. A burn roars regardless. (Omitted, throttle counts as held.) */
+function humLevel(v, burn, throttle){
   const b = Math.max(0, Math.min(1, burn || 0));
   const spool = Math.min(1, v/24);
+  const th = throttle == null ? 1 : Math.max(0, Math.min(1, throttle));
+  // at a standstill with the gas down you still hear it idle up, just quietly
+  const drive = th*(0.012 + spool*0.030) + (v < 0.3 && th > 0 ? 0.006 : 0);
+  return {jet: drive + b*0.055, sub: th*(0.008 + spool*0.012) + b*0.03, b, spool};
+}
+function setHum(v, burn, throttle){
+  if(!jet || !AC) return;
+  const tN = AC.currentTime + 0.06;
+  const L = humLevel(v, burn, throttle);
+  const b = L.b, spool = L.spool;
   jet.band.frequency.linearRampToValueAtTime(380 + spool*760 + b*900, tN);
   jet.band.Q.linearRampToValueAtTime(0.75 + b*0.9, tN);
   // the lowpass is what "opening the throttle" sounds like: the top end arrives with it
   jet.low.frequency.linearRampToValueAtTime(700 + spool*1900 + b*5200, tN);
-  jet.gain.gain.linearRampToValueAtTime(v < 0.3 && b <= 0 ? 0.0001
-    : 0.012 + spool*0.030 + b*0.055, tN);
+  jet.gain.gain.linearRampToValueAtTime(Math.max(0.0001, L.jet), tN);
   jet.sub.frequency.linearRampToValueAtTime(62 + spool*26 + b*22, tN);
-  jet.subGain.gain.linearRampToValueAtTime(v < 0.3 ? 0.0001 : 0.008 + spool*0.012 + b*0.03, tN);
+  jet.subGain.gain.linearRampToValueAtTime(Math.max(0.0001, L.sub), tN);
 }
 
 /* The moment a burn lights: a short upward whoosh laid over the running jet, so the
@@ -6426,7 +6492,10 @@ function stopHum(){
   jet.gain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.1);
   jet.subGain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.1);
   if(wind) wind.gain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.1);
+  if(brakeN) brakeN.gain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.1);
 }
+function brakeState(){ return brakeN; }
+function humState(){ return jet; }
 function windState(){ return wind; }
 
 /* ==== src/neon/cells.js ==== */
@@ -6868,6 +6937,7 @@ const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale
                   // screen edges (ctlInset) and above the bottom edge (ctlBottom), in px
                   ctlInset: 24, ctlBottom: 16,    // ctlInset defaults AT the swipe-safe floor, not below it
                   steerMode: 'pad',               // 'pad' (drag) or 'buttons' (left/right)
+                  ctlSide: 'left',                // which corner the steering sits in; pedals take the other
                   // background grid: line thickness in slider steps (0 = always one pixel)
                   // and a hue turn in degrees (0 = the original colours)
                   gridThick: 2, gridHue: 0, gridGlow: 100};   // gridGlow: percent, 0..200
@@ -7368,6 +7438,17 @@ function applySteerMode(){
   document.body.classList.toggle('steer-buttons', settings.steerMode === 'buttons');
   document.querySelectorAll('.steerSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.steer === settings.steerMode));
 }
+/* STEER ON: which corner the steering is in. Just a body class (see the CSS), so like the
+   steer mode it can change mid-race from the pause card. */
+function applyCtlSide(){
+  document.body.classList.toggle('ctl-swap', settings.ctlSide === 'right');
+  document.querySelectorAll('.sideSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.side === settings.ctlSide));
+}
+function setCtlSide(side){
+  if((side !== 'left' && side !== 'right') || settings.ctlSide === side) return;
+  settings.ctlSide = side;
+  applyCtlSide(); neonWriteStore();
+}
 function setSteerMode(mode){
   if((mode !== 'pad' && mode !== 'buttons') || settings.steerMode === mode) return;
   settings.steerMode = mode;
@@ -7597,7 +7678,7 @@ function pickRivals(n, course, playerWho){
   return keys.slice(0, n).map((key, i) => ({
     key, name: SPECIES[key].nm, color: RIVAL_COLORS[i % RIVAL_COLORS.length],
     // a deer is quicker than a possum, but only just: this is a board race, not a footrace
-    paceMul: 0.95 + 0.07*(SPECIES[key].speed - lo)/Math.max(0.01, hi - lo),
+    paceMul: 0.98 + 0.03*(SPECIES[key].speed - lo)/Math.max(0.01, hi - lo),
     seed: 1 + Math.floor(rnd()*1e6),
   }));
 }
@@ -7633,7 +7714,9 @@ function startRace(){
       lap: T.closed ? -1 : 0}, o));
   };
   cast.forEach((c, i) => {
-    racers.push(place(i, {name: c.name, skill: NEON_SKILL[settings.skill], paceMul: c.paceMul, speedK,
+    // a rival's board is as quick as its pace: the class, its skill level, its style, its species
+    const sk = NEON_SKILL[settings.skill], st = styleFor(c.key);
+    racers.push(place(i, {name: c.name, skill: sk, paceMul: c.paceMul, speedK: speedK*sk.pace*st.pace*c.paceMul,
       lane: ((i % 4) - 1.5)/2.2, seed: c.seed % 1000, color: c.color, emo: SPECIES[c.key].emo,
       riderId: 'w:' + c.key, style: styleFor(c.key), styleKey: c.key}));
     riders.push(makeRider({kind: 'wild', key: c.key}, c.color, c.seed, sizeK));
@@ -7892,7 +7975,11 @@ function drawRace(dt){
   const pct = Math.round(me.slope*100);
   $('slopeVal').textContent = !R.gravity ? '' : pct > 1 ? '▲ ' + pct + '%' : pct < -1 ? '▼ ' + (-pct) + '%'
     : (dem ? Math.round(feet(f.elev)) + ' ft' : '');
-  setHum(me.v, me.burnT > 0 ? Math.min(1, me.burnT/NEON.burnS + 0.35) : 0);
+  /* The motor answers the GAS: no throttle, no hum (a burn still roars on its own). The
+     brake gets its own scrub, as loud as the braking is hard and the board is fast. */
+  const live = !me.done && R.phase !== 'count';
+  setHum(me.v, me.burnT > 0 ? Math.min(1, me.burnT/NEON.burnS + 0.35) : 0, live ? me.throttleIn || 0 : 0);
+  setBrakeSound(live ? me.brakeIn || 0 : 0, me.v);
   setWind(me.done || me.spinT > 0 ? 0 : me.steerIn, me.v);
   $('burnPip').textContent = me.spinT > 0 ? 'SPUN OUT' : me.burnT > 0 ? 'NITRO' : me.fuel ? '' : 'OUT OF NITRO';
   $('burnPip').classList.toggle('hot', me.burnT > 0);
@@ -7964,6 +8051,7 @@ function wireUI(){
   document.querySelectorAll('#ghostHitSeg .btn').forEach(b => b.addEventListener('click', () => setGhostHit(b.dataset.hit === '1')));
   document.querySelectorAll('#dirSeg .btn').forEach(b => b.addEventListener('click', () => setReverse(b.dataset.dir === 'rev')));
   document.querySelectorAll('.steerSeg .btn').forEach(b => b.addEventListener('click', () => setSteerMode(b.dataset.steer)));
+  document.querySelectorAll('.sideSeg .btn').forEach(b => b.addEventListener('click', () => setCtlSide(b.dataset.side)));
   $('scaleSel').addEventListener('change', e => setScale(+e.target.value));
   $('riderSel').addEventListener('change', e => { settings.rider = e.target.value; neonWriteStore(); });
   $('mapSel').addEventListener('change', e => {
@@ -8025,6 +8113,7 @@ async function bootNeon(){
   applyControlLayout();
   applyGrid();
   applySteerMode();
+  applyCtlSide();
   loadKennel();
   wireUI();
   fillRiderSelect();

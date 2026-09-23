@@ -2,7 +2,7 @@
    nothing to say to a black screen. */
 :root{
   --bg:#04050d; --panel:rgba(8,12,28,.88); --line:#1b2a66;
-  --cyan:#19f0ff; --mag:#ff2bd6; --lime:#b6ff3c; --text:#cfe0ff; --dim:#6f82b8;
+  --cyan:#19f0ff; --mag:#ff2bd6; --lime:#b6ff3c; --red:#ff3b4e; --text:#cfe0ff; --dim:#6f82b8;
   --safe-b:env(safe-area-inset-bottom, 0px); --safe-l:env(safe-area-inset-left, 0px);
   --safe-r:env(safe-area-inset-right, 0px); --safe-t:env(safe-area-inset-top, 0px);
   /* Touch control position, adjustable on the pause screen (see #pauseCard, main.js
@@ -175,6 +175,12 @@ body[data-screen="race"] #hud, body[data-screen="count"] #hud, body[data-screen=
   justify-content:space-between; gap:12px; touch-action:none;
   padding:0 calc(var(--ctl-inset) + var(--safe-r)) 0 calc(var(--ctl-inset) + var(--safe-l)); pointer-events:none;}
 body.touch #touchCtl{display:flex;}
+/* STEER ON THE RIGHT (settings.ctlSide): the row flips, so the steering sits in the right
+   corner and gas/brake/nitro in the left, and the cluster mirrors too -- gas stays on the
+   side nearest the middle of the screen, where the thumb rests. */
+body.ctl-swap #touchCtl{flex-direction:row-reverse;}
+body.ctl-swap #tAccel{grid-column:2;}
+body.ctl-swap #tBoost, body.ctl-swap #tBrake{grid-column:1;}
 /* The speed readout STAYS AT THE BOTTOM on a touch screen. It used to be pushed up above
    the thumb controls, which put a 44px number across the middle of the road -- exactly
    where you are looking. The controls live in the two bottom corners, so the middle of
@@ -190,16 +196,12 @@ body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
    #tSteerBtns below, where pointer-events:none on tLeft/tRight means neither one is ever
    really the event target to begin with. */
 .tbtn:active, .tbtn.pressed{background:rgba(25,240,255,.2);}
-/* Icons rather than words: two pedals (gas tall, brake wide -- the shapes a driver's foot
-   already knows) and a nitro bottle, drawn as SVG strokes in currentColor so they glow in
-   the button's own colour and never fall back to an emoji font. */
-#tAccel, #tBrake, #tBoost{font-size:30px; display:flex; align-items:center; justify-content:center; padding:0;}
-.ticon{width:1.75em; height:1.75em; fill:none; stroke:currentColor; stroke-width:2.2;
-  stroke-linecap:round; stroke-linejoin:round; pointer-events:none; filter:drop-shadow(0 0 3px currentColor);}
-.ticon .fillIcon{fill:currentColor; stroke-width:1.2;}
-/* gas is the green one, so the two pedals are told apart by colour as well as shape */
+/* Words, coloured by job: GAS green, BRAKE red, NITRO the magenta it has always been. */
+#tAccel, #tBrake, #tBoost{font-size:14px; font-weight:700; letter-spacing:.06em;}
 #tAccel{color:var(--lime); border-color:var(--lime);}
-#tAccel:active, #tAccel.pressed{background:rgba(182,255,60,.18);}
+#tAccel:active, #tAccel.pressed{background:rgba(182,255,60,.2);}
+#tBrake{color:var(--red); border-color:var(--red);}
+#tBrake:active, #tBrake.pressed{background:rgba(255,59,78,.22);}
 
 /* STEERING: either the drag pad or the two buttons, never both -- settings.steerMode
    (see main.js applySteerMode) toggles a body class, and that is the only thing either
@@ -252,7 +254,7 @@ body.steer-buttons #tSteerBtns{display:flex;}
   #tSteer span{font-size:24px;}
   #tSteerBtns{width:min(50vw,320px); height:104px; gap:12px;}
   #tSteerBtns .tbtn{width:auto; font-size:32px;}
-  #tAccel, #tBrake, #tBoost{font-size:36px;}
+  #tAccel, #tBrake, #tBoost{font-size:16px;}
 }
 
 #count{position:fixed; inset:0; display:none; align-items:center; justify-content:center; pointer-events:none;

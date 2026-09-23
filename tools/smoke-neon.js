@@ -1433,6 +1433,15 @@ const arraysClose = (a, b, eps = 1e-9) => {
     const gh = S.race.racers.find(x => x.isGhost);
     check('a ghost follows its recording', gh.prog > 0 && Number.isFinite(gh.s) && Number.isFinite(gh.yaw)
       && Math.abs(gh.d) <= trackFrame(S.race.T, gh.s, {}).halfW + 0.01);
+    {
+      const me = S.race.racers[S.race.me];
+      const riv = S.race.racers.filter(r => !r.isPlayer && !r.isGhost);
+      const sk = N.skills[S.settings.skill];
+      check('each rival rides a board as quick as its skill, style and species make it',
+        riv.length > 0 && riv.every(r => Math.abs(r.speedK - me.speedK * sk.pace * r.style.pace * r.paceMul) < 1e-9)
+        && (S.settings.skill === 'chill' || riv.some(r => r.speedK > me.speedK)),
+        riv.map(r => r.name + ' ' + (r.speedK / me.speedK).toFixed(3)).join(', '));
+    }
     check('a ghost on the grid carries its rider id, and so does the player',
       gh.riderId === gh.ghost.rider && S.race.racers[S.race.me].riderId === S.race.riderId);
 
@@ -1641,7 +1650,8 @@ const arraysClose = (a, b, eps = 1e-9) => {
       const field = keys.map((k, i) => {
         const s0 = 5 + Math.floor(i / 2) * 7;
         return makeRacer({ s: s0, d: (i % 2 ? -1 : 1) * 1.5, yaw: trackFrame(TT, s0, {}).yaw, key: k,
-          skill: N.skills.fair, paceMul: 1, lane: (i % 3 - 1) * 0.5, seed: i + 11, style: N.styleFor(k), riderId: 'w:' + k });
+          skill: N.skills.fair, paceMul: 1, lane: (i % 3 - 1) * 0.5, seed: i + 11, style: N.styleFor(k), riderId: 'w:' + k,
+          speedK: N.skills.fair.pace * N.styleFor(k).pace });
       });
       const touches = new Map(field.map(r => [r, 0]));
       let t = 0, bad = false, outside = 0;
@@ -1812,6 +1822,31 @@ const arraysClose = (a, b, eps = 1e-9) => {
       }
       const main = fs.readFileSync(path.join(ROOT, 'src/neon/main.js'), 'utf8');
       check('the race loop drives the wind from the player\'s steering', /setWind\([^)]*me\.steerIn, me\.v\)/.test(main));
+
+      /* THE MOTOR ANSWERS THE GAS, the brake has a sound of its own. */
+      const off = humLevel(20, 0, 0), on = humLevel(20, 0, 1), idle = humLevel(0, 0, 1), still = humLevel(0, 0, 0);
+      check('no gas, no motor hum; gas spools it up', off.jet === 0 && off.sub === 0 && on.jet > 0.03 && idle.jet > 0 && still.jet === 0,
+        `off ${off.jet}, on ${on.jet.toFixed(3)}, idling ${idle.jet.toFixed(3)}`);
+      check('a nitro burn roars even off the gas', humLevel(20, 1, 0).jet > 0.04);
+      const h = humState();
+      if (h) {
+        setHum(20, 0, 0); const gOff = h.gain.gain.value;
+        setHum(20, 0, 1); const gOn = h.gain.gain.value;
+        check('the engine gain follows the gas', gOff < 0.001 && gOn > 0.03, `${gOff} / ${gOn.toFixed(3)}`);
+      }
+      check('braking scrubs, harder and faster is louder, stopped or released is silent',
+        brakeLevel(1, 20) > brakeLevel(0.4, 20) && brakeLevel(1, 20) > brakeLevel(1, 5) && brakeLevel(0, 20) === 0 && brakeLevel(1, 0) === 0);
+      const bk = brakeState();
+      check('the brake sound is its own filtered noise loop', !!bk && bk.src.loop === true && !!bk.band);
+      if (bk) {
+        setBrakeSound(1, 20); const bOn = bk.gain.gain.value;
+        setBrakeSound(0, 20); const bOff = bk.gain.gain.value;
+        check('the brake gain follows the brake', bOn > 0.03 && bOff < 0.001, `${bOn.toFixed(3)} / ${bOff}`);
+      }
+      check('the race loop drives the motor from the gas and the brake sound from the brake',
+        /setHum\([^;]*me\.throttleIn/.test(main) && /setBrakeSound\([^;]*me\.brakeIn[^;]*me\.v\)/.test(main));
+      const rac = fs.readFileSync(path.join(ROOT, 'src/neon/racer.js'), 'utf8');
+      check('the board remembers its pedals for the sound', /r\.throttleIn = input\.throttle/.test(rac) && /r\.brakeIn = input\.brake/.test(rac));
     }
   }
 
@@ -1889,12 +1924,12 @@ const arraysClose = (a, b, eps = 1e-9) => {
       /#tSteerBtns \.tbtn\{[^}]*border-radius:16px/.test(css));
     check('the button pair catches every event itself; its two buttons are purely visual',
       /#tSteerBtns\{[^}]*pointer-events:auto/.test(css) && /#tSteerBtns \.tbtn\{[^}]*pointer-events:none/.test(css));
-    check('gas, brake and nitro are drawn icons (pedals and a nitro bottle), not words, each with an aria-label',
-      ['tAccel', 'tBrake', 'tBoost'].every(id => {
-        const el = d.getElementById(id);
-        return el.querySelector('svg.ticon') && el.textContent.trim() === '' && el.getAttribute('aria-label');
-      }) && d.querySelector('#tBoost .fillIcon')
-      && /\.ticon\{[^}]*stroke:currentColor/.test(css));
+    check('gas, brake and nitro are labelled in words', d.getElementById('tAccel').textContent.trim() === 'GAS'
+      && d.getElementById('tBrake').textContent.trim() === 'BRAKE' && d.getElementById('tBoost').textContent.trim() === 'NITRO'
+      && !d.querySelector('#touchCtl svg'));
+    check('gas is green and brake is red', /#tAccel\{[^}]*color:var\(--lime\)/.test(css)
+      && /#tBrake\{[^}]*color:var\(--red\)/.test(css) && /--red:#ff[0-9a-f]{4}/i.test(css));
+
     check('pad is the default steer mode, on at boot',
       N.state().settings.steerMode === 'pad' && !d.body.classList.contains('steer-buttons'));
     const press = (id, down) => {
@@ -1902,6 +1937,24 @@ const arraysClose = (a, b, eps = 1e-9) => {
       e.pointerId = 2;
       d.getElementById(id).dispatchEvent(e);
     };
+
+    /* STEER ON THE RIGHT. One body class flips the row and mirrors the pedal cluster so
+       gas stays on the inside; both copies of the control agree, and it is saved. */
+    check('the swapped layout puts steering right and mirrors the pedals',
+      /body\.ctl-swap #touchCtl\{[^}]*flex-direction:row-reverse/.test(css)
+      && /body\.ctl-swap #tAccel\{[^}]*grid-column:2/.test(css)
+      && /body\.ctl-swap #tBoost, body\.ctl-swap #tBrake\{[^}]*grid-column:1/.test(css));
+    check('steering is on the left by default', N.state().settings.ctlSide === 'left' && !d.body.classList.contains('ctl-swap'));
+    d.querySelector('.sideSeg [data-side="right"]').click();
+    check('choosing Steer on: Right swaps the controls, in both menus, and is saved',
+      d.body.classList.contains('ctl-swap') && d.querySelectorAll('.sideSeg .btn.on').length === 2
+      && [...d.querySelectorAll('.sideSeg .btn.on')].every(b => b.dataset.side === 'right')
+      && JSON.parse(localStorage.getItem('dogexplorer.neon')).settings.ctlSide === 'right');
+    press('tAccel', true);
+    check('the controls still work swapped', readNeonInput(1 / 60).throttle === 1);
+    press('tAccel', false);
+    d.querySelector('.sideSeg [data-side="left"]').click();
+    check('and back to the left', !d.body.classList.contains('ctl-swap'));
 
     /* THE SLIDE. tLeft and tRight are one drag surface (see bindSteerButtons): a pointer
        that goes down on one side and moves to the other, without ever lifting, has to
@@ -2035,8 +2088,42 @@ const arraysClose = (a, b, eps = 1e-9) => {
 
   // ---- rival pace ----
   {
-    check('the easiest rivals are as quick as the old hardest', N.skills.chill.pace >= 1.0 && N.skills.chill.corner >= 1.04);
-    check('the pace ladder still goes up', N.skills.fair.pace > N.skills.chill.pace && N.skills.fierce.pace > N.skills.fair.pace);
+    /* COMPETITION, measured. The yardstick is the simplest way a person drives this game:
+       full throttle, never brakes, never burns nitro, follows the track. Rivals race it
+       with no nitro either, on several circuits. Chill lands a little behind that rider,
+       Fair ahead of it, Fierce well ahead -- so beating Fair or Fierce takes the nitro
+       spent well, not just holding the button down. (Before this, a no-brake rider beat
+       even Fierce by 20-30%: the rivals' corner speed was a guess far under the real limit.) */
+    const lapOf = (r, T2, drive) => { let t = 0;
+      while (!r.done && t < 600) { stepRacer(r, T2, drive(r, T2, t), { gravity: true }, 1 / 60); t += 1 / 60; }
+      return r.finishT || 999; };
+    const flatDrive = (r, T2, t) => {
+      r.wob = 0;
+      const i = rivalInput(r, T2, [r], { gravity: true }, t);
+      return Object.assign(i, { throttle: 1, brake: 0, boost: false });
+    };
+    const rivalDrive = (r, T2, t) => { const i = rivalInput(r, T2, [r], { gravity: true }, t); i.boost = false; return i; };
+    const tot = { flat: 0, chill: 0, fair: 0, fierce: 0 }; let flatBumps = 0;
+    for (const c2 of N.state().courses.filter(c => c.kind === 'circuit').slice(0, 3)) {
+      const T2 = trackFor(c2);
+      const y = trackFrame(T2, 5, {}).yaw;
+      // the flat-out rider steers with a rival's line-follower but a grip it never runs out of
+      const fr = makeRacer({ s: 5, yaw: y, fuel: 0, skill: Object.assign({}, N.skills.fierce, { grip: 50, wobble: 0 }), paceMul: 1, lane: 0, seed: 1 });
+      tot.flat += lapOf(fr, T2, flatDrive); flatBumps += fr.bumps;
+      for (const k of ['chill', 'fair', 'fierce']) {
+        const sk = N.skills[k];
+        const r = makeRacer({ s: 5, yaw: y, fuel: 0, skill: sk, paceMul: 1, lane: 0, seed: 3, speedK: sk.pace });
+        tot[k] += lapOf(r, T2, rivalDrive);
+      }
+    }
+    const pct = k => (100 * (tot.flat / tot[k] - 1)).toFixed(1) + '%';
+    const info = `vs flat-out rider (${tot.flat.toFixed(0)} s, ${flatBumps} wall hits): chill ${pct('chill')}, fair ${pct('fair')}, fierce ${pct('fierce')}`;
+    check('Chill rivals are close behind a flat-out rider', tot.chill > tot.flat && tot.chill < tot.flat * 1.06, info);
+    check('Fair rivals beat a rider who only holds the throttle', tot.fair < tot.flat * 0.99, info);
+    check('Fierce rivals beat one clearly', tot.fierce < tot.flat * 0.93, info);
+    check('the flat-out yardstick itself rides clean (so the comparison is fair)', flatBumps === 0, info);
+    check('the pace ladder still goes up', N.skills.fair.pace > N.skills.chill.pace && N.skills.fierce.pace > N.skills.fair.pace
+      && N.skills.fair.grip > N.skills.chill.grip && N.skills.fierce.grip > N.skills.fair.grip);
   }
 
   // ---- the course preview zooms to the selected course ----
