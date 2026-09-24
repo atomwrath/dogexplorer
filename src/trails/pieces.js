@@ -122,9 +122,46 @@ const FILL_RUN = 1.6;         // horizontal run per unit of drop, about 32 degre
 const FILL_MAX_RUN = 9;       // a huge step gets a steeper skirt, not one across the map
 const FILL_STOP_GAP = 0.6;    // clear space left between a shortened skirt and the tread below
 const FILL_MIN_RUN_RATIO = 0.25;  // steepest the skirt is ever allowed to get, about 76 degrees
+/* NEVER OVER WATER. A skirt is ground, and ground is drawn on top of water -- so where a
+   path runs along a creek, the fill sloping down its creek-side edge reached straight out
+   over the channel and painted a brown bank across the stream (the Seven Bridges Trail,
+   for most of its length). The same fix as for a lower tread, for the same reason: stop
+   the skirt FILL_WATER_PAD short of the water's drawn edge and let it steepen. Where the
+   path's own edge is already that close to the water there is no room for a fill at all,
+   and the right answer is none -- a tread edge standing at the water's edge is a bank,
+   not a hole that needs closing. */
+const FILL_WATER_PAD = 0.35;      // clear space kept between a skirt and the water's edge
+const FILL_WATER_MIN_RUN = 0.05;  // a skirt this short is a vertical bank face
+const FILL_EDGE_SAMPLES = 8;      // ground checks along each quad's bottom edge
+const FILL_SINK = 0.1;            // how far a foot is buried below the ground it must reach
+const FILL_REACH_RATE = 1.0;      // most a skirt's reach may change per unit along the path
 
-function embankmentGeom(pts, halfW, topYs, groundYAt, buriesTreadAt){
-  if(!pts || pts.length < 2 || !topYs) return null;
+/* THE SKIRT SAMPLES THE GROUND DENSELY, whatever the profile does. A graded profile only
+   keeps a station where the line bends, so a long straight run on Pikes Peak had stations
+   6-9 units apart -- and the skirt only asked "is the ground below me?" AT stations. Both
+   ends of such a run could sit near the ground while the terraces between them fell away
+   under the middle of it, and the tread was left floating with no skirt at all (60% of the
+   floating edge along Barr Trail). So the edge is resampled to FILL_STATION spacing
+   first, with heights interpolated linearly -- exactly as the ribbon above is drawn
+   between the same stations -- and every one of those points is asked. */
+const FILL_STATION = 1.0;
+function densifyEdge(pts, ys){
+  const P=[pts[0]], Y=[ys[0]];
+  for(let i=1;i<pts.length;i++){
+    const a=pts[i-1], b=pts[i], L=Math.hypot(b[0]-a[0], b[1]-a[1]);
+    const n=Math.max(1, Math.ceil(L/FILL_STATION));
+    for(let k=1;k<=n;k++){
+      const u=k/n;
+      P.push([a[0]+(b[0]-a[0])*u, a[1]+(b[1]-a[1])*u]);
+      Y.push(ys[i-1]+(ys[i]-ys[i-1])*u);
+    }
+  }
+  return {pts:P, ys:Y};
+}
+
+function embankmentGeom(pts0, halfW, topYs0, groundYAt, buriesTreadAt, waterDistAt){
+  if(!pts0 || pts0.length < 2 || !topYs0) return null;
+  const dense = densifyEdge(pts0, topYs0), pts = dense.pts, topYs = dense.ys;
   const P=[],N=[],idx=[];
   const push=(x,y,z)=>{ P.push(x,y,z); N.push(0,1,0); return P.length/3-1; };
   const setN=(i,nx,ny,nz)=>{ N[i*3]=nx; N[i*3+1]=ny; N[i*3+2]=nz; };
@@ -145,6 +182,31 @@ function embankmentGeom(pts, halfW, topYs, groundYAt, buriesTreadAt){
 
   for(const side of [1,-1]){
     let prev = null;
+    const strip = [], links = [];              // stations, and the quads between them
+    let touch = null;                          // the last station where the ground met the tread
+    /* HOW FAR EACH STATION REACHES, smoothed along the path. The natural reach is set by
+       that station's own drop, and on terraced ground the drop jumps a whole step from one
+       station to the next -- so a long reach stood next to a short one and the skirt's
+       outer edge came out as a row of spikes. Rate-limited instead: a station may reach
+       no more than FILL_REACH_RATE further than its neighbour per unit along the path, so
+       the outline changes at 45 degrees at most. Only ever SHORTENS a reach (a lower
+       envelope, forwards then backwards), and a shorter skirt is still one that meets the
+       ground -- steeper, never floating. Stations that need no skirt break the chain. */
+    const reach = new Array(pts.length).fill(null);
+    for(let i=0;i<pts.length;i++){
+      const p=pts[i], q=pts[Math.min(pts.length-1,i+1)], r=pts[Math.max(0,i-1)];
+      let dx=q[0]-r[0], dz=q[1]-r[1]; const L=Math.hypot(dx,dz)||1; dx/=L; dz/=L;
+      const ex=p[0]-dz*side*halfW, ez=p[1]+dx*side*halfW;
+      const drop=topYs[i]-groundYAt(ex,ez);
+      if(drop>FILL_MIN_DROP) reach[i]=Math.min(drop*FILL_RUN, FILL_MAX_RUN);
+    }
+    const gapTo = i => Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1]);
+    /* Neighbours only: a station beside one that needs no skirt is not limited by it. A
+       strip now CLOSES to that station (see the no-gap case below), so its end already
+       comes down to the tread edge; tapering the reach to zero there as well squeezed
+       every station near a break to a sliver and left the interval open again. */
+    for(let i=1;i<pts.length;i++) if(reach[i]!=null && reach[i-1]!=null) reach[i]=Math.min(reach[i], reach[i-1]+gapTo(i)*FILL_REACH_RATE);
+    for(let i=pts.length-2;i>=0;i--) if(reach[i]!=null && reach[i+1]!=null) reach[i]=Math.min(reach[i], reach[i+1]+gapTo(i+1)*FILL_REACH_RATE);
     for(let i=0;i<pts.length;i++){
       const p=pts[i];
       const q=pts[Math.min(pts.length-1,i+1)], r=pts[Math.max(0,i-1)];
@@ -154,9 +216,27 @@ function embankmentGeom(pts, halfW, topYs, groundYAt, buriesTreadAt){
       const yTop=topYs[i];
       const gEdge=groundYAt(ex,ez);
       const drop=yTop-gEdge;
-      // no gap here: end the strip rather than bridging across a stretch that needs no fill
-      if(!(drop>FILL_MIN_DROP)){ prev=null; continue; }
-      let run=Math.min(drop*FILL_RUN, FILL_MAX_RUN);
+      /* No gap AT this station: the ground has come up to the tread. But the ground steps
+         between stations, so the interval from the last skirted station to this one could
+         be open half a terrace down -- the trail floating with no skirt at all. So the strip
+         runs ON to here and closes with a zero-width edge (foot at the tread's edge), and
+         the foot-lowering pass below drops that foot to the lowest ground in the interval.
+         Likewise a strip that starts after such a station opens from it. Only where the
+         ground meets the tread: a strip cut short by a lower tread or by water still stops
+         dead, because covering those is the whole thing being avoided. */
+      if(!(drop>FILL_MIN_DROP)){
+        if(Number.isFinite(yTop) && Number.isFinite(gEdge)){
+          const yF = Math.min(yTop, gEdge);
+          if(prev){
+            const a=push(ex,yTop,ez), b=push(ex,yF,ez);
+            strip.push({a, b, fx:ex, fz:ez, yTop});
+            links.push([prev, strip[strip.length-1]]);
+          }
+          touch = {i, ex, ez, yTop, yF};
+        }else touch = null;
+        prev=null; continue;
+      }
+      let run=Math.min(drop*FILL_RUN, FILL_MAX_RUN, reach[i]!=null ? reach[i] : Infinity);
       /* STEEPEN RATHER THAN BURY. On a short switchback the next leg of the trail runs
          back underneath this one only a few metres out, and a skirt at the natural angle
          of repose reaches straight over the top of it -- the lower tread disappears under
@@ -186,16 +266,60 @@ function embankmentGeom(pts, halfW, topYs, groundYAt, buriesTreadAt){
         while(run > 0 && buriesTreadAt(ex+ox*run, ez+oz*run, yTop) && guard++ < 8) run *= 0.5;
         if(run <= FILL_STOP_GAP && buriesTreadAt(ex+ox*run, ez+oz*run, yTop)){ prev=null; continue; }
       }
+      if(waterDistAt){
+        if(waterDistAt(ex,ez) < FILL_WATER_PAD){ prev=null; continue; }
+        // march at a fine stride: a creek is narrow next to a long run, and a coarse
+        // march steps clean over it
+        const probes = Math.max(8, Math.ceil(run/0.2));
+        for(let t=1;t<=probes;t++){
+          const dd = run*t/probes;
+          if(waterDistAt(ex+ox*dd, ez+oz*dd) < FILL_WATER_PAD){
+            run = Math.max(run*(t-1)/probes, FILL_WATER_MIN_RUN);
+            break;
+          }
+        }
+      }
       const fx=ex+ox*run, fz=ez+oz*run;
       let yFoot=groundYAt(fx,fz);
       /* Ground back up at the foot means the skirt would tunnel through a rise instead of
          landing on it -- happens on the inside of a switchback, where the next terrace up
          is within a run's reach. Land at the tread edge's own ground instead. */
       if(yFoot > yTop-0.05) yFoot = gEdge;
+      // open from the touching station just before, if this strip starts right after one
+      if(!prev && touch && touch.i === i-1){
+        const a0=push(touch.ex,touch.yTop,touch.ez), b0=push(touch.ex,touch.yF,touch.ez);
+        strip.push({a:a0, b:b0, fx:touch.ex, fz:touch.ez, yTop:touch.yTop});
+        prev=strip[strip.length-1];
+      }
+      touch = null;
       const a=push(ex,yTop,ez), b=push(fx,yFoot,fz);
-      if(prev) quad(prev.a, prev.b, b, a);
-      prev={a,b};
+      strip.push({a, b, fx, fz, yTop});
+      if(prev) links.push([prev, strip[strip.length-1]]);
+      prev=strip[strip.length-1];
     }
+    /* A BOTTOM EDGE THAT NEVER FLOATS. Each quad's bottom runs straight from one foot to
+       the next, and on terraced ground the two feet land on different terraces -- so
+       wherever the ground between them steps down, that straight edge hung in the air
+       over the lower terrace, and you saw daylight under the trail through a skirt torn
+       into separate triangular sails (a quarter of all bottom-edge length on Pikes Peak,
+       up to 10 units clear of the ground under a switchback).
+
+       So every foot is lowered to the lowest ground found along the bottom edge on either
+       side of it, and FILL_SINK below that. A straight edge between two feet that are both
+       at or under the lowest ground beneath it cannot come out above that ground anywhere
+       along its length. What is lower than it needs to be is inside the terrain, where it
+       is hidden; what fills the step down is exactly the gap that was showing. */
+    const lowest = new Map();                       // foot vertex -> lowest ground to reach
+    for(const [s0, s1] of links){
+      let lo = Math.min(P[s0.b*3+1], P[s1.b*3+1]);
+      for(let k=1;k<FILL_EDGE_SAMPLES;k++){
+        const u = k/FILL_EDGE_SAMPLES;
+        lo = Math.min(lo, groundYAt(s0.fx + (s1.fx - s0.fx)*u, s0.fz + (s1.fz - s0.fz)*u));
+      }
+      for(const f of [s0, s1]) if(!lowest.has(f.b) || lo < lowest.get(f.b)) lowest.set(f.b, lo);
+    }
+    for(const [b, lo] of lowest) P[b*3+1] = Math.min(P[b*3+1], lo - FILL_SINK);
+    for(const [s0, s1] of links) quad(s0.a, s0.b, s1.b, s1.a);
   }
   if(!idx.length) return null;
   const geo=new THREE.BufferGeometry();
@@ -205,6 +329,43 @@ function embankmentGeom(pts, halfW, topYs, groundYAt, buriesTreadAt){
   // test seam (tools/smoke.js): how many skirt quads this edge needed
   geo.userData = geo.userData || {};
   geo.userData.skirtQuads = idx.length/6;
+  return geo;
+}
+
+/* ---------- the sides of a stream ----------
+
+   The channel is carved wider than the water drawn in it (world.js WATER_BANK), leaving a
+   strip of bed along each margin 0.3 units below the surface -- and a water ribbon is a
+   single sheet with no sides. From any low angle you looked straight in under the surface
+   through that strip: at the bed beneath the water, and at a wading pup's paws, which
+   were below the surface and still in plain view. It also made the water read as a sheet
+   floating over a trench rather than as water filling a channel.
+
+   So close the sides: a curtain down each edge of the surface to the bed, one quad per
+   station pair. The offset direction is the one the ribbon itself uses (averaged across
+   each station), so the curtain meets the surface's edge. Colour is the caller's --
+   a shade deeper than the surface, reading as depth. */
+function waterSideGeom(pts, halfW, topYs, bottomYs){
+  if(!pts || pts.length < 2) return null;
+  const P=[], I=[];
+  for(const side of [1,-1]){
+    const base = P.length/3;
+    for(let i=0;i<pts.length;i++){
+      const q=pts[Math.min(pts.length-1,i+1)], r=pts[Math.max(0,i-1)];
+      let dx=q[0]-r[0], dz=q[1]-r[1]; const L=Math.hypot(dx,dz)||1; dx/=L; dz/=L;
+      const x=pts[i][0]-dz*side*halfW, z=pts[i][1]+dx*side*halfW;
+      P.push(x, topYs[i], z, x, Math.min(bottomYs[i], topYs[i]-0.01), z);
+    }
+    for(let i=0;i<pts.length-1;i++){
+      const a=base+i*2, b=base+(i+1)*2;
+      I.push(a, a+1, b+1, a, b+1, b);
+    }
+  }
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(P),3));
+  geo.setIndex(I);
+  geo.computeVertexNormals();
+  geo.__waterSide = true;
   return geo;
 }
 
@@ -1256,7 +1417,7 @@ function buildBackdrop(theme, rng, mapScale=1){
 }
 
 
-export { ribbonGeom, junctionGapGeom, embankmentGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
+export { ribbonGeom, junctionGapGeom, waterSideGeom, densifyEdge, embankmentGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
          POI_STYLE, AREA_STYLE, nameplate, buildPOI, pavementTexture, buildLandform,
          buildFloatingLabel, buildArea, buildAreaSign, makeShadow, pickTree, shade,
          buildBackdrop, backdropRadius, ridgeProfile, bridgeDeckGeom, bridgeFrameGeom, deckMat, frameMat };

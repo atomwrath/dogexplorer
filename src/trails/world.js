@@ -14,7 +14,7 @@
    remains adjustable, since stretching Y alone can't misalign vectors from terrain. */
 import { clamp } from '../core/math.js';
 import { QUALITY } from '../core/quality.js';
-import { areaCells, buildTerrainMesh, flattenAreaCells, gradeProfile, setCellsHeightM, gradeTrailCells, GROUND_TILE_M, groundTexture, reliefCanvas, resample, setStep, setWorld, terrainY } from './terrain.js';
+import { areaCells, stepChannelBanks, buildTerrainMesh, flattenAreaCells, gradeProfile, setCellsHeightM, gradeTrailCells, GROUND_TILE_M, groundTexture, reliefCanvas, resample, setStep, setWorld, terrainY } from './terrain.js';
 
 import { scene, camera, disposeGroup, sun, hemi } from '../core/render.js';
 import { toon, toonTex } from '../core/materials.js';
@@ -28,7 +28,7 @@ import { THEME, THEMES, setTheme } from './themes.js';
    applyThemeLighting without a cycle -- the chain is themes -> sky -> world -> main. */
 import { refreshSky, setSkyBackdrop, setSkyPlace } from './sky.js';
 import { patchGroundRing } from './noise-ring.js';
-import { ribbonGeom, junctionGapGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
+import { ribbonGeom, junctionGapGeom, waterSideGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
          pickTree, buildPOI, buildArea, buildAreaSign, POI_STYLE, AREA_STYLE, shade,
          buildBackdrop, backdropRadius, embankmentGeom, bridgeDeckGeom, bridgeFrameGeom,
          deckMat, frameMat } from './pieces.js';
@@ -1868,8 +1868,12 @@ function hashWater(){
   WATER_HASH=new Map();
   for(const w of WATERWAYS){
     const pts=w.prof ? w.prof.pts : w.pts, hw=w.width/2;
+    // the drawn water surface at each end (the same wetY the water ribbon is built from),
+    // so standingY can put a wading pup's paws under it; null without a graded profile
+    const wet = w.prof ? w.prof.hm.map(h => h*VERT_SCALE + WATER_U) : null;
     for(let i=0;i<pts.length-1;i++){
-      const a=pts[i], b=pts[i+1], seg={a, b, hw};
+      const a=pts[i], b=pts[i+1], seg={a, b, hw, ya: wet ? wet[i] : null, yb: wet ? wet[i+1] : null,
+                                     w, i, wet};
       const x0=Math.floor((Math.min(a[0],b[0])-hw)/WATER_HASH_CELL), x1=Math.floor((Math.max(a[0],b[0])+hw)/WATER_HASH_CELL);
       const z0=Math.floor((Math.min(a[1],b[1])-hw)/WATER_HASH_CELL), z1=Math.floor((Math.max(a[1],b[1])+hw)/WATER_HASH_CELL);
       for(let cx=x0;cx<=x1;cx++) for(let cz=z0;cz<=z1;cz++){
@@ -1890,6 +1894,97 @@ function waterEdgeDist(x, z){
 /* Standing in a creek? For the footstep voice. Off-tread only -- on a bridge you are on
    the deck, whatever is underneath. */
 function inWaterway(x, z){ return waterEdgeDist(x, z) <= 0; }
+/* The drawn water surface at (x,z), or null when (x,z) is not in a channel. Taken from
+   the nearest channel segment that actually contains the point, interpolated along it. */
+function waterSurfaceAt(x, z){
+  const w = waterSurfaceInfo(x, z);
+  return w ? w.y : null;
+}
+/* The same, plus the surface's fall per unit along the channel there -- the slope of THIS
+   stretch of water, which is what a pup standing in it spans. */
+function waterSurfaceInfo(x, z){
+  const arr=WATER_HASH.get(Math.floor(x/WATER_HASH_CELL)+'_'+Math.floor(z/WATER_HASH_CELL));
+  if(!arr) return null;
+  let best=null, bd=Infinity;
+  for(const s of arr){
+    if(s.ya == null) continue;
+    const r=ptSeg([x,z], s.a, s.b);
+    if(r.d > s.hw || r.d >= bd) continue;
+    const L=Math.hypot(s.b[0]-s.a[0], s.b[1]-s.a[1]) || 1;
+    bd=r.d; best={y: s.ya + (s.yb - s.ya)*r.t, slope: Math.abs(s.yb - s.ya)/L, seg: s, t: r.t};
+  }
+  return best;
+}
+
+/* WADING. The channel is carved WATER_U below the surface it is drawn at, but only across
+   the carved bed: the drawn water is wider than the cut, so along both margins the ground
+   is the bank, level with or above the surface, and a pup standing there walked ON the
+   water with its paws in plain view. In the middle it had the opposite problem -- 0.3u of
+   water over a 0.24u leg is swimming, not wading.
+
+   So wherever water is VISIBLE (the ground there is not above the surface), anything
+   standing off a path stands WADE_FRACTION of a leg below the surface: paws hidden, body
+   clear, the same wherever in the creek you are. Deeper than that and it is held at that
+   depth (a pool reads as wading, not a pup vanishing); shallower and it is let down to it.
+   Where the ground rises above the drawn surface the water is buried there anyway, and
+   the pup stands on the ground as before.
+
+   The depth is a fraction of the actual pup's leg, pushed in by main.js whenever a pup is
+   spawned, since leg length varies with size. Critters stand on standingY too, so they
+   wade at the same depth -- by the pup's leg rather than their own, which at these sizes
+   is close enough to read right. */
+const WADE_FRACTION = 0.45, WATER_SHOWS = 0.02;
+/* THE WHOLE FOOTPRINT, NOT THE CENTRE. On a steep creek the surface falls several
+   centimetres across one pup's length, so a depth measured at the centre left the
+   downhill paws' tops above their own water. The wading surface is the lowest the water
+   gets under the paws: walk THIS creek's own profile WADE_REACH up and down the channel
+   from where the pup stands and take the lowest surface met -- the distance from centre
+   to farthest paw, 0.6 of a leg, measured off the rig (the paws span about +-0.15u on a
+   0.24u leg). Not a whole body length: that over-reached, and on a 35% creek it sank the
+   pup to its chest. Along the profile, not round a circle or along one segment's slope:
+   a circle at a tight bend reaches into a lower stretch of the same creek that is not
+   under the pup, and one segment's slope misses the gradient changing at the next. Taken from the channel's gradient
+   rather than by sampling round the pup, because at a tight bend a sampling circle
+   reaches across into another stretch of the same creek, lower down, and sank the pup to
+   its chest in water that is not under it. */
+const WADE_REACH_PER_LEG = 0.6, WADE_MAX_DROP = 0.5;
+let WADE_DEPTH = 0.24*WADE_FRACTION, WADE_REACH = 0.24*WADE_REACH_PER_LEG;
+function setWadeLegLength(legLen){
+  if(Number.isFinite(legLen) && legLen > 0){
+    WADE_DEPTH = legLen*WADE_FRACTION;
+    WADE_REACH = legLen*WADE_REACH_PER_LEG;
+  }
+}
+function wadeDepth(){ return WADE_DEPTH; }
+function wadeReach(){ return WADE_REACH; }
+function wadeSurfaceAt(x, z){
+  const w = waterSurfaceInfo(x, z);
+  if(!w) return null;
+  const pr = w.seg.w.prof, wet = w.seg.wet, pts = pr.pts, n = pts.length;
+  // cumulative arc along this creek, cached on its profile (rebuilt with the world)
+  if(!pr.__arc || pr.__arc.length !== n){
+    const A = [0];
+    for(let k=1;k<n;k++) A[k] = A[k-1] + Math.hypot(pts[k][0]-pts[k-1][0], pts[k][1]-pts[k-1][1]);
+    pr.__arc = A;
+  }
+  const A = pr.__arc, i0 = w.seg.i;
+  const here = A[i0] + (A[i0+1] - A[i0])*w.t;
+  const at = s0 => {                                   // surface at arc position s0
+    s0 = clamp(s0, 0, A[n-1]);
+    let k = 0; while(k < n-2 && A[k+1] < s0) k++;
+    const f = (A[k+1] - A[k]) > 1e-9 ? (s0 - A[k])/(A[k+1] - A[k]) : 0;
+    return wet[k] + (wet[k+1] - wet[k])*f;
+  };
+  let lo = Math.min(w.y, at(here - WADE_REACH), at(here + WADE_REACH));
+  for(let k=0;k<n;k++) if(A[k] > here - WADE_REACH && A[k] < here + WADE_REACH && wet[k] < lo) lo = wet[k];
+  /* A CASCADE IS NOT WADED. Where the creek falls faster than the paws can follow (one
+     67% step on the seven-bridges map), following the lowest surface under the paws
+     would put the pup in over its back. The extra depth stops at WADE_MAX_DROP of a leg:
+     on a cascade the uphill paws may meet the falling water, which is what it looks like
+     to stand in one. */
+  const leg = WADE_DEPTH/WADE_FRACTION;
+  return Math.max(lo, w.y - leg*WADE_MAX_DROP);
+}
 function getWaterways(){ return WATERWAYS; }
 function getBridges(){ return BRIDGES; }
 
@@ -2174,7 +2269,11 @@ function benchY(x,z){
 
    Off-trail it is plain terrainY: no inflation, no floating near a rise. */
 function standingY(x,z){
-  const g = terrainY(x,z,VERT_SCALE);
+  let g = terrainY(x,z,VERT_SCALE);
+  // in visible water, stand at wading depth (see WADE_FRACTION); a path over or through
+  // the water still wins below, because its tread is what you are on there
+  const ws = waterSurfaceAt(x,z);
+  if(ws != null && g < ws + WATER_SHOWS) g = wadeSurfaceAt(x,z) - WADE_DEPTH;
   const nt = nearestTrail(x,z);
   if(nt.y == null || !(nt.d <= nt.hw)) return g;
   // ease over the outer 40 cm of the corridor so stepping onto a trail that sits a hair
@@ -2368,8 +2467,12 @@ function rebuildWorld(){
   PATH_MIX.lotRamps = gradePathsThroughLots();
   gradeWaterways();
   const bridgeZones = raiseBridgeDecks();
-  gradeTrailCells(GRAPH.edges.map(e=>e.prof),
+  const claimedCells = gradeTrailCells(GRAPH.edges.map(e=>e.prof),
                   WATERWAYS.map(w=>w.prof).filter(Boolean), bridgeZones);
+  // creek banks step down to the water instead of standing as slot walls (terrain.js);
+  // a graded area (a lot, a building pad) keeps its own level
+  PATH_MIX.bankCells = stepChannelBanks(WATERWAYS.map(w=>w.prof).filter(Boolean), claimedCells, vm(WATER_U),
+    (x,z) => AREAS.some(a => a.groundY != null && a.kind !== 'water' && pointInArea(x, z, a)));
   hashWater();
   // hash before any geometry: buildArea's ground-cover scatter and buildAreaSign both
   // call nearestTrail, and standingY now needs tread heights too
@@ -2529,7 +2632,7 @@ function rebuildWorld(){
       // a footway beside a road floats over a drop exactly as a trail does; skirt it too
       if(hs){
         const sk = embankmentGeom(rpts, fw*1.35*0.5, skirtTops(prof, lift+0.01),
-                                  (x,z)=>terrainY(x,z,VERT_SCALE), buriesTread);
+                                  (x,z)=>terrainY(x,z,VERT_SCALE), buriesTread, waterEdgeDist);
         if(sk) worldG.add(new THREE.Mesh(sk, trailMat(shade(st.shoulder,0.86),rank)));
       }
       // a kerb belongs to tarmac; a path beside a dirt road just runs along its edge
@@ -2546,7 +2649,7 @@ function rebuildWorld(){
        ink ends and no ribbon layer overhangs it. */
     if(hs){
       const skirt = embankmentGeom(rpts, W*OUTLINE_MUL*0.5, skirtTops(prof, lift+0.01),
-                                   (x,z)=>terrainY(x,z,VERT_SCALE), buriesTread);
+                                   (x,z)=>terrainY(x,z,VERT_SCALE), buriesTread, waterEdgeDist);
       if(skirt) worldG.add(new THREE.Mesh(skirt, trailMat(shade(st.shoulder,0.86),rank)));
     }
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*OUTLINE_MUL,lift+0.012,hs),inkMats[rank]));
@@ -2591,6 +2694,10 @@ function rebuildWorld(){
     const water = new THREE.Mesh(ribbonGeom(pr.pts, w.width, 0.0, wetY), trailMat(col,0));
     water.name='water';
     worldG.add(water);
+    // the sides, down to the bed (pieces.js waterSideGeom): without them the margin strip
+    // of bed let you see in under the surface, wading paws included
+    const sides = waterSideGeom(pr.pts, w.width/2, wetY, bedY.map(y=>y+0.03));
+    if(sides){ const m = new THREE.Mesh(sides, trailMat(shade(col,0.82),0)); m.name='water-side'; worldG.add(m); }
     worldG.add(new THREE.Mesh(ribbonGeom(pr.pts, w.width*0.28, 0.03, wetY), trailMat(shade(col,1.35),0)));
   }
 
@@ -2977,7 +3084,7 @@ function getBackdrop(){ return backdropG; }
 
 export { loadWorld, rebuildWorld, addLayers, clearLayers, hasBundle, setContourStep,
          standingY, getWorldRevision, pathWidth, getContourStep, getSignCount, getPathMix, getMapId, getMapLatLon, getCrossings,
-         pathRank, kindLift, pathOutlineWidth, getWaterways, getBridges, inWaterway, styleKey,
+         pathRank, kindLift, pathOutlineWidth, getWaterways, getBridges, inWaterway, waterSurfaceAt, waterSurfaceInfo, wadeSurfaceAt, setWadeLegLength, wadeDepth, wadeReach, styleKey,
          getAreaLabels, updateAreaLabels, getAreaSolids, areaBlocked, areaSolidTop, lineOfSight, nearestSolidFace, solidEmbed, distToSolid,
          setThemeById, getTheme, setMapScale, getMapScale, getExaggeration, getBackdrop,
          setFogMultiplier, getFogMultiplier, setTerrainQuadBudget, getDemStride, applyThemeLighting,

@@ -425,6 +425,55 @@ function gradeTrailCells(profiles, channels, zones){
     }
   }
   for(const [key, v] of claim) BAND[key] = bandOfM(v.h);
+  return new Set(claim.keys());
+}
+
+/* ---------- creek banks ----------
+
+   A channel is claimed as a notch: its own cells, cut CHANNEL_DEPTH below the floor it
+   runs along, and nothing either side. On open ground that reads as a creek. In a canyon
+   it read as a slot: the cells beside the notch kept whatever terrace height the valley
+   side had, each one its own sheer column, so the water ran at the bottom of a crevasse
+   one cell wide with walls a metre and a half high on both sides (North Cheyenne Creek,
+   median lower bank 1.8 units above the water).
+
+   So the banks are graded too, as terraces stepping down to the water: within BANK_RINGS
+   cells of a channel's edge, a cell may stand no more than one step per ring above the
+   water surface -- ring 1 a single step, ring 2 two. Only ever LOWERED (a bank already
+   below the cap keeps its own shape), never a cell any path or channel claimed (their
+   heights are the graded profiles, and a path's bench must not be cut into), and never a
+   cell `skip` says belongs to something else (a graded lot). Beyond the rings the valley
+   sides are left exactly as the terrain has them -- this widens the creek's floor, it
+   does not flatten the canyon. */
+const BANK_RINGS = 2;
+function stepChannelBanks(channels, claimed, surfOffsetM, skip){
+  if(!WORLD || !BAND || !channels || !channels.length) return 0;
+  const cap = new Map();                         // cell key -> lowest allowed band
+  for(const pr of channels){
+    const reach = pr.halfWidth + WORLD.cell*BANK_RINGS;
+    for(let i=0;i<pr.pts.length;i++){
+      const p = pr.pts[i], surfBand = bandOfM(pr.hm[i] + surfOffsetM);
+      const i0 = clamp(WORLD.cellI(p[0]-reach),0,WORLD.width-1), i1 = clamp(WORLD.cellI(p[0]+reach),0,WORLD.width-1);
+      const j0 = clamp(WORLD.cellJ(p[1]-reach),0,WORLD.height-1), j1 = clamp(WORLD.cellJ(p[1]+reach),0,WORLD.height-1);
+      for(let j=j0;j<=j1;j++) for(let ci=i0;ci<=i1;ci++){
+        const c = WORLD.cellCentre(ci, j);
+        const d = Math.hypot(c.x - p[0], c.z - p[1]) - pr.halfWidth;
+        if(d > WORLD.cell*BANK_RINGS) continue;
+        const ring = Math.max(1, Math.ceil(d/WORLD.cell));
+        const allowed = surfBand + ring;
+        const key = j*WORLD.width + ci;
+        const prev = cap.get(key);
+        if(prev == null || allowed < prev) cap.set(key, allowed);
+      }
+    }
+  }
+  let lowered = 0;
+  for(const [key, allowed] of cap){
+    if(claimed && claimed.has(key)) continue;
+    if(skip){ const ci = key % WORLD.width, cj = (key - ci)/WORLD.width, c = WORLD.cellCentre(ci, cj); if(skip(c.x, c.z)) continue; }
+    if(BAND[key] > allowed){ BAND[key] = allowed; lowered++; }
+  }
+  return lowered;
 }
 
 /* One profile's claim on the band grid, lowest height wins within `claim`. `pad` is how
@@ -719,6 +768,6 @@ function groundTexture(theme){
   const t=new THREE.CanvasTexture(c);t.wrapS=t.wrapT=THREE.RepeatWrapping;return t;
 }
 
-export { setWorld, setStep, getWorld, getStep, terrainY, cameraGroundY, rawGroundY, flattenAreaCells, areaCells, setCellsHeightM,
+export { setWorld, setStep, getWorld, getStep, terrainY, cameraGroundY, rawGroundY, flattenAreaCells, areaCells, setCellsHeightM, stepChannelBanks,
          bandAt, bandY, heightM, bandOfM, gradeProfile, gradeTrailCells, reliefCanvas,
          resample, buildTerrainMesh, groundTexture, GROUND_TILE_M };

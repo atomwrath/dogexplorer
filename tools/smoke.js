@@ -713,6 +713,104 @@ async function assertAll(window, errors, stats) {
   /* A fill that hides the path it was built to reveal is worse than no fill. On a short
      switchback the upper leg's skirt reaches out over the lower leg at the natural angle
      of repose, so the skirt has to steepen instead. */
+  /* NO FLOATING TREAD WITHOUT A SKIRT UNDER IT. The skirt only asked "is the ground below
+     me?" at profile stations, which a long straight run keeps 6-9 units apart -- and it
+     stopped dead at the last skirted station before the ground came up again, however far
+     the terrain had stepped down in between. So whole stretches of tread hung in the air
+     with nothing under them (60% of Barr Trail's floating edge on Pikes Peak). Sampled
+     every half unit along every edge, just outside the painted edge: where the tread
+     stands clear of the ground, a skirt must be there. Excluded, by design: beside a
+     lower tread (the skirt stops rather than bury it) and within 2.5u of a junction. */
+  const FLOAT_BARE_MAX = 0.05;   // measured: 3.9% here, 0.3% along Barr Trail on Pikes Peak
+  let __floatNote = '';
+  check('floating tread always has a fill embankment under it', (() => {
+    const tris = [], verts = [];
+    getWorldGroup().traverse(o => {
+      const g = o.isMesh && o.geometry;
+      if (!g || !g.userData || !g.userData.skirtQuads) return;
+      const A = g.attributes.position.array, I = g.index.array || g.index;
+      for (let i = 0; i < A.length; i += 3) verts.push([A[i], A[i+2]]);
+      for (let t = 0; t < I.length; t += 3)
+        tris.push([[A[I[t]*3], A[I[t]*3+2]], [A[I[t+1]*3], A[I[t+1]*3+2]], [A[I[t+2]*3], A[I[t+2]*3+2]]]);
+    });
+    const inTri = (x, z, [a, b, c]) => {
+      const d1 = (x-b[0])*(a[1]-b[1]) - (a[0]-b[0])*(z-b[1]), d2 = (x-c[0])*(b[1]-c[1]) - (b[0]-c[0])*(z-c[1]), d3 = (x-a[0])*(c[1]-a[1]) - (c[0]-a[0])*(z-a[1]);
+      return !((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0));
+    };
+    const VS = getVertScale();
+    let n = 0, bare = 0;
+    for (const e of getGraph().edges) {
+      if (!e.prof || e.buried || e.trimA || e.trimB) continue;
+      const pr = e.prof, pts = pr.pts, hw = pathOutlineWidth(e.kind) / 2, lift = kindLift(e.kind);
+      let arc = 0; const total = pts.reduce((t, p, i) => i ? t + Math.hypot(p[0]-pts[i-1][0], p[1]-pts[i-1][1]) : 0, 0);
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i], b = pts[i+1], L = Math.hypot(b[0]-a[0], b[1]-a[1]);
+        if (pr.deck && (pr.deck[i] || pr.deck[i+1])) { arc += L; continue; }
+        const nx = -(b[1]-a[1]) / L, nz = (b[0]-a[0]) / L;
+        for (let s0 = 0; s0 < L; s0 += 0.5) {
+          const u = s0 / L, at = arc + s0;
+          if (at < 2.5 || total - at < 2.5) continue;
+          const cx = a[0] + (b[0]-a[0])*u, cz = a[1] + (b[1]-a[1])*u, top = pr.ys[i] + (pr.ys[i+1]-pr.ys[i])*u + lift;
+          for (const sd of [1, -1]) {
+            /* FLOATING means the tread's own edge is in the air: sampled just INSIDE the
+               painted edge. Just outside it, a path on its bench beside a terrace step down
+               reads as "floating" when it is sitting on the ground -- the step is terrain
+               beside the path, and on Garden of the Gods that was 208 of 236 false alarms. */
+            const ix = cx + nx*sd*(hw - 0.05), iz = cz + nz*sd*(hw - 0.05);
+            if (top - terrainY(ix, iz, VS) < 0.6) continue;
+            // coverage is judged a hair outside, where a skirt that exists must be in plan
+            const ex = cx + nx*sd*(hw + 0.1), ez = cz + nz*sd*(hw + 0.1);
+            let lower = false;
+            for (let d = 0.3; d <= 3 && !lower; d += 0.3) lower = buriesTread(cx + nx*sd*(hw + d), cz + nz*sd*(hw + d), top);
+            if (lower || waterEdgeDist(ex, ez) < 1) continue;
+            n++;
+            if (tris.some(t => inTri(ex, ez, t))) continue;
+            /* Not under a skirt in plan -- but a skirt that closes steeply to where the ground
+               meets the tread is near-vertical at its tip and covers almost nothing in plan
+               while hiding the gap from every view. So a true HOLE is one with no skirt
+               vertex within half a unit of this point on the edge. */
+            const px = cx + nx*sd*hw, pz = cz + nz*sd*hw;
+            if (!verts.some(v => Math.abs(v[0]-px) < 0.5 && Math.abs(v[1]-pz) < 0.5 && Math.hypot(v[0]-px, v[1]-pz) < 0.5)) bare++;
+          }
+        }
+        arc += L;
+      }
+    }
+    __floatNote = `${bare} of ${n} floating edge samples with no skirt at or under them (${n ? (100*bare/n).toFixed(1) : 0}%)`;
+    return n > 100 && bare / n < FLOAT_BARE_MAX;
+  })(), () => __floatNote);
+
+  /* A SKIRT'S BOTTOM EDGE NEVER FLOATS. Each quad's bottom runs straight between two
+     feet; on terraced ground those land on different terraces and the edge between them
+     hung over the lower one -- daylight under the trail, through a skirt torn into
+     triangular sails (a quarter of all bottom-edge length on Pikes Peak). Sampled along
+     every bottom edge against the ground under it. */
+  let __skirtFloatNote = '';
+  check('no fill embankment bottom edge hangs above the ground', (() => {
+    let edges = 0, samples = 0, floating = 0, worst = 0;
+    getWorldGroup().traverse(o => {
+      const g = o.isMesh && o.geometry;
+      if (!g || !g.userData || !g.userData.skirtQuads) return;
+      const A = g.attributes.position.array, I = g.index.array || g.index;
+      const pairs = new Set();
+      for (let t = 0; t < I.length; t += 3) { const s3 = [I[t], I[t+1], I[t+2]]; for (const a of s3) for (const b of s3) if (a < b) pairs.add(a + '_' + b); }
+      for (let v = 0; v + 3 < A.length / 3; v += 2) {
+        const f1 = v + 1, f2 = v + 3;                   // vertices come as (top, foot) pairs
+        if (!pairs.has(f1 + '_' + f2)) continue;
+        edges++;
+        for (let k = 1; k < 8; k++) {
+          const u = k / 8;
+          const x = A[f1*3] + (A[f2*3] - A[f1*3]) * u, y = A[f1*3+1] + (A[f2*3+1] - A[f1*3+1]) * u, z = A[f1*3+2] + (A[f2*3+2] - A[f1*3+2]) * u;
+          samples++;
+          const gap = y - terrainY(x, z, getVertScale());
+          if (gap > 0.02) { floating++; worst = Math.max(worst, gap); }
+        }
+      }
+    });
+    __skirtFloatNote = `${floating} of ${samples} bottom-edge samples above the ground over ${edges} edges (worst ${worst.toFixed(2)}u)`;
+    return edges > 50 && floating === 0;
+  })(), () => __skirtFloatNote);
+
   check('a fill embankment never buries the trail below it',
     coarse.skirtVerts > 0 && coarse.buried === 0,
     `${coarse.buried} of ${coarse.skirtVerts} skirt vertices hang over a lower tread`);
@@ -5425,6 +5523,8 @@ async function assertAll(window, errors, stats) {
       creek: W.filter(w=>w.name==='North Cheyenne Creek').length,
       bridges: B.length, hinted: B.filter(b=>b.hinted && b.water).length,
       decks: [], skirtUnderDeck: 0, stations: 0, buried: 0, steps: {n:0, over:0, worst:0},
+      skirtTris: 0, skirtTrisWet: 0, wade: {n:0, dry:0, deep:0, off:0, edgeN:0, edgeDry:0, spanN:0, spanShallow:0, worstSpan:9},
+      waterN: 0, sideN: 0, sideBad: 0, banks: [],
       deckMeshes: 0, frameMeshes: 0, waterMeshes: 0,
     };
     for(const b of B){
@@ -5439,14 +5539,104 @@ async function assertAll(window, errors, stats) {
       if(o.name==='bridge-deck') out.deckMeshes++;
       if(o.name==='bridge-frame') out.frameMeshes++;
       if(o.name==='water') out.waterMeshes++;
+      /* Water has sides: every channel's surface gets a curtain down to its bed, so you
+         cannot look in under it through the margin of bed the channel is carved wider by. */
+      if(o.name==='water'){
+        out.waterN++;
+        const g = o.geometry.__ribbon ? o.geometry : null;
+        if(g) o.userData.__len = g.__ribbon.length;
+      }
+      if(o.name==='water-side'){
+        out.sideN++;
+        const A = o.geometry.attributes.position.array;
+        for(let i=0;i<A.length;i+=6) if(!(A[i+4] < A[i+1] - 0.005)) { out.sideBad++; break; }   // bottom below top
+      }
       const ud = o.geometry && o.geometry.userData;
       if(!ud || !ud.skirtQuads) return;
       const pos = o.geometry.getAttribute('position'), arr = pos.array || pos;
+      /* ANYWHERE along the creek, not just under a deck: a skirt triangle whose centre
+         lies inside the drawn water is ground painted over the stream. Centres, because a
+         triangle can cover water with all three corners on the bank. */
+      const I = o.geometry.index ? (o.geometry.index.array || o.geometry.index) : null;
+      if(I) for(let t=0;t<I.length;t+=3){
+        const cx=(arr[I[t]*3]+arr[I[t+1]*3]+arr[I[t+2]*3])/3, cz=(arr[I[t]*3+2]+arr[I[t+1]*3+2]+arr[I[t+2]*3+2])/3;
+        out.skirtTris++;
+        if(inWaterway(cx, cz)) out.skirtTrisWet++;
+      }
       for(let i=0;i<arr.length;i+=3)
         for(const b of B) if(b.water && Math.hypot(arr[i]-b.x, arr[i+2]-b.z) < b.water.width/2 + 0.3){
           out.skirtUnderDeck++; break;
         }
     });
+    /* WADING, across the whole width of the drawn water and not only its centreline --
+       the margins are where the bank used to hold the pup up on top of the water. Every
+       point off a path where the water shows: the pup must stand under the surface (paws
+       hidden) and by no more than its leg (body clear). */
+    const legW = wadeDepth() / 0.45;
+    for(const w of W){
+      if(!w.prof) continue;
+      const pts=w.prof.pts;
+      for(let i=1;i<pts.length-1;i+=2){
+        const dx=pts[i+1][0]-pts[i-1][0], dz=pts[i+1][1]-pts[i-1][1], L=Math.hypot(dx,dz)||1;
+        for(const f of [0, 0.5, 0.9]) for(const sd of [1,-1]){
+          const o=f*w.width/2*sd, px=pts[i][0]-dz/L*o, pz=pts[i][1]+dx/L*o;
+          const nt=nearestTrail(px,pz); if(nt.d<=nt.hw+0.4) continue;      // on or by a path
+          const ws=waterSurfaceAt(px,pz); if(ws==null) continue;
+          if(terrainY(px,pz,VS) >= ws + 0.02) continue;                    // water buried here
+          const st = standingY(px,pz), d = ws - st;
+          out.wade.n++;
+          if(d <= 0.005) out.wade.dry++;
+          if(d > legW*1.0) out.wade.deep++;       // the steepest rapid may wet the belly; never over the leg
+          if(Math.abs(st - (wadeSurfaceAt(px,pz) - wadeDepth())) > 1e-4) out.wade.off++;
+          /* ACROSS THE PAWS, independently of how standingY got there: up and down the
+             channel by the paw reach, the water must still be at least the wading depth
+             over where the pup stands -- on a steep creek a depth taken at the centre
+             leaves the downhill paws poking out of their own water. */
+          /* The full rule, in its own code: project the point onto THIS creek (the
+             nearest segment of it), find the lowest drawn surface within the paw reach
+             either way along the creek from there, and then
+               - normally the pup stands at least 0.9 of the wading depth under it
+                 (the 10% is sampling slack), paws covered wherever they reach;
+               - on a cascade, where that lowest surface is more than half a leg below the
+                 centre's, the extra depth is capped by design (world.js WADE_MAX_DROP):
+                 the pup stands exactly half a leg plus the wading depth under the centre. */
+          const Arc=[0]; for(let k=1;k<pts.length;k++) Arc[k]=Arc[k-1]+Math.hypot(pts[k][0]-pts[k-1][0], pts[k][1]-pts[k-1][1]);
+          const wetAt = k => w.prof.hm[k]*VS + 0.3;
+          let pk=0, pt=0, pd=Infinity;
+          for(let k=0;k<pts.length-1;k++){ const r=ptSeg([px,pz], pts[k], pts[k+1]); if(r.d<pd){ pd=r.d; pk=k; pt=r.t; } }
+          const here = Arc[pk] + (Arc[pk+1]-Arc[pk])*pt;
+          const surfAt = a0 => { a0=Math.max(0,Math.min(Arc[pts.length-1],a0)); let k=0; while(k<pts.length-2 && Arc[k+1]<a0) k++;
+                                 const f=(Arc[k+1]-Arc[k])>1e-9?(a0-Arc[k])/(Arc[k+1]-Arc[k]):0; return wetAt(k)+(wetAt(k+1)-wetAt(k))*f; };
+          const centre = surfAt(here), R = wadeReach();
+          let lowest = Math.min(centre, surfAt(here-R), surfAt(here+R));
+          for(let k=0;k<pts.length;k++) if(Arc[k]>here-R && Arc[k]<here+R) lowest=Math.min(lowest, wetAt(k));
+          const leg = wadeDepth()/0.45;
+          out.wade.spanN++;
+          if(centre - lowest > leg*0.5){
+            out.wade.cascade = (out.wade.cascade||0) + 1;
+            if(Math.abs(st - (centre - leg*0.5 - wadeDepth())) > 1e-3) out.wade.spanShallow++;
+          }else{
+            const dq = lowest - st;
+            if(dq < out.wade.worstSpan) out.wade.worstSpan = dq;
+            if(dq < wadeDepth()*0.9) out.wade.spanShallow++;
+          }
+          if(f === 0.9){ out.wade.edgeN++; if(d <= 0.005) out.wade.edgeDry++; }
+        }
+      }
+    }
+    /* The lower of the two banks, a cell beyond the water's edge, over the water surface:
+       how deep a trench the creek runs in. */
+    for(const w of W){
+      if(!w.prof) continue;
+      const pts=w.prof.pts;
+      for(let i=1;i<pts.length-1;i++){
+        const dx=pts[i+1][0]-pts[i-1][0], dz=pts[i+1][1]-pts[i-1][1], L=Math.hypot(dx,dz)||1;
+        const wet=w.prof.hm[i]*VS+0.3, cell=getWorld().cell;
+        const b=[]; for(const sd of [1,-1]){ const o=(w.width/2+0.8+cell)*sd; b.push(terrainY(pts[i][0]-dz/L*o, pts[i][1]+dx/L*o, VS)-wet); }
+        out.banks.push(Math.min(b[0], b[1]));
+      }
+    }
+    out.banks.sort((a,b)=>a-b);
     for(const w of W){
       if(!w.prof) continue;
       for(let i=0;i<w.prof.pts.length;i++){
@@ -5490,6 +5680,28 @@ async function assertAll(window, errors, stats) {
     sb.decks.map(d => (d.groundY - d.waterY).toFixed(2)).join(' '));
   check('no fill embankment is built across the water under a deck',
     sb.skirtUnderDeck === 0, `${sb.skirtUnderDeck} skirt vertices over bridged water`);
+  check('no fill embankment reaches over the creek anywhere along it',
+    sb.skirtTris > 100 && sb.skirtTrisWet === 0,
+    `${sb.skirtTrisWet} of ${sb.skirtTris} skirt triangles over water`);
+  check('a pup in the creek wades: paws under the surface, body above it, edge to edge',
+    sb.wade.n > 200 && sb.wade.dry === 0 && sb.wade.deep === 0 && sb.wade.off === 0 && sb.wade.edgeN > 30,
+    `${sb.wade.n} wet points (${sb.wade.edgeN} at the margins): ${sb.wade.dry} dry, ${sb.wade.deep} too deep, ${sb.wade.off} off the wading depth`);
+  check('wading depth holds across the paws, not just under the centre',
+    sb.wade.spanN > 400 && sb.wade.spanShallow === 0,
+    `${sb.wade.spanShallow} of ${sb.wade.spanN} paw-span samples shallower than the wading depth (worst ${sb.wade.worstSpan.toFixed(3)}u), ${sb.wade.cascade||0} cascade points exempt`);
+  check('every stretch of water has sides down to its bed',
+    sb.waterN > 0 && sb.sideN === sb.waterN && sb.sideBad === 0,
+    `${sb.waterN} water surfaces, ${sb.sideN} with sides, ${sb.sideBad} sides not reaching down`);
+  /* A CREEK IN A VALLEY, NOT A SLOT. The channel was cut as a one-cell notch and the cells
+     beside it kept the canyon side's terrace heights as sheer walls: the lower bank stood
+     a median 1.78u over the water (3.39u at the 90th percentile), a crevasse. The banks now
+     step down to the water a terrace per cell. */
+  {
+    const q = p => sb.banks.length ? sb.banks[Math.floor(sb.banks.length*p)] : Infinity;
+    check('a creek runs between banks that step down to it, not at the bottom of a slot',
+      sb.banks.length > 200 && q(0.5) <= 0.9 && q(0.9) <= 1.6,
+      `lower bank over the water: median ${q(0.5).toFixed(2)}u, 90th percentile ${q(0.9).toFixed(2)}u`);
+  }
   check('a creek running beside a path is not buried under its bench',
     sb.stations > 100 && sb.buried / sb.stations < 0.02, `${sb.buried} of ${sb.stations} creek stations under ground`);
   check('walking onto and over a bridge never meets an un-walkable step',

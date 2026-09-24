@@ -29,7 +29,7 @@ Two cartoon 3D dog games that run in any browser — no install, no build step r
   line that set the time, replayed, so it cannot be blocked or shoved. Scenery draped on the
   terrain is subdivided (RIBBON_STEP_M): a simplified trail segment that spans a rock fin
   instead of following it renders as a sheet of light hanging in the sky.
-  Verify with `node tools/smoke-neon.js`; `tools/revert-neon.py` proves each check load-bearing.
+  Verify with `node tools/smoke-neon.js`
 
 Both games share the same dog builder, so a pup you design in the creator is the pup you run with in the city.
 

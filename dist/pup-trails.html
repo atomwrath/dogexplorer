@@ -3375,6 +3375,55 @@ function gradeTrailCells(profiles, channels, zones){
     }
   }
   for(const [key, v] of claim) BAND[key] = bandOfM(v.h);
+  return new Set(claim.keys());
+}
+
+/* ---------- creek banks ----------
+
+   A channel is claimed as a notch: its own cells, cut CHANNEL_DEPTH below the floor it
+   runs along, and nothing either side. On open ground that reads as a creek. In a canyon
+   it read as a slot: the cells beside the notch kept whatever terrace height the valley
+   side had, each one its own sheer column, so the water ran at the bottom of a crevasse
+   one cell wide with walls a metre and a half high on both sides (North Cheyenne Creek,
+   median lower bank 1.8 units above the water).
+
+   So the banks are graded too, as terraces stepping down to the water: within BANK_RINGS
+   cells of a channel's edge, a cell may stand no more than one step per ring above the
+   water surface -- ring 1 a single step, ring 2 two. Only ever LOWERED (a bank already
+   below the cap keeps its own shape), never a cell any path or channel claimed (their
+   heights are the graded profiles, and a path's bench must not be cut into), and never a
+   cell `skip` says belongs to something else (a graded lot). Beyond the rings the valley
+   sides are left exactly as the terrain has them -- this widens the creek's floor, it
+   does not flatten the canyon. */
+const BANK_RINGS = 2;
+function stepChannelBanks(channels, claimed, surfOffsetM, skip){
+  if(!WORLD || !BAND || !channels || !channels.length) return 0;
+  const cap = new Map();                         // cell key -> lowest allowed band
+  for(const pr of channels){
+    const reach = pr.halfWidth + WORLD.cell*BANK_RINGS;
+    for(let i=0;i<pr.pts.length;i++){
+      const p = pr.pts[i], surfBand = bandOfM(pr.hm[i] + surfOffsetM);
+      const i0 = clamp(WORLD.cellI(p[0]-reach),0,WORLD.width-1), i1 = clamp(WORLD.cellI(p[0]+reach),0,WORLD.width-1);
+      const j0 = clamp(WORLD.cellJ(p[1]-reach),0,WORLD.height-1), j1 = clamp(WORLD.cellJ(p[1]+reach),0,WORLD.height-1);
+      for(let j=j0;j<=j1;j++) for(let ci=i0;ci<=i1;ci++){
+        const c = WORLD.cellCentre(ci, j);
+        const d = Math.hypot(c.x - p[0], c.z - p[1]) - pr.halfWidth;
+        if(d > WORLD.cell*BANK_RINGS) continue;
+        const ring = Math.max(1, Math.ceil(d/WORLD.cell));
+        const allowed = surfBand + ring;
+        const key = j*WORLD.width + ci;
+        const prev = cap.get(key);
+        if(prev == null || allowed < prev) cap.set(key, allowed);
+      }
+    }
+  }
+  let lowered = 0;
+  for(const [key, allowed] of cap){
+    if(claimed && claimed.has(key)) continue;
+    if(skip){ const ci = key % WORLD.width, cj = (key - ci)/WORLD.width, c = WORLD.cellCentre(ci, cj); if(skip(c.x, c.z)) continue; }
+    if(BAND[key] > allowed){ BAND[key] = allowed; lowered++; }
+  }
+  return lowered;
 }
 
 /* One profile's claim on the band grid, lowest height wins within `claim`. `pad` is how
@@ -4906,9 +4955,46 @@ const FILL_RUN = 1.6;         // horizontal run per unit of drop, about 32 degre
 const FILL_MAX_RUN = 9;       // a huge step gets a steeper skirt, not one across the map
 const FILL_STOP_GAP = 0.6;    // clear space left between a shortened skirt and the tread below
 const FILL_MIN_RUN_RATIO = 0.25;  // steepest the skirt is ever allowed to get, about 76 degrees
+/* NEVER OVER WATER. A skirt is ground, and ground is drawn on top of water -- so where a
+   path runs along a creek, the fill sloping down its creek-side edge reached straight out
+   over the channel and painted a brown bank across the stream (the Seven Bridges Trail,
+   for most of its length). The same fix as for a lower tread, for the same reason: stop
+   the skirt FILL_WATER_PAD short of the water's drawn edge and let it steepen. Where the
+   path's own edge is already that close to the water there is no room for a fill at all,
+   and the right answer is none -- a tread edge standing at the water's edge is a bank,
+   not a hole that needs closing. */
+const FILL_WATER_PAD = 0.35;      // clear space kept between a skirt and the water's edge
+const FILL_WATER_MIN_RUN = 0.05;  // a skirt this short is a vertical bank face
+const FILL_EDGE_SAMPLES = 8;      // ground checks along each quad's bottom edge
+const FILL_SINK = 0.1;            // how far a foot is buried below the ground it must reach
+const FILL_REACH_RATE = 1.0;      // most a skirt's reach may change per unit along the path
 
-function embankmentGeom(pts, halfW, topYs, groundYAt, buriesTreadAt){
-  if(!pts || pts.length < 2 || !topYs) return null;
+/* THE SKIRT SAMPLES THE GROUND DENSELY, whatever the profile does. A graded profile only
+   keeps a station where the line bends, so a long straight run on Pikes Peak had stations
+   6-9 units apart -- and the skirt only asked "is the ground below me?" AT stations. Both
+   ends of such a run could sit near the ground while the terraces between them fell away
+   under the middle of it, and the tread was left floating with no skirt at all (60% of the
+   floating edge along Barr Trail). So the edge is resampled to FILL_STATION spacing
+   first, with heights interpolated linearly -- exactly as the ribbon above is drawn
+   between the same stations -- and every one of those points is asked. */
+const FILL_STATION = 1.0;
+function densifyEdge(pts, ys){
+  const P=[pts[0]], Y=[ys[0]];
+  for(let i=1;i<pts.length;i++){
+    const a=pts[i-1], b=pts[i], L=Math.hypot(b[0]-a[0], b[1]-a[1]);
+    const n=Math.max(1, Math.ceil(L/FILL_STATION));
+    for(let k=1;k<=n;k++){
+      const u=k/n;
+      P.push([a[0]+(b[0]-a[0])*u, a[1]+(b[1]-a[1])*u]);
+      Y.push(ys[i-1]+(ys[i]-ys[i-1])*u);
+    }
+  }
+  return {pts:P, ys:Y};
+}
+
+function embankmentGeom(pts0, halfW, topYs0, groundYAt, buriesTreadAt, waterDistAt){
+  if(!pts0 || pts0.length < 2 || !topYs0) return null;
+  const dense = densifyEdge(pts0, topYs0), pts = dense.pts, topYs = dense.ys;
   const P=[],N=[],idx=[];
   const push=(x,y,z)=>{ P.push(x,y,z); N.push(0,1,0); return P.length/3-1; };
   const setN=(i,nx,ny,nz)=>{ N[i*3]=nx; N[i*3+1]=ny; N[i*3+2]=nz; };
@@ -4929,6 +5015,31 @@ function embankmentGeom(pts, halfW, topYs, groundYAt, buriesTreadAt){
 
   for(const side of [1,-1]){
     let prev = null;
+    const strip = [], links = [];              // stations, and the quads between them
+    let touch = null;                          // the last station where the ground met the tread
+    /* HOW FAR EACH STATION REACHES, smoothed along the path. The natural reach is set by
+       that station's own drop, and on terraced ground the drop jumps a whole step from one
+       station to the next -- so a long reach stood next to a short one and the skirt's
+       outer edge came out as a row of spikes. Rate-limited instead: a station may reach
+       no more than FILL_REACH_RATE further than its neighbour per unit along the path, so
+       the outline changes at 45 degrees at most. Only ever SHORTENS a reach (a lower
+       envelope, forwards then backwards), and a shorter skirt is still one that meets the
+       ground -- steeper, never floating. Stations that need no skirt break the chain. */
+    const reach = new Array(pts.length).fill(null);
+    for(let i=0;i<pts.length;i++){
+      const p=pts[i], q=pts[Math.min(pts.length-1,i+1)], r=pts[Math.max(0,i-1)];
+      let dx=q[0]-r[0], dz=q[1]-r[1]; const L=Math.hypot(dx,dz)||1; dx/=L; dz/=L;
+      const ex=p[0]-dz*side*halfW, ez=p[1]+dx*side*halfW;
+      const drop=topYs[i]-groundYAt(ex,ez);
+      if(drop>FILL_MIN_DROP) reach[i]=Math.min(drop*FILL_RUN, FILL_MAX_RUN);
+    }
+    const gapTo = i => Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1]);
+    /* Neighbours only: a station beside one that needs no skirt is not limited by it. A
+       strip now CLOSES to that station (see the no-gap case below), so its end already
+       comes down to the tread edge; tapering the reach to zero there as well squeezed
+       every station near a break to a sliver and left the interval open again. */
+    for(let i=1;i<pts.length;i++) if(reach[i]!=null && reach[i-1]!=null) reach[i]=Math.min(reach[i], reach[i-1]+gapTo(i)*FILL_REACH_RATE);
+    for(let i=pts.length-2;i>=0;i--) if(reach[i]!=null && reach[i+1]!=null) reach[i]=Math.min(reach[i], reach[i+1]+gapTo(i+1)*FILL_REACH_RATE);
     for(let i=0;i<pts.length;i++){
       const p=pts[i];
       const q=pts[Math.min(pts.length-1,i+1)], r=pts[Math.max(0,i-1)];
@@ -4938,9 +5049,27 @@ function embankmentGeom(pts, halfW, topYs, groundYAt, buriesTreadAt){
       const yTop=topYs[i];
       const gEdge=groundYAt(ex,ez);
       const drop=yTop-gEdge;
-      // no gap here: end the strip rather than bridging across a stretch that needs no fill
-      if(!(drop>FILL_MIN_DROP)){ prev=null; continue; }
-      let run=Math.min(drop*FILL_RUN, FILL_MAX_RUN);
+      /* No gap AT this station: the ground has come up to the tread. But the ground steps
+         between stations, so the interval from the last skirted station to this one could
+         be open half a terrace down -- the trail floating with no skirt at all. So the strip
+         runs ON to here and closes with a zero-width edge (foot at the tread's edge), and
+         the foot-lowering pass below drops that foot to the lowest ground in the interval.
+         Likewise a strip that starts after such a station opens from it. Only where the
+         ground meets the tread: a strip cut short by a lower tread or by water still stops
+         dead, because covering those is the whole thing being avoided. */
+      if(!(drop>FILL_MIN_DROP)){
+        if(Number.isFinite(yTop) && Number.isFinite(gEdge)){
+          const yF = Math.min(yTop, gEdge);
+          if(prev){
+            const a=push(ex,yTop,ez), b=push(ex,yF,ez);
+            strip.push({a, b, fx:ex, fz:ez, yTop});
+            links.push([prev, strip[strip.length-1]]);
+          }
+          touch = {i, ex, ez, yTop, yF};
+        }else touch = null;
+        prev=null; continue;
+      }
+      let run=Math.min(drop*FILL_RUN, FILL_MAX_RUN, reach[i]!=null ? reach[i] : Infinity);
       /* STEEPEN RATHER THAN BURY. On a short switchback the next leg of the trail runs
          back underneath this one only a few metres out, and a skirt at the natural angle
          of repose reaches straight over the top of it -- the lower tread disappears under
@@ -4970,16 +5099,60 @@ function embankmentGeom(pts, halfW, topYs, groundYAt, buriesTreadAt){
         while(run > 0 && buriesTreadAt(ex+ox*run, ez+oz*run, yTop) && guard++ < 8) run *= 0.5;
         if(run <= FILL_STOP_GAP && buriesTreadAt(ex+ox*run, ez+oz*run, yTop)){ prev=null; continue; }
       }
+      if(waterDistAt){
+        if(waterDistAt(ex,ez) < FILL_WATER_PAD){ prev=null; continue; }
+        // march at a fine stride: a creek is narrow next to a long run, and a coarse
+        // march steps clean over it
+        const probes = Math.max(8, Math.ceil(run/0.2));
+        for(let t=1;t<=probes;t++){
+          const dd = run*t/probes;
+          if(waterDistAt(ex+ox*dd, ez+oz*dd) < FILL_WATER_PAD){
+            run = Math.max(run*(t-1)/probes, FILL_WATER_MIN_RUN);
+            break;
+          }
+        }
+      }
       const fx=ex+ox*run, fz=ez+oz*run;
       let yFoot=groundYAt(fx,fz);
       /* Ground back up at the foot means the skirt would tunnel through a rise instead of
          landing on it -- happens on the inside of a switchback, where the next terrace up
          is within a run's reach. Land at the tread edge's own ground instead. */
       if(yFoot > yTop-0.05) yFoot = gEdge;
+      // open from the touching station just before, if this strip starts right after one
+      if(!prev && touch && touch.i === i-1){
+        const a0=push(touch.ex,touch.yTop,touch.ez), b0=push(touch.ex,touch.yF,touch.ez);
+        strip.push({a:a0, b:b0, fx:touch.ex, fz:touch.ez, yTop:touch.yTop});
+        prev=strip[strip.length-1];
+      }
+      touch = null;
       const a=push(ex,yTop,ez), b=push(fx,yFoot,fz);
-      if(prev) quad(prev.a, prev.b, b, a);
-      prev={a,b};
+      strip.push({a, b, fx, fz, yTop});
+      if(prev) links.push([prev, strip[strip.length-1]]);
+      prev=strip[strip.length-1];
     }
+    /* A BOTTOM EDGE THAT NEVER FLOATS. Each quad's bottom runs straight from one foot to
+       the next, and on terraced ground the two feet land on different terraces -- so
+       wherever the ground between them steps down, that straight edge hung in the air
+       over the lower terrace, and you saw daylight under the trail through a skirt torn
+       into separate triangular sails (a quarter of all bottom-edge length on Pikes Peak,
+       up to 10 units clear of the ground under a switchback).
+
+       So every foot is lowered to the lowest ground found along the bottom edge on either
+       side of it, and FILL_SINK below that. A straight edge between two feet that are both
+       at or under the lowest ground beneath it cannot come out above that ground anywhere
+       along its length. What is lower than it needs to be is inside the terrain, where it
+       is hidden; what fills the step down is exactly the gap that was showing. */
+    const lowest = new Map();                       // foot vertex -> lowest ground to reach
+    for(const [s0, s1] of links){
+      let lo = Math.min(P[s0.b*3+1], P[s1.b*3+1]);
+      for(let k=1;k<FILL_EDGE_SAMPLES;k++){
+        const u = k/FILL_EDGE_SAMPLES;
+        lo = Math.min(lo, groundYAt(s0.fx + (s1.fx - s0.fx)*u, s0.fz + (s1.fz - s0.fz)*u));
+      }
+      for(const f of [s0, s1]) if(!lowest.has(f.b) || lo < lowest.get(f.b)) lowest.set(f.b, lo);
+    }
+    for(const [b, lo] of lowest) P[b*3+1] = Math.min(P[b*3+1], lo - FILL_SINK);
+    for(const [s0, s1] of links) quad(s0.a, s0.b, s1.b, s1.a);
   }
   if(!idx.length) return null;
   const geo=new THREE.BufferGeometry();
@@ -4989,6 +5162,43 @@ function embankmentGeom(pts, halfW, topYs, groundYAt, buriesTreadAt){
   // test seam (tools/smoke.js): how many skirt quads this edge needed
   geo.userData = geo.userData || {};
   geo.userData.skirtQuads = idx.length/6;
+  return geo;
+}
+
+/* ---------- the sides of a stream ----------
+
+   The channel is carved wider than the water drawn in it (world.js WATER_BANK), leaving a
+   strip of bed along each margin 0.3 units below the surface -- and a water ribbon is a
+   single sheet with no sides. From any low angle you looked straight in under the surface
+   through that strip: at the bed beneath the water, and at a wading pup's paws, which
+   were below the surface and still in plain view. It also made the water read as a sheet
+   floating over a trench rather than as water filling a channel.
+
+   So close the sides: a curtain down each edge of the surface to the bed, one quad per
+   station pair. The offset direction is the one the ribbon itself uses (averaged across
+   each station), so the curtain meets the surface's edge. Colour is the caller's --
+   a shade deeper than the surface, reading as depth. */
+function waterSideGeom(pts, halfW, topYs, bottomYs){
+  if(!pts || pts.length < 2) return null;
+  const P=[], I=[];
+  for(const side of [1,-1]){
+    const base = P.length/3;
+    for(let i=0;i<pts.length;i++){
+      const q=pts[Math.min(pts.length-1,i+1)], r=pts[Math.max(0,i-1)];
+      let dx=q[0]-r[0], dz=q[1]-r[1]; const L=Math.hypot(dx,dz)||1; dx/=L; dz/=L;
+      const x=pts[i][0]-dz*side*halfW, z=pts[i][1]+dx*side*halfW;
+      P.push(x, topYs[i], z, x, Math.min(bottomYs[i], topYs[i]-0.01), z);
+    }
+    for(let i=0;i<pts.length-1;i++){
+      const a=base+i*2, b=base+(i+1)*2;
+      I.push(a, a+1, b+1, a, b+1, b);
+    }
+  }
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(P),3));
+  geo.setIndex(I);
+  geo.computeVertexNormals();
+  geo.__waterSide = true;
   return geo;
 }
 
@@ -9687,8 +9897,12 @@ function hashWater(){
   WATER_HASH=new Map();
   for(const w of WATERWAYS){
     const pts=w.prof ? w.prof.pts : w.pts, hw=w.width/2;
+    // the drawn water surface at each end (the same wetY the water ribbon is built from),
+    // so standingY can put a wading pup's paws under it; null without a graded profile
+    const wet = w.prof ? w.prof.hm.map(h => h*VERT_SCALE + WATER_U) : null;
     for(let i=0;i<pts.length-1;i++){
-      const a=pts[i], b=pts[i+1], seg={a, b, hw};
+      const a=pts[i], b=pts[i+1], seg={a, b, hw, ya: wet ? wet[i] : null, yb: wet ? wet[i+1] : null,
+                                     w, i, wet};
       const x0=Math.floor((Math.min(a[0],b[0])-hw)/WATER_HASH_CELL), x1=Math.floor((Math.max(a[0],b[0])+hw)/WATER_HASH_CELL);
       const z0=Math.floor((Math.min(a[1],b[1])-hw)/WATER_HASH_CELL), z1=Math.floor((Math.max(a[1],b[1])+hw)/WATER_HASH_CELL);
       for(let cx=x0;cx<=x1;cx++) for(let cz=z0;cz<=z1;cz++){
@@ -9709,6 +9923,97 @@ function waterEdgeDist(x, z){
 /* Standing in a creek? For the footstep voice. Off-tread only -- on a bridge you are on
    the deck, whatever is underneath. */
 function inWaterway(x, z){ return waterEdgeDist(x, z) <= 0; }
+/* The drawn water surface at (x,z), or null when (x,z) is not in a channel. Taken from
+   the nearest channel segment that actually contains the point, interpolated along it. */
+function waterSurfaceAt(x, z){
+  const w = waterSurfaceInfo(x, z);
+  return w ? w.y : null;
+}
+/* The same, plus the surface's fall per unit along the channel there -- the slope of THIS
+   stretch of water, which is what a pup standing in it spans. */
+function waterSurfaceInfo(x, z){
+  const arr=WATER_HASH.get(Math.floor(x/WATER_HASH_CELL)+'_'+Math.floor(z/WATER_HASH_CELL));
+  if(!arr) return null;
+  let best=null, bd=Infinity;
+  for(const s of arr){
+    if(s.ya == null) continue;
+    const r=ptSeg([x,z], s.a, s.b);
+    if(r.d > s.hw || r.d >= bd) continue;
+    const L=Math.hypot(s.b[0]-s.a[0], s.b[1]-s.a[1]) || 1;
+    bd=r.d; best={y: s.ya + (s.yb - s.ya)*r.t, slope: Math.abs(s.yb - s.ya)/L, seg: s, t: r.t};
+  }
+  return best;
+}
+
+/* WADING. The channel is carved WATER_U below the surface it is drawn at, but only across
+   the carved bed: the drawn water is wider than the cut, so along both margins the ground
+   is the bank, level with or above the surface, and a pup standing there walked ON the
+   water with its paws in plain view. In the middle it had the opposite problem -- 0.3u of
+   water over a 0.24u leg is swimming, not wading.
+
+   So wherever water is VISIBLE (the ground there is not above the surface), anything
+   standing off a path stands WADE_FRACTION of a leg below the surface: paws hidden, body
+   clear, the same wherever in the creek you are. Deeper than that and it is held at that
+   depth (a pool reads as wading, not a pup vanishing); shallower and it is let down to it.
+   Where the ground rises above the drawn surface the water is buried there anyway, and
+   the pup stands on the ground as before.
+
+   The depth is a fraction of the actual pup's leg, pushed in by main.js whenever a pup is
+   spawned, since leg length varies with size. Critters stand on standingY too, so they
+   wade at the same depth -- by the pup's leg rather than their own, which at these sizes
+   is close enough to read right. */
+const WADE_FRACTION = 0.45, WATER_SHOWS = 0.02;
+/* THE WHOLE FOOTPRINT, NOT THE CENTRE. On a steep creek the surface falls several
+   centimetres across one pup's length, so a depth measured at the centre left the
+   downhill paws' tops above their own water. The wading surface is the lowest the water
+   gets under the paws: walk THIS creek's own profile WADE_REACH up and down the channel
+   from where the pup stands and take the lowest surface met -- the distance from centre
+   to farthest paw, 0.6 of a leg, measured off the rig (the paws span about +-0.15u on a
+   0.24u leg). Not a whole body length: that over-reached, and on a 35% creek it sank the
+   pup to its chest. Along the profile, not round a circle or along one segment's slope:
+   a circle at a tight bend reaches into a lower stretch of the same creek that is not
+   under the pup, and one segment's slope misses the gradient changing at the next. Taken from the channel's gradient
+   rather than by sampling round the pup, because at a tight bend a sampling circle
+   reaches across into another stretch of the same creek, lower down, and sank the pup to
+   its chest in water that is not under it. */
+const WADE_REACH_PER_LEG = 0.6, WADE_MAX_DROP = 0.5;
+let WADE_DEPTH = 0.24*WADE_FRACTION, WADE_REACH = 0.24*WADE_REACH_PER_LEG;
+function setWadeLegLength(legLen){
+  if(Number.isFinite(legLen) && legLen > 0){
+    WADE_DEPTH = legLen*WADE_FRACTION;
+    WADE_REACH = legLen*WADE_REACH_PER_LEG;
+  }
+}
+function wadeDepth(){ return WADE_DEPTH; }
+function wadeReach(){ return WADE_REACH; }
+function wadeSurfaceAt(x, z){
+  const w = waterSurfaceInfo(x, z);
+  if(!w) return null;
+  const pr = w.seg.w.prof, wet = w.seg.wet, pts = pr.pts, n = pts.length;
+  // cumulative arc along this creek, cached on its profile (rebuilt with the world)
+  if(!pr.__arc || pr.__arc.length !== n){
+    const A = [0];
+    for(let k=1;k<n;k++) A[k] = A[k-1] + Math.hypot(pts[k][0]-pts[k-1][0], pts[k][1]-pts[k-1][1]);
+    pr.__arc = A;
+  }
+  const A = pr.__arc, i0 = w.seg.i;
+  const here = A[i0] + (A[i0+1] - A[i0])*w.t;
+  const at = s0 => {                                   // surface at arc position s0
+    s0 = clamp(s0, 0, A[n-1]);
+    let k = 0; while(k < n-2 && A[k+1] < s0) k++;
+    const f = (A[k+1] - A[k]) > 1e-9 ? (s0 - A[k])/(A[k+1] - A[k]) : 0;
+    return wet[k] + (wet[k+1] - wet[k])*f;
+  };
+  let lo = Math.min(w.y, at(here - WADE_REACH), at(here + WADE_REACH));
+  for(let k=0;k<n;k++) if(A[k] > here - WADE_REACH && A[k] < here + WADE_REACH && wet[k] < lo) lo = wet[k];
+  /* A CASCADE IS NOT WADED. Where the creek falls faster than the paws can follow (one
+     67% step on the seven-bridges map), following the lowest surface under the paws
+     would put the pup in over its back. The extra depth stops at WADE_MAX_DROP of a leg:
+     on a cascade the uphill paws may meet the falling water, which is what it looks like
+     to stand in one. */
+  const leg = WADE_DEPTH/WADE_FRACTION;
+  return Math.max(lo, w.y - leg*WADE_MAX_DROP);
+}
 function getWaterways(){ return WATERWAYS; }
 function getBridges(){ return BRIDGES; }
 
@@ -9993,7 +10298,11 @@ function benchY(x,z){
 
    Off-trail it is plain terrainY: no inflation, no floating near a rise. */
 function standingY(x,z){
-  const g = terrainY(x,z,VERT_SCALE);
+  let g = terrainY(x,z,VERT_SCALE);
+  // in visible water, stand at wading depth (see WADE_FRACTION); a path over or through
+  // the water still wins below, because its tread is what you are on there
+  const ws = waterSurfaceAt(x,z);
+  if(ws != null && g < ws + WATER_SHOWS) g = wadeSurfaceAt(x,z) - WADE_DEPTH;
   const nt = nearestTrail(x,z);
   if(nt.y == null || !(nt.d <= nt.hw)) return g;
   // ease over the outer 40 cm of the corridor so stepping onto a trail that sits a hair
@@ -10187,8 +10496,12 @@ function rebuildWorld(){
   PATH_MIX.lotRamps = gradePathsThroughLots();
   gradeWaterways();
   const bridgeZones = raiseBridgeDecks();
-  gradeTrailCells(GRAPH.edges.map(e=>e.prof),
+  const claimedCells = gradeTrailCells(GRAPH.edges.map(e=>e.prof),
                   WATERWAYS.map(w=>w.prof).filter(Boolean), bridgeZones);
+  // creek banks step down to the water instead of standing as slot walls (terrain.js);
+  // a graded area (a lot, a building pad) keeps its own level
+  PATH_MIX.bankCells = stepChannelBanks(WATERWAYS.map(w=>w.prof).filter(Boolean), claimedCells, vm(WATER_U),
+    (x,z) => AREAS.some(a => a.groundY != null && a.kind !== 'water' && pointInArea(x, z, a)));
   hashWater();
   // hash before any geometry: buildArea's ground-cover scatter and buildAreaSign both
   // call nearestTrail, and standingY now needs tread heights too
@@ -10348,7 +10661,7 @@ function rebuildWorld(){
       // a footway beside a road floats over a drop exactly as a trail does; skirt it too
       if(hs){
         const sk = embankmentGeom(rpts, fw*1.35*0.5, skirtTops(prof, lift+0.01),
-                                  (x,z)=>terrainY(x,z,VERT_SCALE), buriesTread);
+                                  (x,z)=>terrainY(x,z,VERT_SCALE), buriesTread, waterEdgeDist);
         if(sk) worldG.add(new THREE.Mesh(sk, trailMat(shade(st.shoulder,0.86),rank)));
       }
       // a kerb belongs to tarmac; a path beside a dirt road just runs along its edge
@@ -10365,7 +10678,7 @@ function rebuildWorld(){
        ink ends and no ribbon layer overhangs it. */
     if(hs){
       const skirt = embankmentGeom(rpts, W*OUTLINE_MUL*0.5, skirtTops(prof, lift+0.01),
-                                   (x,z)=>terrainY(x,z,VERT_SCALE), buriesTread);
+                                   (x,z)=>terrainY(x,z,VERT_SCALE), buriesTread, waterEdgeDist);
       if(skirt) worldG.add(new THREE.Mesh(skirt, trailMat(shade(st.shoulder,0.86),rank)));
     }
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*OUTLINE_MUL,lift+0.012,hs),inkMats[rank]));
@@ -10410,6 +10723,10 @@ function rebuildWorld(){
     const water = new THREE.Mesh(ribbonGeom(pr.pts, w.width, 0.0, wetY), trailMat(col,0));
     water.name='water';
     worldG.add(water);
+    // the sides, down to the bed (pieces.js waterSideGeom): without them the margin strip
+    // of bed let you see in under the surface, wading paws included
+    const sides = waterSideGeom(pr.pts, w.width/2, wetY, bedY.map(y=>y+0.03));
+    if(sides){ const m = new THREE.Mesh(sides, trailMat(shade(col,0.82),0)); m.name='water-side'; worldG.add(m); }
     worldG.add(new THREE.Mesh(ribbonGeom(pr.pts, w.width*0.28, 0.03, wetY), trailMat(shade(col,1.35),0)));
   }
 
@@ -13792,10 +14109,12 @@ function ensureAvatar(){
   avatarKey = key;
   if(mode==='dog'){
     spawnDog(dogParams());
+    setWadeLegLength(dogLegLength());      // wading depth follows this pup's legs (world.js)
   }else{
     // stable seed per species: the same fox should look the same every time you pick it
     let h=0; for(let i=0;i<wildKey.length;i++) h=(h*31+wildKey.charCodeAt(i))|0;
     spawnWild(wildKey, Math.abs(h)||1);
+    setWadeLegLength(wildLegLength());
   }
   setDogVisible(mode==='dog');
   setWildVisible(mode==='wild');

@@ -10,9 +10,9 @@
    camera follows the player, which on a 2.6 km map means it is simply never on screen.
    That was the "map loads, no dog" bug. */
 import { clamp, lerp } from '../core/math.js';
-import { setWildVisible, setWildYaw, spawnWild, spookRadiusFor, topSpeedFor, updateWild, wildPos, wildShadowRadius } from './wild-driver.js';
+import { setWildVisible, setWildYaw, spawnWild, spookRadiusFor, topSpeedFor, updateWild, wildPos, wildShadowRadius, wildLegLength } from './wild-driver.js';
 
-import { dogRunMul, dogTopSpeed, setDogPos, setDogVisible, setYaw, spawnDog, updateDog, dogShadowRadius } from './dog-driver.js';
+import { dogRunMul, dogTopSpeed, setDogPos, setDogVisible, setYaw, spawnDog, updateDog, dogShadowRadius, dogLegLength } from './dog-driver.js';
 import { updateShadow, setShadowVisible } from './shadow.js';
 import { updateNoiseRing, setNoiseRingVisible, noiseRingRadius, updateCatchRing, setCatchRingVisible } from './noise-ring.js';
 import { getWorld, rawGroundY } from './terrain.js';
@@ -38,7 +38,7 @@ import { barkSound, cheerBlip, initAudio, thudSound,
          stepSound, landSound, jumpSound, scrabbleSound,
          countPip, goTone, offCourseSound, rejoinSound } from '../core/audio.js';
 
-import { applyThemeLighting, getMapLatLon, setTerrainQuadBudget, getDemStride, addLayers, clearLayers, compass, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapId, getMapScale, getPathMix, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, inWaterway, loadWorld, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY, getWorldRevision, areaBlocked, areaSolidTop, nearestSolidFace, solidEmbed, distToSolid } from './world.js';
+import { applyThemeLighting, getMapLatLon, setTerrainQuadBudget, getDemStride, addLayers, clearLayers, compass, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapId, getMapScale, getPathMix, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, inWaterway, loadWorld, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY, setWadeLegLength, getWorldRevision, areaBlocked, areaSolidTop, nearestSolidFace, solidEmbed, distToSolid } from './world.js';
 
 import { THEME, THEMES } from './themes.js';
 import { setSkyMode, getSkyMode, setSkyClock, getSkyClock, skyFrame, skyReadout, skyState, nowClock } from './sky.js';
@@ -258,10 +258,12 @@ function ensureAvatar(){
   avatarKey = key;
   if(mode==='dog'){
     spawnDog(dogParams());
+    setWadeLegLength(dogLegLength());      // wading depth follows this pup's legs (world.js)
   }else{
     // stable seed per species: the same fox should look the same every time you pick it
     let h=0; for(let i=0;i<wildKey.length;i++) h=(h*31+wildKey.charCodeAt(i))|0;
     spawnWild(wildKey, Math.abs(h)||1);
+    setWadeLegLength(wildLegLength());
   }
   setDogVisible(mode==='dog');
   setWildVisible(mode==='wild');
