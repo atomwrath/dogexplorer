@@ -1233,6 +1233,84 @@ async function assertAll(window, errors, stats) {
     return s3.startHead === to && getPane() === null && dist(s3.dogWorld, heads[to]) < 0.5;
   })());
 
+  /* START ANYWHERE ON A TRAIL. A tap on the sheet that is not a pin and not a badge snaps
+     to the nearest path within a fingertip and loads THAT point into the start card, with
+     the same pick-loads/button-starts contract as a trailhead. Driven through
+     pickOnSheet -- the dispatcher the real pointerup calls -- at the screen position of a
+     mid-trail point chosen well away from every badge, so a pass cannot come from a
+     trailhead hit by accident. */
+  let __ptNote = '';
+  check('tapping any trail on the full map loads that point into the start card', (() => {
+    if (typeof pickOnSheet !== 'function' || typeof getPickedPoint !== 'function') return false;
+    showPane('map');
+    if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(1040); }
+    const bv = getBigView(); if (!bv) return false;
+    const k = bv.at.ppm * bv.s;
+    const heads = getTrailheads();
+    const G = getGraph();
+    let target = null;
+    for (const e of G.edges) {
+      if (e.kind !== 'trail' || e.pts.length < 2 || !e.named) continue;
+      const m = Math.floor(e.pts.length / 2);
+      const a = e.pts[Math.max(0, m - 1)], b = e.pts[m];
+      const x = (a[0] + b[0]) / 2, z = (a[1] + b[1]) / 2;
+      if (heads.some(h => Math.hypot(h.x - x, h.z - z) * k < 60)) continue;
+      if (getSpots().some(sp => { const q = spotWorld(sp); return Math.hypot(q.x - x, q.z - z) * k < 60; })) continue;
+      // no OTHER path within two fingertips AT 4x ZOOM (applied below, as a walker would
+      // zoom in to pick one path out of a dense network), or "nearest path" is
+      // legitimately a neighbour
+      const R = 70 / (k * 4);
+      const crowded = G.edges.some(o => o !== e && o.pts.some((p2, i) =>
+        i < o.pts.length - 1 && ptSegSmoke([x, z], p2, o.pts[i + 1]).d < R));
+      if (crowded) continue;
+      target = { x, z, e }; break;
+    }
+    if (!target) { __ptNote = 'no isolated trail point found'; return false; }
+    zoomBigToward(4, bv.ox + (target.x - bv.at.x0) * k, bv.oy + (target.z - bv.at.z0) * k);
+    if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(1048); }
+    const bz = getBigView(), kz = bz.at.ppm * bz.s;
+    const was = probe().dogWorld;
+    // a few pixels off the line, as a finger would land
+    const px = bz.ox + (target.x - bz.at.x0) * kz + 6, py = bz.oy + (target.z - bz.at.z0) * kz + 4;
+    const hit = pickOnSheet(px, py);
+    const subj = getHereSubject(), pp = getPickedPoint();
+    __ptNote = subj ? `${subj.kind} on ${subj.pt ? subj.pt.name : '?'}` : 'nothing loaded';
+    return hit && subj && subj.kind === 'point' && subj.pt.name === target.e.name &&
+      pp && Math.hypot(pp.x - target.x, pp.z - target.z) < 1.5 &&
+      /On /.test(txt('#hereTitle')) &&
+      dist(probe().dogWorld, was) < 0.01 && getPane() === 'map';
+  })(), () => __ptNote);
+
+  check('a tap on open ground, far from any path, loads nothing', (() => {
+    const bv = getBigView(); if (!bv) return false;
+    showHereIdle();
+    const before = getHereSubject();
+    // the sheet's top-left corner is outside the atlas bbox padding, clear of every path
+    const hit = pickOnSheet(2, 2);
+    return !hit && getHereSubject() === before;
+  })());
+
+  check('"Start here" on a trail point starts a fresh walk there, facing along it', (() => {
+    const bv = getBigView(); if (!bv) return false;
+    const G = getGraph();
+    const e = G.edges.find(x => x.kind === 'trail' && x.pts.length >= 2 && x.named);
+    const a = e.pts[0], b = e.pts[1];
+    const pt = { x: (a[0] + b[0]) / 2, z: (a[1] + b[1]) / 2, yaw: Math.atan2(-(b[1] - a[1]), b[0] - a[0]), edge: e };
+    showHerePoint(pt);
+    const btn = d.querySelector('#hereActions .btn.primary');
+    if (!btn) return false;
+    btn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    const tp = getTrailPlayer();
+    const sp = probe();
+    const ok = Math.hypot(tp.x - pt.x, tp.z - pt.z) < 0.05 && Math.abs(tp.yaw - pt.yaw) < 1e-6 &&
+      tp.dist === 0 && getPane() === null && mapSelectedHead() === -1 &&
+      /On /.test(txt('#startNow'));
+    // and choosing a trailhead afterwards takes the flag down again
+    placeAtHead(sp.startHead);
+    showHereIdle();
+    return ok && getPickedPoint() === null && mapSelectedHead() === getStartHead();
+  })());
+
   check('the trailhead card reports where it is and what meets it', (() => {
     showPane('map');
     showHereHead(0);
@@ -1662,12 +1740,193 @@ async function assertAll(window, errors, stats) {
         && Math.abs(leapPose(1, 0, 4).pitch) < 1e-9;
   })());
 
-  /* The blob must clear the trail's whole ribbon stack. world.js layers those at fixed
-     offsets above the graded profile (max 0.09, dashes); standingY returns the profile,
-     so anything lifted less than that is inside the stack and z-fights. */
-  check('the shadow clears the trail ribbon stack so it cannot z-fight',
-    typeof shadowLift === 'function' && shadowLift() > 0.09 && shadowLift() < 0.25,
-    typeof shadowLift === 'function' ? `lift ${shadowLift()}u vs 0.09u tallest ribbon layer` : 'missing');
+  /* THE MOON'S PHASE, measured on the path moonTexture actually draws. The harness has no
+     pixels, so a recording 2D context captures the cut-away path -- the dark half's arc
+     and the terminator ellipse, in the order and direction drawn -- and it is rasterised
+     here with the canvas's own nonzero rule. The bug: the ellipse was swept the wrong way,
+     so a 97% moon drew as a hairline ring and a new moon as a full disc. */
+  let __moonNote = '';
+  check('the moon is drawn at the phase it is: dark fraction matches 1 - illumination', (() => {
+    if (typeof moonTexture !== 'function') return false;
+    const rec = () => {
+      const path = []; let cur = null;
+      const trace = (cx, cy, rx, ry, a0, a1, ccw) => {
+        let da = a1 - a0;
+        if (!ccw) { while (da < 0) da += 2 * Math.PI; if (da > 2 * Math.PI) da = 2 * Math.PI; }
+        else { while (da > 0) da -= 2 * Math.PI; if (da < -2 * Math.PI) da = -2 * Math.PI; }
+        for (let k = 0; k <= 64; k++) { const t = a0 + da * k / 64; cur.push([cx + Math.cos(t) * rx, cy + Math.sin(t) * ry]); }
+      };
+      // every call moonTexture makes, and nothing else: an unexpected call throws, so a
+      // change to how the moon is drawn cannot silently fall outside what is measured
+      const ctx = {
+        __fills: [], globalCompositeOperation: 'source-over', fillStyle: null,
+        createRadialGradient: () => ({ addColorStop() {} }),
+        beginPath() { cur = []; path.push(cur); },
+        arc(cx, cy, r, a0, a1, ccw) { trace(cx, cy, r, r, a0, a1, !!ccw); },
+        ellipse(cx, cy, rx, ry, rot, a0, a1, ccw) { trace(cx, cy, rx, ry, a0, a1, !!ccw); },
+        closePath() {},
+        fill() { this.__fills.push({ op: this.globalCompositeOperation, poly: cur }); },
+      };
+      return ctx;
+    };
+    const doc = window.document, mk = doc.createElement.bind(doc);
+    let bad = 0, worst = 0, sideBad = 0;
+    for (const illum of [0.03, 0.2, 0.5, 0.8, 0.97]) for (const side of [1, -1]) {
+      const ctx = rec();
+      doc.createElement = t => { const el = mk(t); if (String(t).toLowerCase() === 'canvas') el.getContext = () => ctx; return el; };
+      try { moonTexture(illum, side); } finally { doc.createElement = mk; }
+      const cut = ctx.__fills.find(f => f.op === 'destination-out');
+      // nonzero winding of the cut polygon, over the disc of radius 26 at (32,32)
+      let dark = 0, disc = 0, dx = 0;
+      for (let y = 6; y < 58; y += 0.5) for (let x = 6; x < 58; x += 0.5) {
+        if (Math.hypot(x - 32, y - 32) > 25.5) continue;
+        disc++;
+        if (!cut) continue;
+        let w = 0; const P = cut.poly;
+        for (let i = 0; i < P.length; i++) {
+          const a = P[i], b = P[(i + 1) % P.length];
+          if (a[1] <= y) { if (b[1] > y && (b[0] - a[0]) * (y - a[1]) - (x - a[0]) * (b[1] - a[1]) > 0) w++; }
+          else if (b[1] <= y && (b[0] - a[0]) * (y - a[1]) - (x - a[0]) * (b[1] - a[1]) < 0) w--;
+        }
+        if (w !== 0) { dark++; dx += x - 32; }
+      }
+      const frac = dark / disc, err = Math.abs(frac - (1 - illum));
+      worst = Math.max(worst, err); if (err > 0.06) bad++;
+      // the lit limb faces the sun: side +1 means the DARK side is on the left (-x)
+      if (dark > disc * 0.05 && Math.sign(dx) !== -side) sideBad++;
+    }
+    __moonNote = `worst phase error ${worst.toFixed(3)}, ${sideBad} lit on the wrong side`;
+    return bad === 0 && sideBad === 0;
+  })(), () => __moonNote);
+
+  /* The skyline at night. The tint used to be mixed in the MATERIAL's colour space, which
+     the sRGB output encoding then brightened -- so a ridge tinted "90% of the way to the
+     sky" displayed three times lighter than the sky, glowing lavender against navy. What
+     the eye sees is the ENCODED material colour against the raw background, so that is
+     what is compared: every band, at full night, no brighter than the sky behind it. */
+  let __ridgeNote = '';
+  check('at night the skyline sits darker than the sky, as shown on screen', (() => {
+    if (typeof setSkyMode !== 'function' || typeof linearToSrgbHex !== 'function') return false;
+    const wasMode = getSkyMode();
+    const wasClock = getSkyClock();
+    setSkyMode('daynight'); setSkyClock({ y: 2026, m: 9, day: 24, minutes: 23 * 60 }); refreshSky();
+    const luma = h => 0.2126 * ((h >> 16) & 255) + 0.7152 * ((h >> 8) & 255) + 0.0722 * (h & 255);
+    const sky = skyState().skyColor;
+    let bands = 0, over = 0, worst = -Infinity;
+    const scn = getWorldGroup().parent || getWorldGroup();
+    scn.traverse(o => {
+      if (o.name !== 'backdrop') return;
+      o.traverse(m => {
+        if (!m.isMesh || !m.material || !m.material.color) return;
+        bands++;
+        const shown = linearToSrgbHex(m.material.color.getHex());
+        const d = luma(shown) - luma(sky);
+        worst = Math.max(worst, d);
+        if (d > 1) over++;
+      });
+    });
+    setSkyClock(wasClock); setSkyMode(wasMode); refreshSky();
+    __ridgeNote = `${bands} bands, brightest ${worst.toFixed(1)} luma vs the sky`;
+    return bands > 0 && over === 0;
+  })(), () => __ridgeNote);
+
+  /* And by day the round trip must be exact: with no tint, encode-then-decode returns the
+     theme's own colour, so fixing the night did not repaint the afternoon. */
+  check('with no sky tint the skyline keeps its theme colour exactly', (() => {
+    if (typeof backdropShown !== 'function') return false;
+    const base = 0x4a6470;
+    const shown = backdropShown(base, 0x9fbfae, 0, 0, 3);
+    return shown === linearToSrgbHex(base) && backdropShown(base, null, 0.5, 1, 3) === linearToSrgbHex(base);
+  })());
+
+  /* The ridgeline used to be a strict sawtooth: every other sample knocked down to 72%, so
+     the slope flipped sign at EVERY sample. A natural ridge rises and falls over several
+     samples at a time. Measured as how often consecutive slopes change sign. */
+  let __sawNote = '';
+  check('the skyline is a natural ridgeline, not a regular sawtooth', (() => {
+    if (typeof ridgeProfile !== 'function') return false;
+    let seed = 7; const rng = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const h = ridgeProfile(192, 100, false, rng);
+    let flips = 0;
+    for (let i = 2; i < h.length; i++) if (Math.sign(h[i] - h[i - 1]) !== Math.sign(h[i - 1] - h[i - 2])) flips++;
+    const rate = flips / (h.length - 2);
+    const lo = Math.min(...h), hi = Math.max(...h);
+    __sawNote = `slope flips at ${(rate * 100).toFixed(0)}% of samples, relief ${lo.toFixed(0)}..${hi.toFixed(0)}`;
+    return rate < 0.4 && Math.abs(h[0] - h[h.length - 1]) < 1e-9 && hi - lo > 40;
+  })(), () => __sawNote);
+
+  /* WHERE A WALKER STANDS relative to what is PAINTED there -- the "trail covers the
+     back paw but the road doesn't" report. standingY used to return the graded profile,
+     and every ribbon is stacked above that: 0.08 above it on a road, 0.17 on a trail
+     (kindLift 0.09 + inner stripe 0.08). So a pup sank twice as deep into a trail as
+     into a road. Asserted per class, on real stations away from junctions, decks and
+     trimmed road contacts: the surface under your feet must be the top of the paint. */
+  let __standNote = '';
+  check('a walker stands on top of the painted tread, on trail and road alike', (() => {
+    const G = getGraph(); if (!G) return false;
+    const by = {};
+    for (const e of G.edges) {
+      if (!e.prof || e.buried || e.trimA || e.trimB) continue;
+      const k = e.kind === 'road' ? 'road' : (e.kind === 'trail' ? 'trail' : null);
+      if (!k) continue;
+      const pr = e.prof, want = kindLift(e.kind) + 0.08;
+      for (let i = 2; i < pr.pts.length - 2; i += 3) {
+        if (pr.deck && pr.deck[i]) continue;
+        const [x, z] = pr.pts[i];
+        const nt = nearestTrail(x, z);
+        if (nt.edge !== e) continue;          // another path's corridor wins here
+        const b = by[k] || (by[k] = { n: 0, ok: 0, worst: 0 });
+        const d = standingY(x, z) - (pr.ys[i] + want);
+        b.n++; if (Math.abs(d) < 0.02) b.ok++;
+        if (Math.abs(d) > Math.abs(b.worst)) b.worst = d;
+      }
+    }
+    __standNote = Object.entries(by).map(([k, b]) => `${k} ${b.ok}/${b.n} (worst ${b.worst.toFixed(3)})`).join(', ');
+    return by.trail && by.road && by.trail.n > 20 && by.road.n > 5 &&
+           by.trail.ok / by.trail.n > 0.97 && by.road.ok / by.road.n > 0.97;
+  })(), () => __standNote);
+
+  /* The blob sits on the surface standingY returns, which is now the top of the paint;
+     the only things drawn above that are a road's dashes (+0.01) and crosswalk bars
+     (+0.035 at most). Clear those, and do not float: a shadow a tenth of a unit up
+     reads as a hovering pup. */
+  check('the shadow clears the dashes and bars above the tread without floating',
+    typeof shadowLift === 'function' && shadowLift() > 0.035 && shadowLift() < 0.08,
+    typeof shadowLift === 'function' ? `lift ${shadowLift()}u vs 0.035u tallest marking above the tread` : 'missing');
+
+  /* The "fish scales" down every grade. ribbonGeom filled each bend with a flat disc at
+     the vertex height; on a slope the downhill half of each disc stood proud of the
+     segment arriving at it. Built directly on a zig-zag climbing 0.5u per metre, then
+     every triangle compared with the height of the centreline point nearest to it. */
+  let __scaleNote = '';
+  check('ribbon joins lie flush on a grade (no scales)', (() => {
+    if (typeof ribbonGeom !== 'function') return false;
+    const pts = [], ys = [];
+    let x = 0, z = 0, y = 0;
+    for (let i = 0; i < 30; i++) {
+      pts.push([x, z]); ys.push(y);
+      const a = Math.sin(i * 0.9) * 0.8;
+      x += Math.cos(a) * 0.7; z += Math.sin(a) * 0.7; y += 0.35;
+    }
+    const g = ribbonGeom(pts, 1.6, 0, ys);
+    const P = g.attributes.position.array, I = g.index;
+    const ideal = (px, pz) => {
+      let best = Infinity, h = 0;
+      for (let i = 0; i < pts.length - 1; i++) {
+        const r = ptSegSmoke([px, pz], pts[i], pts[i + 1]);
+        if (r.d < best) { best = r.d; h = ys[i] + (ys[i + 1] - ys[i]) * r.t; }
+      }
+      return h;
+    };
+    let worst = 0;
+    for (let k = 0; k < I.length; k += 3) {
+      let cx = 0, cy = 0, cz = 0;
+      for (let j = 0; j < 3; j++) { cx += P[I[k+j]*3]; cy += P[I[k+j]*3+1]; cz += P[I[k+j]*3+2]; }
+      worst = Math.max(worst, cy / 3 - ideal(cx / 3, cz / 3));
+    }
+    __scaleNote = `worst join ${worst.toFixed(3)}u above the tread`;
+    return worst < 0.01;
+  })(), () => __scaleNote);
 
   /* Backing up must not spin the camera. The auto-follow correction is atan2(-ix,-iz) --
      a function of the INPUT only -- so straight back is a constant PI that can never
@@ -1772,20 +2031,21 @@ async function assertAll(window, errors, stats) {
     const sprint= settle(playerNoise(top, top, false, false));
     return sneak < walk * 0.75 && sprint > walk * 1.5 && sneak > 0;
   })());
-  check('the noise ring hugs the terrain rather than lying flat', (() => {
-    if (typeof updateNoiseRing !== 'function' || typeof getNoiseRing !== 'function') return false;
-    // feed it a sloped ground function; the ring's vertices must follow it
-    const slope = (x, z) => x * 0.5;
-    for (let i = 0; i < 400; i++) updateNoiseRing(0.05, 0, 0, 1, 10, slope, true);
-    const r = getNoiseRing(); if (!r) return false;
-    const arr = r.geometry.attributes.position.array;
-    let ok = true, spread = 0, lo = 1e9, hi = -1e9;
-    for (let i = 0; i < arr.length; i += 3) {
-      if (Math.abs(arr[i + 1] - (slope(arr[i], arr[i + 2]) + 0.13)) > 1e-6) ok = false;
-      lo = Math.min(lo, arr[i + 1]); hi = Math.max(hi, arr[i + 1]);
-    }
-    spread = hi - lo;
-    return ok && spread > 1;      // genuinely following the slope, not a flat disc
+  /* THE RING IS PROJECTED, NOT DRAPED. The draped band sampled its inner and outer edge
+     onto the terrain separately, so wherever it crossed a terrace riser the two edges
+     landed on different steps and the triangles between them twisted into spikes -- the
+     jagged ring round every hillside. It is now painted by the ground's own shaders (see
+     noise-ring.js), so there is no ring geometry left to spike. What must hold instead:
+     the update writes exactly what the shaders read. */
+  check('the noise ring is projected: the shared uniforms carry its centre and radius', (() => {
+    if (typeof updateNoiseRing !== 'function' || typeof groundRingUniforms !== 'function') return false;
+    for (let i = 0; i < 400; i++) updateNoiseRing(0.05, 12, -7, 1, 10, () => 0, true);
+    const U = groundRingUniforms().uRing0.value, st = getNoiseRing();
+    const on = Math.abs(U[0] - 12) < 1e-9 && Math.abs(U[1] + 7) < 1e-9 &&
+               Math.abs(U[2] - noiseRingRadius()) < 1e-9 && U[3] > 0.1 && st.visible;
+    updateNoiseRing(0.05, 12, -7, 1, 10, () => 0, false);
+    const off = groundRingUniforms().uRing0.value[2] === 0;      // radius 0 = not drawn
+    return on && off;
   })());
 
   /* THE CLIFF-EDGE CLIMB. `onTrail` used to mean "within 1.5 m of a trail", but the
@@ -1840,38 +2100,54 @@ async function assertAll(window, errors, stats) {
     return cliffTest && cliffTest.found >= 5 && cliffTest.blocked === cliffTest.found;
   })(), cliffTest ? `${cliffTest.blocked}/${cliffTest.found} cliff-edge approaches refused (worst ${cliffTest.worst.toFixed(2)}u vs a ${cliffTest.lim.toFixed(2)}u step)` : '');
 
-  /* The ring must be a painted BAND, not a line. WebGL ignores linewidth, so a
-     LineBasicMaterial is one pixel however wide you ask for -- which is what made the
-     first version invisible in practice even though its maths were right. */
-  check('the noise ring is a filled band, not a one-pixel line', (() => {
-    if (typeof getNoiseRing !== 'function') return false;
-    const r = getNoiseRing(); if (!r) return false;
-    const g = r.geometry;
-    if (!g || !g.index || !g.index.length) return false;      // indexed triangles
-    const arr = g.attributes.position.array;
-    // inner and outer edge of the first step must be a real distance apart
-    const w = Math.hypot(arr[3] - arr[0], arr[5] - arr[2]);
-    return w > 0.25 && g.index.length / 3 > 100;
+  /* Every surface you can stand on has to show the ring, or it has a hole wherever you
+     walk onto that surface: the terrain, every path ribbon and junction fill, a paved lot
+     and its wall. Found on the built world, not asserted of a list -- a material that is
+     never patched simply does not appear here. */
+  let __ringMatNote = '';
+  check('every ground surface in the world is patched to show the ring', (() => {
+    const wg = getWorldGroup(); if (!wg) return false;
+    let terrain = 0, ribbons = 0, fills = 0, lots = 0, unpatched = 0;
+    const patched = m => !!(m && m.userData && m.userData.groundRing);
+    wg.traverse(o => {
+      if (!o.isMesh || !o.geometry) return;
+      const g = o.geometry;
+      if (o.name === 'terrain' || o.name === 'ground') { terrain++; if (!patched(o.material)) unpatched++; }
+      if (g.__ribbon) { ribbons++; if (!patched(o.material)) unpatched++; }
+      if (g.__junctionGap) { fills++; if (!patched(o.material)) unpatched++; }
+      if (g.__areaWall) { lots++; if (!patched(o.material)) unpatched++; }
+    });
+    __ringMatNote = `terrain ${terrain}, ribbons ${ribbons}, fills ${fills}, lot walls ${lots}, unpatched ${unpatched}`;
+    return terrain > 0 && ribbons > 50 && fills > 10 && lots > 0 && unpatched === 0;
+  })(), () => __ringMatNote);
+
+  /* The patch itself, run on a stand-in shader: it must inject at the two hooks three.js
+     really has, and hand the shader the SAME uniform objects the update writes -- a copy
+     would compile, render, and never move. */
+  check('the ground-ring shader patch injects at real hooks and shares the live uniforms', (() => {
+    if (typeof patchGroundRing !== 'function') return false;
+    const m = patchGroundRing(new THREE.MeshBasicMaterial({}));
+    const sh = { uniforms: {},
+      vertexShader: 'void main(){\n#include <begin_vertex>\n#include <project_vertex>\n}',
+      fragmentShader: 'void main(){\n#include <tonemapping_fragment>\n}' };
+    m.onBeforeCompile(sh);
+    const U = groundRingUniforms();
+    return sh.uniforms.uRing0 === U.uRing0 && sh.uniforms.uRing1Col === U.uRing1Col &&
+      /vRingW = \(modelMatrix/.test(sh.vertexShader) &&
+      sh.vertexShader.indexOf('vRingW =') > sh.vertexShader.indexOf('#include <project_vertex>') &&
+      sh.fragmentShader.indexOf('groundRingBand(uRing0)') < sh.fragmentShader.indexOf('#include <tonemapping_fragment>') &&
+      sh.fragmentShader.indexOf('groundRingBand(uRing0)') > 0 &&
+      /groundRing/.test(m.customProgramCacheKey()) &&
+      patchGroundRing(m) === m;           // idempotent: shared materials are patched once
   })());
-  check('the ring drapes over terrace risers instead of tunnelling through them', (() => {
-    if (typeof updateNoiseRing !== 'function' || typeof getNoiseRing !== 'function') return false;
-    // a staircase ground function: the pathological case for a coarse ring
-    const stair = (x, z) => Math.floor(x / 3) * 0.8;
-    for (let i = 0; i < 300; i++) updateNoiseRing(0.05, 0, 0, 1, 25, stair, true);
-    const r = getNoiseRing(); const a = r.geometry.attributes.position.array;
-    const S = a.length / 6;
-    let buried = 0;
-    for (let i = 0; i < S; i++) {
-      const j = (i + 1) % S;
-      for (const e of [0, 1]) {
-        const p = (i * 2 + e) * 3, q = (j * 2 + e) * 3;
-        const mx = (a[p] + a[q]) / 2, mz = (a[p + 2] + a[q + 2]) / 2, my = (a[p + 1] + a[q + 1]) / 2;
-        if (my < stair(mx, mz)) buried++;
-      }
-    }
-    // the old 64-segment loop buried 17% of itself on real terrain; well under 10% here
-    return buried / (S * 2) < 0.10;
-  })(), 'sampled against a 0.8u staircase');
+
+  check('there is no ring geometry left to spike over a riser', (() => {
+    let meshes = 0;
+    (getWorldGroup().parent || getWorldGroup()).traverse(o => {
+      if (o.name === 'noiseRing' || o.name === 'catchRing') meshes++;
+    });
+    return meshes === 0;
+  })());
 
   /* World units are NOT metres: positions compact with world scale while elevation does
      not, so anything reporting a raw length as metres understates it by that factor. */
@@ -4158,12 +4434,9 @@ async function assertAll(window, errors, stats) {
       updateCatchRing(0.016, near ? near.critter.x : pl.x, near ? near.critter.z : pl.z,
                       catchRadius(), standingY, !!near, !!(near && near.inReach));
       const shown = getCatchRing().visible;
-      // the band's own vertices say where it was actually drawn, not where we asked
-      const pos = getCatchRing().geometry.attributes.position.array;
-      let cx = 0, cz = 0;
-      const n = pos.length / 3;
-      for (let i = 0; i < n; i++) { cx += pos[i * 3]; cz += pos[i * 3 + 2]; }
-      cx /= n; cz /= n;
+      // the uniform the ground shaders read says where it is actually drawn
+      const U = groundRingUniforms().uRing1.value;
+      const cx = U[0], cz = U[1];
       const onAnimal = Math.hypot(cx - target.x, cz - target.z) < 0.5;
       const notOnPlayer = Math.hypot(cx - pl.x, cz - pl.z) > catchRadius() * 0.5;
       const approaching = near && !near.inReach;   // outside arm's length, so dim not armed
@@ -4535,6 +4808,149 @@ async function assertAll(window, errors, stats) {
       __postNote = `${bad} of ${posts.length} posts in a road`;
       return bad === 0;
     })(), __postNote);
+
+    /* A fingerpost stands BESIDE the paths it names. It used to be planted on the node --
+       dead centre of a trail fork -- because only roads were ever pushed clear. Measured
+       against every drawn path's painted edge, not only roads. */
+    let __offNote = '';
+    check('no signpost stands on any painted path', (() => {
+      const G = getGraph(), wg = getWorldGroup();
+      const posts = [];
+      wg.traverse(o => { if (o.__sign) posts.push(o); });
+      if (!posts.length) return false;
+      let bad = 0;
+      for (const p of posts) {
+        for (const e of G.edges) {
+          if (e.pts.length < 2) continue;
+          const clear = pathOutlineWidth(e.kind) * 0.5;
+          let hit = false;
+          for (let i = 0; i < e.pts.length - 1 && !hit; i++)
+            if (ptSegSmoke([p.position.x, p.position.z], e.pts[i], e.pts[i + 1]).d < clear) hit = true;
+          if (hit) { bad++; break; }
+        }
+      }
+      __offNote = `${bad} of ${posts.length} posts on a path`;
+      return bad === 0;
+    })(), () => __offNote);
+
+    check('signposts are sized for a footpath, not a fire road', (() => {
+      const posts = [];
+      getWorldGroup().traverse(o => { if (o.__sign) posts.push(o); });
+      return posts.length > 0 && posts.every(p => p.scale.x > 0.4 && p.scale.x < 0.75);
+    })());
+
+    /* An arm is aimed from where the POST stands, not from the node it was set back from:
+       a post a metre or two off the fork, still aiming at node-relative angles, points
+       beside its trail rather than down it. */
+    check('sign arms are aimed from the post, down their own trail', (() => {
+      const posts = [];
+      getWorldGroup().traverse(o => { if (o.__sign) posts.push(o); });
+      let n = 0, good = 0;
+      const G = getGraph();
+      for (const p of posts) {
+        for (const arm of p.children.filter(c => !c.isMesh)) {
+          const ang = -arm.rotation.y;
+          const tip = [p.position.x + Math.cos(ang) * 4, p.position.z + Math.sin(ang) * 4];
+          let best = Infinity;
+          for (const e of G.edges) for (let i = 0; i < e.pts.length - 1; i++)
+            best = Math.min(best, ptSegSmoke(tip, e.pts[i], e.pts[i + 1]).d);
+          n++; if (best < 2.0) good++;
+        }
+      }
+      return n > 0 && good / n > 0.85;
+    })());
+
+    /* JUNCTION FILLS. A trail cut back to the verge of a road does not reach the node on
+       the carriageway, so it must not get a fill there -- that is the dirt disc that sat
+       in the middle of Ridge Road. And no fill may be wider than the ribbon layer it
+       joins, which is what made the road visibly swell at every junction. */
+    let __fillNote = '';
+    check('no path fill is painted on a carriageway, and none is wider than its ribbon', (() => {
+      const G = getGraph(), wg = getWorldGroup();
+      const roads = G.edges.filter(e => e.kind === 'road' && e.pts.length >= 2);
+      let fills = 0, onRoad = 0, wide = 0;
+      wg.traverse(o => {
+        const g = o.isMesh && o.geometry;
+        if (!g || !g.__junctionGap) return;
+        fills++;
+        const P = g.attributes.position.array;
+        const cx = P[0], cz = P[2];
+        for (let i = 3; i < P.length; i += 3)
+          // Float32 vertices at coordinates in the hundreds carry ~1e-5 of rounding: 1 mm slack
+          if (Math.hypot(P[i] - cx, P[i + 2] - cz) > pathOutlineWidth(g.__gapKind) / 2 + 1e-3) { wide++; break; }
+        if (g.__gapKind === 'road') return;
+        for (const e of roads) {
+          let hit = false;
+          for (let i = 0; i < e.pts.length - 1 && !hit; i++)
+            if (ptSegSmoke([cx, cz], e.pts[i], e.pts[i + 1]).d < pathWidth('road') * 0.45) hit = true;
+          if (hit) { onRoad++; break; }
+        }
+      });
+      __fillNote = `${fills} fills, ${onRoad} off-road fills on a carriageway, ${wide} wider than their path`;
+      return fills > 10 && onRoad === 0 && wide === 0;
+    })(), () => __fillNote);
+
+    /* The fill geometry itself: a straight run through a node leaves nothing to fill, a
+       bend fills only its OUTER wedge, and a lone arm gets a half-disc end. */
+    check('a junction fill covers only what no arriving ribbon covers', (() => {
+      if (typeof junctionGapGeom !== 'function') return false;
+      const straight = junctionGapGeom(0, 0, 0, [0, Math.PI], 1);
+      const bend = junctionGapGeom(0, 0, 0, [0, Math.PI / 2], 1);      // arms toward +x and +z
+      const lone = junctionGapGeom(0, 0, 0, [0], 1);
+      if (straight !== null || !bend || !lone) return false;
+      const P = bend.attributes.position.array;
+      // every rim vertex of the bend fill must lie behind BOTH butt lines: x <= 0 and z <= 0
+      for (let i = 3; i < P.length; i += 3) if (P[i] > 1e-6 || P[i + 2] > 1e-6) return false;
+      const L = lone.attributes.position.array;
+      for (let i = 3; i < L.length; i += 3) if (L[i] > 1e-6) return false;   // the half behind the arm
+      return true;
+    })());
+
+    /* An area's name board stands on the area, off every painted path -- "overlook
+       parking" was planted on the centre line of the road it faces. */
+    let __areaSignNote = '';
+    check('no area name board stands on a painted path', (() => {
+      const G = getGraph(), wg = getWorldGroup();
+      const boards = [];
+      wg.traverse(o => { if (o.__areaSign) boards.push(o); });
+      if (!boards.length) return false;
+      let bad = 0;
+      for (const b of boards) {
+        for (const e of G.edges) {
+          if (e.pts.length < 2) continue;
+          const clear = pathOutlineWidth(e.kind) * 0.5;
+          let hit = false;
+          for (let i = 0; i < e.pts.length - 1 && !hit; i++)
+            if (ptSegSmoke([b.position.x, b.position.z], e.pts[i], e.pts[i + 1]).d < clear) hit = true;
+          if (hit) { bad++; break; }
+        }
+      }
+      __areaSignNote = `${bad} of ${boards.length} boards on a path`;
+      return bad === 0;
+    })(), () => __areaSignNote);
+
+    /* A paved lot is a solid pad, not a slab with daylight under its edge: a kerb wall runs
+       round it from the surface down to below the ground at every point. */
+    let __lotNote = '';
+    check('a paved lot has a wall reaching the ground all the way round', (() => {
+      const wg = getWorldGroup();
+      let walls = 0, samples = 0, short = 0;
+      wg.traverse(o => {
+        const g = o.isMesh && o.geometry;
+        if (!g || !g.__areaWall) return;
+        walls++;
+        const baseY = o.parent ? o.parent.position.y : 0;
+        const P = g.attributes.position.array;
+        for (let i = 0; i < P.length; i += 6) {           // (top, bottom) pairs
+          const x = P[i], z = P[i + 2], bot = P[i + 4] + baseY;
+          samples++;
+          if (bot > terrainY(x, z, getVertScale()) + 1e-3) short++;
+        }
+      });
+      const paved = getAreas().filter(a => a.kind === 'parking').length;
+      __lotNote = `${walls} walls for ${paved} lots, ${short}/${samples} wall feet above the ground`;
+      return paved > 0 && walls >= paved && short === 0;
+    })(), () => __lotNote);
 
     /* Reported as getting stuck on a trail or road and having to jump or step sideways.
        Measured rather than assumed: walk every corridor sample in eight directions and

@@ -10,6 +10,7 @@
    know about World, SEG_HASH, or VERT_SCALE -- those stay owned by world.js. */
 import { clamp } from '../core/math.js';
 import { toon, toonTex, sharedMat, M } from '../core/materials.js';
+import { patchGroundRing } from './noise-ring.js';
 import { pointInArea, areaBBox, areaShape } from './geom2d.js';
 import { THEME } from './themes.js';
 
@@ -44,16 +45,44 @@ function ribbonGeom(pts,w,y,elevArr){
     pushTri(aL,bL,aR);pushTri(bL,bR,aR);
     corner.push([aL,aR,bL,bR]);
   }
-  // Round joins. A single chord triangle across the bend still leaves the arc-shaped
-  // sliver between the chord and the true swept region uncovered on sharp turns. A full
-  // fan disc of radius w/2 at each interior vertex covers that region by construction:
-  // segment quads + vertex discs = exactly the stadium swept by a width-w brush.
-  const JOIN=12;
+  /* Joins: fill ONLY the outer wedge of each bend, at the vertex's own height.
+
+     This used to be a full disc of radius w/2 at every interior vertex -- segment quads
+     plus discs is exactly the stadium a width-w brush sweeps, so in plan it was perfect.
+     In elevation it was not: the disc is flat at the vertex height while the segment
+     arriving at it is sloped, so on any grade the downhill half of every disc stood
+     proud of the tread it was meant to be hidden in. One visible arc per station, each
+     with the ink layer's own arc outlining it -- the "fish scales" down every climb.
+
+     Both quads meeting at vertex i end on a horizontal edge through that vertex at
+     exactly baseY(i), so the gap between them on the OUTSIDE of the bend is a flat
+     wedge at that one height, and a fan over just that wedge is flush with both quads by
+     construction. The inside of the bend is already covered twice (the quads overlap
+     there), so nothing is drawn on that side at all. */
+  const segDir=i=>{
+    const p=pts[i],q=pts[i+1];let dx=q[0]-p[0],dz=q[1]-p[1];const L=Math.hypot(dx,dz);
+    return L>1e-9?[dx/L,dz/L]:null;
+  };
   for(let i=1;i<segs;i++){
+    const d1=segDir(i-1), d2=segDir(i);
+    if(!d1||!d2) continue;
+    const cr=d1[0]*d2[1]-d1[1]*d2[0], dt=d1[0]*d2[0]+d1[1]*d2[1];
+    if(Math.abs(cr)<1e-6 && dt>0) continue;             // straight on: no gap to fill
+    const n1=[-d1[1],d1[0]], n2=[-d2[1],d2[0]];
+    const tx=d2[0]-d1[0], tz=d2[1]-d1[1];              // points into the bend
+    const into=(n1[0]+n2[0])*tx+(n1[1]+n2[1])*tz;
+    const s=into>0?-1:1;                               // the side the bend opens away from
+    const a1=Math.atan2(s*n1[1],s*n1[0]), a2=Math.atan2(s*n2[1],s*n2[0]);
+    let da=a2-a1; while(da>Math.PI)da-=2*Math.PI; while(da<=-Math.PI)da+=2*Math.PI;
+    // the wedge bulges away from the turn, i.e. along d1-d2; a U-turn is ambiguous at
+    // exactly pi, so decide it by that rather than by the sign rounding happened to give
+    const mid=a1+da/2, ox=d1[0]-d2[0], oz=d1[1]-d2[1];
+    if(Math.cos(mid)*ox+Math.sin(mid)*oz<0) da=da>0?da-2*Math.PI:da+2*Math.PI;
+    const steps=Math.max(1,Math.ceil(Math.abs(da)/(Math.PI/10)));
     const cx=pts[i][0],cz=pts[i][1],yi=baseY(i),c=addV(cx,cz,yi);
-    let prevIdx=addV(cx+w/2,cz,yi);
-    for(let k=1;k<=JOIN;k++){
-      const th=k/JOIN*Math.PI*2;
+    let prevIdx=addV(cx+Math.cos(a1)*w/2,cz+Math.sin(a1)*w/2,yi);
+    for(let k=1;k<=steps;k++){
+      const th=a1+da*k/steps;
       const cur=addV(cx+Math.cos(th)*w/2,cz+Math.sin(th)*w/2,yi);
       pushTri(c,prevIdx,cur);
       prevIdx=cur;
@@ -330,9 +359,9 @@ function frameMat(color){
     new THREE.MeshToonMaterial({color:new THREE.Color(color), gradientMap:toonTex, side:THREE.DoubleSide}));
 }
 function deckMat(){
-  return sharedMat('deck|planks', () =>
+  return sharedMat('deck|planks', () => patchGroundRing(
     new THREE.MeshToonMaterial({color:new THREE.Color('#ffffff'), vertexColors:true, gradientMap:toonTex,
-      side:THREE.DoubleSide, polygonOffset:true, polygonOffsetFactor:-9, polygonOffsetUnits:-9}));
+      side:THREE.DoubleSide, polygonOffset:true, polygonOffsetFactor:-9, polygonOffsetUnits:-9})));
 }
 
 /* `layer` is the path's CLASS rank (0 road, 1 track, 2 trail) -- see world.js's
@@ -344,6 +373,71 @@ function deckMat(){
    tarmac, because that is what a path crossing a road looks like. world.js also lifts
    each class by a few centimetres (kindLift) so the ordering survives on hardware that
    clamps polygon offset; neither is visible as float at that size. */
+/* THE GAPS AT A JUNCTION, and nothing else. Every ribbon arriving at a node ends on a
+   straight butt edge through the node, perpendicular to its own first segment, at the
+   node's height -- so a point at radius <= r from the node is already painted by an arm
+   whenever it lies AHEAD of that arm's butt line (cos(theta - armAngle) >= 0). What is
+   left is the set of directions that are behind EVERY arm's butt line: the outer wedge
+   between two arms meeting at an angle, or the half-disc behind a lone arm (a round end).
+
+   This replaces the flat full discs the junction pads used to be. Those had two faults:
+   they were drawn wider than the ribbons they joined (a road visibly swelled at every
+   junction), and a flat disc on a graded road stands proud of the downhill arm exactly as
+   the old bend joins did. A fan over only the uncovered directions is flush with every
+   butt edge by construction, because each butt edge is horizontal at the node height.
+
+   Exact: the only places coverage can change are the butt-edge directions armAngle +- 90
+   degrees, so those are the interval boundaries, and each interval is tested once at its
+   midpoint. */
+function junctionGapGeom(cx, cz, y, angles, r){
+  const P = [], I = [];
+  if(!angles.length){
+    // nothing arrives: a plain disc (a lone node with every arm trimmed away is filtered
+    // out by the caller; this only keeps the function total)
+    angles = [];
+  }
+  const TAU = Math.PI*2;
+  const norm = a => ((a % TAU) + TAU) % TAU;
+  const cuts = [];
+  for(const a of angles){ cuts.push(norm(a + Math.PI/2), norm(a - Math.PI/2)); }
+  cuts.sort((a, b) => a - b);
+  const covered = th => angles.some(a => Math.cos(th - a) >= -1e-9);
+  const spans = [];
+  if(!cuts.length) spans.push([0, TAU]);
+  for(let k = 0; k < cuts.length; k++){
+    const a0 = cuts[k], a1 = k + 1 < cuts.length ? cuts[k + 1] : cuts[0] + TAU;
+    if(a1 - a0 < 1e-6) continue;
+    if(!covered((a0 + a1)/2)) spans.push([a0, a1]);
+  }
+  P.push(cx, y, cz);
+  for(const [a0, a1] of spans){
+    const steps = Math.max(1, Math.ceil((a1 - a0)/(Math.PI/10)));
+    let prev = P.length/3; P.push(cx + Math.cos(a0)*r, y, cz + Math.sin(a0)*r);
+    for(let k = 1; k <= steps; k++){
+      const th = a0 + (a1 - a0)*k/steps;
+      const cur = P.length/3; P.push(cx + Math.cos(th)*r, y, cz + Math.sin(th)*r);
+      I.push(0, cur, prev);                 // counter-clockwise seen from above (+y up)
+      prev = cur;
+    }
+  }
+  if(!I.length) return null;
+  const N = new Float32Array(P.length); for(let i = 1; i < N.length; i += 3) N[i] = 1;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(P), 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(N, 3));
+  geo.setIndex(I);
+  geo.__junctionGap = true;
+  return geo;
+}
+
+/* Depth bias for every painted path layer. The UNITS term (constant depth, scaled by
+   class rank) is what orders a road under a trail where the two are coplanar. The FACTOR
+   term scales with how steeply the surface is seen, and it used to scale with rank as
+   well -- -8 for a trail against -2 for a road -- which at the chase camera's grazing
+   angle pulled a trail's tread forward far enough to paint over the feet of anything
+   standing on it. Kind order is already carried geometrically by kindLift (4.5 cm per
+   rank) and by the units term, so the slope term is one small constant for every layer. */
+const TRAIL_BIAS_FACTOR = -1.5;
 function trailMat(color, layer){
   // DoubleSide is a safety net on top of the winding fix — cheap for a ribbon this size,
   // and guarantees the trail can never vanish again from a stray winding edge case.
@@ -352,9 +446,9 @@ function trailMat(color, layer){
      cache purely through this one function, because it builds its material directly
      rather than going through it. Nothing mutates a trail material after construction. */
   const L = layer || 0;
-  return sharedMat('trail|'+color+'|'+L, () =>
+  return sharedMat('trail|'+color+'|'+L, () => patchGroundRing(
     new THREE.MeshToonMaterial({color:new THREE.Color(color),gradientMap:toonTex,side:THREE.DoubleSide,
-      polygonOffset:true,polygonOffsetFactor:-2-L*3,polygonOffsetUnits:-2-L*3}));
+      polygonOffset:true,polygonOffsetFactor:TRAIL_BIAS_FACTOR,polygonOffsetUnits:-2-L*3})));
 }
 const INK='#3a2517';
 function signText(label,dist,flip){
@@ -375,8 +469,15 @@ function signText(label,dist,flip){
   x.fillStyle='#5a3d24';x.fillText(dist,tx,80);
   const t=new THREE.CanvasTexture(c);t.minFilter=THREE.LinearFilter;return t;
 }
+/* Fingerpost, modelled at the old dimensions and scaled as a whole (like the gate): the
+   original 3.4 m post with 3.1 m arms was sized for fire-road-width trails and, planted
+   beside a metre-wide footpath, its arms reached right across the tread in front of the
+   camera. SIGN_SCALE puts the post at about 2.1 m with 1.9 m arms -- a real trail
+   fingerpost -- and the origin is at the foot, so it shrinks toward the ground. */
+const SIGN_SCALE = 0.62;
 function buildSign(node,arms){
   const g=new THREE.Group();g.position.set(node.p[0],0,node.p[1]);
+  g.scale.setScalar(SIGN_SCALE);
   /* test seam: lets tools/smoke.js find every fingerpost in the scene and check none of
      them ended up planted in a carriageway. */
   g.__sign = true;
@@ -736,7 +837,8 @@ function buildLandform(a,st,shape,bb,rng){
   const geo=new THREE.ExtrudeGeometry(shape,{depth:hgt,bevelEnabled:true,
     bevelThickness:bevel,bevelSize:bevel*0.75,bevelSegments:2});
   const palette=[st.fill,shade(st.fill,1.16),shade(st.fill,0.8)];
-  const mat=palette.map(c=>toon(c));
+  // climbable rock: the ring lands on it the way it lands on the ground
+  const mat=palette.map(c=>patchGroundRing(toon(c)));
   const m=M(geo,mat[(rng()*mat.length)|0]);
   // rotation.x=-90° maps local z (0..depth, the extrude axis) straight onto world y
   // (0..depth) with no extra vertical offset needed — the base already lands on y=0.
@@ -808,6 +910,49 @@ function buildFloatingLabel(name,em,width,topY){
   spr.userData.areaLabel=true;
   return spr;
 }
+/* Vertical skirt round each ring of an area, in the group's own space: top at `topY`,
+   bottom a little below `groundLocal(x,z)` (terrain height relative to the group). Sampled
+   at a metre so the bottom edge follows every terrace step; the bottom is taken as the
+   LOWER of the ground at the outline and just outside it, since the outside is where the
+   ground drops away. A wall that ends up inside a bank is simply hidden by it. */
+const AREA_WALL_STEP = 1.0, AREA_WALL_SINK = 0.35;
+function areaWallGeom(rings, topY, groundLocal){
+  const P=[], I=[];
+  for(const ring of rings){
+    if(!ring || ring.length<3) continue;
+    // signed area: which side of each edge is outside
+    let A=0; for(let k=0;k<ring.length;k++){ const p=ring[k], q=ring[(k+1)%ring.length]; A+=p[0]*q[1]-q[0]*p[1]; }
+    const out=A>0?-1:1;
+    const pts=[];
+    for(let k=0;k<ring.length;k++){
+      const p=ring[k], q=ring[(k+1)%ring.length];
+      const L=Math.hypot(q[0]-p[0], q[1]-p[1]);
+      const n=Math.max(1, Math.ceil(L/AREA_WALL_STEP));
+      const nx=L>1e-9?-(q[1]-p[1])/L*out:0, nz=L>1e-9?(q[0]-p[0])/L*out:0;
+      for(let s=0;s<n;s++){ const t=s/n; pts.push([p[0]+(q[0]-p[0])*t, p[1]+(q[1]-p[1])*t, nx, nz]); }
+    }
+    if(pts.length<3) continue;
+    const base=P.length/3;
+    for(const [x,z,nx,nz] of pts){
+      const g=Math.min(groundLocal(x,z), groundLocal(x+nx*0.6, z+nz*0.6));
+      const bot=Math.min(topY-0.02, g-AREA_WALL_SINK);
+      P.push(x,topY,z, x,bot,z);
+    }
+    const m=pts.length;
+    for(let i=0;i<m;i++){
+      const a=base+i*2, b=base+((i+1)%m)*2;
+      I.push(a,a+1,b+1, a,b+1,b);
+    }
+  }
+  if(!I.length) return null;
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(P),3));
+  geo.setIndex(I);
+  geo.computeVertexNormals();
+  geo.__areaWall=true;
+  return geo;
+}
+
 function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
   const g=new THREE.Group();
   const st=AREA_STYLE[a.kind]||AREA_STYLE.meadow;
@@ -845,10 +990,24 @@ function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
       map:st.paved?pavementTexture():null,gradientMap:toonTex,
       transparent:st.op<1,opacity:st.op,side:THREE.DoubleSide,
       polygonOffset:true,polygonOffsetFactor:-1,polygonOffsetUnits:-1});
+    if(a.kind!=='water') patchGroundRing(mat);   // the ring lies on a lot or a meadow like any ground
     if(st.paved)mat.map.repeat.set(Math.max(1,bb.w/9),Math.max(1,bb.h/9));
     const m=M(geo,mat);
     m.rotation.x=-Math.PI/2;m.position.y=a.kind==='water'?0.09:0.03;
     g.add(m);
+    /* A PAVED lot is a built thing, so it gets sides. The slab is flat at the area's graded
+       height, but the ground round it is not: a road bench cut through the entrance, or a
+       slope falling away along one edge, left the edge of the lot hanging in mid-air with
+       daylight under it. A kerb wall round every ring, from the surface down to just
+       below the ground at each point, makes it read as one solid pad on the hillside. */
+    if(st.paved){
+      const baseY=(a.groundY!=null)?a.groundY*vertScale:groundYAt(bb.cx,bb.cz);
+      const wall=areaWallGeom(a.rings, 0.03, (x,z)=>groundYAt(x,z)-baseY);
+      // its own material: double-sided (ring winding varies by source file), and toon()'s
+      // cached materials are shared, so they must not be mutated
+      if(wall) g.add(M(wall, patchGroundRing(new THREE.MeshToonMaterial({color:new THREE.Color(shade(st.fill,0.72)),
+                                                         gradientMap:toonTex, side:THREE.DoubleSide}))));
+    }
     // scatter matching cover inside the polygon, skipping the trail corridor
     const want=a.kind==='forest'?Math.min(90,bb.w*bb.h/70)
              :a.kind==='meadow'?Math.min(70,bb.w*bb.h/60):0;
@@ -899,7 +1058,14 @@ function areaSignTex(title,sub){
 /* A signpost planted at whichever boundary point sits closest to the trail network, facing
    outward so it reads from the path — must run AFTER trails are hashed (nearestTrail needs
    SEG_HASH populated), unlike buildArea's ground cover which can go down any time. */
-function buildAreaSign(a,groundYAt,nearestTrail){
+/* An area's name board, at the edge of the area nearest a path so you pass it on the way
+   in. It used to step 1.1 m OUTWARD from the area's centre past that nearest outline
+   vertex -- and for a lot beside a road the nearest vertex is the entrance, on the road
+   edge, so outward was straight into the carriageway ("overlook parking" planted on the
+   centre line of Ridge Road). It now steps INWARD, onto the area's own ground, and then
+   `clear` (world.js pushOffPaths) moves it off any painted path it still touches. It
+   still faces outward, toward the path it is read from. */
+function buildAreaSign(a,groundYAt,nearestTrail,clear){
   const bb=areaBBox(a);
   let best=null;
   for(const c of a.rings[0]){
@@ -911,7 +1077,8 @@ function buildAreaSign(a,groundYAt,nearestTrail){
   const L=Math.hypot(dx,dz)||1;dx/=L;dz/=L;
   const st=AREA_STYLE[a.kind]||AREA_STYLE.meadow;
   const g=new THREE.Group();
-  const signX=anchor[0]+dx*1.1,signZ=anchor[1]+dz*1.1;
+  let signX=anchor[0]-dx*1.4,signZ=anchor[1]-dz*1.4;
+  if(clear){ const c=clear(signX,signZ); signX=c[0]; signZ=c[1]; }
   g.position.set(signX,groundYAt(signX,signZ),signZ);
   g.rotation.y=Math.atan2(dx,dz);
   const post=M(new THREE.CylinderGeometry(0.09,0.11,1.9,7),toon('#7a4e28'));
@@ -978,6 +1145,47 @@ function backdropRadius(theme, mapScale=1){
   return 900 * mapScale * (1 + (bands-1)*0.07);
 }
 
+/* THE RIDGELINE. It used to be 64 random heights with every other one knocked down to
+   72% -- a perfectly regular sawtooth, identical tooth width all the way round, which is
+   what made the skyline read as a paper cut-out rather than as distant country. A real
+   ridge is self-similar: a few big summits, shoulders on those, and small notches on the
+   shoulders. So: periodic value noise (it has to close seamlessly round the ring) summed
+   over octaves, sharpened with a power so summits are peaks and valleys are broad, at
+   enough segments that the small octave is visible as texture, not as teeth.
+
+   Mesas keep their flat-topped runs -- that IS the silhouette of mesa country -- but the
+   run heights now come from the same noise, so neighbouring tables relate instead of
+   jumping at random, and each run is stepped down at its ends as a talus shoulder. */
+const RIDGE_SEGS = 192;
+function ridgeProfile(segs, peakH, mesas, rng){
+  // periodic 1-D value noise: `cells` random values round the ring, smoothstep between
+  const octave = cells => {
+    const v = Array.from({length: cells}, () => rng());
+    return i => {
+      const t = i/segs*cells, k = Math.floor(t), f = t - k, u = f*f*(3 - 2*f);
+      return v[k % cells] + (v[(k + 1) % cells] - v[k % cells])*u;
+    };
+  };
+  const o1 = octave(7), o2 = octave(19), o3 = octave(53);
+  const raw = i => Math.pow(0.58*o1(i) + 0.30*o2(i) + 0.12*o3(i), 1.6);
+  const h = new Array(segs + 1);
+  if(mesas){
+    let i = 0;
+    while(i < segs){
+      const run = 6 + Math.floor(rng()*10);
+      const top = peakH*(0.35 + 0.65*raw(i + run/2));
+      for(let k = 0; k < run && i < segs; k++, i++){
+        const edge = Math.min(k, run - 1 - k);
+        h[i] = edge === 0 ? top*0.78 : top;           // a shoulder step either side
+      }
+    }
+  }else{
+    for(let i = 0; i < segs; i++) h[i] = peakH*(0.22 + 0.78*raw(i));
+  }
+  h[segs] = h[0];                                     // close the ring seamlessly
+  return h;
+}
+
 function buildBackdrop(theme, rng, mapScale=1){
   const g = new THREE.Group();
   g.name = 'backdrop';
@@ -997,7 +1205,6 @@ function buildBackdrop(theme, rng, mapScale=1){
   const bands = theme.mountain.length;
   for(let b=0; b<bands; b++){
     const R = 900 * mapScale * (1 + b*0.07);
-    const segs = 64;
     const peakH = (150 + b*55) * mapScale;
     const mat = new THREE.MeshBasicMaterial({
       color: mixHex(theme.mountain[b], theme.sky, 0.28 + b*0.17),
@@ -1016,18 +1223,8 @@ function buildBackdrop(theme, rng, mapScale=1){
          that right too -- the closer band wins because it actually is closer. */
       side: THREE.DoubleSide, fog:false, depthTest:true, depthWrite:true,
     });
-    // ridge profile: one height per segment, flat-topped runs for mesas, spikes for peaks
-    const h = new Array(segs+1);
-    let runH = 0, runLeft = 0;
-    for(let i=0; i<=segs; i++){
-      if(mesas){
-        if(runLeft<=0){ runLeft = 3 + Math.floor(rng()*4); runH = peakH*(0.45+rng()*0.55); }
-        runLeft--; h[i] = runH;
-      }else{
-        h[i] = peakH*(0.35 + rng()*0.65) * (i%2 ? 1 : 0.72);
-      }
-    }
-    h[segs] = h[0];                        // close the ring seamlessly
+    const segs = RIDGE_SEGS;
+    const h = ridgeProfile(segs, peakH, mesas, rng);
     const P=[], idx=[];
     for(let i=0; i<=segs; i++){
       const a = i/segs*Math.PI*2;
@@ -1046,13 +1243,14 @@ function buildBackdrop(theme, rng, mapScale=1){
     // a stable submission order -- cheapest first, in case the driver ever cares
     m.renderOrder = -10 + b;
     m.frustumCulled = false;               // it surrounds the camera; culling it is wrong
+    m.userData.band = b; m.userData.bands = bands;   // sky.js scales its haze by depth
     g.add(m);
   }
   return g;
 }
 
 
-export { ribbonGeom, embankmentGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
+export { ribbonGeom, junctionGapGeom, embankmentGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
          POI_STYLE, AREA_STYLE, nameplate, buildPOI, pavementTexture, buildLandform,
          buildFloatingLabel, buildArea, buildAreaSign, makeShadow, pickTree, shade,
-         buildBackdrop, backdropRadius, bridgeDeckGeom, bridgeFrameGeom, deckMat, frameMat };
+         buildBackdrop, backdropRadius, ridgeProfile, bridgeDeckGeom, bridgeFrameGeom, deckMat, frameMat };

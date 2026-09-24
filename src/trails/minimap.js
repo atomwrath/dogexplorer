@@ -66,6 +66,8 @@ let bigView = null;            // last-drawn transform, for pointer/wheel pickin
 let lastSelectedHead = -1;
 let onTrailheadPick = null;    // main.js's placeAtHead, wired through initMinimap
 let onSpotPick = null;         // main.js's placeAtSpot, same arrangement
+let onTrailPointPick = null;   // main.js's "load any point on a trail into the start card"
+let pickedPoint = null;        // {x,z} the sheet marks as a chosen start point, or null
 let bigWired = false;          // guards against double-binding listeners if init runs twice
 
 /* The route the walker is currently on, and the edges that belong to it.
@@ -189,9 +191,70 @@ function pickSpotAt(px, py){
   return true;
 }
 
-/* One tap, two kinds of target. Spots first (see above), trailheads second. */
+/* ANY POINT ON ANY PATH is a start point. Trailheads are only the outer dead ends, and
+   on a real network the trail you want to walk usually has none near where you want to
+   be. A tap that hits neither a pin nor a badge snaps to the nearest point on the nearest
+   drawn path, if one lies within a finger's width on screen, and hands main.js the spot
+   and the heading along the path there -- main.js loads it into the start card, it does
+   not move anyone, same contract as a trailhead tap.
+
+   The tolerance is in SCREEN pixels converted to world units, so it is a fingertip at
+   every zoom rather than a fixed distance on the ground. */
+function nearestPathPoint(x, z, maxD){
+  const g = getGraph();
+  if(!g) return null;
+  let best = null, bd = maxD == null ? Infinity : maxD;
+  for(const e of g.edges){
+    const pts = e.pts;
+    for(let i=0;i<pts.length-1;i++){
+      const a=pts[i], b=pts[i+1];
+      const dx=b[0]-a[0], dz=b[1]-a[1], L2=dx*dx+dz*dz;
+      if(L2 < 1e-12) continue;
+      let t=((x-a[0])*dx+(z-a[1])*dz)/L2; t=t<0?0:(t>1?1:t);
+      const qx=a[0]+dx*t, qz=a[1]+dz*t, d=Math.hypot(x-qx, z-qz);
+      if(d < bd){ bd=d; best={x:qx, z:qz, yaw:Math.atan2(-dz, dx), edge:e, d}; }
+    }
+  }
+  return best;
+}
+function pickTrailPointAt(px, py){
+  if(!bigView || !onTrailPointPick) return false;
+  const {ox, oy, s, at, dpr} = bigView;
+  const k = at.ppm*s;
+  const wx = at.x0 + (px-ox)/k, wz = at.z0 + (py-oy)/k;
+  const hitR = Math.max(20*(dpr||1), 28)/k;
+  const hit = nearestPathPoint(wx, wz, hitR);
+  if(!hit) return false;
+  onTrailPointPick(hit);
+  return true;
+}
+
+/* One tap, three kinds of target, most deliberate first: a pin you dropped, then a
+   lettered trailhead, then anywhere along a path. */
 function pickOnSheet(px, py){
-  return pickSpotAt(px, py) || pickTrailheadAt(px, py);
+  return pickSpotAt(px, py) || pickTrailheadAt(px, py) || pickTrailPointAt(px, py);
+}
+
+/* The chosen start point, drawn as a flag on a stick so it reads as "you will start
+   here" and cannot be confused with a numbered pin or a lettered trailhead badge. */
+function setPickedPoint(p){ pickedPoint = (p && isFinite(p.x) && isFinite(p.z)) ? {x:p.x, z:p.z} : null; }
+function getPickedPoint(){ return pickedPoint; }
+function drawPickedPoint(g, X, Z, scale){
+  if(!pickedPoint) return;
+  const x = X(pickedPoint.x), y = Z(pickedPoint.z);
+  g.save();
+  g.lineCap = 'round';
+  g.beginPath(); g.arc(x, y, 5*scale, 0, 7);
+  g.fillStyle = 'rgba(255,217,74,0.55)'; g.fill();
+  g.lineWidth = Math.max(1.4, 1.8*scale); g.strokeStyle = INK_MAP; g.stroke();
+  g.beginPath(); g.moveTo(x, y); g.lineTo(x, y - 22*scale);
+  g.lineWidth = Math.max(1.6, 2.2*scale); g.stroke();
+  g.beginPath();
+  g.moveTo(x, y - 22*scale); g.lineTo(x + 13*scale, y - 17.5*scale); g.lineTo(x, y - 13*scale);
+  g.closePath();
+  g.fillStyle = '#ffd94a'; g.fill();
+  g.lineWidth = Math.max(1.2, 1.6*scale); g.stroke();
+  g.restore();
 }
 
 /* Drag-to-pan + tap-to-pick, as one pointer sequence: a real drag pans, a pointer that
@@ -248,6 +311,7 @@ function initMinimap(onPick){
   const opts = (typeof onPick === 'function') ? {onTrailhead:onPick} : (onPick || {});
   onTrailheadPick = opts.onTrailhead || null;
   onSpotPick = opts.onSpot || null;
+  onTrailPointPick = opts.onTrailPoint || null;
   miniCv = document.getElementById('minimap');
   bigCv = document.getElementById('bigmap');
   if(miniCv) miniCtx = miniCv.getContext('2d');
@@ -707,6 +771,7 @@ function updateMinimap(px, pz, yaw, selectedHead){
       drawCourse(g, X, Z, dpr*1.4, true);
       lastSelectedHead = (selectedHead == null || selectedHead < 0) ? -1 : selectedHead;
       drawTrailheadLabels(g, X, Z, dpr*1.3, lastSelectedHead);
+      drawPickedPoint(g, X, Z, dpr*1.3);
       drawSighted(g, X, Z, dpr*1.6);
       drawSpots(g, X, Z, dpr*1.9, true);
       drawPup(g, X(px), Z(pz), yaw, dpr*2.2);
@@ -726,5 +791,6 @@ function updateMinimap(px, pz, yaw, selectedHead){
 }
 
 export { initMinimap, updateMinimap, setBigMapOpen, getBigView, getSelectedHead,
+         setPickedPoint, getPickedPoint, nearestPathPoint,
          setHighlightRoute, getHighlightRoute, highlightEdges, pickSpotAt, pickOnSheet,
          setCourseShown, getCourseShown, setRaceFrac, getRaceFrac };

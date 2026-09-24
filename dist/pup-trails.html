@@ -785,8 +785,8 @@ body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
                 <h3 id="hereTitle">🚩 Start here</h3>
                 <div id="hereIdle">
                   <p class="hint" id="startNow">—</p>
-                  <p class="hint">Tap a lettered badge on the map, or a course below, to see
-                    what is there. Every outer dead-end is a trailhead.</p>
+                  <p class="hint">Tap any trail on the map to start from that spot, a
+                    lettered badge for a trailhead, or a course below.</p>
                 </div>
                 <div id="hereStats" class="here-stats"></div>
                 <div id="hereActions" class="here-actions"></div>
@@ -2670,15 +2670,13 @@ function dogBodyPitch(){ return R && R.bodyG ? R.bodyG.rotation.z : null; }
 
 let mesh = null, tex = null, baseOpacity = 0.34;
 
-/* How far above the surface the blob floats. This is NOT an arbitrary nudge: world.js
-   stacks the trail's six ribbon layers at fixed offsets above the graded profile --
-   outline 0.012, shoulder 0.02, tread 0.05, junction pad 0.06, inner 0.08, dashes 0.09 --
-   and standingY() returns the profile itself, so a shadow lifted by less than 0.09 is
-   embedded IN that stack and z-fights whichever layer it lands on. (0.06, the old value,
-   was exactly the junction-pad offset, which is why the flicker was worst at junctions.)
-   Clearing the tallest layer with a little margin puts it unambiguously on top. These
-   offsets are in world units and do not scale, so neither does this. */
-const SHADOW_LIFT = 0.115;
+/* How far above the surface the blob floats. standingY() now returns the TOP of the
+   painted stack (world.js's drawnTopLifts: the inner stripe or ruts, the planks on a
+   deck), not the graded profile under it, so the only things left above the surface are
+   a road's dashes (+0.01) and a crosswalk's bars (+0.02..0.035). Clearing those with a
+   little margin is all the lift has to do. It used to be 0.115 because the surface it
+   was measured from was buried under the whole stack. */
+const SHADOW_LIFT = 0.045;
 
 /* Soft-edged radial blob. Wrapped because the 2D canvas is the one browser API this
    file needs and headless harnesses stub it loosely -- a hard-edged fallback disc is a
@@ -2784,165 +2782,170 @@ function getShadow(){ return mesh; }
    they spanned -- measured on the default map, 17% of the loop was underground at any
    moment. A one-pixel line that is also 17% missing is not an indicator.
 
-   A band fixes both: it has real width in metres so it scales with the view, and because
-   every vertex on BOTH edges is placed on the terrain it drapes over risers instead of
-   cutting through them. Rebuilt every frame -- a few hundred vertices is nothing, and it
-   means the ring needs no invalidation logic when the ground under it changes. */
+   The draped band fixed both, and then showed its own limit: it was still GEOMETRY laid
+   on a terraced heightfield. Wherever the circle crossed a riser, the inner edge sampled
+   one terrace and the outer edge the next, and the two triangles between them twisted
+   into a spike -- the jagged saw-teeth round every hillside. Finer sampling cannot fix
+   that; a vertical step is a step at any resolution.
 
+   So the ring is no longer geometry at all. It is PROJECTED, like a decal: every ground
+   material (terrain, path ribbons, junction fills, lots, crossings, decks) is patched by
+   patchGroundRing() to work out its own horizontal distance from the ring's centre in the
+   fragment shader and paint the band where that distance matches the radius. The band
+   lies on exactly whatever surface is there -- tread, riser, kerb, lot -- with no draping,
+   no lift, no depth bias to fight, and an edge antialiased to the pixel at any radius.
+   Things that are not ground (the pup, critters, trees, signs) are never patched, so the
+   ring passes under them instead of being painted up their sides.
 
+   Updating it is four uniforms per ring per frame. */
 
-const SEGS = 192;           // ~0.9 m of arc at a 27 m radius; short enough to drape
-const LIFT = 0.13;          // clears the trail ribbon stack, same reasoning as shadow.js
-
-let ring = null, geom = null, mat = null;
-let shownR = 0;             // eased radius, so state changes glide rather than snap
-let catchRing = null, catchGeom = null, catchMat = null;
 
 /* Colour by how loud you are, because that is the thing being communicated. Green when
    you are quiet enough to approach, amber at a walk, red when you are broadcasting. */
 const QUIET = 0x4f9d4f, WALK = 0xd8922e, LOUD = 0xc4442e;
 /* The catch ring has exactly one colour now that it only exists while armed -- see
-   updateCatchRing. Kept as a named constant rather than inlined so the build-time default
-   passed to makeBand and the colour set every frame can't drift apart. */
+   updateCatchRing. */
 const REACH_ARMED = 0x7bc47f;
 
-/* One band, built once. Extracted the moment there were two of these: the noise ring and
-   the catch ring differ in colour, radius and what they mean, and in nothing at all about
-   how a draped annulus is constructed. Two copies of this would drift, and the drift would
-   be invisible -- both rings would still draw, just no longer comparably, which is fatal
-   for a mechanic whose entire readout is one circle sitting inside the other. */
-function makeBand(name, color, opacity, order){
-  const g = new THREE.BufferGeometry();
-  // two vertices per angular step: inner edge, outer edge
-  g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(SEGS*2*3), 3));
-  const idx = [];
-  for(let i=0;i<SEGS;i++){
-    const a = i*2, b = a+1, c = ((i+1)%SEGS)*2, d = c+1;
-    idx.push(a, b, d, a, d, c);
-  }
-  g.setIndex(idx);
-  const m = new THREE.MeshBasicMaterial({
-    color, transparent:true, opacity,
-    depthWrite:false, side:THREE.DoubleSide,
-    // same reasoning as shadow.js: a surface lying on the ground needs a firm depth
-    // bias or it strobes against the ground it is lying on
-    polygonOffset:true, polygonOffsetFactor:-8, polygonOffsetUnits:-8,
-  });
-  const mesh = new THREE.Mesh(g, m);
-  mesh.frustumCulled = false;
-  mesh.renderOrder = order;
-  mesh.name = name;
-  scene.add(mesh);
-  return {mesh, geom:g, mat:m};
+/* One shared uniform set, referenced (not copied) by every patched material's shader, so
+   a single write here moves the ring on every surface at once. vec4s as plain arrays:
+   three's uniform setter takes either, and arrays need nothing from THREE, which keeps
+   this module loadable before the renderer exists and inside the smoke harness.
+     uRingN     centre x, centre z, radius, half-width   (radius 0 = not drawn)
+     uRingNCol  r, g, b (linear, like every material colour), opacity */
+const RING_UNIFORMS = {
+  uRing0: {value: [0, 0, 0, 0]}, uRing0Col: {value: [0, 0, 0, 0]},
+  uRing1: {value: [0, 0, 0, 0]}, uRing1Col: {value: [0, 0, 0, 0]},
+};
+
+/* The whole technique, in two snippets. The band's coverage is 1 inside |d - R| < half
+   and falls to 0 over one pixel's worth of d either side, measured with fwidth so the
+   edge is exactly one pixel soft whether the ring is at your feet or across the valley.
+   fwidth needs derivatives: native in WebGL2, an extension in WebGL1 -- where it is
+   missing, a fixed 5 cm soft edge stands in. */
+const RING_VERT_DECL = 'varying vec3 vRingW;\n';
+const RING_VERT_BODY = '\n  vRingW = (modelMatrix * vec4(transformed, 1.0)).xyz;\n';
+const RING_FRAG_DECL = `
+uniform vec4 uRing0; uniform vec4 uRing0Col;
+uniform vec4 uRing1; uniform vec4 uRing1Col;
+varying vec3 vRingW;
+float groundRingBand(vec4 R){
+  if(R.z <= 0.0) return 0.0;
+  float d = abs(length(vRingW.xz - R.xy) - R.z);
+#if __VERSION__ >= 300 || defined(GL_OES_standard_derivatives)
+  float aa = max(fwidth(d), 1e-4);
+#else
+  float aa = 0.05;
+#endif
+  return 1.0 - smoothstep(R.w - aa, R.w + aa, d);
+}
+`;
+const RING_FRAG_BODY = `
+  gl_FragColor.rgb = mix(gl_FragColor.rgb, uRing0Col.rgb, uRing0Col.a * groundRingBand(uRing0));
+  gl_FragColor.rgb = mix(gl_FragColor.rgb, uRing1Col.rgb, uRing1Col.a * groundRingBand(uRing1));
+`;
+
+/* Teach one material to show the rings. Idempotent (shared materials are handed to this
+   from every ribbon that uses them), chains any onBeforeCompile already there, and keys
+   the program cache so a patched material never reuses an unpatched program. Injected
+   after <project_vertex> -- `transformed` is the final local position by then -- and
+   before <tonemapping_fragment>, so the ring is mixed in the same linear space as the
+   lit colour and then encoded with it. Returns the material, for inline use. */
+function patchGroundRing(mat){
+  if(!mat || (mat.userData && mat.userData.groundRing)) return mat;
+  mat.userData = mat.userData || {};
+  mat.userData.groundRing = true;
+  const prev = mat.onBeforeCompile;
+  mat.onBeforeCompile = function(sh, renderer){
+    if(typeof prev === 'function') prev.call(this, sh, renderer);
+    Object.assign(sh.uniforms, RING_UNIFORMS);
+    sh.vertexShader = RING_VERT_DECL + sh.vertexShader.replace(
+      '#include <project_vertex>', '#include <project_vertex>' + RING_VERT_BODY);
+    sh.fragmentShader = RING_FRAG_DECL + sh.fragmentShader.replace(
+      '#include <tonemapping_fragment>', RING_FRAG_BODY + '#include <tonemapping_fragment>');
+  };
+  const prevKey = mat.customProgramCacheKey;
+  mat.customProgramCacheKey = function(){
+    return 'groundRing|' + (typeof prevKey === 'function' ? prevKey.call(this) : '');
+  };
+  mat.needsUpdate = true;
+  return mat;
 }
 
-/* Write one circle's worth of draped vertices. Both edges are sampled onto the terrain
-   (see the module header on why a line loop was not enough), and `lift` differs per ring
-   so the two never z-fight where they cross -- which they do constantly, since the whole
-   point is watching one pass through the other. */
-function drapeBand(g, px, pz, radius, half, groundAt, lift){
-  const arr = g.attributes.position.array;
-  for(let i=0;i<SEGS;i++){
-    const a = i/SEGS*Math.PI*2, ca = Math.cos(a), sa = Math.sin(a);
-    for(let e=0;e<2;e++){
-      const rr = radius + (e ? half : -half);
-      const x = px + ca*rr, z = pz + sa*rr;
-      const o = (i*2+e)*3;
-      arr[o]   = x;
-      arr[o+1] = groundAt(x, z) + lift;
-      arr[o+2] = z;
-    }
-  }
-  g.attributes.position.needsUpdate = true;
-  if(g.computeBoundingSphere) g.computeBoundingSphere();
-}
+/* The ring's state as the player sees it, kept for the HUD code and the harness: where
+   it is centred, how big, and whether it is up. The uniforms are the rendering; these
+   are the record of what was asked for. */
+function ringState(){ return {visible:false, x:0, z:0, radius:0, half:0, color:0, opacity:0}; }
+const noise = ringState(), reach = ringState();
+let shownR = 0;             // eased radius, so state changes glide rather than snap
 
-function ensureRing(){
-  if(ring) return ring;
-  try{
-    const built = makeBand('noiseRing', WALK, 0.55, 3);
-    ring = built.mesh; geom = built.geom; mat = built.mat;
-  }catch(err){
-    ring = null;
-  }
-  return ring;
+function hexToLinear(hex){
+  const f = c => { c /= 255; return c <= 0.04045 ? c/12.92 : Math.pow((c + 0.055)/1.055, 2.4); };
+  return [f((hex >> 16) & 255), f((hex >> 8) & 255), f(hex & 255)];
 }
-
-function ensureCatchRing(){
-  if(catchRing) return catchRing;
-  try{
-    const built = makeBand('catchRing', REACH_ARMED, 0.8, 4);
-    catchRing = built.mesh; catchGeom = built.geom; catchMat = built.mat;
-  }catch(err){
-    catchRing = null;
-  }
-  return catchRing;
+function pushRing(st, U, UC){
+  if(!st.visible){ U.value[2] = 0; UC.value[3] = 0; return; }
+  U.value[0] = st.x; U.value[1] = st.z; U.value[2] = st.radius; U.value[3] = st.half;
+  const c = hexToLinear(st.color);
+  UC.value[0] = c[0]; UC.value[1] = c[1]; UC.value[2] = c[2]; UC.value[3] = st.opacity;
 }
 
 /* noise:  critters.js's own multiplier for the current state (see updateCritters)
    baseR:  a representative spook radius for this map's wildlife
-   groundAt: standingY, passed in so this module needs no world.js import */
-function updateNoiseRing(dt, px, pz, noise, baseR, groundAt, visible){
-  const r = ensureRing();
-  if(!r) return;
-  r.visible = !!visible;
-  if(!visible) return;
-
-  const target = clamp(baseR*noise, 1.5, 400);
-  // ease, but converge fast enough that crouching feels like a response, not a delay
-  shownR = shownR > 0 ? lerp(shownR, target, 1-Math.pow(0.004, dt)) : target;
-
-  // band width grows with the circle so it stays readable at any radius, with a floor so
-  // a tight sneaking ring does not thin away to nothing
-  const half = clamp(shownR*0.045, 0.30, 1.6)*0.5;
-  drapeBand(geom, px, pz, shownR, half, groundAt, LIFT);
-
-  // colour tracks the multiplier, not the absolute radius, so it means the same thing
-  // on a map full of jumpy deer as on one full of bold bears
-  mat.color.setHex(noise <= 0.4 ? QUIET : (noise >= 1.2 ? LOUD : WALK));
-  mat.opacity = noise <= 0.4 ? 0.7 : 0.5;
+   groundAt is still accepted, for the callers, and no longer needed: a projected ring
+   takes its height from whatever surface it lands on. */
+function updateNoiseRing(dt, px, pz, noiseMul, baseR, groundAt, visible){
+  noise.visible = !!visible;
+  if(visible){
+    const target = clamp(baseR*noiseMul, 1.5, 400);
+    // ease, but converge fast enough that crouching feels like a response, not a delay
+    shownR = shownR > 0 ? lerp(shownR, target, 1-Math.pow(0.004, dt)) : target;
+    // band width grows with the circle so it stays readable at any radius, with a floor so
+    // a tight sneaking ring does not thin away to nothing
+    noise.half = clamp(shownR*0.045, 0.30, 1.6)*0.5;
+    noise.x = px; noise.z = pz; noise.radius = shownR;
+    // colour tracks the multiplier, not the absolute radius, so it means the same thing
+    // on a map full of jumpy deer as on one full of bold bears
+    noise.color = noiseMul <= 0.4 ? QUIET : (noiseMul >= 1.2 ? LOUD : WALK);
+    noise.opacity = noiseMul <= 0.4 ? 0.7 : 0.55;
+  }
+  pushRing(noise, RING_UNIFORMS.uRing0, RING_UNIFORMS.uRing0Col);
 }
 
 /* The catch ring: how far you can reach, drawn the same way the noise ring is so the two
    can be read against each other at a glance.
 
    CENTRED ON THE ANIMAL, NOT THE PLAYER, and shown only when there is one worth showing.
+   Drawn continuously round the pup it read as clutter ("a static blue ring that seems
+   unnecessary"); stapled to the player it asked whether a moving animal had entered a
+   circle attached to yourself. Round the animal it asks the real question: get inside
+   this and it is yours. The centre is passed in; main.js decides whose ring it is, from
+   critters.js's own search, so the ring and the catching rule cannot drift apart.
 
-   Two rounds of getting this wrong are worth recording, because they were the same
-   mistake at different sizes. First it was drawn continuously around the pup at a fixed
-   radius -- next to the noise ring, which visibly breathes as you move and sneak, a circle
-   that never changed read as a leftover rather than information ("a static blue ring that
-   seems unnecessary"). Gating it on having a target fixed the clutter but kept it stapled
-   to the player, which still asked the player to judge whether a moving animal had entered
-   a ring attached to themselves.
-
-   Drawing it around the animal inverts that into the question actually being asked: get
-   inside this and it is yours. The centre is passed in, so this module stays ignorant of
-   whose ring it is -- main.js decides, from critters.js's own search, which is what keeps
-   the ring and the rule that governs catching from ever drifting apart.
-
-   `armed` means the player is inside it right now. It gates colour rather than visibility
-   here (visibility is the caller's `visible`, which is "is there a target at all"), so the
-   ring fades in while you approach and brightens at the moment the jump would work. */
+   `armed` means the player is inside it right now: dim while closing in, solid once the
+   jump would work. Visibility is the caller's `visible` -- is there a target at all. */
 function updateCatchRing(dt, px, pz, radius, groundAt, visible, armed){
-  const r = ensureCatchRing();
-  if(!r) return;
-  r.visible = !!visible;
-  if(!visible) return;
-  const rad = clamp(radius, 0.5, 60);
-  // a hair thinner than the noise band, so where they overlap it is still obvious which
-  // is which, and lifted clear of it so the crossing does not strobe
-  drapeBand(catchGeom, px, pz, rad, 0.16, groundAt, LIFT + 0.05);
-  catchMat.color.setHex(REACH_ARMED);
-  // dim while you are still closing in, solid once you could actually grab it
-  catchMat.opacity = armed ? 0.85 : 0.32;
+  reach.visible = !!visible;
+  if(visible){
+    reach.x = px; reach.z = pz;
+    reach.radius = clamp(radius, 0.5, 60);
+    // a hair thinner than the noise band, so where they cross it is obvious which is which
+    reach.half = 0.16;
+    reach.color = REACH_ARMED;
+    reach.opacity = armed ? 0.85 : 0.35;
+  }
+  pushRing(reach, RING_UNIFORMS.uRing1, RING_UNIFORMS.uRing1Col);
 }
 
-function setNoiseRingVisible(v){ const r = ensureRing(); if(r) r.visible = !!v; }
-function setCatchRingVisible(v){ const r = ensureCatchRing(); if(r) r.visible = !!v; }
-function getNoiseRing(){ return ring; }
-function getCatchRing(){ return catchRing; }
+function setNoiseRingVisible(v){ noise.visible = !!v; pushRing(noise, RING_UNIFORMS.uRing0, RING_UNIFORMS.uRing0Col); }
+function setCatchRingVisible(v){ reach.visible = !!v; pushRing(reach, RING_UNIFORMS.uRing1, RING_UNIFORMS.uRing1Col); }
+function getNoiseRing(){ return noise; }
+function getCatchRing(){ return reach; }
 function noiseRingRadius(){ return shownR; }
+/* TEST SEAM: the live uniform set, and the snippets, so the harness can check that what a
+   patched shader reads is what the update functions wrote. */
+function groundRingUniforms(){ return RING_UNIFORMS; }
+function groundRingSource(){ return {vertDecl:RING_VERT_DECL, vertBody:RING_VERT_BODY, fragDecl:RING_FRAG_DECL, fragBody:RING_FRAG_BODY}; }
 
 /* ==== src/trails/terrain.js ==== */
 /* Terraced terrain, sourced from a real DEM via data/world_bundle.js — NOT from Z
@@ -4776,6 +4779,7 @@ function setTheme(t){ THEME = t; }
 
 
 
+
 function shade(hex,f){ // darken/lighten a hex color by a multiplier, for the rock palette
   const c=new THREE.Color(hex);
   return '#'+new THREE.Color(clamp(c.r*f,0,1),clamp(c.g*f,0,1),clamp(c.b*f,0,1)).getHexString();
@@ -4807,16 +4811,44 @@ function ribbonGeom(pts,w,y,elevArr){
     pushTri(aL,bL,aR);pushTri(bL,bR,aR);
     corner.push([aL,aR,bL,bR]);
   }
-  // Round joins. A single chord triangle across the bend still leaves the arc-shaped
-  // sliver between the chord and the true swept region uncovered on sharp turns. A full
-  // fan disc of radius w/2 at each interior vertex covers that region by construction:
-  // segment quads + vertex discs = exactly the stadium swept by a width-w brush.
-  const JOIN=12;
+  /* Joins: fill ONLY the outer wedge of each bend, at the vertex's own height.
+
+     This used to be a full disc of radius w/2 at every interior vertex -- segment quads
+     plus discs is exactly the stadium a width-w brush sweeps, so in plan it was perfect.
+     In elevation it was not: the disc is flat at the vertex height while the segment
+     arriving at it is sloped, so on any grade the downhill half of every disc stood
+     proud of the tread it was meant to be hidden in. One visible arc per station, each
+     with the ink layer's own arc outlining it -- the "fish scales" down every climb.
+
+     Both quads meeting at vertex i end on a horizontal edge through that vertex at
+     exactly baseY(i), so the gap between them on the OUTSIDE of the bend is a flat
+     wedge at that one height, and a fan over just that wedge is flush with both quads by
+     construction. The inside of the bend is already covered twice (the quads overlap
+     there), so nothing is drawn on that side at all. */
+  const segDir=i=>{
+    const p=pts[i],q=pts[i+1];let dx=q[0]-p[0],dz=q[1]-p[1];const L=Math.hypot(dx,dz);
+    return L>1e-9?[dx/L,dz/L]:null;
+  };
   for(let i=1;i<segs;i++){
+    const d1=segDir(i-1), d2=segDir(i);
+    if(!d1||!d2) continue;
+    const cr=d1[0]*d2[1]-d1[1]*d2[0], dt=d1[0]*d2[0]+d1[1]*d2[1];
+    if(Math.abs(cr)<1e-6 && dt>0) continue;             // straight on: no gap to fill
+    const n1=[-d1[1],d1[0]], n2=[-d2[1],d2[0]];
+    const tx=d2[0]-d1[0], tz=d2[1]-d1[1];              // points into the bend
+    const into=(n1[0]+n2[0])*tx+(n1[1]+n2[1])*tz;
+    const s=into>0?-1:1;                               // the side the bend opens away from
+    const a1=Math.atan2(s*n1[1],s*n1[0]), a2=Math.atan2(s*n2[1],s*n2[0]);
+    let da=a2-a1; while(da>Math.PI)da-=2*Math.PI; while(da<=-Math.PI)da+=2*Math.PI;
+    // the wedge bulges away from the turn, i.e. along d1-d2; a U-turn is ambiguous at
+    // exactly pi, so decide it by that rather than by the sign rounding happened to give
+    const mid=a1+da/2, ox=d1[0]-d2[0], oz=d1[1]-d2[1];
+    if(Math.cos(mid)*ox+Math.sin(mid)*oz<0) da=da>0?da-2*Math.PI:da+2*Math.PI;
+    const steps=Math.max(1,Math.ceil(Math.abs(da)/(Math.PI/10)));
     const cx=pts[i][0],cz=pts[i][1],yi=baseY(i),c=addV(cx,cz,yi);
-    let prevIdx=addV(cx+w/2,cz,yi);
-    for(let k=1;k<=JOIN;k++){
-      const th=k/JOIN*Math.PI*2;
+    let prevIdx=addV(cx+Math.cos(a1)*w/2,cz+Math.sin(a1)*w/2,yi);
+    for(let k=1;k<=steps;k++){
+      const th=a1+da*k/steps;
       const cur=addV(cx+Math.cos(th)*w/2,cz+Math.sin(th)*w/2,yi);
       pushTri(c,prevIdx,cur);
       prevIdx=cur;
@@ -5093,9 +5125,9 @@ function frameMat(color){
     new THREE.MeshToonMaterial({color:new THREE.Color(color), gradientMap:toonTex, side:THREE.DoubleSide}));
 }
 function deckMat(){
-  return sharedMat('deck|planks', () =>
+  return sharedMat('deck|planks', () => patchGroundRing(
     new THREE.MeshToonMaterial({color:new THREE.Color('#ffffff'), vertexColors:true, gradientMap:toonTex,
-      side:THREE.DoubleSide, polygonOffset:true, polygonOffsetFactor:-9, polygonOffsetUnits:-9}));
+      side:THREE.DoubleSide, polygonOffset:true, polygonOffsetFactor:-9, polygonOffsetUnits:-9})));
 }
 
 /* `layer` is the path's CLASS rank (0 road, 1 track, 2 trail) -- see world.js's
@@ -5107,6 +5139,71 @@ function deckMat(){
    tarmac, because that is what a path crossing a road looks like. world.js also lifts
    each class by a few centimetres (kindLift) so the ordering survives on hardware that
    clamps polygon offset; neither is visible as float at that size. */
+/* THE GAPS AT A JUNCTION, and nothing else. Every ribbon arriving at a node ends on a
+   straight butt edge through the node, perpendicular to its own first segment, at the
+   node's height -- so a point at radius <= r from the node is already painted by an arm
+   whenever it lies AHEAD of that arm's butt line (cos(theta - armAngle) >= 0). What is
+   left is the set of directions that are behind EVERY arm's butt line: the outer wedge
+   between two arms meeting at an angle, or the half-disc behind a lone arm (a round end).
+
+   This replaces the flat full discs the junction pads used to be. Those had two faults:
+   they were drawn wider than the ribbons they joined (a road visibly swelled at every
+   junction), and a flat disc on a graded road stands proud of the downhill arm exactly as
+   the old bend joins did. A fan over only the uncovered directions is flush with every
+   butt edge by construction, because each butt edge is horizontal at the node height.
+
+   Exact: the only places coverage can change are the butt-edge directions armAngle +- 90
+   degrees, so those are the interval boundaries, and each interval is tested once at its
+   midpoint. */
+function junctionGapGeom(cx, cz, y, angles, r){
+  const P = [], I = [];
+  if(!angles.length){
+    // nothing arrives: a plain disc (a lone node with every arm trimmed away is filtered
+    // out by the caller; this only keeps the function total)
+    angles = [];
+  }
+  const TAU = Math.PI*2;
+  const norm = a => ((a % TAU) + TAU) % TAU;
+  const cuts = [];
+  for(const a of angles){ cuts.push(norm(a + Math.PI/2), norm(a - Math.PI/2)); }
+  cuts.sort((a, b) => a - b);
+  const covered = th => angles.some(a => Math.cos(th - a) >= -1e-9);
+  const spans = [];
+  if(!cuts.length) spans.push([0, TAU]);
+  for(let k = 0; k < cuts.length; k++){
+    const a0 = cuts[k], a1 = k + 1 < cuts.length ? cuts[k + 1] : cuts[0] + TAU;
+    if(a1 - a0 < 1e-6) continue;
+    if(!covered((a0 + a1)/2)) spans.push([a0, a1]);
+  }
+  P.push(cx, y, cz);
+  for(const [a0, a1] of spans){
+    const steps = Math.max(1, Math.ceil((a1 - a0)/(Math.PI/10)));
+    let prev = P.length/3; P.push(cx + Math.cos(a0)*r, y, cz + Math.sin(a0)*r);
+    for(let k = 1; k <= steps; k++){
+      const th = a0 + (a1 - a0)*k/steps;
+      const cur = P.length/3; P.push(cx + Math.cos(th)*r, y, cz + Math.sin(th)*r);
+      I.push(0, cur, prev);                 // counter-clockwise seen from above (+y up)
+      prev = cur;
+    }
+  }
+  if(!I.length) return null;
+  const N = new Float32Array(P.length); for(let i = 1; i < N.length; i += 3) N[i] = 1;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(P), 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(N, 3));
+  geo.setIndex(I);
+  geo.__junctionGap = true;
+  return geo;
+}
+
+/* Depth bias for every painted path layer. The UNITS term (constant depth, scaled by
+   class rank) is what orders a road under a trail where the two are coplanar. The FACTOR
+   term scales with how steeply the surface is seen, and it used to scale with rank as
+   well -- -8 for a trail against -2 for a road -- which at the chase camera's grazing
+   angle pulled a trail's tread forward far enough to paint over the feet of anything
+   standing on it. Kind order is already carried geometrically by kindLift (4.5 cm per
+   rank) and by the units term, so the slope term is one small constant for every layer. */
+const TRAIL_BIAS_FACTOR = -1.5;
 function trailMat(color, layer){
   // DoubleSide is a safety net on top of the winding fix — cheap for a ribbon this size,
   // and guarantees the trail can never vanish again from a stray winding edge case.
@@ -5115,9 +5212,9 @@ function trailMat(color, layer){
      cache purely through this one function, because it builds its material directly
      rather than going through it. Nothing mutates a trail material after construction. */
   const L = layer || 0;
-  return sharedMat('trail|'+color+'|'+L, () =>
+  return sharedMat('trail|'+color+'|'+L, () => patchGroundRing(
     new THREE.MeshToonMaterial({color:new THREE.Color(color),gradientMap:toonTex,side:THREE.DoubleSide,
-      polygonOffset:true,polygonOffsetFactor:-2-L*3,polygonOffsetUnits:-2-L*3}));
+      polygonOffset:true,polygonOffsetFactor:TRAIL_BIAS_FACTOR,polygonOffsetUnits:-2-L*3})));
 }
 const INK='#3a2517';
 function signText(label,dist,flip){
@@ -5138,8 +5235,15 @@ function signText(label,dist,flip){
   x.fillStyle='#5a3d24';x.fillText(dist,tx,80);
   const t=new THREE.CanvasTexture(c);t.minFilter=THREE.LinearFilter;return t;
 }
+/* Fingerpost, modelled at the old dimensions and scaled as a whole (like the gate): the
+   original 3.4 m post with 3.1 m arms was sized for fire-road-width trails and, planted
+   beside a metre-wide footpath, its arms reached right across the tread in front of the
+   camera. SIGN_SCALE puts the post at about 2.1 m with 1.9 m arms -- a real trail
+   fingerpost -- and the origin is at the foot, so it shrinks toward the ground. */
+const SIGN_SCALE = 0.62;
 function buildSign(node,arms){
   const g=new THREE.Group();g.position.set(node.p[0],0,node.p[1]);
+  g.scale.setScalar(SIGN_SCALE);
   /* test seam: lets tools/smoke.js find every fingerpost in the scene and check none of
      them ended up planted in a carriageway. */
   g.__sign = true;
@@ -5499,7 +5603,8 @@ function buildLandform(a,st,shape,bb,rng){
   const geo=new THREE.ExtrudeGeometry(shape,{depth:hgt,bevelEnabled:true,
     bevelThickness:bevel,bevelSize:bevel*0.75,bevelSegments:2});
   const palette=[st.fill,shade(st.fill,1.16),shade(st.fill,0.8)];
-  const mat=palette.map(c=>toon(c));
+  // climbable rock: the ring lands on it the way it lands on the ground
+  const mat=palette.map(c=>patchGroundRing(toon(c)));
   const m=M(geo,mat[(rng()*mat.length)|0]);
   // rotation.x=-90° maps local z (0..depth, the extrude axis) straight onto world y
   // (0..depth) with no extra vertical offset needed — the base already lands on y=0.
@@ -5571,6 +5676,49 @@ function buildFloatingLabel(name,em,width,topY){
   spr.userData.areaLabel=true;
   return spr;
 }
+/* Vertical skirt round each ring of an area, in the group's own space: top at `topY`,
+   bottom a little below `groundLocal(x,z)` (terrain height relative to the group). Sampled
+   at a metre so the bottom edge follows every terrace step; the bottom is taken as the
+   LOWER of the ground at the outline and just outside it, since the outside is where the
+   ground drops away. A wall that ends up inside a bank is simply hidden by it. */
+const AREA_WALL_STEP = 1.0, AREA_WALL_SINK = 0.35;
+function areaWallGeom(rings, topY, groundLocal){
+  const P=[], I=[];
+  for(const ring of rings){
+    if(!ring || ring.length<3) continue;
+    // signed area: which side of each edge is outside
+    let A=0; for(let k=0;k<ring.length;k++){ const p=ring[k], q=ring[(k+1)%ring.length]; A+=p[0]*q[1]-q[0]*p[1]; }
+    const out=A>0?-1:1;
+    const pts=[];
+    for(let k=0;k<ring.length;k++){
+      const p=ring[k], q=ring[(k+1)%ring.length];
+      const L=Math.hypot(q[0]-p[0], q[1]-p[1]);
+      const n=Math.max(1, Math.ceil(L/AREA_WALL_STEP));
+      const nx=L>1e-9?-(q[1]-p[1])/L*out:0, nz=L>1e-9?(q[0]-p[0])/L*out:0;
+      for(let s=0;s<n;s++){ const t=s/n; pts.push([p[0]+(q[0]-p[0])*t, p[1]+(q[1]-p[1])*t, nx, nz]); }
+    }
+    if(pts.length<3) continue;
+    const base=P.length/3;
+    for(const [x,z,nx,nz] of pts){
+      const g=Math.min(groundLocal(x,z), groundLocal(x+nx*0.6, z+nz*0.6));
+      const bot=Math.min(topY-0.02, g-AREA_WALL_SINK);
+      P.push(x,topY,z, x,bot,z);
+    }
+    const m=pts.length;
+    for(let i=0;i<m;i++){
+      const a=base+i*2, b=base+((i+1)%m)*2;
+      I.push(a,a+1,b+1, a,b+1,b);
+    }
+  }
+  if(!I.length) return null;
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(P),3));
+  geo.setIndex(I);
+  geo.computeVertexNormals();
+  geo.__areaWall=true;
+  return geo;
+}
+
 function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
   const g=new THREE.Group();
   const st=AREA_STYLE[a.kind]||AREA_STYLE.meadow;
@@ -5608,10 +5756,24 @@ function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
       map:st.paved?pavementTexture():null,gradientMap:toonTex,
       transparent:st.op<1,opacity:st.op,side:THREE.DoubleSide,
       polygonOffset:true,polygonOffsetFactor:-1,polygonOffsetUnits:-1});
+    if(a.kind!=='water') patchGroundRing(mat);   // the ring lies on a lot or a meadow like any ground
     if(st.paved)mat.map.repeat.set(Math.max(1,bb.w/9),Math.max(1,bb.h/9));
     const m=M(geo,mat);
     m.rotation.x=-Math.PI/2;m.position.y=a.kind==='water'?0.09:0.03;
     g.add(m);
+    /* A PAVED lot is a built thing, so it gets sides. The slab is flat at the area's graded
+       height, but the ground round it is not: a road bench cut through the entrance, or a
+       slope falling away along one edge, left the edge of the lot hanging in mid-air with
+       daylight under it. A kerb wall round every ring, from the surface down to just
+       below the ground at each point, makes it read as one solid pad on the hillside. */
+    if(st.paved){
+      const baseY=(a.groundY!=null)?a.groundY*vertScale:groundYAt(bb.cx,bb.cz);
+      const wall=areaWallGeom(a.rings, 0.03, (x,z)=>groundYAt(x,z)-baseY);
+      // its own material: double-sided (ring winding varies by source file), and toon()'s
+      // cached materials are shared, so they must not be mutated
+      if(wall) g.add(M(wall, patchGroundRing(new THREE.MeshToonMaterial({color:new THREE.Color(shade(st.fill,0.72)),
+                                                         gradientMap:toonTex, side:THREE.DoubleSide}))));
+    }
     // scatter matching cover inside the polygon, skipping the trail corridor
     const want=a.kind==='forest'?Math.min(90,bb.w*bb.h/70)
              :a.kind==='meadow'?Math.min(70,bb.w*bb.h/60):0;
@@ -5662,7 +5824,14 @@ function areaSignTex(title,sub){
 /* A signpost planted at whichever boundary point sits closest to the trail network, facing
    outward so it reads from the path — must run AFTER trails are hashed (nearestTrail needs
    SEG_HASH populated), unlike buildArea's ground cover which can go down any time. */
-function buildAreaSign(a,groundYAt,nearestTrail){
+/* An area's name board, at the edge of the area nearest a path so you pass it on the way
+   in. It used to step 1.1 m OUTWARD from the area's centre past that nearest outline
+   vertex -- and for a lot beside a road the nearest vertex is the entrance, on the road
+   edge, so outward was straight into the carriageway ("overlook parking" planted on the
+   centre line of Ridge Road). It now steps INWARD, onto the area's own ground, and then
+   `clear` (world.js pushOffPaths) moves it off any painted path it still touches. It
+   still faces outward, toward the path it is read from. */
+function buildAreaSign(a,groundYAt,nearestTrail,clear){
   const bb=areaBBox(a);
   let best=null;
   for(const c of a.rings[0]){
@@ -5674,7 +5843,8 @@ function buildAreaSign(a,groundYAt,nearestTrail){
   const L=Math.hypot(dx,dz)||1;dx/=L;dz/=L;
   const st=AREA_STYLE[a.kind]||AREA_STYLE.meadow;
   const g=new THREE.Group();
-  const signX=anchor[0]+dx*1.1,signZ=anchor[1]+dz*1.1;
+  let signX=anchor[0]-dx*1.4,signZ=anchor[1]-dz*1.4;
+  if(clear){ const c=clear(signX,signZ); signX=c[0]; signZ=c[1]; }
   g.position.set(signX,groundYAt(signX,signZ),signZ);
   g.rotation.y=Math.atan2(dx,dz);
   const post=M(new THREE.CylinderGeometry(0.09,0.11,1.9,7),toon('#7a4e28'));
@@ -5741,6 +5911,47 @@ function backdropRadius(theme, mapScale=1){
   return 900 * mapScale * (1 + (bands-1)*0.07);
 }
 
+/* THE RIDGELINE. It used to be 64 random heights with every other one knocked down to
+   72% -- a perfectly regular sawtooth, identical tooth width all the way round, which is
+   what made the skyline read as a paper cut-out rather than as distant country. A real
+   ridge is self-similar: a few big summits, shoulders on those, and small notches on the
+   shoulders. So: periodic value noise (it has to close seamlessly round the ring) summed
+   over octaves, sharpened with a power so summits are peaks and valleys are broad, at
+   enough segments that the small octave is visible as texture, not as teeth.
+
+   Mesas keep their flat-topped runs -- that IS the silhouette of mesa country -- but the
+   run heights now come from the same noise, so neighbouring tables relate instead of
+   jumping at random, and each run is stepped down at its ends as a talus shoulder. */
+const RIDGE_SEGS = 192;
+function ridgeProfile(segs, peakH, mesas, rng){
+  // periodic 1-D value noise: `cells` random values round the ring, smoothstep between
+  const octave = cells => {
+    const v = Array.from({length: cells}, () => rng());
+    return i => {
+      const t = i/segs*cells, k = Math.floor(t), f = t - k, u = f*f*(3 - 2*f);
+      return v[k % cells] + (v[(k + 1) % cells] - v[k % cells])*u;
+    };
+  };
+  const o1 = octave(7), o2 = octave(19), o3 = octave(53);
+  const raw = i => Math.pow(0.58*o1(i) + 0.30*o2(i) + 0.12*o3(i), 1.6);
+  const h = new Array(segs + 1);
+  if(mesas){
+    let i = 0;
+    while(i < segs){
+      const run = 6 + Math.floor(rng()*10);
+      const top = peakH*(0.35 + 0.65*raw(i + run/2));
+      for(let k = 0; k < run && i < segs; k++, i++){
+        const edge = Math.min(k, run - 1 - k);
+        h[i] = edge === 0 ? top*0.78 : top;           // a shoulder step either side
+      }
+    }
+  }else{
+    for(let i = 0; i < segs; i++) h[i] = peakH*(0.22 + 0.78*raw(i));
+  }
+  h[segs] = h[0];                                     // close the ring seamlessly
+  return h;
+}
+
 function buildBackdrop(theme, rng, mapScale=1){
   const g = new THREE.Group();
   g.name = 'backdrop';
@@ -5760,7 +5971,6 @@ function buildBackdrop(theme, rng, mapScale=1){
   const bands = theme.mountain.length;
   for(let b=0; b<bands; b++){
     const R = 900 * mapScale * (1 + b*0.07);
-    const segs = 64;
     const peakH = (150 + b*55) * mapScale;
     const mat = new THREE.MeshBasicMaterial({
       color: mixHex(theme.mountain[b], theme.sky, 0.28 + b*0.17),
@@ -5779,18 +5989,8 @@ function buildBackdrop(theme, rng, mapScale=1){
          that right too -- the closer band wins because it actually is closer. */
       side: THREE.DoubleSide, fog:false, depthTest:true, depthWrite:true,
     });
-    // ridge profile: one height per segment, flat-topped runs for mesas, spikes for peaks
-    const h = new Array(segs+1);
-    let runH = 0, runLeft = 0;
-    for(let i=0; i<=segs; i++){
-      if(mesas){
-        if(runLeft<=0){ runLeft = 3 + Math.floor(rng()*4); runH = peakH*(0.45+rng()*0.55); }
-        runLeft--; h[i] = runH;
-      }else{
-        h[i] = peakH*(0.35 + rng()*0.65) * (i%2 ? 1 : 0.72);
-      }
-    }
-    h[segs] = h[0];                        // close the ring seamlessly
+    const segs = RIDGE_SEGS;
+    const h = ridgeProfile(segs, peakH, mesas, rng);
     const P=[], idx=[];
     for(let i=0; i<=segs; i++){
       const a = i/segs*Math.PI*2;
@@ -5809,6 +6009,7 @@ function buildBackdrop(theme, rng, mapScale=1){
     // a stable submission order -- cheapest first, in case the driver ever cares
     m.renderOrder = -10 + b;
     m.frustumCulled = false;               // it surrounds the camera; culling it is wrong
+    m.userData.band = b; m.userData.bands = bands;   // sky.js scales its haze by depth
     g.add(m);
   }
   return g;
@@ -7228,13 +7429,36 @@ function moonTexture(illum, side){
       g.beginPath();
       // the dark half, then the terminator ellipse either added to it or carved out of it
       g.arc(cx, cy, R + 0.5, -Math.PI / 2, Math.PI / 2, side > 0);
-      g.ellipse(cx, cy, R * k, R, 0, Math.PI / 2, -Math.PI / 2, illum > 0.5 ? side > 0 : side < 0);
+      /* WHICH WAY ROUND the terminator runs decides crescent from gibbous, and this had it
+       backwards: the dark half is swept top -> bottom on the side away from the sun, and
+       the ellipse closes the shape bottom -> top. For a CRESCENT the dark region is MORE
+       than half, so the ellipse has to bulge into the lit half (sweep through the sun's
+       side); for a GIBBOUS it is less than half, so it bulges back into the dark half.
+       The flags were swapped, which is why a 97% moon drew as a hairline ring and a new
+       moon as a full disc -- at k=1 the ellipse exactly cancels the dark half. */
+    g.ellipse(cx, cy, R * k, R, 0, Math.PI / 2, -Math.PI / 2, illum > 0.5 ? side < 0 : side > 0);
       g.closePath();
       g.fill();
       g.globalCompositeOperation = 'source-over';
     }
     return new THREE.CanvasTexture(cv);
   }catch(err){ return null; }
+}
+
+/* TEST SEAM: how much of the disc the drawn texture actually leaves lit, measured on the
+   texture's own pixels, so a check can compare it with the phase it was drawn for rather
+   than trusting the path arithmetic above. null where there is no canvas to draw on. */
+function moonTextureLitFrac(illum, side){
+  const tex = moonTexture(illum, side);
+  const cv = tex && tex.image;
+  if(!cv || typeof cv.getContext !== 'function') return null;
+  const d = cv.getContext('2d').getImageData(0, 0, 64, 64).data;
+  let lit = 0, disc = 0;
+  for(let y=0; y<64; y++) for(let x=0; x<64; x++){
+    if(Math.hypot(x + 0.5 - 32, y + 0.5 - 32) > 24) continue;
+    disc++; if(d[(y*64 + x)*4 + 3] > 128) lit++;
+  }
+  return disc ? lit / disc : null;
 }
 
 function ensureBodies(){
@@ -7402,18 +7626,54 @@ function placeBody(sprite, v, visible, tint){
 /* The horizon ring is MeshBasicMaterial and deliberately exempt from fog and from
    lighting (pieces.js), so it is the one thing in the scene that will happily stay
    noon-bright at midnight. Tinting it toward the sky colour is what keeps the mountains
-   as a silhouette rather than a glowing cutout; a little contrast is held back so they do
-   not disappear into the sky entirely.
+   as a silhouette rather than a glowing cutout.
+
+   THE MIX HAS TO HAPPEN IN DISPLAY SPACE. render.js sets outputEncoding = sRGB, so a
+   material colour is read as LINEAR and brightened on the way out -- but scene.background
+   is not, it goes to the screen as written. Mixing a band 90% toward the sky hex in the
+   material's own terms therefore produced #222e4d, which the encoder then lifted to about
+   #6b7aa0: a lavender ridge glowing against a #141e3f sky, three times lighter than the
+   sky it was meant to disappear into. So each band's base is first ENCODED to what it
+   actually looks like, mixed with the sky as it actually looks, and the result DECODED
+   back to linear for the material. At mix 0 that round trip returns the base unchanged,
+   so the daytime look is exactly what it was.
+
+   Two more things a real skyline does:
+   - at night a ridge is darker than the sky behind it -- it is the sky that carries the
+     glow -- so the night target is the sky pulled toward black, not the sky itself;
+   - farther bands sit closer to the sky colour than nearer ones (aerial perspective),
+     so the tint is scaled by band, outermost most.
 
    Base colours are captured lazily on first touch, per mesh, so a rebuilt backdrop starts
    from its own theme colours rather than from whatever tint the last one ended on. */
+function srgbToLinearHex(h){
+  const f = c => { c /= 255; return c <= 0.04045 ? c/12.92 : Math.pow((c + 0.055)/1.055, 2.4); };
+  const n = hexNum(h);
+  return (Math.round(f((n >> 16) & 255)*255) << 16) | (Math.round(f((n >> 8) & 255)*255) << 8) | Math.round(f(n & 255)*255);
+}
+function linearToSrgbHex(h){
+  const f = c => { c /= 255; return c <= 0.0031308 ? c*12.92 : 1.055*Math.pow(c, 1/2.4) - 0.055; };
+  const n = hexNum(h);
+  const g = c => clamp(Math.round(f(c)*255), 0, 255);
+  return (g((n >> 16) & 255) << 16) | (g((n >> 8) & 255) << 8) | g(n & 255);
+}
+const NIGHT_RIDGE_DARK = 0.28;   // how far below the sky a ridge sits at full night
+/* The colour a band should LOOK on screen, as a hex, for a given sky and ramp mix. */
+function backdropShown(baseLinear, skyHex, mix, band, bands){
+  const shown = linearToSrgbHex(baseLinear);
+  if(skyHex == null) return shown;
+  const target = scaleHex(skyHex, 1 - NIGHT_RIDGE_DARK*clamp(mix, 0, 1));
+  const depth = bands > 1 ? band/(bands - 1) : 0;          // 0 nearest .. 1 farthest
+  return mixHexes(shown, target, clamp(mix*(0.86 + 0.12*depth), 0, 1));
+}
 function tintBackdrop(skyHex, mix){
   if(!skyBackdropG || typeof skyBackdropG.traverse !== 'function') return;
   skyBackdropG.traverse(o => {
     if(!o.material || !o.material.color) return;
     if(o.userData.skyBase == null) o.userData.skyBase = o.material.color.getHex();
+    const band = o.userData.band || 0, bands = o.userData.bands || 1;
     o.material.color = col(skyHex == null ? o.userData.skyBase
-                                          : mixHexes(o.userData.skyBase, skyHex, clamp(mix * 0.9, 0, 1)));
+      : srgbToLinearHex(backdropShown(o.userData.skyBase, skyHex, mix, band, bands)));
   });
 }
 function setSkyBackdrop(g){
@@ -7564,6 +7824,7 @@ function skyOcclusion(){
 /* One-way: sky.js knows about the renderer's lights and the theme palette, and nothing
    about maps, graphs or bundles. That is what lets this file call into it from
    applyThemeLighting without a cycle -- the chain is themes -> sky -> world -> main. */
+
 
 
 
@@ -8636,13 +8897,22 @@ function planCrossings(adj){
          to. A path that merely ends at the verge has no far side to line up with, and
          turning its last few metres to face the traffic would invent a geometry the
          survey never recorded and no walker would follow. */
-      if(!c.crossing || a.along > ALONG_MAX) continue;
+      if(!c.crossing) continue;
+      /* An arm surveyed running ALONG the road into a crossing used to be left alone, so
+         the crosswalk was built square and the path slid into it at a shallow angle. It
+         is squared too now, over a longer apron the more oblique it arrives, so the turn
+         onto the markings is a curve rather than a kink. */
+      const apronHere = a.along > ALONG_MAX ? apron*(1 + 1.5*a.along) : apron;
       // orient the arm so pts[0] is this node, square it up, then write it back the way
       // round it came. squareApproach returns a new array (it inserts vertices), so the
       // assignment is not optional the way an in-place nudge would have been.
       const pts = a.flip ? [...w.pts].reverse() : w.pts;
-      const squared = squareApproach(pts, c.nx*a.side, c.nz*a.side, apron);
+      const squared = squareApproach(pts, c.nx*a.side, c.nz*a.side, apronHere);
       w.pts = a.flip ? squared.reverse() : squared;
+      // kept so clearOfWiderPaths can put the square back after it resamples and nudges
+      // the line -- otherwise the displacement pass quietly rounds the apron off again
+      const sq = {ux:c.nx*a.side, uz:c.nz*a.side, apron:apronHere};
+      if(a.flip) w.squareB = sq; else w.squareA = sq;
     }
 
     if(!c.crossing) continue;
@@ -8754,7 +9024,7 @@ function clearOfWiderPaths(){
        displaced line is sampled at least as finely as the ribbon that will be drawn from
        it, and no conflict can hide between two stations. */
     e.pts = resample(e.pts, pathOutlineWidth(e.kind)*0.6);
-    if(e.pts.length < 3) continue;   // too short to have an interior; leave it alone
+    if(e.pts.length < 3){ resquare(e); continue; }   // too short to have an interior; leave it alone
     const recorded = e.pts.map(p=>p.slice());
 
     /* Endpoints never move. An endpoint is the edge's claim on a graph node -- shift it
@@ -8767,7 +9037,7 @@ function clearOfWiderPaths(){
     for(let i=1;i<e.pts.length;i++)
       arc[i]=arc[i-1]+Math.hypot(e.pts[i][0]-e.pts[i-1][0], e.pts[i][1]-e.pts[i-1][1]);
     const total=arc[arc.length-1];
-    if(!(total>0)) continue;
+    if(!(total>0)){ resquare(e); continue; }
 
     /* WHICH SIDE OF WHAT: frozen here, from the RECORDED geometry, before anything moves.
 
@@ -8783,23 +9053,26 @@ function clearOfWiderPaths(){
        almost exactly on the centreline has no reliable opinion of its own, so it borrows
        the edge's majority instead of voting with rounding noise -- the same reasoning
        asSidewalk applies to a footway wandering over a road's centreline. */
-    const sideOf = new Array(e.pts.length).fill(0);
+    /* One frozen side PER ANCHOR, not one per vertex. The first version froze each
+       vertex's side against its NEAREST anchor and then pushed it off whichever anchor it
+       overlapped WORST -- and where those were two different roads, or the near and far
+       legs of one loop road, the sign belonged to the wrong line and the vertex was
+       pushed straight through the carriageway. That is where the crossings with no node
+       came from at 1:12 (Juniper Way Loop, three of them). */
+    const sideOf = e.pts.map(()=>new Map());
     {
-      let sum = 0;
+      const sums = new Map();
       for(let i=0;i<e.pts.length;i++){
         const p=e.pts[i];
-        let near=null, nd=Infinity;
         for(const o of anchors){
           const pr=projectOnPolyline(o.pts, p[0], p[1]);
-          if(pr.d < nd){ nd=pr.d; near=pr; }
+          const off=(p[0]-pr.px)*(-pr.dir[1]) + (p[1]-pr.pz)*pr.dir[0];
+          sums.set(o, (sums.get(o)||0) + off);
+          if(Math.abs(off) > 1e-3) sideOf[i].set(o, off>0?1:-1);
         }
-        if(!near) continue;
-        const off=(p[0]-near.px)*(-near.dir[1]) + (p[1]-near.pz)*near.dir[0];
-        sum += off;
-        sideOf[i] = Math.abs(off) > 1e-3 ? (off>0?1:-1) : 0;
       }
-      const majority = sum>=0 ? 1 : -1;
-      for(let i=0;i<sideOf.length;i++) if(!sideOf[i]) sideOf[i]=majority;
+      for(let i=0;i<e.pts.length;i++)
+        for(const o of anchors) if(!sideOf[i].has(o)) sideOf[i].set(o, (sums.get(o)||0)>=0?1:-1);
     }
 
     let touched=false;
@@ -8820,12 +9093,12 @@ function clearOfWiderPaths(){
           if(p[0] < b.x0-clear || p[0] > b.x1+clear || p[1] < b.z0-clear || p[1] > b.z1+clear) continue;
           const pr = projectOnPolyline(o.pts, p[0], p[1]);
           const over = clear - pr.d;
-          if(over > worstOver){ worstOver=over; worst={pr, clear}; }
+          if(over > worstOver){ worstOver=over; worst={pr, clear, o}; }
         }
         if(!worst) continue;
         const {pr, clear}=worst;
         const nx=-pr.dir[1], nz=pr.dir[0];
-        const sd = sideOf[i];
+        const sd = sideOf[i].get(worst.o);
         // taper scaled to the size of the correction, so a small nudge unwinds quickly
         // and a large one is spread over enough of the edge to stay smooth
         const taper=Math.min(Math.max(worstOver*3, 2), total*0.4);
@@ -8848,9 +9121,54 @@ function clearOfWiderPaths(){
        the sidedness invariant can be CHECKED rather than asserted by the code that
        enforces it -- tools/smoke.js reads it to confirm no vertex ended up on the far
        side of the anchor from where the survey put it. */
+    /* NEVER TRADE AN OVERLAP FOR A CROSSING. Sidedness per anchor stops the pass pushing
+       a path through the thing it is clearing, but not through a THIRD path it was never
+       measuring against. A crossing with no node is worse than an overlap -- it cannot be
+       crosswalked, graded to a shared height or routed -- so if the displaced line crosses
+       anything more often than the recorded one did, back the displacement off by halves
+       until it doesn't, and keep the survey line if nothing short of it works. */
+    if(touched){
+      const shifted = e.pts.map(p=>p.slice());
+      const others = GRAPH.edges.filter(o => o!==e && o.pts.length>=2 &&
+                                             boxesMeet(eb, anchorBox(o)));
+      const before = crossCount(recorded, e, others);
+      let ok = crossCount(shifted, e, others) <= before;
+      for(let f=0.5; !ok && f>=0.125; f*=0.5){
+        const trial = recorded.map((p,i)=>[p[0]+(shifted[i][0]-p[0])*f, p[1]+(shifted[i][1]-p[1])*f]);
+        if(crossCount(trial, e, others) <= before){ e.pts = trial; ok = true; }
+      }
+      if(!ok){ e.pts = recorded.map(p=>p.slice()); touched = false; }
+    }
     if(touched){ moved++; e.displaced=true; e.recorded=recorded; }
+    resquare(e);
   }
   return moved;
+}
+
+/* Re-apply planCrossings' square approach to either end of `e` that has one. Displacement
+   resamples every edge near an anchor and tapers its push toward the ends; both bend the
+   last metre off square, and at a crosswalk that metre is the whole point. squareApproach
+   leaves pts[0] where it is, so the junction is untouched. */
+function resquare(e){
+  if(e.squareA) e.pts = squareApproach(e.pts, e.squareA.ux, e.squareA.uz, e.squareA.apron);
+  if(e.squareB){
+    const r = squareApproach([...e.pts].reverse(), e.squareB.ux, e.squareB.uz, e.squareB.apron);
+    e.pts = r.reverse();
+  }
+}
+
+/* Proper crossings between polyline `pts` (standing in for edge e) and every edge in
+   `others` that does not share a node with e. segCross is open on both intervals, so two
+   lines meeting exactly at a shared node never count. */
+function crossCount(pts, e, others){
+  let n=0;
+  for(const o of others){
+    if(o.a===e.a || o.a===e.b || o.b===e.a || o.b===e.b) continue;
+    for(let a=0;a<pts.length-1;a++)
+      for(let b=0;b<o.pts.length-1;b++)
+        if(segCross(pts[a], pts[a+1], o.pts[b], o.pts[b+1])) n++;
+  }
+  return n;
 }
 
 
@@ -8894,6 +9212,76 @@ function pushOffRoad(x, z, margin){
     pz = worst.r.q[1] + nz*side*worst.clear*1.06;
   }
   return [px, pz];
+}
+
+/* Shove a point clear of EVERY drawn path, not only roads -- the general form of
+   pushOffRoad, for sign posts. A fork of two footpaths is exactly where a post used to
+   stand in the tread. Same push (perpendicular, to the side it is already on), iterated
+   because clearing one path can land the point on a neighbour; in a gap too narrow to
+   clear both it settles on the last push, which is still off the path it was pushed from. */
+const POST_CLEAR = 0.45;
+// an area board is 2.5 m wide and hangs square to the path it faces, so its post needs a
+// little more room than a fingerpost for the board edge to clear the verge
+const AREA_SIGN_CLEAR = 0.6;
+function pushOffPaths(x, z, margin){
+  if(!GRAPH) return [x, z];
+  let px=x, pz=z;
+  for(let pass=0; pass<5; pass++){
+    let worst=null, worstOver=0;
+    for(const e of GRAPH.edges){
+      if(e.pts.length<2) continue;
+      const clear = pathOutlineWidth(e.kind)/2 + (margin||0);
+      for(let i=0;i<e.pts.length-1;i++){
+        const a=e.pts[i], b=e.pts[i+1];
+        if(Math.min(a[0],b[0])-clear > px || Math.max(a[0],b[0])+clear < px) continue;
+        if(Math.min(a[1],b[1])-clear > pz || Math.max(a[1],b[1])+clear < pz) continue;
+        const r=ptSeg([px,pz], a, b);
+        const over = clear - r.d;
+        if(over > worstOver){ worstOver=over; worst={r, a, b, clear}; }
+      }
+    }
+    if(!worst) break;
+    const dx=worst.b[0]-worst.a[0], dz=worst.b[1]-worst.a[1];
+    const L=Math.hypot(dx,dz)||1;
+    const nx=-dz/L, nz=dx/L;
+    const sx=px-worst.r.q[0], sz=pz-worst.r.q[1];
+    const side = (sx*nx + sz*nz) >= 0 ? 1 : -1;
+    px = worst.r.q[0] + nx*side*worst.clear*1.04;
+    pz = worst.r.q[1] + nz*side*worst.clear*1.04;
+  }
+  /* Pinned between two paths closer together than a post plus two verges, the pushes
+     just trade one path for the other. Then search outward in rings for the NEAREST
+     point that is clear of everything, which is where a real post would be dug in. */
+  if(pathOverlap(px, pz, margin) > 0){
+    for(let r=0.6; r<=6; r+=0.6){
+      let best=null, bd=Infinity;
+      for(let k=0;k<16;k++){
+        const a=k/16*Math.PI*2, cx=px+Math.cos(a)*r, cz=pz+Math.sin(a)*r;
+        if(pathOverlap(cx, cz, margin) > 0) continue;
+        const d=Math.hypot(cx-x, cz-z);
+        if(d<bd){ bd=d; best=[cx,cz]; }
+      }
+      if(best) return best;
+    }
+  }
+  return [px, pz];
+}
+/* How far (x,z) sits inside the nearest drawn path's painted edge plus `margin`; <= 0 is
+   clear. */
+function pathOverlap(x, z, margin){
+  let worst=0;
+  for(const e of GRAPH.edges){
+    if(e.pts.length<2) continue;
+    const clear = pathOutlineWidth(e.kind)/2 + (margin||0);
+    for(let i=0;i<e.pts.length-1;i++){
+      const a=e.pts[i], b=e.pts[i+1];
+      if(Math.min(a[0],b[0])-clear > x || Math.max(a[0],b[0])+clear < x) continue;
+      if(Math.min(a[1],b[1])-clear > z || Math.max(a[1],b[1])+clear < z) continue;
+      const over = clear - ptSeg([x,z], a, b).d;
+      if(over > worst) worst = over;
+    }
+  }
+  return worst;
 }
 
 function crossingAt(ni){
@@ -9314,6 +9702,59 @@ const PATH_STYLE_KEYS = new Set(['trail','track','dirtroad','road','paved_trail'
 let WORLD_REV = 0;
 function getWorldRevision(){ return WORLD_REV; }
 
+/* HOW HIGH THE PAINTED SURFACE IS above an edge's graded profile, per station.
+
+   The profile (e.prof.ys) is the bench the ground was graded to; the ribbons are stacked
+   ABOVE it -- casing, shoulder, tread, then the inner stripe or ruts -- and each class is
+   lifted again by kindLift so a trail reads on top of a road. Standing on the profile
+   therefore put every walker INSIDE that stack, and by a different amount per class: 0.08
+   below the top of a road, 0.17 below the top of a trail. That difference is the whole of
+   "the trail covers the dog's back paw but the road doesn't".
+
+   So the surface the spatial hash reports is the top of what was actually drawn there:
+     - an ordinary stretch: kindLift + TREAD_TOP (the inner stripe / ruts)
+     - a footway beside a road: its tread, which is all it draws
+     - a deck: the planks, which sit PLANK_LIFT over the tread line
+     - a stretch trimmed back at a road contact: the road's own top, because that is the
+       surface painted under your feet there (the crosswalk bars sit a hair above it). */
+const TREAD_TOP = 0.08, FOOTWAY_TOP = 0.05, PLANK_LIFT = 0.1;
+function drawnTopLifts(e, pr){
+  const n = pr.pts.length, out = new Array(n);
+  const lift = kindLift(e.kind);
+  const base = e.buried ? lift + FOOTWAY_TOP : lift + TREAD_TOP;
+  const roadTop = kindLift('road') + TREAD_TOP;
+  let arc = 0, total = 0;
+  for(let i=1;i<n;i++) total += Math.hypot(pr.pts[i][0]-pr.pts[i-1][0], pr.pts[i][1]-pr.pts[i-1][1]);
+  const ta = e.trimA || 0, tb = e.trimB || 0;
+  for(let i=0;i<n;i++){
+    if(i) arc += Math.hypot(pr.pts[i][0]-pr.pts[i-1][0], pr.pts[i][1]-pr.pts[i-1][1]);
+    let v = base;
+    if(!e.buried && ((ta > 0 && arc < ta) || (tb > 0 && arc > total - tb))) v = roadTop;
+    if(pr.deck && pr.deck[i]) v = lift + PLANK_LIFT;
+    out[i] = v;
+  }
+  return out;
+}
+
+/* The graded bench itself, with no paint on it: what the crosswalk markings are laid on,
+   since they are drawn at their own fixed offsets above it like every other ribbon. */
+function benchY(x,z){
+  const g = terrainY(x,z,VERT_SCALE);
+  const nt = nearestTrail(x,z);
+  if(nt.y == null || !(nt.d <= nt.hw) || !nt.edge) return g;
+  const e = nt.edge, pr = e.prof;
+  if(!pr) return g;
+  // undo the drawn lift nearest this point; the lift only varies station to station
+  let bi = 0, bd = Infinity;
+  for(let i=0;i<pr.pts.length;i++){
+    const d = Math.hypot(pr.pts[i][0]-x, pr.pts[i][1]-z);
+    if(d < bd){ bd = d; bi = i; }
+  }
+  const y = nt.y - drawnTopLifts(e, pr)[bi];
+  const k = clamp((nt.hw - nt.d)/0.4, 0, 1);
+  return g + (y - g)*k;
+}
+
 /* Height something STANDS on: the ground, or the trail tread when inside a trail's
    corridor.
 
@@ -9469,8 +9910,8 @@ function rebuildWorld(){
   // ground: with a DEM the terrace mesh IS the heightfield, already in real-metre world
   // coordinates. Without one, a single flat plane covering the map's extent -- so a bare
   // pair of .geojson files is still playable, just level.
-  const groundMat=new THREE.MeshToonMaterial({map:groundTexture(THEME),
-    gradientMap:toonTex, polygonOffset:true, polygonOffsetFactor:2, polygonOffsetUnits:2});
+  const groundMat=patchGroundRing(new THREE.MeshToonMaterial({map:groundTexture(THEME),
+    gradientMap:toonTex, polygonOffset:true, polygonOffsetFactor:2, polygonOffsetUnits:2}));
   // buildTerrainMesh now writes UVs straight from world x/z (see its own comment) at a
   // fixed real-world tile size, so the texture is already correctly scaled by
   // construction -- no separate repeat.set() needed, and one WOULD be wrong here: it
@@ -9539,8 +9980,9 @@ function rebuildWorld(){
   // call nearestTrail, and standingY now needs tread heights too
   GRAPH.edges.forEach(e=>{
     const pr = e.prof, hw = (pathWidth(e.kind)+1.5)/2;
+    const top = drawnTopLifts(e, pr);
     for(let i=0;i<pr.pts.length-1;i++)
-      hashSeg({a:pr.pts[i], b:pr.pts[i+1], edge:e, ya:pr.ys[i], yb:pr.ys[i+1], hw,
+      hashSeg({a:pr.pts[i], b:pr.pts[i+1], edge:e, ya:pr.ys[i]+top[i], yb:pr.ys[i+1]+top[i+1], hw,
                deck: !!(pr.deck && pr.deck[i] && pr.deck[i+1])});
   });
 
@@ -9761,11 +10203,15 @@ function rebuildWorld(){
      road: standingY (not terrainY) so the stripes sit on the tread the road actually
      rendered at rather than on the terrace underneath it. */
   CROSSINGS.forEach(rec=>{
-    try{ worldG.add(buildCrossing(rec, standingY)); }
+    try{ worldG.add(buildCrossing(rec, benchY)); }
     catch(err){ console.warn('crossing skipped', err); }
   });
 
-  AREAS.forEach(a=>{ if(a.name) worldG.add(buildAreaSign(a,groundYAt,nearestTrail)); });
+  AREAS.forEach(a=>{ if(a.name){
+    const sg=buildAreaSign(a,groundYAt,nearestTrail,(x,z)=>pushOffPaths(x,z,AREA_SIGN_CLEAR));
+    sg.__areaSign=true;               // test seam: found by the smoke harness like fingerposts
+    worldG.add(sg);
+  } });
 
   // junction pads + signs
   // These discs are the ONLY thing that covers the seam where two edges meet: each
@@ -9800,31 +10246,49 @@ function rebuildWorld(){
   const signWanted=[];      // collected here, thinned and built after the loop (see below)
   GRAPH.nodes.forEach((n,ni)=>{
     if(n.deg<1) return;
-    const y=standingY(n.p[0],n.p[1]);
     const here=adj[ni];
-    if(n.deg>=3){
-      const xing=crossingAt(ni);
-      const byKind=new Map();
+    /* JUNCTION FILLS, one per drawn style, covering only what the arms' own ribbons
+       leave open (pieces.js junctionGapGeom). An arm is left out when it was TRIMMED at
+       this node: a trail cut back to the verge of a road no longer reaches the node, so
+       giving it a pad there put a dirt disc in the middle of the tarmac -- which is what
+       used to happen at every road contact that was not a marked crossing (the crossing
+       case had its own exception; this is the general rule it was a special case of).
+       Each layer is filled at its own width and height, so nothing is wider than the
+       ribbon it joins, and the fill sits at the arms' end height, flush with their butt
+       edges. Also run at degree 2 now: two edges of one road meeting at a bend node
+       leave the same outer wedge as a bend inside an edge does. */
+    if(n.deg>=2){
+      const groups=new Map();
       for(const e of here){
-        if(e.buried) continue;
-        /* At a marked crossing the walking surfaces stop at the kerb, so a pad for them
-           would be a dirt disc floating in the middle of the road with nothing to join --
-           the crosswalk and its two landings are the junction here. The ROAD still gets
-           its pad: its own ribbons really do meet at this node. */
-        if(xing && e.kind!=='road') continue;
-        // keyed by drawn style, not class: a paved and a dirt trail meeting here are two
-        // treads in two colours, and each needs its seam covered in its own
-        const key=styleKey(e), prev=byKind.get(key);
-        byKind.set(key, {kind:e.kind, hw:Math.max(prev?prev.hw:0, pathOutlineWidth(e.kind)/2)});
+        if(e.buried || !e.prof || e.prof.pts.length<2) continue;
+        const ends=[];
+        if(e.a===ni && !(e.trimA>0)) ends.push('a');
+        if(e.b===ni && !(e.trimB>0)) ends.push('b');
+        for(const end of ends){
+          const pp=e.prof.pts, ys=e.prof.ys;
+          const p0=end==='a'?pp[0]:pp[pp.length-1], p1=end==='a'?pp[1]:pp[pp.length-2];
+          const y0=end==='a'?ys[0]:ys[ys.length-1];
+          const key=styleKey(e);
+          const g=groups.get(key)||{kind:e.kind, key, angs:[], ys:[]};
+          g.angs.push(Math.atan2(p1[1]-p0[1], p1[0]-p0[0])); g.ys.push(y0);
+          groups.set(key,g);
+        }
       }
-      for(const [key, {kind, hw}] of byKind){
-        const rank=pathRank(kind), lift=kindLift(kind);
-        const st=PATH_STYLE[key]||PATH_STYLE.trail;
-        const r=Math.max(hw*1.2,0.4);
-        const oDisc=new THREE.Mesh(new THREE.CircleGeometry(r,20),inkMats[rank]);
-        oDisc.rotation.x=-Math.PI/2; oDisc.position.set(n.p[0],y+lift+0.045,n.p[1]); worldG.add(oDisc);
-        const disc=new THREE.Mesh(new THREE.CircleGeometry(r*0.84,20),trailMat(st.tread,rank));
-        disc.rotation.x=-Math.PI/2; disc.position.set(n.p[0],y+lift+0.06,n.p[1]); worldG.add(disc);
+      for(const g of groups.values()){
+        // a style with a single arm here gets a half-disc: the path's rounded end where
+        // it meets a different kind of path
+        const rank=pathRank(g.kind), lift=kindLift(g.kind);
+        const st=PATH_STYLE[g.key]||PATH_STYLE.trail;
+        const W=pathWidth(g.kind);
+        const yb=g.ys.reduce((a,b)=>a+b,0)/g.ys.length;
+        const layers=[[W*OUTLINE_MUL/2, 0.012, inkMats[rank]],
+                      [W*SHOULDER_MUL/2, 0.02, trailMat(st.shoulder,rank)],
+                      [W/2, 0.05, trailMat(st.tread,rank)]];
+        for(const [r, dy, mat] of layers){
+          const geo=junctionGapGeom(n.p[0], n.p[1], yb+lift+dy, g.angs, r);
+          // test seam: which kind of path this fill belongs to, and the ribbon width it matches
+          if(geo){ geo.__gapKind=g.kind; geo.__gapR=r; worldG.add(new THREE.Mesh(geo, mat)); }
+        }
       }
     }
 
@@ -9851,27 +10315,65 @@ function rebuildWorld(){
          walks the fragments of one route together until the walker actually has to choose
          again, which is the distance a fingerpost is for. */
       const reach=armReach(ni,o.e,adj);
+      // tx/tz: the point the arm is aimed AT, kept so the angle can be re-measured from
+      // wherever the post finally stands rather than from the node it was set back from
       return{label:o.e.name, route:o.e.route, kind:o.e.kind, named:!!o.e.named,
-             distU:reach.dist, dist:distLabel(reach.dist), angle:Math.atan2(az,ax)};
+             distU:reach.dist, dist:distLabel(reach.dist), angle:Math.atan2(az,ax),
+             tx:n.p[0]+ax, tz:n.p[1]+az, buried:!!o.e.buried};
     };
-    /* WHERE THE POST GOES, worked out once for both kinds of sign.
+    /* WHERE THE POST GOES. A fingerpost stands BESIDE the paths it names, never on one.
 
-       A fingerpost belongs on the verge, not in the road. At a crossing there is a right
-       answer -- the landing beside the markings -- and everywhere else there is a catch
-       all: shove it clear of any carriageway it happens to be standing in. Applied to
-       trailhead posts too, which is the bit that was missed first time round: a trailhead
-       at a roadside car park is exactly the sign most likely to be planted in tarmac, and
-       four of them were. */
+       It used to be planted on the node itself -- dead centre of the junction, in the
+       tread -- and only moved if that happened to be a road. At a crossing the landing
+       beside the markings is still the answer. Everywhere else the post goes into the
+       widest open wedge between the arms, set back along that wedge's bisector just far
+       enough that the nearest arm's painted edge clears it by POST_CLEAR -- a narrow wedge
+       needs a longer set-back to get the same clearance, which is the sin() below. A dead
+       end (trailhead) is a one-armed junction whose open wedge is everything behind it,
+       so the same rule puts its post off to one side of the gate. Then a general push
+       clear of every drawn path, since the wedge only knows about the arms at THIS node. */
     let sx=n.p[0], sz=n.p[1];
     const xing=crossingAt(ni);
     if(xing){
       const nxr=-xing.dir[1], nzr=xing.dir[0];
       const off=xing.trim + xing.walkW*0.5;
       sx=n.p[0]+nxr*off; sz=n.p[1]+nzr*off;
+    }else if(out.length){
+      const angs=[]; let hwMax=0;
+      for(const o of out){
+        let ax=0,az=0,acc=0,i=1;
+        while(i<o.pts.length&&acc<2.5){ax=o.pts[i][0]-n.p[0];az=o.pts[i][1]-n.p[1];acc=Math.hypot(ax,az);i++;}
+        if(acc>1e-6) angs.push(Math.atan2(az,ax));
+        hwMax=Math.max(hwMax, pathOutlineWidth(o.e.kind)/2);
+      }
+      angs.sort((a,b)=>a-b);
+      let gap=2*Math.PI, bis=0;
+      if(angs.length===1){ gap=2*Math.PI; bis=angs[0]+Math.PI; }
+      else if(angs.length>1){
+        gap=-1;
+        for(let k=0;k<angs.length;k++){
+          const a=angs[k], b=k+1<angs.length?angs[k+1]:angs[0]+2*Math.PI;
+          if(b-a>gap){ gap=b-a; bis=(a+b)/2; }
+        }
+      }
+      if(angs.length){
+        // a trailhead post goes to the SIDE of the path (the gate straddles the end), a
+        // little way up it so it is not in the arch's footprint
+        if(angs.length===1){
+          const a=angs[0], side=Math.PI/2;
+          const r=hwMax+POST_CLEAR+0.5;
+          sx=n.p[0]+Math.cos(a+side)*r+Math.cos(a)*1.6;
+          sz=n.p[1]+Math.sin(a+side)*r+Math.sin(a)*1.6;
+        }else{
+          const half=Math.max(gap/2, 0.35);
+          const r=Math.min((hwMax+POST_CLEAR)/Math.sin(Math.min(half, Math.PI/2)), (hwMax+POST_CLEAR)*3);
+          sx=n.p[0]+Math.cos(bis)*r; sz=n.p[1]+Math.sin(bis)*r;
+        }
+      }
     }
-    const clearPt=pushOffRoad(sx, sz, 0.8);
+    const clearPt=pushOffPaths(sx, sz, POST_CLEAR);
     sx=clearPt[0]; sz=clearPt[1];
-    const sy=standingY(sx, sz);
+    const sy=terrainY(sx, sz, VERT_SCALE);
 
     if(n.deg>=3 && isFork){
       signWanted.push({n, y:sy, sx, sz, arms:pickArms(out.map(armOf)), deg:n.deg, routes:routes.length});
@@ -9932,7 +10434,11 @@ function rebuildWorld(){
          node is left alone -- it is the graph's, and the arm ANGLES were measured from it. */
       const at = (c.s.sx==null || (c.s.sx===c.s.n.p[0] && c.s.sz===c.s.n.p[1]))
         ? c.s.n : {p:[c.s.sx, c.s.sz], deg:c.s.n.deg};
-      const sg=buildSign(at, c.s.arms); sg.position.y=c.s.y; worldG.add(sg);
+      // re-aim every arm from where the post actually stands: measured from the node, an
+      // arm on a set-back post points a metre or two off its trail
+      const arms = c.s.arms.map(a => (a.tx==null) ? a :
+        Object.assign({}, a, {angle:Math.atan2(a.tz-at.p[1], a.tx-at.p[0])}));
+      const sg=buildSign(at, arms); sg.position.y=c.s.y; worldG.add(sg);
     });
     SIGN_COUNT = {wanted:signWanted.length, built:kept.length, minGap};
   }
@@ -11601,6 +12107,8 @@ let bigView = null;            // last-drawn transform, for pointer/wheel pickin
 let lastSelectedHead = -1;
 let onTrailheadPick = null;    // main.js's placeAtHead, wired through initMinimap
 let onSpotPick = null;         // main.js's placeAtSpot, same arrangement
+let onTrailPointPick = null;   // main.js's "load any point on a trail into the start card"
+let pickedPoint = null;        // {x,z} the sheet marks as a chosen start point, or null
 let bigWired = false;          // guards against double-binding listeners if init runs twice
 
 /* The route the walker is currently on, and the edges that belong to it.
@@ -11724,9 +12232,70 @@ function pickSpotAt(px, py){
   return true;
 }
 
-/* One tap, two kinds of target. Spots first (see above), trailheads second. */
+/* ANY POINT ON ANY PATH is a start point. Trailheads are only the outer dead ends, and
+   on a real network the trail you want to walk usually has none near where you want to
+   be. A tap that hits neither a pin nor a badge snaps to the nearest point on the nearest
+   drawn path, if one lies within a finger's width on screen, and hands main.js the spot
+   and the heading along the path there -- main.js loads it into the start card, it does
+   not move anyone, same contract as a trailhead tap.
+
+   The tolerance is in SCREEN pixels converted to world units, so it is a fingertip at
+   every zoom rather than a fixed distance on the ground. */
+function nearestPathPoint(x, z, maxD){
+  const g = getGraph();
+  if(!g) return null;
+  let best = null, bd = maxD == null ? Infinity : maxD;
+  for(const e of g.edges){
+    const pts = e.pts;
+    for(let i=0;i<pts.length-1;i++){
+      const a=pts[i], b=pts[i+1];
+      const dx=b[0]-a[0], dz=b[1]-a[1], L2=dx*dx+dz*dz;
+      if(L2 < 1e-12) continue;
+      let t=((x-a[0])*dx+(z-a[1])*dz)/L2; t=t<0?0:(t>1?1:t);
+      const qx=a[0]+dx*t, qz=a[1]+dz*t, d=Math.hypot(x-qx, z-qz);
+      if(d < bd){ bd=d; best={x:qx, z:qz, yaw:Math.atan2(-dz, dx), edge:e, d}; }
+    }
+  }
+  return best;
+}
+function pickTrailPointAt(px, py){
+  if(!bigView || !onTrailPointPick) return false;
+  const {ox, oy, s, at, dpr} = bigView;
+  const k = at.ppm*s;
+  const wx = at.x0 + (px-ox)/k, wz = at.z0 + (py-oy)/k;
+  const hitR = Math.max(20*(dpr||1), 28)/k;
+  const hit = nearestPathPoint(wx, wz, hitR);
+  if(!hit) return false;
+  onTrailPointPick(hit);
+  return true;
+}
+
+/* One tap, three kinds of target, most deliberate first: a pin you dropped, then a
+   lettered trailhead, then anywhere along a path. */
 function pickOnSheet(px, py){
-  return pickSpotAt(px, py) || pickTrailheadAt(px, py);
+  return pickSpotAt(px, py) || pickTrailheadAt(px, py) || pickTrailPointAt(px, py);
+}
+
+/* The chosen start point, drawn as a flag on a stick so it reads as "you will start
+   here" and cannot be confused with a numbered pin or a lettered trailhead badge. */
+function setPickedPoint(p){ pickedPoint = (p && isFinite(p.x) && isFinite(p.z)) ? {x:p.x, z:p.z} : null; }
+function getPickedPoint(){ return pickedPoint; }
+function drawPickedPoint(g, X, Z, scale){
+  if(!pickedPoint) return;
+  const x = X(pickedPoint.x), y = Z(pickedPoint.z);
+  g.save();
+  g.lineCap = 'round';
+  g.beginPath(); g.arc(x, y, 5*scale, 0, 7);
+  g.fillStyle = 'rgba(255,217,74,0.55)'; g.fill();
+  g.lineWidth = Math.max(1.4, 1.8*scale); g.strokeStyle = INK_MAP; g.stroke();
+  g.beginPath(); g.moveTo(x, y); g.lineTo(x, y - 22*scale);
+  g.lineWidth = Math.max(1.6, 2.2*scale); g.stroke();
+  g.beginPath();
+  g.moveTo(x, y - 22*scale); g.lineTo(x + 13*scale, y - 17.5*scale); g.lineTo(x, y - 13*scale);
+  g.closePath();
+  g.fillStyle = '#ffd94a'; g.fill();
+  g.lineWidth = Math.max(1.2, 1.6*scale); g.stroke();
+  g.restore();
 }
 
 /* Drag-to-pan + tap-to-pick, as one pointer sequence: a real drag pans, a pointer that
@@ -11783,6 +12352,7 @@ function initMinimap(onPick){
   const opts = (typeof onPick === 'function') ? {onTrailhead:onPick} : (onPick || {});
   onTrailheadPick = opts.onTrailhead || null;
   onSpotPick = opts.onSpot || null;
+  onTrailPointPick = opts.onTrailPoint || null;
   miniCv = document.getElementById('minimap');
   bigCv = document.getElementById('bigmap');
   if(miniCv) miniCtx = miniCv.getContext('2d');
@@ -12242,6 +12812,7 @@ function updateMinimap(px, pz, yaw, selectedHead){
       drawCourse(g, X, Z, dpr*1.4, true);
       lastSelectedHead = (selectedHead == null || selectedHead < 0) ? -1 : selectedHead;
       drawTrailheadLabels(g, X, Z, dpr*1.3, lastSelectedHead);
+      drawPickedPoint(g, X, Z, dpr*1.3);
       drawSighted(g, X, Z, dpr*1.6);
       drawSpots(g, X, Z, dpr*1.9, true);
       drawPup(g, X(px), Z(pz), yaw, dpr*2.2);
@@ -13097,6 +13668,7 @@ function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
    layers has no degree-1 node to make a trailhead out of -- an avatar standing in the
    centre of the map is far more debuggable than no avatar at all. */
 function placeAtHead(i){
+  startPoint = null;
   const heads = getTrailheads();
   if(heads.length){
     setStartHead(clamp(i,0,heads.length-1));
@@ -13140,6 +13712,27 @@ function placeAtSpot(spot){
   const p = spotWorld(spot);
   placeAt(p.x, p.z, spot.yaw);
   showPane(null);
+}
+
+/* START A WALK ANYWHERE ON A TRAIL -- a point tapped on the map sheet (minimap.js's
+   pickTrailPointAt), loaded into the start card and committed here by "Start here".
+
+   A START, not travel, so it resets the odometer exactly as a trailhead does (see
+   placeAt's note on the difference). Faces along the trail at that point; which way
+   along is the direction the path was surveyed, the same arbitrary-but-stable choice a
+   trailhead makes. The point is remembered with the world revision it was picked on:
+   a rescale or relief change rebuilds every coordinate, and a stale point would put the
+   flag in the wrong place, so it simply stops being shown. */
+let startPoint = null;       // {x,z,yaw,name,route,rev} once a walk starts from a tapped point
+function placeAtPoint(pt){
+  if(!pt) return;
+  placeAt(pt.x, pt.z, pt.yaw);
+  player.dist = 0;
+  startPoint = {x:pt.x, z:pt.z, yaw:pt.yaw, name:pt.name, route:pt.route, rev:getWorldRevision()};
+  renderStartPicker();
+}
+function liveStartPoint(){
+  return (startPoint && startPoint.rev === getWorldRevision()) ? startPoint : null;
 }
 
 /* Drop a pin where the player is standing.
@@ -15427,7 +16020,7 @@ function headLetter(i){ return i<26 ? String.fromCharCode(65+i) : String(i+1); }
    `hereSubject` is what is loaded, and it is a tagged object rather than two separate
    nullable variables, because "a trailhead is showing" and "a course is showing" have to
    be mutually exclusive and two variables can disagree about that. */
-let hereSubject = null;      // {kind:'head', i} | {kind:'course', c} | null
+let hereSubject = null;      // {kind:'head', i} | {kind:'course', c} | {kind:'point', pt} | null
 
 function getHereSubject(){ return hereSubject; }
 
@@ -15445,7 +16038,9 @@ function getHereSubject(){ return hereSubject; }
    which). */
 function mapSelectedHead(){
   if(hereSubject && hereSubject.kind === 'head') return hereSubject.i;
-  if(hereSubject && hereSubject.kind === 'course') return -1;
+  if(hereSubject && (hereSubject.kind === 'course' || hereSubject.kind === 'point')) return -1;
+  // walking from a tapped point: the flag is the answer, so no trailhead is ringed
+  if(liveStartPoint()) return -1;
   return getStartHead();
 }
 
@@ -15462,6 +16057,7 @@ function showHereIdle(){
   if(el.idle) el.idle.classList.remove('off');
   if(el.stats){ el.stats.classList.remove('on'); el.stats.innerHTML = ''; }
   if(el.actions){ el.actions.classList.remove('on'); el.actions.innerHTML = ''; }
+  setPickedPoint(liveStartPoint());
   renderStartPicker();
 }
 
@@ -15501,6 +16097,7 @@ function showHereHead(i){
      sheet would be ringing a trailhead AND tracing a course line that has nothing to do
      with it. */
   if(previewCourse){ previewCourse = null; renderCourseList(); syncCourseOverlay(); }
+  setPickedPoint(null);
   const h = heads[i];
   const el = hereEl();
   if(el.idle) el.idle.classList.add('off');
@@ -15544,10 +16141,48 @@ function showHereHead(i){
   actions.classList.add('on');
 }
 
+/* --- any point on a trail -------------------------------------------------------------- */
+/* Same three slots as a trailhead, so the card reads the same whichever you tapped. `pt`
+   comes from minimap.js: {x, z, yaw, edge}. The edge is read for its name and route here
+   and then dropped -- the graph is rebuilt on every rescale and a held edge would go stale. */
+function showHerePoint(pt){
+  if(!pt || !isFinite(pt.x) || !isFinite(pt.z)){ showHereIdle(); return; }
+  const e = pt.edge || null;
+  const p = {x:pt.x, z:pt.z, yaw:pt.yaw || 0,
+             name: e ? e.name : 'the trail', route: e ? e.route : null,
+             kind: e ? e.kind : 'trail', named: !!(e && e.named)};
+  hereSubject = {kind:'point', pt:p};
+  if(previewCourse){ previewCourse = null; renderCourseList(); syncCourseOverlay(); }
+  setPickedPoint(p);
+  const el = hereEl();
+  if(el.idle) el.idle.classList.add('off');
+  if(el.title) el.title.textContent = '\u{1F4CD} On ' + p.name;
+  const stats = el.stats, actions = el.actions;
+  if(!stats || !actions) return;
+  stats.innerHTML = ''; actions.innerHTML = '';
+
+  const kindWord = {road:'Road', dirtroad:'Dirt road', track:'Track'}[p.kind] || 'Trail';
+  hereRow(stats, kindWord, p.name + ' (' + compass(p.x, p.z) + ')');
+  const ft = elevationFt(p.x, p.z);
+  if(ft != null) hereRow(stats, 'Elevation', Math.round(ft).toLocaleString() + ' ft');
+  const k = Math.max(1e-6, getMapScale());
+  hereRow(stats, 'From you', fmtCourseLen(Math.hypot(p.x - player.x, p.z - player.z)/k) + ' as the crow flies');
+  if(!p.named) hereNote(stats, 'An unnamed connector \u2014 the sign name is a nickname.');
+  stats.classList.add('on');
+
+  hereBtn(actions, '\u{1F6A9} Start here', true, ()=>{
+    placeAtPoint(p);
+    if(!playing) enterPlay();
+    showPane(null);
+  });
+  actions.classList.add('on');
+}
+
 /* --- a course ------------------------------------------------------------------------- */
 function showHereCourse(c){
   if(!c){ showHereIdle(); return; }
   hereSubject = {kind:'course', c};
+  setPickedPoint(null);
   const el = hereEl();
   if(el.idle) el.idle.classList.add('off');
   if(el.title) el.title.textContent = '\u{1F3C1} ' + c.name;
@@ -15612,6 +16247,8 @@ function refreshHere(){
   if(hereSubject.kind === 'head'){
     if(hereSubject.i >= getTrailheads().length) showHereIdle();
     else showHereHead(hereSubject.i);
+  }else if(hereSubject.kind === 'point'){
+    showHerePoint(hereSubject.pt);
   }else{
     const still = getCourses().some(x => x.id === hereSubject.c.id);
     if(still) showHereCourse(hereSubject.c); else showHereIdle();
@@ -15625,6 +16262,8 @@ function renderStartPicker(){
     if(now) now.textContent='— load a map first —';
     return;
   }
+  const sp=liveStartPoint();
+  if(sp){ if(now) now.textContent = '\u{1F4CD} On '+sp.name+' ('+compass(sp.x, sp.z)+')'; return; }
   const i=getStartHead(), h=heads[i];
   if(now && h) now.textContent = headLetter(i)+' · '+h.name+' ('+h.where+' end)';
 }
@@ -15854,6 +16493,7 @@ async function boot(bundleUrl){
   initMinimap({
     onTrailhead: i => showHereHead(i),
     onSpot: sp => { placeAtSpot(sp); if(!playing) enterPlay(); showPane(null); },
+    onTrailPoint: pt => showHerePoint(pt),
   });
   await loadMapList();
   const startUrl = bundleUrl || DEFAULT_WORLD;

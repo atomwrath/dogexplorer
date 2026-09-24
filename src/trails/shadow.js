@@ -22,15 +22,13 @@ import { scene } from '../core/render.js';
 
 let mesh = null, tex = null, baseOpacity = 0.34;
 
-/* How far above the surface the blob floats. This is NOT an arbitrary nudge: world.js
-   stacks the trail's six ribbon layers at fixed offsets above the graded profile --
-   outline 0.012, shoulder 0.02, tread 0.05, junction pad 0.06, inner 0.08, dashes 0.09 --
-   and standingY() returns the profile itself, so a shadow lifted by less than 0.09 is
-   embedded IN that stack and z-fights whichever layer it lands on. (0.06, the old value,
-   was exactly the junction-pad offset, which is why the flicker was worst at junctions.)
-   Clearing the tallest layer with a little margin puts it unambiguously on top. These
-   offsets are in world units and do not scale, so neither does this. */
-const SHADOW_LIFT = 0.115;
+/* How far above the surface the blob floats. standingY() now returns the TOP of the
+   painted stack (world.js's drawnTopLifts: the inner stripe or ruts, the planks on a
+   deck), not the graded profile under it, so the only things left above the surface are
+   a road's dashes (+0.01) and a crosswalk's bars (+0.02..0.035). Clearing those with a
+   little margin is all the lift has to do. It used to be 0.115 because the surface it
+   was measured from was buried under the whole stack. */
+const SHADOW_LIFT = 0.045;
 
 /* Soft-edged radial blob. Wrapped because the 2D canvas is the one browser API this
    file needs and headless harnesses stub it loosely -- a hard-edged fallback disc is a

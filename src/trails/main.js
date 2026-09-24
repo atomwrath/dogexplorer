@@ -20,7 +20,7 @@ import { getWorld, rawGroundY } from './terrain.js';
 import { addCamPitch, addCamYaw, addCamZoom, getCamPitch, getCamYaw, getCamZoom, setCamYaw, snapChaseCam, updateChaseCam } from './camera.js';
 import { getCritterStats, spawnCritters, resetCritters, updateCritters, WATCH_SECONDS, playerNoise, typicalSpookRadius, takeImpacts,
          catchNear, releaseCarried, getCarried, carrySlow, setCarryAnchor, nearestCatchable, catchRadius } from './critters.js';
-import { initMinimap, updateMinimap, setHighlightRoute,
+import { initMinimap, updateMinimap, setHighlightRoute, setPickedPoint,
          setCourseShown, getCourseShown, setRaceFrac } from './minimap.js';
 import { initPanes, getPane, showPane, togglePane } from './panes.js';
 import { setCourseLine, refreshCourseLine, clearCourseLine } from './course-line.js';
@@ -38,7 +38,7 @@ import { barkSound, cheerBlip, initAudio, thudSound,
          stepSound, landSound, jumpSound, scrabbleSound,
          countPip, goTone, offCourseSound, rejoinSound } from '../core/audio.js';
 
-import { applyThemeLighting, getMapLatLon, setTerrainQuadBudget, getDemStride, addLayers, clearLayers, compass, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapId, getMapScale, getPathMix, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, inWaterway, loadWorld, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY, areaBlocked, areaSolidTop, nearestSolidFace, solidEmbed, distToSolid } from './world.js';
+import { applyThemeLighting, getMapLatLon, setTerrainQuadBudget, getDemStride, addLayers, clearLayers, compass, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapId, getMapScale, getPathMix, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, inWaterway, loadWorld, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY, getWorldRevision, areaBlocked, areaSolidTop, nearestSolidFace, solidEmbed, distToSolid } from './world.js';
 
 import { THEME, THEMES } from './themes.js';
 import { setSkyMode, getSkyMode, setSkyClock, getSkyClock, skyFrame, skyReadout, skyState, nowClock } from './sky.js';
@@ -348,6 +348,7 @@ function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
    layers has no degree-1 node to make a trailhead out of -- an avatar standing in the
    centre of the map is far more debuggable than no avatar at all. */
 function placeAtHead(i){
+  startPoint = null;
   const heads = getTrailheads();
   if(heads.length){
     setStartHead(clamp(i,0,heads.length-1));
@@ -391,6 +392,27 @@ function placeAtSpot(spot){
   const p = spotWorld(spot);
   placeAt(p.x, p.z, spot.yaw);
   showPane(null);
+}
+
+/* START A WALK ANYWHERE ON A TRAIL -- a point tapped on the map sheet (minimap.js's
+   pickTrailPointAt), loaded into the start card and committed here by "Start here".
+
+   A START, not travel, so it resets the odometer exactly as a trailhead does (see
+   placeAt's note on the difference). Faces along the trail at that point; which way
+   along is the direction the path was surveyed, the same arbitrary-but-stable choice a
+   trailhead makes. The point is remembered with the world revision it was picked on:
+   a rescale or relief change rebuilds every coordinate, and a stale point would put the
+   flag in the wrong place, so it simply stops being shown. */
+let startPoint = null;       // {x,z,yaw,name,route,rev} once a walk starts from a tapped point
+function placeAtPoint(pt){
+  if(!pt) return;
+  placeAt(pt.x, pt.z, pt.yaw);
+  player.dist = 0;
+  startPoint = {x:pt.x, z:pt.z, yaw:pt.yaw, name:pt.name, route:pt.route, rev:getWorldRevision()};
+  renderStartPicker();
+}
+function liveStartPoint(){
+  return (startPoint && startPoint.rev === getWorldRevision()) ? startPoint : null;
 }
 
 /* Drop a pin where the player is standing.
@@ -2678,7 +2700,7 @@ function headLetter(i){ return i<26 ? String.fromCharCode(65+i) : String(i+1); }
    `hereSubject` is what is loaded, and it is a tagged object rather than two separate
    nullable variables, because "a trailhead is showing" and "a course is showing" have to
    be mutually exclusive and two variables can disagree about that. */
-let hereSubject = null;      // {kind:'head', i} | {kind:'course', c} | null
+let hereSubject = null;      // {kind:'head', i} | {kind:'course', c} | {kind:'point', pt} | null
 
 function getHereSubject(){ return hereSubject; }
 
@@ -2696,7 +2718,9 @@ function getHereSubject(){ return hereSubject; }
    which). */
 function mapSelectedHead(){
   if(hereSubject && hereSubject.kind === 'head') return hereSubject.i;
-  if(hereSubject && hereSubject.kind === 'course') return -1;
+  if(hereSubject && (hereSubject.kind === 'course' || hereSubject.kind === 'point')) return -1;
+  // walking from a tapped point: the flag is the answer, so no trailhead is ringed
+  if(liveStartPoint()) return -1;
   return getStartHead();
 }
 
@@ -2713,6 +2737,7 @@ function showHereIdle(){
   if(el.idle) el.idle.classList.remove('off');
   if(el.stats){ el.stats.classList.remove('on'); el.stats.innerHTML = ''; }
   if(el.actions){ el.actions.classList.remove('on'); el.actions.innerHTML = ''; }
+  setPickedPoint(liveStartPoint());
   renderStartPicker();
 }
 
@@ -2752,6 +2777,7 @@ function showHereHead(i){
      sheet would be ringing a trailhead AND tracing a course line that has nothing to do
      with it. */
   if(previewCourse){ previewCourse = null; renderCourseList(); syncCourseOverlay(); }
+  setPickedPoint(null);
   const h = heads[i];
   const el = hereEl();
   if(el.idle) el.idle.classList.add('off');
@@ -2795,10 +2821,48 @@ function showHereHead(i){
   actions.classList.add('on');
 }
 
+/* --- any point on a trail -------------------------------------------------------------- */
+/* Same three slots as a trailhead, so the card reads the same whichever you tapped. `pt`
+   comes from minimap.js: {x, z, yaw, edge}. The edge is read for its name and route here
+   and then dropped -- the graph is rebuilt on every rescale and a held edge would go stale. */
+function showHerePoint(pt){
+  if(!pt || !isFinite(pt.x) || !isFinite(pt.z)){ showHereIdle(); return; }
+  const e = pt.edge || null;
+  const p = {x:pt.x, z:pt.z, yaw:pt.yaw || 0,
+             name: e ? e.name : 'the trail', route: e ? e.route : null,
+             kind: e ? e.kind : 'trail', named: !!(e && e.named)};
+  hereSubject = {kind:'point', pt:p};
+  if(previewCourse){ previewCourse = null; renderCourseList(); syncCourseOverlay(); }
+  setPickedPoint(p);
+  const el = hereEl();
+  if(el.idle) el.idle.classList.add('off');
+  if(el.title) el.title.textContent = '\u{1F4CD} On ' + p.name;
+  const stats = el.stats, actions = el.actions;
+  if(!stats || !actions) return;
+  stats.innerHTML = ''; actions.innerHTML = '';
+
+  const kindWord = {road:'Road', dirtroad:'Dirt road', track:'Track'}[p.kind] || 'Trail';
+  hereRow(stats, kindWord, p.name + ' (' + compass(p.x, p.z) + ')');
+  const ft = elevationFt(p.x, p.z);
+  if(ft != null) hereRow(stats, 'Elevation', Math.round(ft).toLocaleString() + ' ft');
+  const k = Math.max(1e-6, getMapScale());
+  hereRow(stats, 'From you', fmtCourseLen(Math.hypot(p.x - player.x, p.z - player.z)/k) + ' as the crow flies');
+  if(!p.named) hereNote(stats, 'An unnamed connector \u2014 the sign name is a nickname.');
+  stats.classList.add('on');
+
+  hereBtn(actions, '\u{1F6A9} Start here', true, ()=>{
+    placeAtPoint(p);
+    if(!playing) enterPlay();
+    showPane(null);
+  });
+  actions.classList.add('on');
+}
+
 /* --- a course ------------------------------------------------------------------------- */
 function showHereCourse(c){
   if(!c){ showHereIdle(); return; }
   hereSubject = {kind:'course', c};
+  setPickedPoint(null);
   const el = hereEl();
   if(el.idle) el.idle.classList.add('off');
   if(el.title) el.title.textContent = '\u{1F3C1} ' + c.name;
@@ -2863,6 +2927,8 @@ function refreshHere(){
   if(hereSubject.kind === 'head'){
     if(hereSubject.i >= getTrailheads().length) showHereIdle();
     else showHereHead(hereSubject.i);
+  }else if(hereSubject.kind === 'point'){
+    showHerePoint(hereSubject.pt);
   }else{
     const still = getCourses().some(x => x.id === hereSubject.c.id);
     if(still) showHereCourse(hereSubject.c); else showHereIdle();
@@ -2876,6 +2942,8 @@ function renderStartPicker(){
     if(now) now.textContent='— load a map first —';
     return;
   }
+  const sp=liveStartPoint();
+  if(sp){ if(now) now.textContent = '\u{1F4CD} On '+sp.name+' ('+compass(sp.x, sp.z)+')'; return; }
   const i=getStartHead(), h=heads[i];
   if(now && h) now.textContent = headLetter(i)+' · '+h.name+' ('+h.where+' end)';
 }
@@ -3105,6 +3173,7 @@ async function boot(bundleUrl){
   initMinimap({
     onTrailhead: i => showHereHead(i),
     onSpot: sp => { placeAtSpot(sp); if(!playing) enterPlay(); showPane(null); },
+    onTrailPoint: pt => showHerePoint(pt),
   });
   await loadMapList();
   const startUrl = bundleUrl || DEFAULT_WORLD;
@@ -3381,7 +3450,7 @@ export { boot, enterPlay, exitPlay, placeAtHead, placeAt, placeAtSpot, saveHere,
          avatarName, raceFrozen, isRaceCardOpen, closeRaceCard, syncCourseOverlay,
          getRecState, getRaceState, getPendingRecording, getPreviewCourse,
          getGhostMode, setGhostMode, armGhost, fmtRelief, courseElevAt, worldElevAt,
-         showHereHead, showHereCourse, showHereIdle, refreshHere, getHereSubject };
+         showHereHead, showHereCourse, showHereIdle, showHerePoint, placeAtPoint, refreshHere, getHereSubject };
 
 // auto-boot from a `?world=` query param, or wait for the panel's own load button
 {

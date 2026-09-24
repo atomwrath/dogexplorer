@@ -226,13 +226,36 @@ function moonTexture(illum, side){
       g.beginPath();
       // the dark half, then the terminator ellipse either added to it or carved out of it
       g.arc(cx, cy, R + 0.5, -Math.PI / 2, Math.PI / 2, side > 0);
-      g.ellipse(cx, cy, R * k, R, 0, Math.PI / 2, -Math.PI / 2, illum > 0.5 ? side > 0 : side < 0);
+      /* WHICH WAY ROUND the terminator runs decides crescent from gibbous, and this had it
+       backwards: the dark half is swept top -> bottom on the side away from the sun, and
+       the ellipse closes the shape bottom -> top. For a CRESCENT the dark region is MORE
+       than half, so the ellipse has to bulge into the lit half (sweep through the sun's
+       side); for a GIBBOUS it is less than half, so it bulges back into the dark half.
+       The flags were swapped, which is why a 97% moon drew as a hairline ring and a new
+       moon as a full disc -- at k=1 the ellipse exactly cancels the dark half. */
+    g.ellipse(cx, cy, R * k, R, 0, Math.PI / 2, -Math.PI / 2, illum > 0.5 ? side < 0 : side > 0);
       g.closePath();
       g.fill();
       g.globalCompositeOperation = 'source-over';
     }
     return new THREE.CanvasTexture(cv);
   }catch(err){ return null; }
+}
+
+/* TEST SEAM: how much of the disc the drawn texture actually leaves lit, measured on the
+   texture's own pixels, so a check can compare it with the phase it was drawn for rather
+   than trusting the path arithmetic above. null where there is no canvas to draw on. */
+function moonTextureLitFrac(illum, side){
+  const tex = moonTexture(illum, side);
+  const cv = tex && tex.image;
+  if(!cv || typeof cv.getContext !== 'function') return null;
+  const d = cv.getContext('2d').getImageData(0, 0, 64, 64).data;
+  let lit = 0, disc = 0;
+  for(let y=0; y<64; y++) for(let x=0; x<64; x++){
+    if(Math.hypot(x + 0.5 - 32, y + 0.5 - 32) > 24) continue;
+    disc++; if(d[(y*64 + x)*4 + 3] > 128) lit++;
+  }
+  return disc ? lit / disc : null;
 }
 
 function ensureBodies(){
@@ -400,18 +423,54 @@ function placeBody(sprite, v, visible, tint){
 /* The horizon ring is MeshBasicMaterial and deliberately exempt from fog and from
    lighting (pieces.js), so it is the one thing in the scene that will happily stay
    noon-bright at midnight. Tinting it toward the sky colour is what keeps the mountains
-   as a silhouette rather than a glowing cutout; a little contrast is held back so they do
-   not disappear into the sky entirely.
+   as a silhouette rather than a glowing cutout.
+
+   THE MIX HAS TO HAPPEN IN DISPLAY SPACE. render.js sets outputEncoding = sRGB, so a
+   material colour is read as LINEAR and brightened on the way out -- but scene.background
+   is not, it goes to the screen as written. Mixing a band 90% toward the sky hex in the
+   material's own terms therefore produced #222e4d, which the encoder then lifted to about
+   #6b7aa0: a lavender ridge glowing against a #141e3f sky, three times lighter than the
+   sky it was meant to disappear into. So each band's base is first ENCODED to what it
+   actually looks like, mixed with the sky as it actually looks, and the result DECODED
+   back to linear for the material. At mix 0 that round trip returns the base unchanged,
+   so the daytime look is exactly what it was.
+
+   Two more things a real skyline does:
+   - at night a ridge is darker than the sky behind it -- it is the sky that carries the
+     glow -- so the night target is the sky pulled toward black, not the sky itself;
+   - farther bands sit closer to the sky colour than nearer ones (aerial perspective),
+     so the tint is scaled by band, outermost most.
 
    Base colours are captured lazily on first touch, per mesh, so a rebuilt backdrop starts
    from its own theme colours rather than from whatever tint the last one ended on. */
+function srgbToLinearHex(h){
+  const f = c => { c /= 255; return c <= 0.04045 ? c/12.92 : Math.pow((c + 0.055)/1.055, 2.4); };
+  const n = hexNum(h);
+  return (Math.round(f((n >> 16) & 255)*255) << 16) | (Math.round(f((n >> 8) & 255)*255) << 8) | Math.round(f(n & 255)*255);
+}
+function linearToSrgbHex(h){
+  const f = c => { c /= 255; return c <= 0.0031308 ? c*12.92 : 1.055*Math.pow(c, 1/2.4) - 0.055; };
+  const n = hexNum(h);
+  const g = c => clamp(Math.round(f(c)*255), 0, 255);
+  return (g((n >> 16) & 255) << 16) | (g((n >> 8) & 255) << 8) | g(n & 255);
+}
+const NIGHT_RIDGE_DARK = 0.28;   // how far below the sky a ridge sits at full night
+/* The colour a band should LOOK on screen, as a hex, for a given sky and ramp mix. */
+function backdropShown(baseLinear, skyHex, mix, band, bands){
+  const shown = linearToSrgbHex(baseLinear);
+  if(skyHex == null) return shown;
+  const target = scaleHex(skyHex, 1 - NIGHT_RIDGE_DARK*clamp(mix, 0, 1));
+  const depth = bands > 1 ? band/(bands - 1) : 0;          // 0 nearest .. 1 farthest
+  return mixHexes(shown, target, clamp(mix*(0.86 + 0.12*depth), 0, 1));
+}
 function tintBackdrop(skyHex, mix){
   if(!skyBackdropG || typeof skyBackdropG.traverse !== 'function') return;
   skyBackdropG.traverse(o => {
     if(!o.material || !o.material.color) return;
     if(o.userData.skyBase == null) o.userData.skyBase = o.material.color.getHex();
+    const band = o.userData.band || 0, bands = o.userData.bands || 1;
     o.material.color = col(skyHex == null ? o.userData.skyBase
-                                          : mixHexes(o.userData.skyBase, skyHex, clamp(mix * 0.9, 0, 1)));
+      : srgbToLinearHex(backdropShown(o.userData.skyBase, skyHex, mix, band, bands)));
   });
 }
 function setSkyBackdrop(g){
@@ -535,5 +594,5 @@ function skyOcclusion(){
 
 export { setSkyMode, getSkyMode, setSkyClock, getSkyClock, setSkyPlace, getSkyPlace,
          skyLights, skyOcclusion,
-         setSkyBackdrop, refreshSky, skyFrame, skyReadout, skyState, nowClock,
+         setSkyBackdrop, refreshSky, moonTextureLitFrac, backdropShown, linearToSrgbHex, skyFrame, skyReadout, skyState, nowClock,
          SUN_RAMP, rampAt, skyVector, mixHexes };

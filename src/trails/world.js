@@ -27,7 +27,8 @@ import { THEME, THEMES, setTheme } from './themes.js';
    about maps, graphs or bundles. That is what lets this file call into it from
    applyThemeLighting without a cycle -- the chain is themes -> sky -> world -> main. */
 import { refreshSky, setSkyBackdrop, setSkyPlace } from './sky.js';
-import { ribbonGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
+import { patchGroundRing } from './noise-ring.js';
+import { ribbonGeom, junctionGapGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
          pickTree, buildPOI, buildArea, buildAreaSign, POI_STYLE, AREA_STYLE, shade,
          buildBackdrop, backdropRadius, embankmentGeom, bridgeDeckGeom, bridgeFrameGeom,
          deckMat, frameMat } from './pieces.js';
@@ -1101,13 +1102,22 @@ function planCrossings(adj){
          to. A path that merely ends at the verge has no far side to line up with, and
          turning its last few metres to face the traffic would invent a geometry the
          survey never recorded and no walker would follow. */
-      if(!c.crossing || a.along > ALONG_MAX) continue;
+      if(!c.crossing) continue;
+      /* An arm surveyed running ALONG the road into a crossing used to be left alone, so
+         the crosswalk was built square and the path slid into it at a shallow angle. It
+         is squared too now, over a longer apron the more oblique it arrives, so the turn
+         onto the markings is a curve rather than a kink. */
+      const apronHere = a.along > ALONG_MAX ? apron*(1 + 1.5*a.along) : apron;
       // orient the arm so pts[0] is this node, square it up, then write it back the way
       // round it came. squareApproach returns a new array (it inserts vertices), so the
       // assignment is not optional the way an in-place nudge would have been.
       const pts = a.flip ? [...w.pts].reverse() : w.pts;
-      const squared = squareApproach(pts, c.nx*a.side, c.nz*a.side, apron);
+      const squared = squareApproach(pts, c.nx*a.side, c.nz*a.side, apronHere);
       w.pts = a.flip ? squared.reverse() : squared;
+      // kept so clearOfWiderPaths can put the square back after it resamples and nudges
+      // the line -- otherwise the displacement pass quietly rounds the apron off again
+      const sq = {ux:c.nx*a.side, uz:c.nz*a.side, apron:apronHere};
+      if(a.flip) w.squareB = sq; else w.squareA = sq;
     }
 
     if(!c.crossing) continue;
@@ -1219,7 +1229,7 @@ function clearOfWiderPaths(){
        displaced line is sampled at least as finely as the ribbon that will be drawn from
        it, and no conflict can hide between two stations. */
     e.pts = resample(e.pts, pathOutlineWidth(e.kind)*0.6);
-    if(e.pts.length < 3) continue;   // too short to have an interior; leave it alone
+    if(e.pts.length < 3){ resquare(e); continue; }   // too short to have an interior; leave it alone
     const recorded = e.pts.map(p=>p.slice());
 
     /* Endpoints never move. An endpoint is the edge's claim on a graph node -- shift it
@@ -1232,7 +1242,7 @@ function clearOfWiderPaths(){
     for(let i=1;i<e.pts.length;i++)
       arc[i]=arc[i-1]+Math.hypot(e.pts[i][0]-e.pts[i-1][0], e.pts[i][1]-e.pts[i-1][1]);
     const total=arc[arc.length-1];
-    if(!(total>0)) continue;
+    if(!(total>0)){ resquare(e); continue; }
 
     /* WHICH SIDE OF WHAT: frozen here, from the RECORDED geometry, before anything moves.
 
@@ -1248,23 +1258,26 @@ function clearOfWiderPaths(){
        almost exactly on the centreline has no reliable opinion of its own, so it borrows
        the edge's majority instead of voting with rounding noise -- the same reasoning
        asSidewalk applies to a footway wandering over a road's centreline. */
-    const sideOf = new Array(e.pts.length).fill(0);
+    /* One frozen side PER ANCHOR, not one per vertex. The first version froze each
+       vertex's side against its NEAREST anchor and then pushed it off whichever anchor it
+       overlapped WORST -- and where those were two different roads, or the near and far
+       legs of one loop road, the sign belonged to the wrong line and the vertex was
+       pushed straight through the carriageway. That is where the crossings with no node
+       came from at 1:12 (Juniper Way Loop, three of them). */
+    const sideOf = e.pts.map(()=>new Map());
     {
-      let sum = 0;
+      const sums = new Map();
       for(let i=0;i<e.pts.length;i++){
         const p=e.pts[i];
-        let near=null, nd=Infinity;
         for(const o of anchors){
           const pr=projectOnPolyline(o.pts, p[0], p[1]);
-          if(pr.d < nd){ nd=pr.d; near=pr; }
+          const off=(p[0]-pr.px)*(-pr.dir[1]) + (p[1]-pr.pz)*pr.dir[0];
+          sums.set(o, (sums.get(o)||0) + off);
+          if(Math.abs(off) > 1e-3) sideOf[i].set(o, off>0?1:-1);
         }
-        if(!near) continue;
-        const off=(p[0]-near.px)*(-near.dir[1]) + (p[1]-near.pz)*near.dir[0];
-        sum += off;
-        sideOf[i] = Math.abs(off) > 1e-3 ? (off>0?1:-1) : 0;
       }
-      const majority = sum>=0 ? 1 : -1;
-      for(let i=0;i<sideOf.length;i++) if(!sideOf[i]) sideOf[i]=majority;
+      for(let i=0;i<e.pts.length;i++)
+        for(const o of anchors) if(!sideOf[i].has(o)) sideOf[i].set(o, (sums.get(o)||0)>=0?1:-1);
     }
 
     let touched=false;
@@ -1285,12 +1298,12 @@ function clearOfWiderPaths(){
           if(p[0] < b.x0-clear || p[0] > b.x1+clear || p[1] < b.z0-clear || p[1] > b.z1+clear) continue;
           const pr = projectOnPolyline(o.pts, p[0], p[1]);
           const over = clear - pr.d;
-          if(over > worstOver){ worstOver=over; worst={pr, clear}; }
+          if(over > worstOver){ worstOver=over; worst={pr, clear, o}; }
         }
         if(!worst) continue;
         const {pr, clear}=worst;
         const nx=-pr.dir[1], nz=pr.dir[0];
-        const sd = sideOf[i];
+        const sd = sideOf[i].get(worst.o);
         // taper scaled to the size of the correction, so a small nudge unwinds quickly
         // and a large one is spread over enough of the edge to stay smooth
         const taper=Math.min(Math.max(worstOver*3, 2), total*0.4);
@@ -1313,9 +1326,54 @@ function clearOfWiderPaths(){
        the sidedness invariant can be CHECKED rather than asserted by the code that
        enforces it -- tools/smoke.js reads it to confirm no vertex ended up on the far
        side of the anchor from where the survey put it. */
+    /* NEVER TRADE AN OVERLAP FOR A CROSSING. Sidedness per anchor stops the pass pushing
+       a path through the thing it is clearing, but not through a THIRD path it was never
+       measuring against. A crossing with no node is worse than an overlap -- it cannot be
+       crosswalked, graded to a shared height or routed -- so if the displaced line crosses
+       anything more often than the recorded one did, back the displacement off by halves
+       until it doesn't, and keep the survey line if nothing short of it works. */
+    if(touched){
+      const shifted = e.pts.map(p=>p.slice());
+      const others = GRAPH.edges.filter(o => o!==e && o.pts.length>=2 &&
+                                             boxesMeet(eb, anchorBox(o)));
+      const before = crossCount(recorded, e, others);
+      let ok = crossCount(shifted, e, others) <= before;
+      for(let f=0.5; !ok && f>=0.125; f*=0.5){
+        const trial = recorded.map((p,i)=>[p[0]+(shifted[i][0]-p[0])*f, p[1]+(shifted[i][1]-p[1])*f]);
+        if(crossCount(trial, e, others) <= before){ e.pts = trial; ok = true; }
+      }
+      if(!ok){ e.pts = recorded.map(p=>p.slice()); touched = false; }
+    }
     if(touched){ moved++; e.displaced=true; e.recorded=recorded; }
+    resquare(e);
   }
   return moved;
+}
+
+/* Re-apply planCrossings' square approach to either end of `e` that has one. Displacement
+   resamples every edge near an anchor and tapers its push toward the ends; both bend the
+   last metre off square, and at a crosswalk that metre is the whole point. squareApproach
+   leaves pts[0] where it is, so the junction is untouched. */
+function resquare(e){
+  if(e.squareA) e.pts = squareApproach(e.pts, e.squareA.ux, e.squareA.uz, e.squareA.apron);
+  if(e.squareB){
+    const r = squareApproach([...e.pts].reverse(), e.squareB.ux, e.squareB.uz, e.squareB.apron);
+    e.pts = r.reverse();
+  }
+}
+
+/* Proper crossings between polyline `pts` (standing in for edge e) and every edge in
+   `others` that does not share a node with e. segCross is open on both intervals, so two
+   lines meeting exactly at a shared node never count. */
+function crossCount(pts, e, others){
+  let n=0;
+  for(const o of others){
+    if(o.a===e.a || o.a===e.b || o.b===e.a || o.b===e.b) continue;
+    for(let a=0;a<pts.length-1;a++)
+      for(let b=0;b<o.pts.length-1;b++)
+        if(segCross(pts[a], pts[a+1], o.pts[b], o.pts[b+1])) n++;
+  }
+  return n;
 }
 
 
@@ -1359,6 +1417,76 @@ function pushOffRoad(x, z, margin){
     pz = worst.r.q[1] + nz*side*worst.clear*1.06;
   }
   return [px, pz];
+}
+
+/* Shove a point clear of EVERY drawn path, not only roads -- the general form of
+   pushOffRoad, for sign posts. A fork of two footpaths is exactly where a post used to
+   stand in the tread. Same push (perpendicular, to the side it is already on), iterated
+   because clearing one path can land the point on a neighbour; in a gap too narrow to
+   clear both it settles on the last push, which is still off the path it was pushed from. */
+const POST_CLEAR = 0.45;
+// an area board is 2.5 m wide and hangs square to the path it faces, so its post needs a
+// little more room than a fingerpost for the board edge to clear the verge
+const AREA_SIGN_CLEAR = 0.6;
+function pushOffPaths(x, z, margin){
+  if(!GRAPH) return [x, z];
+  let px=x, pz=z;
+  for(let pass=0; pass<5; pass++){
+    let worst=null, worstOver=0;
+    for(const e of GRAPH.edges){
+      if(e.pts.length<2) continue;
+      const clear = pathOutlineWidth(e.kind)/2 + (margin||0);
+      for(let i=0;i<e.pts.length-1;i++){
+        const a=e.pts[i], b=e.pts[i+1];
+        if(Math.min(a[0],b[0])-clear > px || Math.max(a[0],b[0])+clear < px) continue;
+        if(Math.min(a[1],b[1])-clear > pz || Math.max(a[1],b[1])+clear < pz) continue;
+        const r=ptSeg([px,pz], a, b);
+        const over = clear - r.d;
+        if(over > worstOver){ worstOver=over; worst={r, a, b, clear}; }
+      }
+    }
+    if(!worst) break;
+    const dx=worst.b[0]-worst.a[0], dz=worst.b[1]-worst.a[1];
+    const L=Math.hypot(dx,dz)||1;
+    const nx=-dz/L, nz=dx/L;
+    const sx=px-worst.r.q[0], sz=pz-worst.r.q[1];
+    const side = (sx*nx + sz*nz) >= 0 ? 1 : -1;
+    px = worst.r.q[0] + nx*side*worst.clear*1.04;
+    pz = worst.r.q[1] + nz*side*worst.clear*1.04;
+  }
+  /* Pinned between two paths closer together than a post plus two verges, the pushes
+     just trade one path for the other. Then search outward in rings for the NEAREST
+     point that is clear of everything, which is where a real post would be dug in. */
+  if(pathOverlap(px, pz, margin) > 0){
+    for(let r=0.6; r<=6; r+=0.6){
+      let best=null, bd=Infinity;
+      for(let k=0;k<16;k++){
+        const a=k/16*Math.PI*2, cx=px+Math.cos(a)*r, cz=pz+Math.sin(a)*r;
+        if(pathOverlap(cx, cz, margin) > 0) continue;
+        const d=Math.hypot(cx-x, cz-z);
+        if(d<bd){ bd=d; best=[cx,cz]; }
+      }
+      if(best) return best;
+    }
+  }
+  return [px, pz];
+}
+/* How far (x,z) sits inside the nearest drawn path's painted edge plus `margin`; <= 0 is
+   clear. */
+function pathOverlap(x, z, margin){
+  let worst=0;
+  for(const e of GRAPH.edges){
+    if(e.pts.length<2) continue;
+    const clear = pathOutlineWidth(e.kind)/2 + (margin||0);
+    for(let i=0;i<e.pts.length-1;i++){
+      const a=e.pts[i], b=e.pts[i+1];
+      if(Math.min(a[0],b[0])-clear > x || Math.max(a[0],b[0])+clear < x) continue;
+      if(Math.min(a[1],b[1])-clear > z || Math.max(a[1],b[1])+clear < z) continue;
+      const over = clear - ptSeg([x,z], a, b).d;
+      if(over > worst) worst = over;
+    }
+  }
+  return worst;
 }
 
 function crossingAt(ni){
@@ -1779,6 +1907,59 @@ const PATH_STYLE_KEYS = new Set(['trail','track','dirtroad','road','paved_trail'
 let WORLD_REV = 0;
 function getWorldRevision(){ return WORLD_REV; }
 
+/* HOW HIGH THE PAINTED SURFACE IS above an edge's graded profile, per station.
+
+   The profile (e.prof.ys) is the bench the ground was graded to; the ribbons are stacked
+   ABOVE it -- casing, shoulder, tread, then the inner stripe or ruts -- and each class is
+   lifted again by kindLift so a trail reads on top of a road. Standing on the profile
+   therefore put every walker INSIDE that stack, and by a different amount per class: 0.08
+   below the top of a road, 0.17 below the top of a trail. That difference is the whole of
+   "the trail covers the dog's back paw but the road doesn't".
+
+   So the surface the spatial hash reports is the top of what was actually drawn there:
+     - an ordinary stretch: kindLift + TREAD_TOP (the inner stripe / ruts)
+     - a footway beside a road: its tread, which is all it draws
+     - a deck: the planks, which sit PLANK_LIFT over the tread line
+     - a stretch trimmed back at a road contact: the road's own top, because that is the
+       surface painted under your feet there (the crosswalk bars sit a hair above it). */
+const TREAD_TOP = 0.08, FOOTWAY_TOP = 0.05, PLANK_LIFT = 0.1;
+function drawnTopLifts(e, pr){
+  const n = pr.pts.length, out = new Array(n);
+  const lift = kindLift(e.kind);
+  const base = e.buried ? lift + FOOTWAY_TOP : lift + TREAD_TOP;
+  const roadTop = kindLift('road') + TREAD_TOP;
+  let arc = 0, total = 0;
+  for(let i=1;i<n;i++) total += Math.hypot(pr.pts[i][0]-pr.pts[i-1][0], pr.pts[i][1]-pr.pts[i-1][1]);
+  const ta = e.trimA || 0, tb = e.trimB || 0;
+  for(let i=0;i<n;i++){
+    if(i) arc += Math.hypot(pr.pts[i][0]-pr.pts[i-1][0], pr.pts[i][1]-pr.pts[i-1][1]);
+    let v = base;
+    if(!e.buried && ((ta > 0 && arc < ta) || (tb > 0 && arc > total - tb))) v = roadTop;
+    if(pr.deck && pr.deck[i]) v = lift + PLANK_LIFT;
+    out[i] = v;
+  }
+  return out;
+}
+
+/* The graded bench itself, with no paint on it: what the crosswalk markings are laid on,
+   since they are drawn at their own fixed offsets above it like every other ribbon. */
+function benchY(x,z){
+  const g = terrainY(x,z,VERT_SCALE);
+  const nt = nearestTrail(x,z);
+  if(nt.y == null || !(nt.d <= nt.hw) || !nt.edge) return g;
+  const e = nt.edge, pr = e.prof;
+  if(!pr) return g;
+  // undo the drawn lift nearest this point; the lift only varies station to station
+  let bi = 0, bd = Infinity;
+  for(let i=0;i<pr.pts.length;i++){
+    const d = Math.hypot(pr.pts[i][0]-x, pr.pts[i][1]-z);
+    if(d < bd){ bd = d; bi = i; }
+  }
+  const y = nt.y - drawnTopLifts(e, pr)[bi];
+  const k = clamp((nt.hw - nt.d)/0.4, 0, 1);
+  return g + (y - g)*k;
+}
+
 /* Height something STANDS on: the ground, or the trail tread when inside a trail's
    corridor.
 
@@ -1934,8 +2115,8 @@ function rebuildWorld(){
   // ground: with a DEM the terrace mesh IS the heightfield, already in real-metre world
   // coordinates. Without one, a single flat plane covering the map's extent -- so a bare
   // pair of .geojson files is still playable, just level.
-  const groundMat=new THREE.MeshToonMaterial({map:groundTexture(THEME),
-    gradientMap:toonTex, polygonOffset:true, polygonOffsetFactor:2, polygonOffsetUnits:2});
+  const groundMat=patchGroundRing(new THREE.MeshToonMaterial({map:groundTexture(THEME),
+    gradientMap:toonTex, polygonOffset:true, polygonOffsetFactor:2, polygonOffsetUnits:2}));
   // buildTerrainMesh now writes UVs straight from world x/z (see its own comment) at a
   // fixed real-world tile size, so the texture is already correctly scaled by
   // construction -- no separate repeat.set() needed, and one WOULD be wrong here: it
@@ -2004,8 +2185,9 @@ function rebuildWorld(){
   // call nearestTrail, and standingY now needs tread heights too
   GRAPH.edges.forEach(e=>{
     const pr = e.prof, hw = (pathWidth(e.kind)+1.5)/2;
+    const top = drawnTopLifts(e, pr);
     for(let i=0;i<pr.pts.length-1;i++)
-      hashSeg({a:pr.pts[i], b:pr.pts[i+1], edge:e, ya:pr.ys[i], yb:pr.ys[i+1], hw,
+      hashSeg({a:pr.pts[i], b:pr.pts[i+1], edge:e, ya:pr.ys[i]+top[i], yb:pr.ys[i+1]+top[i+1], hw,
                deck: !!(pr.deck && pr.deck[i] && pr.deck[i+1])});
   });
 
@@ -2226,11 +2408,15 @@ function rebuildWorld(){
      road: standingY (not terrainY) so the stripes sit on the tread the road actually
      rendered at rather than on the terrace underneath it. */
   CROSSINGS.forEach(rec=>{
-    try{ worldG.add(buildCrossing(rec, standingY)); }
+    try{ worldG.add(buildCrossing(rec, benchY)); }
     catch(err){ console.warn('crossing skipped', err); }
   });
 
-  AREAS.forEach(a=>{ if(a.name) worldG.add(buildAreaSign(a,groundYAt,nearestTrail)); });
+  AREAS.forEach(a=>{ if(a.name){
+    const sg=buildAreaSign(a,groundYAt,nearestTrail,(x,z)=>pushOffPaths(x,z,AREA_SIGN_CLEAR));
+    sg.__areaSign=true;               // test seam: found by the smoke harness like fingerposts
+    worldG.add(sg);
+  } });
 
   // junction pads + signs
   // These discs are the ONLY thing that covers the seam where two edges meet: each
@@ -2265,31 +2451,49 @@ function rebuildWorld(){
   const signWanted=[];      // collected here, thinned and built after the loop (see below)
   GRAPH.nodes.forEach((n,ni)=>{
     if(n.deg<1) return;
-    const y=standingY(n.p[0],n.p[1]);
     const here=adj[ni];
-    if(n.deg>=3){
-      const xing=crossingAt(ni);
-      const byKind=new Map();
+    /* JUNCTION FILLS, one per drawn style, covering only what the arms' own ribbons
+       leave open (pieces.js junctionGapGeom). An arm is left out when it was TRIMMED at
+       this node: a trail cut back to the verge of a road no longer reaches the node, so
+       giving it a pad there put a dirt disc in the middle of the tarmac -- which is what
+       used to happen at every road contact that was not a marked crossing (the crossing
+       case had its own exception; this is the general rule it was a special case of).
+       Each layer is filled at its own width and height, so nothing is wider than the
+       ribbon it joins, and the fill sits at the arms' end height, flush with their butt
+       edges. Also run at degree 2 now: two edges of one road meeting at a bend node
+       leave the same outer wedge as a bend inside an edge does. */
+    if(n.deg>=2){
+      const groups=new Map();
       for(const e of here){
-        if(e.buried) continue;
-        /* At a marked crossing the walking surfaces stop at the kerb, so a pad for them
-           would be a dirt disc floating in the middle of the road with nothing to join --
-           the crosswalk and its two landings are the junction here. The ROAD still gets
-           its pad: its own ribbons really do meet at this node. */
-        if(xing && e.kind!=='road') continue;
-        // keyed by drawn style, not class: a paved and a dirt trail meeting here are two
-        // treads in two colours, and each needs its seam covered in its own
-        const key=styleKey(e), prev=byKind.get(key);
-        byKind.set(key, {kind:e.kind, hw:Math.max(prev?prev.hw:0, pathOutlineWidth(e.kind)/2)});
+        if(e.buried || !e.prof || e.prof.pts.length<2) continue;
+        const ends=[];
+        if(e.a===ni && !(e.trimA>0)) ends.push('a');
+        if(e.b===ni && !(e.trimB>0)) ends.push('b');
+        for(const end of ends){
+          const pp=e.prof.pts, ys=e.prof.ys;
+          const p0=end==='a'?pp[0]:pp[pp.length-1], p1=end==='a'?pp[1]:pp[pp.length-2];
+          const y0=end==='a'?ys[0]:ys[ys.length-1];
+          const key=styleKey(e);
+          const g=groups.get(key)||{kind:e.kind, key, angs:[], ys:[]};
+          g.angs.push(Math.atan2(p1[1]-p0[1], p1[0]-p0[0])); g.ys.push(y0);
+          groups.set(key,g);
+        }
       }
-      for(const [key, {kind, hw}] of byKind){
-        const rank=pathRank(kind), lift=kindLift(kind);
-        const st=PATH_STYLE[key]||PATH_STYLE.trail;
-        const r=Math.max(hw*1.2,0.4);
-        const oDisc=new THREE.Mesh(new THREE.CircleGeometry(r,20),inkMats[rank]);
-        oDisc.rotation.x=-Math.PI/2; oDisc.position.set(n.p[0],y+lift+0.045,n.p[1]); worldG.add(oDisc);
-        const disc=new THREE.Mesh(new THREE.CircleGeometry(r*0.84,20),trailMat(st.tread,rank));
-        disc.rotation.x=-Math.PI/2; disc.position.set(n.p[0],y+lift+0.06,n.p[1]); worldG.add(disc);
+      for(const g of groups.values()){
+        // a style with a single arm here gets a half-disc: the path's rounded end where
+        // it meets a different kind of path
+        const rank=pathRank(g.kind), lift=kindLift(g.kind);
+        const st=PATH_STYLE[g.key]||PATH_STYLE.trail;
+        const W=pathWidth(g.kind);
+        const yb=g.ys.reduce((a,b)=>a+b,0)/g.ys.length;
+        const layers=[[W*OUTLINE_MUL/2, 0.012, inkMats[rank]],
+                      [W*SHOULDER_MUL/2, 0.02, trailMat(st.shoulder,rank)],
+                      [W/2, 0.05, trailMat(st.tread,rank)]];
+        for(const [r, dy, mat] of layers){
+          const geo=junctionGapGeom(n.p[0], n.p[1], yb+lift+dy, g.angs, r);
+          // test seam: which kind of path this fill belongs to, and the ribbon width it matches
+          if(geo){ geo.__gapKind=g.kind; geo.__gapR=r; worldG.add(new THREE.Mesh(geo, mat)); }
+        }
       }
     }
 
@@ -2316,27 +2520,65 @@ function rebuildWorld(){
          walks the fragments of one route together until the walker actually has to choose
          again, which is the distance a fingerpost is for. */
       const reach=armReach(ni,o.e,adj);
+      // tx/tz: the point the arm is aimed AT, kept so the angle can be re-measured from
+      // wherever the post finally stands rather than from the node it was set back from
       return{label:o.e.name, route:o.e.route, kind:o.e.kind, named:!!o.e.named,
-             distU:reach.dist, dist:distLabel(reach.dist), angle:Math.atan2(az,ax)};
+             distU:reach.dist, dist:distLabel(reach.dist), angle:Math.atan2(az,ax),
+             tx:n.p[0]+ax, tz:n.p[1]+az, buried:!!o.e.buried};
     };
-    /* WHERE THE POST GOES, worked out once for both kinds of sign.
+    /* WHERE THE POST GOES. A fingerpost stands BESIDE the paths it names, never on one.
 
-       A fingerpost belongs on the verge, not in the road. At a crossing there is a right
-       answer -- the landing beside the markings -- and everywhere else there is a catch
-       all: shove it clear of any carriageway it happens to be standing in. Applied to
-       trailhead posts too, which is the bit that was missed first time round: a trailhead
-       at a roadside car park is exactly the sign most likely to be planted in tarmac, and
-       four of them were. */
+       It used to be planted on the node itself -- dead centre of the junction, in the
+       tread -- and only moved if that happened to be a road. At a crossing the landing
+       beside the markings is still the answer. Everywhere else the post goes into the
+       widest open wedge between the arms, set back along that wedge's bisector just far
+       enough that the nearest arm's painted edge clears it by POST_CLEAR -- a narrow wedge
+       needs a longer set-back to get the same clearance, which is the sin() below. A dead
+       end (trailhead) is a one-armed junction whose open wedge is everything behind it,
+       so the same rule puts its post off to one side of the gate. Then a general push
+       clear of every drawn path, since the wedge only knows about the arms at THIS node. */
     let sx=n.p[0], sz=n.p[1];
     const xing=crossingAt(ni);
     if(xing){
       const nxr=-xing.dir[1], nzr=xing.dir[0];
       const off=xing.trim + xing.walkW*0.5;
       sx=n.p[0]+nxr*off; sz=n.p[1]+nzr*off;
+    }else if(out.length){
+      const angs=[]; let hwMax=0;
+      for(const o of out){
+        let ax=0,az=0,acc=0,i=1;
+        while(i<o.pts.length&&acc<2.5){ax=o.pts[i][0]-n.p[0];az=o.pts[i][1]-n.p[1];acc=Math.hypot(ax,az);i++;}
+        if(acc>1e-6) angs.push(Math.atan2(az,ax));
+        hwMax=Math.max(hwMax, pathOutlineWidth(o.e.kind)/2);
+      }
+      angs.sort((a,b)=>a-b);
+      let gap=2*Math.PI, bis=0;
+      if(angs.length===1){ gap=2*Math.PI; bis=angs[0]+Math.PI; }
+      else if(angs.length>1){
+        gap=-1;
+        for(let k=0;k<angs.length;k++){
+          const a=angs[k], b=k+1<angs.length?angs[k+1]:angs[0]+2*Math.PI;
+          if(b-a>gap){ gap=b-a; bis=(a+b)/2; }
+        }
+      }
+      if(angs.length){
+        // a trailhead post goes to the SIDE of the path (the gate straddles the end), a
+        // little way up it so it is not in the arch's footprint
+        if(angs.length===1){
+          const a=angs[0], side=Math.PI/2;
+          const r=hwMax+POST_CLEAR+0.5;
+          sx=n.p[0]+Math.cos(a+side)*r+Math.cos(a)*1.6;
+          sz=n.p[1]+Math.sin(a+side)*r+Math.sin(a)*1.6;
+        }else{
+          const half=Math.max(gap/2, 0.35);
+          const r=Math.min((hwMax+POST_CLEAR)/Math.sin(Math.min(half, Math.PI/2)), (hwMax+POST_CLEAR)*3);
+          sx=n.p[0]+Math.cos(bis)*r; sz=n.p[1]+Math.sin(bis)*r;
+        }
+      }
     }
-    const clearPt=pushOffRoad(sx, sz, 0.8);
+    const clearPt=pushOffPaths(sx, sz, POST_CLEAR);
     sx=clearPt[0]; sz=clearPt[1];
-    const sy=standingY(sx, sz);
+    const sy=terrainY(sx, sz, VERT_SCALE);
 
     if(n.deg>=3 && isFork){
       signWanted.push({n, y:sy, sx, sz, arms:pickArms(out.map(armOf)), deg:n.deg, routes:routes.length});
@@ -2397,7 +2639,11 @@ function rebuildWorld(){
          node is left alone -- it is the graph's, and the arm ANGLES were measured from it. */
       const at = (c.s.sx==null || (c.s.sx===c.s.n.p[0] && c.s.sz===c.s.n.p[1]))
         ? c.s.n : {p:[c.s.sx, c.s.sz], deg:c.s.n.deg};
-      const sg=buildSign(at, c.s.arms); sg.position.y=c.s.y; worldG.add(sg);
+      // re-aim every arm from where the post actually stands: measured from the node, an
+      // arm on a set-back post points a metre or two off its trail
+      const arms = c.s.arms.map(a => (a.tx==null) ? a :
+        Object.assign({}, a, {angle:Math.atan2(a.tz-at.p[1], a.tx-at.p[0])}));
+      const sg=buildSign(at, arms); sg.position.y=c.s.y; worldG.add(sg);
     });
     SIGN_COUNT = {wanted:signWanted.length, built:kept.length, minGap};
   }
