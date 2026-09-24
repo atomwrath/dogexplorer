@@ -3688,6 +3688,11 @@ async function assertAll(window, errors, stats) {
     let worst = 0, who = '';
     for (const a of areas) {
       if (a.groundY == null) continue;
+      /* EXCEPT a lot graded to its entrance (and anything standing on it), which is
+         deliberately NOT at its own ground's level: it is at the road's, because a car has
+         to drive in. Those answer to a stricter rule of their own, asserted below -- they
+         are exempt from this one, not from checking. */
+      if (a.entrance) continue;
       const bb = areaBBox(a);
       const inside = [];
       for (let i = 0; i <= 14; i++) for (let j = 0; j <= 14; j++) {
@@ -3707,17 +3712,117 @@ async function assertAll(window, errors, stats) {
     return worst <= 0;
   })(), () => __areaNote);
 
+  /* A LOT IS LEVEL WITH THE ROAD INTO IT. The overlook lot stood 0.97 units above Ridge
+     Road -- more than a contour step -- so the only way in was a climb. Every paved lot is
+     now graded to its entrance: its drawn surface equals the painted top of the path it
+     is entered from, and every path station inside it is at that same level. */
+  let __lotLevelNote = '';
+  check('every paved lot is flush with its entrance, and paths across it are at its level', (() => {
+    const solids = getAreaSolids().filter(s => s.kind === 'parking');
+    if (!solids.length) return false;
+    let off = 0, worst = 0, noEntrance = 0, pathOff = 0;
+    for (const s of solids) {
+      const a = s.area;
+      if (!a.entrance) { noEntrance++; continue; }
+      const d = Math.abs(s.top - a.entrance.y);
+      worst = Math.max(worst, d);
+      if (d > 1e-3) off++;
+      for (const e of getGraph().edges) {
+        if (!e.prof || e.buried) continue;
+        const top = drawnTopLifts(e, e.prof);
+        e.prof.pts.forEach((p, i) => {
+          if (pointInArea(p[0], p[1], a) && Math.abs(e.prof.ys[i] + top[i] - s.top) > 1e-3) pathOff++;
+        });
+      }
+    }
+    __lotLevelNote = `${solids.length} lots, worst ${worst.toFixed(4)}u from the entrance, ${pathOff} path stations off-level, ${noEntrance} with no entrance`;
+    return off === 0 && pathOff === 0 && noEntrance === 0;
+  })(), () => __lotLevelNote);
+
+  /* THE TWO THINGS A LOT HAS TO DO UNDER FOOT, driven through the real movement code.
+     In: from the entrance on the road, walk straight at the lot -- you must end up
+     standing on its surface, not stopped at a lip. Not through: from open ground beside
+     a raised edge, walk straight at it -- you must be refused, and stay on the ground. */
+  let __lotWalkNote = '';
+  check('you can walk onto a lot from its entrance, and not into its raised side', (() => {
+    /* At the STARTUP scales (1:5, 0.25x), which is what a player walks. The suite reaches
+       this point at 1:12, where compaction flattens every lot edge below a step -- there
+       is no raised side there to walk into, and a check with nothing to test proves
+       nothing. Restored at the end. */
+    const scale0 = getMapScale(), vert0 = getVertScale();
+    setVertScale(0.25); setMapScale(0.2);
+    const pl = getTrailPlayer();
+    const save = { x: pl.x, z: pl.z, y: pl.y, climbT: pl.climbT, vy: pl.vy };
+    const lim = stepUpLimit();
+    let inOk = 0, inN = 0, wallN = 0, wallOk = 0;
+    for (const s of getAreaSolids().filter(s => s.kind === 'parking')) {
+      const a = s.area, ent = a.entrance;
+      if (!ent) continue;
+      // a point just inside the lot, toward its interior from the entrance
+      const bb = s.bb;
+      let tx = null, tz = null, bd = Infinity;
+      for (let i = 1; i < 20; i++) for (let j = 1; j < 20; j++) {
+        const x = bb.mnx + bb.w * i / 20, z = bb.mnz + bb.h * j / 20;
+        if (!pointInArea(x, z, a)) continue;
+        const d = Math.hypot(x - ent.x, z - ent.z);
+        if (d < bd) { bd = d; tx = x; tz = z; }
+      }
+      if (tx == null) continue;
+      inN++;
+      pl.x = ent.x; pl.z = ent.z; pl.y = 0; pl.climbT = 0; pl.vy = 0;
+      for (let k = 0; k < 400 && Math.hypot(pl.x - tx, pl.z - tz) > 0.1; k++) {
+        const dx = tx - pl.x, dz = tz - pl.z, L = Math.hypot(dx, dz);
+        movePlayer(dx / L * Math.min(0.05, L), dz / L * Math.min(0.05, L));
+      }
+      /* Reached it, at the lot's level -- not stopped at a lip. "At level" allows 0.1u:
+         the lot's outline overlaps the entrance road's corridor, and where a road keeps
+         climbing along the lot's edge the pup stands on the road a few cm over the flat
+         pad. That is a sloped road meeting a level lot, not a step (a step is > 1u). */
+      if (Math.hypot(pl.x - tx, pl.z - tz) <= 0.1 && Math.abs(playerGroundY(pl.x, pl.z) - s.top) < 0.1) inOk++;
+
+      // the raised side: outline points whose outside ground is more than a step below
+      const ring = a.rings[0];
+      let A = 0; for (let k = 0; k < ring.length; k++) { const p = ring[k], q = ring[(k + 1) % ring.length]; A += p[0] * q[1] - q[0] * p[1]; }
+      const out = A > 0 ? -1 : 1;
+      for (let k = 0; k < ring.length && wallN < 60; k++) {
+        const p = ring[k], q = ring[(k + 1) % ring.length];
+        const L = Math.hypot(q[0] - p[0], q[1] - p[1]); if (L < 1e-6) continue;
+        const nx = -(q[1] - p[1]) / L * out, nz = (q[0] - p[0]) / L * out;
+        const mx = (p[0] + q[0]) / 2, mz = (p[1] + q[1]) / 2;
+        const ox = mx + nx * 0.8, oz = mz + nz * 0.8;
+        const nt = nearestTrail(ox, oz);
+        if (nt.d <= nt.hw + 0.3) continue;                    // a path's own edge: not this test
+        if (areaSolidTop(ox, oz) != null) continue;
+        if (s.top - standingY(ox, oz) <= lim * 1.05) continue; // not a genuine wall here
+        wallN++;
+        pl.x = ox; pl.z = oz; pl.y = 0; pl.climbT = 0; pl.vy = 0;
+        for (let k2 = 0; k2 < 40; k2++) movePlayer(-nx * 0.05, -nz * 0.05);
+        if (!pointInArea(pl.x, pl.z, a)) wallOk++;
+      }
+    }
+    Object.assign(pl, save);
+    setVertScale(vert0); setMapScale(scale0);
+    __lotWalkNote = `${inOk}/${inN} lots entered from the road, ${wallOk}/${wallN} raised-edge approaches refused`;
+    return inN > 3 && inOk === inN && wallN >= 1 && wallOk === wallN;
+  })(), () => __lotWalkNote);
+
   /* Solid areas are walls OFF the trail and are not walls ON it. Both halves matter and
      they pull in opposite directions, so both are asserted: a collider that yields to
      nothing fences off the ~5 m of trail that runs through Kissing Camels, and one that
      yields to everything is not a collider. */
   {
     const solids = getAreaSolids();
-    check('rock masses and buildings are registered as solid',
+    check('rock masses, buildings and car parks are registered as solid',
       /* Pinned to the literal list rather than read back out of AREA_STYLE. Asserting a
          table against itself passes no matter what the table says; naming the kinds here
-         is what makes "meadows and car parks are not walls" a thing the suite defends. */
-      solids.length > 0 && solids.every(s => ['building','rock','redrock','lightrock'].includes(s.kind)),
+         is what makes "meadows are not walls" a thing the suite defends.
+
+         Car parks JOINED this list on request. They used to be paint on the ground, and
+         once a lot was a raised pad with a kerb wall (so it stopped floating), walking
+         "into the built-up side" went straight through the wall. A lot is a solid now:
+         its top is the slab, its raised edge is a wall, and its entrance is flush. */
+      solids.length > 0 && solids.every(s => ['building','rock','redrock','lightrock','parking'].includes(s.kind))
+        && solids.some(s => s.kind === 'parking'),
       `${solids.length} solid areas: ${[...new Set(solids.map(s => s.kind))].join('/')}`);
 
     /* Interior points are FOUND by scanning, not assumed to be the centroid. These are

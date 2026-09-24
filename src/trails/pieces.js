@@ -685,7 +685,11 @@ const AREA_STYLE={
   redrock:{fill:'#8a3e2c',op:0.65,em:'🪨',landform:true,solid:true,label:'Red rock formation'},
   lightrock:{fill:'#c9a87e',op:0.65,em:'🪨',landform:true,solid:true,label:'Light rock formation'},
   building:{fill:'#b08a63',op:1,em:'🏚️',solid:true,label:'Building'},
-  parking:{fill:'#8d8578',op:0.85,em:'🅿️',paved:true,label:'Parking'}
+  /* solid: a lot is a graded pad, and where it stands above the ground beside it (the
+     kerb wall's side) that face is a wall, not something to walk into. Its top is the
+     slab (buildArea's solidTop), and world.js levels the slab to its entrance road, so
+     the way in is flush and every other edge is a retaining wall or a cut bank. */
+  parking:{fill:'#8d8578',op:0.85,em:'🅿️',paved:true,solid:true,label:'Parking'}
 };
 function plaqueTex(title,sub){
   const c=document.createElement('canvas');c.width=384;c.height=112;
@@ -1001,6 +1005,8 @@ function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
        daylight under it. A kerb wall round every ring, from the surface down to just
        below the ground at each point, makes it read as one solid pad on the hillside. */
     if(st.paved){
+      // the walkable top is the slab itself (world.js's LOT_SURFACE_LIFT matches this)
+      solidTop=0.03;
       const baseY=(a.groundY!=null)?a.groundY*vertScale:groundYAt(bb.cx,bb.cz);
       const wall=areaWallGeom(a.rings, 0.03, (x,z)=>groundYAt(x,z)-baseY);
       // its own material: double-sided (ring winding varies by source file), and toon()'s

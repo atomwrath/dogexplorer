@@ -14,7 +14,7 @@
    remains adjustable, since stretching Y alone can't misalign vectors from terrain. */
 import { clamp } from '../core/math.js';
 import { QUALITY } from '../core/quality.js';
-import { buildTerrainMesh, flattenAreaCells, gradeProfile, gradeTrailCells, GROUND_TILE_M, groundTexture, reliefCanvas, resample, setStep, setWorld, terrainY } from './terrain.js';
+import { areaCells, buildTerrainMesh, flattenAreaCells, gradeProfile, setCellsHeightM, gradeTrailCells, GROUND_TILE_M, groundTexture, reliefCanvas, resample, setStep, setWorld, terrainY } from './terrain.js';
 
 import { scene, camera, disposeGroup, sun, hemi } from '../core/render.js';
 import { toon, toonTex } from '../core/materials.js';
@@ -1907,6 +1907,191 @@ const PATH_STYLE_KEYS = new Set(['trail','track','dirtroad','road','paved_trail'
 let WORLD_REV = 0;
 function getWorldRevision(){ return WORLD_REV; }
 
+/* ---------- lots level with the road into them ----------
+
+   flattenAreaCells levels every area to the MEDIAN terrace band under it, which is right
+   for a building footprint and wrong for a car park: the car has to get in. Ridge Road
+   passes the overlook lot 0.97 units below its surface -- more than a whole contour step
+   -- so the lot stood on a plinth the road ran along the bottom of, and on other maps a lot
+   sat as far below the path that serves it. A real lot is graded flush with its drive.
+
+   So each paved lot is re-levelled to its ENTRANCE: the graded profile of the path its
+   outline comes closest to, preferring a road or dirt road (what a car arrives on) over a
+   footpath within ENTRY_TRAIL_BIAS of it, taken to the top of that path's paint so the
+   tarmac meets the tarmac. The lot's cells are then set to that height exactly (a
+   fractional band, as a path corridor is), so the slab lies flush on its own ground; where
+   the hillside falls away, pieces.js's kerb wall is the retaining wall, and where it rises
+   the terrain itself is the cut bank.
+
+   Touching areas move TOGETHER. flattenAreaCells deliberately gave polygons that share
+   cells a shared level (this map has lots drawn as several adjoining polygons, and
+   buildings standing on lots); re-levelling one member alone would put a step through the
+   middle of the car park. Rock formations and water are never pulled in -- a rock is not
+   graded to a road, and a pond is the low ground by definition. */
+const ENTRY_REACH = 2.5, ENTRY_TRAIL_BIAS = 2.0;
+function lotEntrance(members){
+  let best = null;
+  for(const e of GRAPH.edges){
+    if(e.buried || !e.prof || e.prof.pts.length < 2) continue;
+    const pr = e.prof, reach = pathOutlineWidth(e.kind)/2 + ENTRY_REACH;
+    const isRoad = e.kind === 'road' || e.kind === 'dirtroad';
+    const top = drawnTopLifts(e, pr);
+    for(const a of members){
+      const bb = areaBBox(a);
+      for(let i=0;i<pr.pts.length-1;i++){
+        const p = pr.pts[i], q = pr.pts[i+1];
+        if(Math.max(p[0],q[0]) < bb.mnx - reach || Math.min(p[0],q[0]) > bb.mxx + reach) continue;
+        if(Math.max(p[1],q[1]) < bb.mnz - reach || Math.min(p[1],q[1]) > bb.mxz + reach) continue;
+        for(const ring of a.rings) for(let k=0;k<ring.length;k++){
+          const c = ring[k], d2 = ring[(k+1)%ring.length];
+          // nearest approach between the path segment and the outline edge: endpoints of
+          // each against the other is exact for non-crossing segments, and a crossing
+          // (the road running INTO the lot) is distance zero
+          const cands = [
+            [ptSeg(c, p, q), 'onPath', c], [ptSeg(d2, p, q), 'onPath', d2],
+            [ptSeg(p, c, d2), 'atStation', 0], [ptSeg(q, c, d2), 'atStation', 1],
+          ];
+          const X = segCross(p, q, c, d2);
+          for(const [r, how, which] of cands){
+            let d = r.d, t;
+            if(how === 'onPath') t = r.t; else t = which;
+            if(X){ d = 0; t = X.t != null ? X.t : t; }
+            if(d > reach) continue;
+            const score = d + (isRoad ? 0 : ENTRY_TRAIL_BIAS);
+            if(!best || score < best.score){
+              const y = pr.ys[i] + (pr.ys[i+1]-pr.ys[i])*t + top[i] + (top[i+1]-top[i])*t;
+              best = {score, d, y, edge:e, x:p[0]+(q[0]-p[0])*t, z:p[1]+(q[1]-p[1])*t};
+            }
+          }
+        }
+      }
+    }
+  }
+  return best;
+}
+function levelLotsToEntrances(){
+  const V = VERT_SCALE;
+  const flat = a => {
+    const st = AREA_STYLE[a.kind];
+    return st && !st.landform && a.kind !== 'water' && a.groundY != null;
+  };
+  const lots = AREAS.filter(a => { const st = AREA_STYLE[a.kind]; return st && st.paved && a.groundY != null; });
+  if(!lots.length) return 0;
+  const cells = new Map();
+  const cellsOf = a => { if(!cells.has(a)) cells.set(a, areaCells(a, pointInArea, areaBBox)); return cells.get(a); };
+  const touches = (a, b) => { const A = cellsOf(a), B = cellsOf(b); for(const k of A) if(B.has(k)) return true; return false; };
+  const done = new Set();
+  let moved = 0;
+  for(const seed of lots){
+    if(done.has(seed)) continue;
+    // grow the group: every flat area sharing a cell with any member
+    const group = [seed]; done.add(seed);
+    for(let gi=0; gi<group.length; gi++){
+      for(const b of AREAS){
+        if(done.has(b) || !flat(b)) continue;
+        if(touches(group[gi], b)){ group.push(b); done.add(b); }
+      }
+    }
+    const paved = group.filter(a => lots.includes(a));
+    const ent = lotEntrance(paved);
+    if(!ent) continue;
+    // the drawn slab sits LOT_SURFACE_LIFT over its group origin; land that on the paint
+    const gy = (ent.y - LOT_SURFACE_LIFT)/V;           // back to raw metres, as groundY is kept
+    for(const a of group){
+      a.groundY = gy;
+      a.entrance = {edge: ent.edge.name, kind: ent.edge.kind, y: ent.y, x: ent.x, z: ent.z};
+      setCellsHeightM(cellsOf(a), gy);
+    }
+    moved += group.length;
+  }
+  return moved;
+}
+/* A PATH THAT CROSSES A LOT IS GRADED TO IT. Levelling a lot to its entrance is only half
+   of it: other paths can run through the same polygon at the height the hillside had,
+   and once the lot is solid a path 2 units below its surface is a path into a wall
+   (Juniper Link through central parking), while one a step above it hangs over the lot.
+   A real footpath across a car park is at car-park level, so every station of any path
+   that lies inside a lot is moved to the lot's surface, and the difference is eased out
+   over a ramp either side -- the path walks down (or up) onto the lot instead of meeting
+   a kerb.
+
+   The ramp grade is a REAL-WORLD grade, 12% (a steep car-park ramp), converted to world
+   units for the current scales: heights scale by VERT_SCALE and horizontal distance by
+   MAP_SCALE, so at the default 0.25x elevation the same 12% is 0.15 world-units-per-unit
+   at 1:5 and 0.03 at 1:1. A
+   fixed world-unit grade was a 25% slope at one scale and a cliff at another.
+
+   If a ramp reaches the end of its edge, the other edges at that node are given the same
+   correction, easing out from the node, so a junction beside a lot does not become a step
+   between an adjusted edge and its unadjusted neighbours. One level of propagation: a
+   ramp longer than a whole neighbouring edge is not a situation this map produces. */
+const LOT_RAMP_GRADE = 0.12, LOT_RAMP_MIN = 1.5;
+function gradePathsThroughLots(){
+  const V = VERT_SCALE;
+  const lots = AREAS.filter(a => { const st = AREA_STYLE[a.kind]; return st && st.paved && a.entrance; });
+  if(!lots.length) return 0;
+  const smooth = t => { t = clamp(t, 0, 1); return t*t*(3 - 2*t); };
+  const arcOf = pts => { const A=[0]; for(let i=1;i<pts.length;i++) A[i]=A[i-1]+Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1]); return A; };
+  const adj = new Map();
+  for(const e of GRAPH.edges){
+    for(const id of [e.a, e.b]){ if(id==null) continue; if(!adj.has(id)) adj.set(id, []); adj.get(id).push(e); }
+  }
+  let touched = 0;
+  for(const a of lots){
+    const surf = a.groundY*V + LOT_SURFACE_LIFT;
+    const nodeDelta = new Map();       // node id -> {delta, ramp, from edge}
+    for(const e of GRAPH.edges){
+      const pr = e.prof;
+      if(!pr || pr.pts.length < 2) continue;
+      const n = pr.pts.length;
+      const inside = pr.pts.map(p => pointInArea(p[0], p[1], a));
+      if(!inside.some(Boolean)) continue;
+      /* Per station, the painted top that station actually has (drawnTopLifts): a stretch
+         trimmed back at a road contact shows the ROAD's surface, not the trail's, and
+         aiming it at the trail's lift left it 0.09 below the lot. */
+      const top = drawnTopLifts(e, pr);
+      const T = i => surf - top[i];
+      let D = 0;
+      for(let i=0;i<n;i++) if(inside[i]) D = Math.max(D, Math.abs(T(i) - pr.ys[i]));
+      if(D < 1e-4) continue;
+      const ramp = Math.max(LOT_RAMP_MIN, D/(LOT_RAMP_GRADE*V/MAP_SCALE));
+      const arc = arcOf(pr.pts);
+      const ins = []; for(let i=0;i<n;i++) if(inside[i]) ins.push(arc[i]);
+      const old0 = pr.ys[0], oldN = pr.ys[n-1];
+      for(let i=0;i<n;i++){
+        let sd = Infinity; for(const s0 of ins) sd = Math.min(sd, Math.abs(arc[i]-s0));
+        const w = inside[i] ? 1 : smooth(1 - sd/ramp);
+        if(w <= 0) continue;
+        pr.ys[i] += (T(i) - pr.ys[i])*w;
+        pr.hm[i] = pr.ys[i]/V;
+      }
+      if(Math.abs(pr.ys[0]-old0) > 1e-4 && e.a != null) nodeDelta.set(e.a, {delta: pr.ys[0]-old0, ramp, from: e});
+      if(Math.abs(pr.ys[n-1]-oldN) > 1e-4 && e.b != null) nodeDelta.set(e.b, {delta: pr.ys[n-1]-oldN, ramp, from: e});
+      touched++;
+    }
+    for(const [id, nd] of nodeDelta){
+      for(const f of (adj.get(id) || [])){
+        if(f === nd.from || !f.prof) continue;
+        const pr = f.prof, n = pr.pts.length;
+        // skip edges this lot already graded (their own ramp set their end)
+        if(pr.pts.some(p => pointInArea(p[0], p[1], a))) continue;
+        const arc = arcOf(pr.pts), L = arc[n-1];
+        for(let i=0;i<n;i++){
+          const fromNode = f.a === id ? arc[i] : L - arc[i];
+          const w = smooth(1 - fromNode/nd.ramp);
+          if(w <= 0) continue;
+          pr.ys[i] += nd.delta*w;
+          pr.hm[i] = pr.ys[i]/V;
+        }
+        touched++;
+      }
+    }
+  }
+  return touched;
+}
+// must match pieces.js buildArea's paved slab offset (m.position.y = 0.03)
+const LOT_SURFACE_LIFT = 0.03;
+
 /* HOW HIGH THE PAINTED SURFACE IS above an edge's graded profile, per station.
 
    The profile (e.prof.ys) is the bench the ground was graded to; the ribbons are stacked
@@ -2176,6 +2361,11 @@ function rebuildWorld(){
   /* Channels are graded from the same untouched band grid the paths just read, then the
      bridges lift their paths over them -- which needs both profiles -- and only then does
      anything get written back into the grid. */
+  /* Lots level with the road into them -- after the path profiles exist (the entrance
+     height IS a graded profile) and before the benches are written back, so a road's own
+     bench still wins the cells it runs over. */
+  PATH_MIX.lotsLevelled = levelLotsToEntrances();
+  PATH_MIX.lotRamps = gradePathsThroughLots();
   gradeWaterways();
   const bridgeZones = raiseBridgeDecks();
   gradeTrailCells(GRAPH.edges.map(e=>e.prof),

@@ -87,25 +87,7 @@ function flattenAreaCells(areas, pointInArea, areaBBox){
   if(!WORLD||!BAND)return;
   const claimed=new Map();
   for(const a of areas){
-    const bb=areaBBox(a);
-    const i0=clamp(WORLD.cellI(bb.mnx)-1,0,WORLD.width-1), i1=clamp(WORLD.cellI(bb.mxx)+1,0,WORLD.width-1);
-    const j0=clamp(WORLD.cellJ(bb.mnz)-1,0,WORLD.height-1), j1=clamp(WORLD.cellJ(bb.mxz)+1,0,WORLD.height-1);
-    const mark=new Set();
-    for(let j=j0;j<=j1;j++)for(let i=i0;i<=i1;i++){
-      const c=WORLD.cellCentre(i,j);
-      if(pointInArea(c.x,c.z,a))mark.add(j*WORLD.width+i);
-    }
-    const grain=WORLD.cell/2;
-    for(const ring of a.rings)for(let k=0;k<ring.length;k++){
-      const p=ring[k],q=ring[(k+1)%ring.length];
-      const L=Math.hypot(q[0]-p[0],q[1]-p[1]);
-      const n2=Math.max(1,Math.ceil(L/grain));
-      for(let s=0;s<=n2;s++){
-        const t=s/n2;
-        const i=WORLD.cellI(p[0]+(q[0]-p[0])*t), j=WORLD.cellJ(p[1]+(q[1]-p[1])*t);
-        mark.add(j*WORLD.width+i);
-      }
-    }
+    const mark=areaCells(a, pointInArea, areaBBox);
     if(!mark.size)continue;
     let lvl=null;
     /* Adopt a neighbour's level only when this polygon is MOSTLY sitting on one, and take
@@ -135,6 +117,42 @@ function flattenAreaCells(areas, pointInArea, areaBBox){
     a.groundY=(lvl*STEP-GROUND_M);   // metres, caller applies vertScale
     for(const k of mark){ BAND[k]=lvl; claimed.set(k,lvl); }
   }
+}
+
+/* Every DEM cell an area polygon claims: cells whose centre is inside it, plus every cell
+   its outline passes through (so a thin lot still owns the cells along its edge). Shared
+   by the first flatten and by world.js's later re-levelling of lots to their entrances,
+   which must move exactly the cells the flatten claimed or it leaves a rim behind. */
+function areaCells(a, pointInArea, areaBBox){
+  const mark=new Set();
+  if(!WORLD) return mark;
+  const bb=areaBBox(a);
+  const i0=clamp(WORLD.cellI(bb.mnx)-1,0,WORLD.width-1), i1=clamp(WORLD.cellI(bb.mxx)+1,0,WORLD.width-1);
+  const j0=clamp(WORLD.cellJ(bb.mnz)-1,0,WORLD.height-1), j1=clamp(WORLD.cellJ(bb.mxz)+1,0,WORLD.height-1);
+  for(let j=j0;j<=j1;j++)for(let i=i0;i<=i1;i++){
+    const c=WORLD.cellCentre(i,j);
+    if(pointInArea(c.x,c.z,a))mark.add(j*WORLD.width+i);
+  }
+  const grain=WORLD.cell/2;
+  for(const ring of a.rings)for(let k=0;k<ring.length;k++){
+    const p=ring[k],q=ring[(k+1)%ring.length];
+    const L=Math.hypot(q[0]-p[0],q[1]-p[1]);
+    const n2=Math.max(1,Math.ceil(L/grain));
+    for(let s=0;s<=n2;s++){
+      const t=s/n2;
+      const i=clamp(WORLD.cellI(p[0]+(q[0]-p[0])*t),0,WORLD.width-1), j=clamp(WORLD.cellJ(p[1]+(q[1]-p[1])*t),0,WORLD.height-1);
+      mark.add(j*WORLD.width+i);
+    }
+  }
+  return mark;
+}
+/* Set a batch of cells to one height in metres -- a FRACTIONAL band, the same form the
+   graded path corridors use, so a re-levelled lot's ground is exactly its surface rather
+   than the nearest whole terrace below it. */
+function setCellsHeightM(cells, hM){
+  if(!BAND) return;
+  const b=bandOfM(hM);
+  for(const k of cells) BAND[k]=b;
 }
 
 /* Terrace band at a point — whole away from trails, fractional inside a graded corridor.
@@ -701,6 +719,6 @@ function groundTexture(theme){
   const t=new THREE.CanvasTexture(c);t.wrapS=t.wrapT=THREE.RepeatWrapping;return t;
 }
 
-export { setWorld, setStep, getWorld, getStep, terrainY, cameraGroundY, rawGroundY, flattenAreaCells,
+export { setWorld, setStep, getWorld, getStep, terrainY, cameraGroundY, rawGroundY, flattenAreaCells, areaCells, setCellsHeightM,
          bandAt, bandY, heightM, bandOfM, gradeProfile, gradeTrailCells, reliefCanvas,
          resample, buildTerrainMesh, groundTexture, GROUND_TILE_M };
