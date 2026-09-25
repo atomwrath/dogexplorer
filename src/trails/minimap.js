@@ -42,7 +42,7 @@ import { THEME } from './themes.js';
 
 const INK_MAP = '#3a2517';
 const TRAIL_INK = {trail:'#9c6a35', track:'#8a6a45', dirtroad:'#a08a68', road:'#6f6b62',
-                   paved_trail:'#9d978b', paved_track:'#8d887e'};
+                   paved_trail:'#9d978b', paved_track:'#8d887e', rail:'#3b3530'};
 const WATER_INK = '#3f8fc9';
 // the same magenta course-line.js paints on the ground (0xd94fa0), so the disc in the
 // corner and the strip underfoot are recognisably one object seen two ways
@@ -424,6 +424,23 @@ function buildAtlas(){
   };
   strokeEdges(Math.max(2.2, ppm*4.2), () => INK_MAP);
   strokeEdges(Math.max(1.2, ppm*2.4), e => TRAIL_INK[styleKey(e)] || TRAIL_INK.trail);
+  /* Railways in the map-maker's own symbol: the dark line above, broken by pale dashes
+     down its middle, so a railway can never be mistaken for a road at any zoom. */
+  if(typeof g.setLineDash === 'function'){
+    const dash = Math.max(3, ppm*6);
+    g.setLineDash([dash, dash]);
+    g.lineCap = 'butt';
+    for(const e of G.edges){
+      if(e.kind !== 'rail' || e.pts.length < 2) continue;
+      g.beginPath();
+      e.pts.forEach((p, i) => i ? g.lineTo(X(p[0]), Z(p[1])) : g.moveTo(X(p[0]), Z(p[1])));
+      g.lineWidth = Math.max(0.7, ppm*1.2);
+      g.strokeStyle = '#f2ead6';
+      g.stroke();
+    }
+    g.setLineDash([]);
+    g.lineCap = 'round';
+  }
 
   // points of interest
   for(const p of getPOIs()){

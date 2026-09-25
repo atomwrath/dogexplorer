@@ -3028,6 +3028,38 @@ const CLAIM_SHARE = 0.5;
 const WATER_PCTILE = 0.25;
 function isWaterArea(a){ return a && a.kind === 'water'; }
 
+/* HOW MUCH HILL A POLYGON MAY SIT ON AND STILL BE GRADED FLAT.
+
+   Grading is right for the things this game was built around -- a lot, a footprint, a
+   pond, a rock mass -- because each is small next to the slope under it. It is exactly
+   wrong for a landscape. A raw OSM export carries natural=wood and natural=scree
+   polygons the size of the mountain: on BarrTrailWorld.json one forest covers 44 km^2
+   with 1,518 m of relief beneath it, and levelling that to its median band carved a
+   plateau with cliffs up to 896 m high round its rim (2,803 cell edges over 30 m that
+   the DEM does not have). No slab is a fair model for that polygon at any size of step.
+
+   So the decision is made on the relief under the footprint, p10 to p90 of the RAW DEM
+   (robust to a noisy cell at a corner, independent of the contour step and the
+   exaggeration). Above the limit the polygon is COVER, not a slab: the terrain under it
+   is left as the DEM says and pieces.js dresses the real hillside with its trees, tufts
+   or stones instead of drawing a floor.
+
+   Two limits because the two families differ by design. A landform is MEANT to be a mass
+   standing off its slope -- Kissing Camels sits on 74 m of relief and is graded on
+   purpose -- so it gets room above the steepest shipped rock. Everything else is paint
+   or a pad, where the tallest shipped case is 25 m (a cheyzoo enclosure). Both limits
+   leave every shipped map exactly as it was; measured, not assumed, per map and kind. */
+const SLAB_MAX_RELIEF_M = 40;
+const LANDFORM_MAX_RELIEF_M = 120;
+const RELIEF_LO = 0.1, RELIEF_HI = 0.9;
+function footprintReliefM(mark){
+  const h=[...mark].map(k=>WORLD.heights[k]).sort((p,q)=>p-q);
+  if(!h.length) return 0;
+  const at=t=>h[clamp(Math.floor((h.length-1)*t),0,h.length-1)];
+  return at(RELIEF_HI)-at(RELIEF_LO);
+}
+function isLandformKind(kind){ return kind==='rock' || kind==='redrock' || kind==='lightrock'; }
+
 /* Flatten every DEM cell under an area polygon to one shared terrace band — the same
    grading pass as before, now operating on the band array instead of a bespoke grid.
    Overlapping polygons (this project has ~20 parking-lot polygons that touch) adopt a
@@ -3037,8 +3069,17 @@ function flattenAreaCells(areas, pointInArea, areaBBox){
   if(!WORLD||!BAND)return;
   const claimed=new Map();
   for(const a of areas){
+    a.cover=false; a.reliefM=null;
     const mark=areaCells(a, pointInArea, areaBBox);
     if(!mark.size)continue;
+    /* Cover is decided before any claim is looked at: a hillside forest overlapping a lot
+       must not adopt the lot's level, and must not leave claims a later polygon would
+       adopt either. Its cells are simply not touched. */
+    a.reliefM=footprintReliefM(mark);
+    if(a.reliefM > (isLandformKind(a.kind) ? LANDFORM_MAX_RELIEF_M : SLAB_MAX_RELIEF_M)){
+      a.cover=true; a.groundY=null;
+      continue;
+    }
     let lvl=null;
     /* Adopt a neighbour's level only when this polygon is MOSTLY sitting on one, and take
        the level the most shared cells actually hold rather than whichever the Set happened
@@ -4505,6 +4546,9 @@ const STEP_SURFACES = {
   sand:  {hz:1500, q:0.4, d:0.130, b:0,   be:0,   n:0.22, bg:0.00}, // dull, no tail at all
   paved: {hz:2350, q:1.2, d:0.050, b:240, be:150, n:0.24, bg:0.13}, // tarmac: short, dry tap
   water: {hz:1050, q:0.5, d:0.160, b:0,   be:0,   n:0.34, bg:0.00}, // splash: low hiss, long tail
+  // railway ballast: crushed stone under the sleepers -- a coarser, louder crunch than
+  // trail gravel, with a little of the sleeper's wooden knock in the head
+  ballast: {hz:2050, q:0.7, d:0.085, b:190, be:115, n:0.36, bg:0.12},
 };
 function stepSurface(name){ return STEP_SURFACES[name] || STEP_SURFACES.trail; }
 
@@ -5657,8 +5701,31 @@ const POI_STYLE={
   rock:{em:'🪨',label:'Rock formation'}, viewpoint:{em:'🔭',label:'Viewpoint'},
   picnic:{em:'🧺',label:'Picnic spot'},  ruin:{em:'🏛️',label:'Ruin'},
   camp:{em:'⛺',label:'Campsite'},       water:{em:'💧',label:'Spring'},
-  cairn:{em:'🗿',label:'Marker'},        tree:{em:'🌳',label:'Landmark tree'}
+  cairn:{em:'🗿',label:'Marker'},        tree:{em:'🌳',label:'Landmark tree'},
+  station:{em:'🚉',label:'Station'},     memorial:{em:'🪦',label:'Memorial'},
+  /* FIXTURES: built into the scene but not landmarks. world.js keeps them out of POIS --
+     no discovery burst, no minimap dot, no "waiting out there" count -- unless the source
+     gave one a name, in which case it is somebody's named thing and is findable. A row of
+     15 pylons and 3 crossing signs are scenery, not 18 places to go and look at. */
+  pylon:{em:'⚡',label:'Power pylon',fixture:true},
+  crossbuck:{em:'🚦',label:'Railroad crossing',fixture:true},
+  buffer:{em:'🛑',label:'Buffer stop',fixture:true},
+  gate:{em:'🚧',label:'Gate',fixture:true},
+  toilet:{em:'🚻',label:'Toilets',fixture:true},
+  infoboard:{em:'ℹ️',label:'Information',fixture:true},
+  guidepost:{em:'🪧',label:'Guidepost',fixture:true}
 };
+/* The pylon's wire attachment points, shared with world.js which strings the spans:
+   the model and the wires must agree on where the insulators are, or every wire ends in
+   mid-air a metre off its arm. Local to a pylon facing +x along its line: arms run along
+   z, so a span leaves each arm tip heading roughly +/-x. */
+const PYLON = {h:12.5, armY:[10.4, 8.2], armHalf:[2.3, 3.0], wireDrop:0.55};
+function pylonWirePoints(){
+  const out=[];
+  PYLON.armY.forEach((y,i)=>{ for(const sd of [-1,1]) out.push([0, y-PYLON.wireDrop, sd*PYLON.armHalf[i]]); });
+  out.push([0, PYLON.h+0.1, 0]);          // earth wire off the peak
+  return out;
+}
 /* `solid` is a PHYSICS fact and it lives here, beside the drawing, because the two have
    to agree: an area is solid exactly when this table gives it real height off the ground.
    The landforms are extruded rock masses and a building is an extruded footprint with a
@@ -5683,7 +5750,13 @@ const AREA_STYLE={
      kerb wall's side) that face is a wall, not something to walk into. Its top is the
      slab (buildArea's solidTop), and world.js levels the slab to its entrance road, so
      the way in is flush and every other edge is a retaining wall or a cut bank. */
-  parking:{fill:'#8d8578',op:0.85,em:'🅿️',paved:true,solid:true,label:'Parking'}
+  parking:{fill:'#8d8578',op:0.85,em:'🅿️',paved:true,solid:true,label:'Parking'},
+  /* A platform is a slab you step UP onto beside the track, so it is drawn and collided
+     exactly as a very low building: `slab` is its fixed height in metres, `cap` the top
+     colour, `edge` the painted safety line round the rim. A station building is a
+     building with a station's colours. */
+  platform:{fill:'#9d968a',op:1,em:'🚉',solid:true,slab:0.85,cap:'#c9c2b3',edge:'#e8c53a',label:'Platform'},
+  depot:{fill:'#e3d3a8',op:1,em:'🚉',solid:true,roof:'#3f6b4a',label:'Station'}
 };
 function plaqueTex(title,sub){
   const c=document.createElement('canvas');c.width=384;c.height=112;
@@ -5792,6 +5865,135 @@ function buildPOI(poi,rng){
     }
   }else if(k==='tree'){
     const t=makeTree(2.6*THEME.treeScale,'blob',rng);g.add(t);
+  }else if(k==='station'){
+    /* A little mountain depot: cream board walls, a green hipped roof with deep eaves, a
+       concrete platform along the front. When the map also has the station's real
+       footprint as an area, world.js sets `signOnly` and the building is not doubled --
+       the landmark is then just the name board, beside the building it names. */
+    if(!poi.signOnly){
+      const w=6.4, d=3.6, hgt=3.0;
+      const wall=M(new THREE.BoxGeometry(w,hgt,d),toon('#e3d3a8')); wall.position.y=hgt/2; g.add(wall);
+      const trim=M(new THREE.BoxGeometry(w+0.12,0.28,d+0.12),toon('#7a4e28')); trim.position.y=0.14; g.add(trim);
+      const roof=M(new THREE.ConeGeometry(Math.hypot(w,d)*0.62,1.7,4),toon('#3f6b4a'));
+      roof.rotation.y=Math.PI/4; roof.scale.set(1,1,d/w*1.25); roof.position.y=hgt+0.84; g.add(roof);
+      for(const sx of [-0.3,0.3]){
+        const win=M(new THREE.BoxGeometry(0.9,0.9,0.06),toon('#8fd0e6')); win.position.set(sx*w,1.8,d/2+0.02); g.add(win);
+      }
+      const door=M(new THREE.BoxGeometry(1.0,2.0,0.06),toon('#5c3a1c')); door.position.set(0,1.0,d/2+0.03); g.add(door);
+      const plat=M(new THREE.BoxGeometry(w+3,0.6,2.4),toon('#c9c2b3')); plat.position.set(0,0.3,d/2+1.2); g.add(plat);
+      const edge=M(new THREE.BoxGeometry(w+3,0.04,0.2),toon('#e8c53a')); edge.position.set(0,0.62,d/2+2.3); g.add(edge);
+    }
+    // the running-in board: the station's name, on two posts, facing the track side
+    for(const sx of [-1,1]){
+      const post=M(new THREE.CylinderGeometry(0.07,0.08,2.3,6),toon('#3a3a3a')); post.position.set(sx*1.3,1.15,poi.signOnly?0:4.6); g.add(post);
+    }
+    const board=M(new THREE.BoxGeometry(3.0,0.7,0.1),toon('#1f3d6b')); board.position.set(0,2.1,poi.signOnly?0:4.6); g.add(board);
+    // the name itself, painted on: its own textured material, not a shared toon()
+    const faceMat=poi.name
+      ? new THREE.MeshToonMaterial({map:plaqueTex(poi.name,'Station'),gradientMap:toonTex})
+      : toon('#f2ead6');
+    for(const sz of [1,-1]){            // both faces: the board is read from either platform side
+      const face=M(new THREE.BoxGeometry(2.7,0.5,0.02),faceMat);
+      face.position.set(0,2.1,(poi.signOnly?0:4.6)+sz*0.06); if(sz<0) face.rotation.y=Math.PI; g.add(face);
+    }
+  }else if(k==='memorial'){
+    // stepped granite base, a dressed block, a bronze plaque on the face
+    const base=M(new THREE.BoxGeometry(1.8,0.3,1.4),toon('#8f8a82')); base.position.y=0.15; g.add(base);
+    const step=M(new THREE.BoxGeometry(1.4,0.25,1.0),toon('#9d978e')); step.position.y=0.42; g.add(step);
+    const block=M(new THREE.BoxGeometry(1.0,1.3,0.55),toon('#a8a39a')); block.position.y=1.2; g.add(block);
+    const plaque=M(new THREE.BoxGeometry(0.62,0.44,0.05),toon('#8a6a2a')); plaque.position.set(0,1.3,0.3); g.add(plaque);
+  }else if(k==='pylon'){
+    /* Lattice tower, facing +x along its line (world.js turns it to face its neighbours).
+       Four tapering legs, horizontal bracing at three levels, two cross-arms along z with
+       insulators hanging from the tips -- the tips are PYLON.armHalf out, the same
+       numbers pylonWirePoints() gives world.js for the wires. */
+    const steel='#8e959b', base=1.7, top=0.35;
+    const lerp=(a,b,t)=>a+(b-a)*t;
+    for(const sx of [-1,1])for(const sz of [-1,1]){
+      const L=Math.hypot(PYLON.h, (base-top)*Math.SQRT2);
+      const leg=M(new THREE.CylinderGeometry(0.07,0.1,L,4),toon(steel));
+      leg.position.set(sx*(base+top)/2, PYLON.h/2, sz*(base+top)/2);
+      leg.rotation.z=-sx*Math.atan((base-top)/PYLON.h); leg.rotation.x=sz*Math.atan((base-top)/PYLON.h);
+      g.add(leg);
+    }
+    for(const t of [0.25,0.5,0.75]){
+      const hw=lerp(base,top,t), y=PYLON.h*t;
+      for(const ax of [0,1]){
+        for(const sd of [-1,1]){
+          const bar=M(new THREE.BoxGeometry(ax?0.08:hw*2,0.08,ax?hw*2:0.08),toon(steel));
+          bar.position.set(ax?sd*hw:0, y, ax?0:sd*hw); g.add(bar);
+        }
+      }
+    }
+    PYLON.armY.forEach((y,i)=>{
+      const arm=M(new THREE.BoxGeometry(0.22,0.22,PYLON.armHalf[i]*2),toon(steel)); arm.position.y=y; g.add(arm);
+      for(const sd of [-1,1]){
+        const ins=M(new THREE.CylinderGeometry(0.09,0.09,PYLON.wireDrop,6),toon('#6a8fa8'));
+        ins.position.set(0, y-PYLON.wireDrop/2, sd*PYLON.armHalf[i]); g.add(ins);
+      }
+    });
+    const peak=M(new THREE.ConeGeometry(0.4,1.4,4),toon(steel)); peak.position.y=PYLON.h-0.4; g.add(peak);
+  }else if(k==='crossbuck'){
+    /* A railroad crossbuck: white X boards with a dark border on a grey post, a pair of red
+       lamps below. world.js stands one each side of the track, turned to face the road. */
+    const post=M(new THREE.CylinderGeometry(0.08,0.09,3.4,8),toon('#b5b5b0')); post.position.y=1.7; g.add(post);
+    for(const r of [Math.PI/4,-Math.PI/4]){
+      const back=M(new THREE.BoxGeometry(1.95,0.36,0.05),toon('#2a2a2a')); back.position.y=3.0; back.rotation.z=r; g.add(back);
+      const face=M(new THREE.BoxGeometry(1.8,0.26,0.07),toon('#f4f1e8')); face.position.y=3.0; face.rotation.z=r; g.add(face);
+    }
+    const bar=M(new THREE.BoxGeometry(1.1,0.1,0.1),toon('#2a2a2a')); bar.position.y=2.1; g.add(bar);
+    for(const sx of [-1,1]){
+      const lamp=M(new THREE.CylinderGeometry(0.17,0.17,0.12,10),toon('#c33b2c'));
+      lamp.rotation.x=Math.PI/2; lamp.position.set(sx*0.5,2.1,0.08); g.add(lamp);
+    }
+  }else if(k==='buffer'){
+    // end of the line: two posts and a red-and-white beam across the rails
+    for(const sx of [-1,1]){
+      const post=M(new THREE.BoxGeometry(0.28,1.0,0.28),toon('#4a4038')); post.position.set(0,0.5,sx*0.72); g.add(post);
+    }
+    const beam=M(new THREE.BoxGeometry(0.36,0.4,2.3),toon('#c33b2c')); beam.position.y=0.9; g.add(beam);
+    for(const sz of [-0.6,0,0.6]){
+      const stripe=M(new THREE.BoxGeometry(0.38,0.42,0.22),toon('#f4f1e8')); stripe.position.set(0,0.9,sz); g.add(stripe);
+    }
+  }else if(k==='gate'){
+    /* A field gate, left OPEN: posts either side of the path, the five-bar leaf swung back
+       along it -- a closed gate across a trail the player can walk through would be a lie.
+       Local +x is along the path (world.js turns it); the posts stand GATE_POST_OFF out. */
+    const off=poi.gateHalf || 1.2;
+    for(const sd of [-1,1]){
+      const post=M(new THREE.CylinderGeometry(0.1,0.12,1.5,6),toon('#6b4a2c')); post.position.set(0,0.75,sd*off); g.add(post);
+    }
+    const leaf=new THREE.Group(); leaf.position.set(0,0,off);
+    for(let i=0;i<4;i++){
+      const bar=M(new THREE.BoxGeometry(off*1.8,0.07,0.05),toon('#a9743f')); bar.position.set(-off*0.9,0.3+i*0.3,0); leaf.add(bar);
+    }
+    const brace=M(new THREE.BoxGeometry(Math.hypot(off*1.8,0.9),0.07,0.05),toon('#a9743f'));
+    brace.position.set(-off*0.9,0.75,0); brace.rotation.z=Math.atan2(0.9,off*1.8); leaf.add(brace);
+    leaf.rotation.y=-0.25; g.add(leaf);
+  }else if(k==='toilet'){
+    // an outhouse: plank box, sloped roof, door with the crescent moon
+    const box=M(new THREE.BoxGeometry(1.3,2.1,1.3),toon('#8a6a45')); box.position.y=1.05; g.add(box);
+    const roof=M(new THREE.BoxGeometry(1.6,0.12,1.7),toon('#5c4a3a')); roof.position.y=2.2; roof.rotation.x=0.12; g.add(roof);
+    const door=M(new THREE.BoxGeometry(0.8,1.7,0.05),toon('#6b4a2c')); door.position.set(0,0.9,0.67); g.add(door);
+    const moon=M(new THREE.TorusGeometry(0.1,0.03,5,10,Math.PI*1.2),toon('#f2e3a0')); moon.position.set(0,1.45,0.7); g.add(moon);
+  }else if(k==='infoboard'){
+    // a trailhead kiosk: two posts, a shingled roof, a map panel under glass
+    for(const sx of [-1,1]){
+      const post=M(new THREE.BoxGeometry(0.16,2.3,0.16),toon('#6b4a2c')); post.position.set(sx*0.9,1.15,0); g.add(post);
+    }
+    const panel=M(new THREE.BoxGeometry(1.6,1.0,0.08),toon('#6b4a2c')); panel.position.y=1.45; g.add(panel);
+    const map=M(new THREE.BoxGeometry(1.4,0.82,0.1),toon('#cfe0b0')); map.position.y=1.45; g.add(map);
+    const trail=M(new THREE.BoxGeometry(0.9,0.05,0.11),toon('#b0472e')); trail.position.set(0.05,1.5,0); trail.rotation.z=0.35; g.add(trail);
+    const roof=M(new THREE.ConeGeometry(1.35,0.55,4),toon('#5c4a3a')); roof.rotation.y=Math.PI/4; roof.scale.set(1,1,0.4); roof.position.y=2.55; g.add(roof);
+  }else if(k==='guidepost'){
+    // a fingerpost: one post, arms pointing three ways
+    const post=M(new THREE.CylinderGeometry(0.07,0.08,2.2,6),toon('#7a4e28')); post.position.y=1.1; g.add(post);
+    [[0,1.85],[2.1,1.6],[4.2,1.35]].forEach(([a,y])=>{
+      const arm=new THREE.Group(); arm.position.y=y; arm.rotation.y=a;
+      const board=M(new THREE.BoxGeometry(0.9,0.2,0.05),toon('#e8d9b0')); board.position.x=0.45; arm.add(board);
+      const tip=M(new THREE.ConeGeometry(0.14,0.2,3),toon('#e8d9b0')); tip.rotation.z=-Math.PI/2; tip.position.x=0.99; arm.add(tip);
+      g.add(arm);
+    });
   }else{ // cairn / generic marker
     let y=0;
     for(let i=0;i<5;i++){
@@ -5804,10 +6006,124 @@ function buildPOI(poi,rng){
   }
   if(poi.name){
     const st=POI_STYLE[k]||POI_STYLE.cairn;
-    const plate=nameplate(poi.name,st.label,k==='building'||k==='tower'?1.5:1.1);
-    plate.position.set(0,0,k==='rock'?3.4:2.4);g.add(plate);
+    /* The station's own running-in board already carries its name, and a pylon's plate
+       would stand under a live wire; everything else gets the usual plaque */
+    if(k!=='station'){
+      const plate=nameplate(poi.name,st.label,k==='building'||k==='tower'?1.5:1.1);
+      plate.position.set(0,0,k==='rock'?3.4:k==='pylon'?3.2:2.4);g.add(plate);
+    }
   }
   return g;
+}
+/* ---------- railway track ----------
+   Built as a few MERGED geometries per edge rather than a mesh per sleeper: a 14 km cog
+   line at 1:5 is ~4,000 sleepers, and one draw call each would be the tablet stutter the
+   material cache exists to prevent. Dimensions are real metres (standard gauge), because
+   the track is an object the pup stands on, like the tread widths in world.js's PATH_W.
+
+   Stacked on the graded profile the ballast ribbon was drawn from, all offsets relative
+   to it: ballast at +0.05 (the tread height every path uses), sleepers on the ballast,
+   rails on the sleepers. `rack` adds the toothed centre rail of a cog railway. */
+const RAIL = {gaugeHalf:0.72, railW:0.1, railH:0.13, tieLen:2.5, tieW:0.24, tieH:0.1,
+              tieGap:0.65, rackW:0.16, rackH:0.1, toothGap:0.4, toothW:0.1};
+function segFrame(pts, i){
+  // unit direction at vertex i: the average of the segments either side (a mitre-free
+  // bisector, good enough for track whose bends are gentle by construction)
+  const a=pts[Math.max(0,i-1)], b=pts[Math.min(pts.length-1,i+1)];
+  let dx=b[0]-a[0], dz=b[1]-a[1]; const L=Math.hypot(dx,dz)||1;
+  return [dx/L, dz/L];
+}
+/* A solid strip along the line, offset `off` to the side: top face plus both walls,
+   from y0 to y1 above the profile. Non-indexed so flat shading shows the edges. */
+function stripGeom(pts, ys, off, w, y0, y1){
+  const P=[];
+  const at=i=>{ const [dx,dz]=segFrame(pts,i); const nx=-dz, nz=dx; return {x:pts[i][0]+nx*off, z:pts[i][1]+nz*off, nx, nz, y:ys?ys[i]:0}; };
+  for(let i=0;i+1<pts.length;i++){
+    const A=at(i), B=at(i+1), hw=w/2;
+    const aL=[A.x+A.nx*hw, A.z+A.nz*hw], aR=[A.x-A.nx*hw, A.z-A.nz*hw];
+    const bL=[B.x+B.nx*hw, B.z+B.nz*hw], bR=[B.x-B.nx*hw, B.z-B.nz*hw];
+    const q=(p1,y1a,p2,y2a,p3,y3a,p4,y4a)=>P.push(p1[0],y1a,p1[1], p2[0],y2a,p2[1], p3[0],y3a,p3[1],
+                                                   p1[0],y1a,p1[1], p3[0],y3a,p3[1], p4[0],y4a,p4[1]);
+    q(aL,A.y+y1, bL,B.y+y1, bR,B.y+y1, aR,A.y+y1);         // top
+    q(aL,A.y+y0, bL,B.y+y0, bL,B.y+y1, aL,A.y+y1);         // left wall
+    q(aR,A.y+y1, bR,B.y+y1, bR,B.y+y0, aR,A.y+y0);         // right wall
+  }
+  if(!P.length) return null;
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(P),3));
+  g.computeVertexNormals();
+  return g;
+}
+/* Evenly spaced stations along the polyline, `gap` apart, each with its height
+   interpolated from the profile and the local direction. */
+function stationsAlong(pts, ys, gap){
+  const out=[]; let carry=gap/2;
+  for(let i=0;i+1<pts.length;i++){
+    const a=pts[i], b=pts[i+1], L=Math.hypot(b[0]-a[0], b[1]-a[1]);
+    if(L<1e-9) continue;
+    const dx=(b[0]-a[0])/L, dz=(b[1]-a[1])/L;
+    for(let t=carry; t<L; t+=gap){
+      const f=t/L;
+      out.push({x:a[0]+dx*t, z:a[1]+dz*t, y:ys?ys[i]+(ys[i+1]-ys[i])*f:0, dx, dz,
+                slope:ys?(ys[i+1]-ys[i])/L:0});
+    }
+    carry=(carry-L)%gap; if(carry<0) carry+=gap;
+  }
+  return out;
+}
+/* Oriented boxes at those stations: `along` x `across` in plan, y0..y1 high. Top and the
+   two long faces only -- the ends are a sleeper's 24 cm, invisible past a few metres, and
+   dropping them is 40% of the vertices on the biggest mesh in the rail set. */
+function boxesGeom(list, along, across, y0, y1){
+  if(!list.length) return null;
+  const P=new Float32Array(list.length*18*3); let o=0;
+  const put=(x,y,z)=>{ P[o++]=x; P[o++]=y; P[o++]=z; };
+  for(const s of list){
+    const fx=s.dx*along/2, fz=s.dz*along/2, rx=-s.dz*across/2, rz=s.dx*across/2;
+    const c=[[s.x-fx-rx, s.z-fz-rz],[s.x+fx-rx, s.z+fz-rz],[s.x+fx+rx, s.z+fz+rz],[s.x-fx+rx, s.z-fz+rz]];
+    /* Tilted WITH the grade, as a real sleeper is: the rails climb, so what they sit on
+       climbs. A level box on a 25% line has one edge in the air and the other in the
+       ballast. c1,c2 are the forward pair (+along), c0,c3 the back. */
+    const k=(s.slope||0)*along/2;
+    const Tb=s.y+y1-k, Tf=s.y+y1+k, Bb=s.y+y0-k, Bf=s.y+y0+k;
+    const T=[Tb,Tf,Tf,Tb], B=[Bb,Bf,Bf,Bb];
+    // top
+    put(c[0][0],T[0],c[0][1]); put(c[2][0],T[2],c[2][1]); put(c[1][0],T[1],c[1][1]);
+    put(c[0][0],T[0],c[0][1]); put(c[3][0],T[3],c[3][1]); put(c[2][0],T[2],c[2][1]);
+    /* the two long faces: c1->c2 and c3->c0 run ACROSS the track (the `across` span), so
+       they face up and down the line. (c0->c1 and c2->c3 are the short ends, dropped.) */
+    put(c[1][0],B[1],c[1][1]); put(c[1][0],T[1],c[1][1]); put(c[2][0],T[2],c[2][1]);
+    put(c[1][0],B[1],c[1][1]); put(c[2][0],T[2],c[2][1]); put(c[2][0],B[2],c[2][1]);
+    put(c[3][0],B[3],c[3][1]); put(c[3][0],T[3],c[3][1]); put(c[0][0],T[0],c[0][1]);
+    put(c[3][0],B[3],c[3][1]); put(c[0][0],T[0],c[0][1]); put(c[0][0],B[0],c[0][1]);
+  }
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(P,3));
+  g.computeVertexNormals();
+  return g;
+}
+/* Everything drawn on top of the ballast, as {ties, rails, rack, teeth} geometries (any
+   may be null). `lift` is the edge's class lift, `tieGap` the sleeper spacing world.js
+   chose under its budget. Sleepers run ACROSS the track: along = sleeper width. */
+function railTrackGeoms(pts, ys, lift, tieGap, rack){
+  const base=lift+0.05;
+  const tieTop=base+RAIL.tieH, railTop=tieTop+RAIL.railH;
+  const ties=boxesGeom(stationsAlong(pts, ys, tieGap), RAIL.tieW, RAIL.tieLen, base, tieTop);
+  const parts=[stripGeom(pts, ys, RAIL.gaugeHalf, RAIL.railW, tieTop, railTop),
+               stripGeom(pts, ys, -RAIL.gaugeHalf, RAIL.railW, tieTop, railTop)].filter(Boolean);
+  let rails=null;
+  if(parts.length){
+    const n=parts.reduce((m,g)=>m+g.attributes.position.array.length,0), P=new Float32Array(n); let o=0;
+    for(const g of parts){ P.set(g.attributes.position.array,o); o+=g.attributes.position.array.length; }
+    rails=new THREE.BufferGeometry(); rails.setAttribute('position', new THREE.BufferAttribute(P,3)); rails.computeVertexNormals();
+  }
+  let rackG=null, teeth=null;
+  if(rack){
+    rackG=stripGeom(pts, ys, 0, RAIL.rackW, tieTop, tieTop+RAIL.rackH);
+    teeth=boxesGeom(stationsAlong(pts, ys, RAIL.toothGap), RAIL.toothW, RAIL.rackW*1.25,
+                    tieTop+RAIL.rackH, tieTop+RAIL.rackH+0.05);
+  }
+  return {ties, rails, rack:rackG, teeth};
 }
 let PAVE_TEX=null;
 function pavementTexture(){
@@ -5951,9 +6267,58 @@ function areaWallGeom(rings, topY, groundLocal){
   return geo;
 }
 
-function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
+/* A polygon terrain.js left as COVER (too much hill under it to be a slab -- see
+   flattenAreaCells). Nothing is drawn as a floor, extruded, or made solid: the ground IS
+   the DEM hillside, and what makes it read as a forest or a scree field is what stands on
+   it. Every piece is planted at its own terrain height, so the group itself stays at 0 --
+   one rigid shift to a single height is precisely what cannot work across a mountain.
+
+   Sampled uniformly over the polygon, capped. The cap is higher than a slab's because a
+   cover polygon is by definition big; it is still a cap, not a density, since the tablet
+   pays for every mesh and the largest of these spans most of a map. Trees keep off the
+   trail corridor exactly as a slab's do. Water as cover gets nothing: a polygon with that
+   much hill under it is not a surface water could have, whatever it is tagged. */
+const COVER_MAX_PIECES = 160;
+function buildCoverArea(a,st,rng,groundYAt,nearestTrail){
   const g=new THREE.Group();
+  const bb=areaBBox(a);
+  const rock=!!st.landform;
+  const want=a.kind==='water' ? 0 : Math.min(COVER_MAX_PIECES, Math.round(bb.w*bb.h/(rock?90:70)));
+  const rockMat=rock ? [toon(st.fill), toon(shade(st.fill,1.16)), toon(shade(st.fill,0.8))] : null;
+  let placed=0,tries=0;
+  while(placed<want&&tries++<want*12){
+    const x=bb.mnx+rng()*bb.w,z=bb.mnz+rng()*bb.h;
+    if(!pointInArea(x,z,a))continue;
+    if(nearestTrail(x,z).d<4)continue;
+    let o;
+    if(a.kind==='forest') o=makeTree((1.2+rng()*1.5)*THEME.treeScale,pickTree(rng),rng);
+    else if(rock){
+      const r=0.4+rng()*1.1;
+      o=M(new THREE.DodecahedronGeometry(r,0), rockMat[(rng()*rockMat.length)|0]);
+      o.scale.set(1, 0.55+rng()*0.4, 1); o.rotation.y=rng()*6.28;
+      o.position.y=r*0.25;
+    }else{
+      o=M(new THREE.ConeGeometry(0.17,0.55,5),toon(THEME.tuft)); o.position.y=0.25;
+    }
+    const holder=new THREE.Group();
+    holder.position.set(x, groundYAt(x,z), z);
+    holder.add(o); g.add(holder); placed++;
+  }
+  if(a.name){
+    const label=buildFloatingLabel(a.name,st.em,Math.max(7,a.name.length*0.7),3.5);
+    label.position.x=bb.cx; label.position.z=bb.cz;
+    label.position.y+=groundYAt(bb.cx,bb.cz);
+    g.add(label);
+  }
+  g.position.y=0;
+  g.userData.cover=true;
+  return g;
+}
+
+function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
   const st=AREA_STYLE[a.kind]||AREA_STYLE.meadow;
+  if(a.cover) return buildCoverArea(a,st,rng,groundYAt,nearestTrail);
+  const g=new THREE.Group();
   const shape=areaShape(a);
   const bb=areaBBox(a);
   let labelY=3.5; // flat ground cover: just enough clearance to read as floating signage
@@ -5971,16 +6336,23 @@ function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
     g.add(built.group);labelY=built.topY+2.2;
     solidTop=built.slabY;
     solidInflate=built.inflate;
-  }else if(a.kind==='building'){
-    const hgt=clamp(+(a.props.height||a.props.levels*3||0)||3.4,1.5,14);
+  }else if(a.kind==='building'||a.kind==='depot'||a.kind==='platform'){
+    const hgt=st.slab ? st.slab : clamp(+(a.props.height||a.props.levels*3||a.props['building:levels']*3||0)||3.4,1.5,14);
     solidTop=hgt;
     const geo=new THREE.ExtrudeGeometry(shape,{depth:hgt,bevelEnabled:false});
     const m=M(geo,toon(st.fill));
     // see buildLandform: rotation alone maps the extrude's base to y=0, no offset needed
     m.rotation.x=-Math.PI/2;g.add(m);
     const capGeo=new THREE.ShapeGeometry(shape);
-    const cap=M(capGeo,toon('#8c4a33'));
+    const cap=M(capGeo,toon(st.cap||st.roof||'#8c4a33'));
     cap.rotation.x=-Math.PI/2;cap.position.y=hgt+0.03;g.add(cap);
+    if(st.edge){
+      // the safety line round the rim, as painted on a real platform. Outer ring only; the
+      // group sits at x=z=0 (only y is shifted below), so the ring is used as it stands
+      const ring=a.rings[0], closed=ring.length>1 && ring[0][0]===ring[ring.length-1][0] && ring[0][1]===ring[ring.length-1][1];
+      const pts=closed ? ring.slice(0,-1) : ring.slice();
+      if(pts.length>=3) g.add(M(ribbonGeom([...pts, pts[0]], 0.22, hgt+0.05, null), toon(st.edge)));
+    }
     labelY=hgt+2.4;
   }else{
     const geo=new THREE.ShapeGeometry(shape);
@@ -6597,10 +6969,19 @@ const PAVED_ROAD_WORDS = 'highway|hwy|street|avenue|ave|boulevard|blvd|parkway|p
    trails at least as often ("Deer Run"), and a trail misread as a creek disappears from
    the walking network -- a far worse failure than a creek drawn as a path. */
 const WATER_WORDS = 'creek|river|brook|stream|canal|ditch';
+/* RAIL. railway=* says what the line carries; a disused or abandoned bed is usually a
+   rail-trail by now and is left as the trail it is walked as. The name fallback is for
+   exports that dropped the railway column (BarrTrailWorld.json kept only name/id, so
+   "Manitou and Pike's Peak Railway" arrived with no tag at all). A name with a trail
+   word in it -- "Midland Rail Trail" -- is a trail first. */
+const RAIL_TAGS = new Set(['rail','narrow_gauge','light_rail','funicular','preserved','tram','monorail','miniature']);
+const RAIL_WORDS = 'railway|railroad|rail|cog|funicular|tramway';
 
 function pathKind(p, name){
   const raw=rawKindOf(p);
   const hw=tag(p,'highway');
+  if(RAIL_TAGS.has(tag(p,'railway'))) return 'rail';
+  if(raw && wordIn(raw, 'rail|railway|railroad')) return 'rail';
   /* order matters: "single track trail" contains both "track" and "trail" — check the
      unambiguous road tokens first, then trail/singletrack phrasing, THEN bare "track" —
      otherwise a hiking singletrack gets misread as a vehicle track. "unpaved" contains
@@ -6616,6 +6997,7 @@ function pathKind(p, name){
   if(PATH_HW.has(hw)) return'trail';
   /* No usable tag: fall back to the name. "Longs Ranch Road" is a road whether or not
      anyone tagged it; "Pikes Peak Highway" is a paved one. */
+  if(!hw && name && !wordIn(name, TRAIL_WORDS) && wordIn(name, RAIL_WORDS)) return 'rail';
   if(!hw && name && !wordIn(name, TRAIL_WORDS) && wordIn(name, ROAD_WORDS))
     return pathPaved(p, 'road', name) ? 'road' : 'dirtroad';
   return'trail';
@@ -6680,6 +7062,23 @@ function isBridge(p){
   return /bridge/.test(rawKindOf(p));
 }
 function isFord(p){ const f=tag(p,'ford'); return !!f && f!=='no'; }
+const GATE_BARRIERS = new Set(['gate','lift_gate','swing_gate','kissing_gate','hampshire_gate','wicket_gate']);
+const MEMORIAL_HISTORIC = new Set(['memorial','monument','wayside_cross','wayside_shrine','plaque']);
+const NOISE_RAILWAY = new Set(['switch','railway_crossing','signal','derail','milestone','crossing_box','turntable']);
+const NOISE_HIGHWAY = new Set(['crossing','elevator','street_lamp','traffic_signals','stop','give_way',
+  'turning_circle','turning_loop','speed_camera','bus_stop','motorway_junction','mini_roundabout','passing_place']);
+const NOISE_AMENITY = new Set(['bicycle_parking','waste_basket','vending_machine','parking','parking_entrance',
+  'recycling','post_box','telephone']);
+const NOISE_BARRIER = new Set(['bollard','kerb','block','cycle_barrier','chain','entrance','height_restrictor']);
+/* A platform POINT is dropped: the station point beside it is the landmark, and the
+   platform itself, when mapped, is an area (see areaKind). */
+function isPoiNoise(p){
+  return NOISE_RAILWAY.has(tag(p,'railway')) || NOISE_HIGHWAY.has(tag(p,'highway'))
+      || NOISE_AMENITY.has(tag(p,'amenity')) || NOISE_BARRIER.has(tag(p,'barrier'))
+      || !!p.place || !!p.entrance
+      || tag(p,'public_transport')==='stop_position' || tag(p,'public_transport')==='platform'
+      || tag(p,'power')==='pole' || tag(p,'power')==='portal';
+}
 function poiKind(p){
   const raw=String(p.kind||p.type||p.poi||p.category||p.class||'').toLowerCase();
   const hit=(...k)=>k.some(s=>raw.includes(s));
@@ -6694,6 +7093,23 @@ function poiKind(p){
   if(hit('peak','summit','cairn','marker'))return'cairn';
   if(hit('tree','grove'))return'tree';
   // OSM tags
+  /* Parts of something already drawn, or points that name a place rather than a thing:
+     a railway switch is a point ON the track, a pedestrian crossing is a point on the
+     road, a hamlet is a label. A raw OSM export is full of them -- BarrTrailWorld.json
+     carries 13 switches and 8 crossings -- and each one used to fall through to the
+     default below and stand in the woods as a cairn called "Marker". */
+  if(isPoiNoise(p)) return null;
+  const rw=tag(p,'railway'), pt=tag(p,'public_transport'), am=tag(p,'amenity'), ts=tag(p,'tourism');
+  if(rw==='station'||rw==='halt'||pt==='station'||tag(p,'building')==='train_station')return'station';
+  if(rw==='level_crossing'||rw==='crossing')return'crossbuck';
+  if(rw==='buffer_stop')return'buffer';
+  if(tag(p,'power')==='tower')return'pylon';
+  if(GATE_BARRIERS.has(tag(p,'barrier')))return'gate';
+  if(am==='toilets')return'toilet';
+  if(ts==='information'||tag(p,'highway')==='trailhead')
+    return tag(p,'information')==='guidepost'?'guidepost':'infoboard';
+  if(MEMORIAL_HISTORIC.has(tag(p,'historic')))return'memorial';
+  if(p.shop||am==='cafe'||am==='restaurant'||ts==='museum'||tag(p,'power')==='generator')return'building';
   if(p.building&&p.building!=='no')return'building';
   if(p.man_made==='tower'||p.man_made==='water_tower')return'tower';
   if(p.tourism==='viewpoint')return'viewpoint';
@@ -6706,7 +7122,17 @@ function poiKind(p){
   if(p.natural==='tree')return'tree';
   return'cairn';
 }
+/* OSM tags that describe WHO OWNS or ZONES the land, not what is on it. A raw OSM export
+   carries them as polygons, and every unrecognised polygon falls through to 'meadow' below
+   -- so a residential zone covering a whole hillside town became a meadow, and then a
+   graded slab. None of them is a surface anyone could see on the ground, so they are not
+   areas at all: areaKind answers null and parseFeatures drops them. Measured on
+   BarrTrailWorld.json: five residential and one industrial polygon, the largest the 81 ha
+   "Crystal Park" zone with 484 m of relief under it. No shipped map carries any. */
+const NOT_A_SURFACE_LANDUSE=new Set(['residential','commercial','industrial','retail','military']);
 function areaKind(p){
+  if(p.boundary) return null;
+  if(NOT_A_SURFACE_LANDUSE.has(String(p.landuse||'').toLowerCase())) return null;
   const raw=String(p.kind||p.type||p.area||p.category||p.class||'').toLowerCase();
   const hit=(...k)=>k.some(s=>raw.includes(s));
   if(hit('water','pond','lake','reservoir','pool'))return'water';
@@ -6717,8 +7143,18 @@ function areaKind(p){
   if(hit('rock','scree','boulder','talus','formation','outcrop'))return'rock';
   if(hit('build','structure','house','cabin'))return'building';
   if(hit('park','lot','gravel'))return'parking';
+  /* Rail areas before the generic building test: a station building is a building, but
+     it should read as the station, and a platform is a raised concrete slab beside the
+     track, not the meadow it used to fall through to. */
+  if(tag(p,'railway')==='platform'||tag(p,'public_transport')==='platform')return'platform';
+  if(tag(p,'building')==='train_station'||tag(p,'railway')==='station')return'depot';
+  if(tag(p,'amenity')==='shelter')return'building';
   if(p.building&&p.building!=='no')return'building';
-  if(p.natural==='water'||p.water||p.waterway)return'water';
+  /* A dam or weir is tagged waterway=* but it is the WALL, not the water -- Lake Moraine
+     Dam is an 8 ha polygon of embankment. Graded as water it became a basin at its own
+     25th percentile beside the real lake. Left to the default instead. */
+  const dam=/^(dam|weir|lock_gate)$/.test(String(p.waterway||''));
+  if(p.natural==='water'||p.water||(p.waterway&&!dam))return'water';
   if(p.natural==='wood'||p.landuse==='forest')return'forest';
   if(p.natural==='scrub'||p.natural==='grassland'||p.landuse==='meadow'||p.landuse==='grass')return'meadow';
   if(p.natural==='bare_rock'||p.natural==='scree'||p.natural==='cliff')return'rock';
@@ -6749,19 +7185,23 @@ function parseFeatures(obj){
         continue;
       }
       const kind=pathKind(p, name);
-      const paved=kind==='road' ? true : kind==='dirtroad' ? false : pathPaved(p, kind, name);
+      const paved=kind==='road' ? true : (kind==='dirtroad'||kind==='rail') ? false : pathPaved(p, kind, name);
       const bridge=isBridge(p), ford=isFord(p);
+      // an explicit rack says cog railway outright; world.js infers it from grade otherwise
+      const rackTag=kind==='rail' && !!tag(p,'railway:rack') && tag(p,'railway:rack')!=='no';
       for(const part of parts)if(part&&part.length>=2)
-        lines.push({name,kind,paved,bridge,ford,pts:part.map(c=>[+c[0],+c[1]])});
+        lines.push({name,kind,paved,bridge,ford,rackTag,pts:part.map(c=>[+c[0],+c[1]])});
     }else if(g.type==='Point'||g.type==='MultiPoint'){
       const parts=g.type==='Point'?[g.coordinates]:g.coordinates;
       for(const c of parts)if(c&&c.length>=2)
-        points.push({name,kind:poiKind(p),props:p,ll:[+c[0],+c[1]]});
+        { const kind=poiKind(p); if(kind!==null) points.push({name,kind,props:p,ll:[+c[0],+c[1]]}); }
     }else if(g.type==='Polygon'||g.type==='MultiPolygon'){
       const parts=g.type==='Polygon'?[g.coordinates]:g.coordinates;
+      const kind=areaKind(p);
+      if(kind===null) continue;
       for(const poly of parts){
         if(!poly||!poly.length||poly[0].length<4)continue;
-        areas.push({name,kind:areaKind(p),props:p,rings:poly.map(r=>r.map(c=>[+c[0],+c[1]]))});
+        areas.push({name,kind,props:p,rings:poly.map(r=>r.map(c=>[+c[0],+c[1]]))});
       }
     }
   }
@@ -6876,7 +7316,7 @@ function applyCuts(L, cuts, tol){
     const end = to ? to.q.slice() : pts[pts.length-1];
     // a cut AT a vertex (a shared survey node) would otherwise repeat that vertex
     const body = pts.slice(k0, k1).filter(p => d2(p, a0) > 1e-12 && d2(p, end) > 1e-12);
-    return {name:L.name, kind:L.kind, paved:L.paved, ford:L.ford, named:L.named, route:L.route,
+    return {name:L.name, kind:L.kind, paved:L.paved, ford:L.ford, rackTag:L.rackTag, named:L.named, route:L.route,
             pts:[a0].concat(body, [end])};
   };
   const out=[];
@@ -6987,7 +7427,7 @@ const SPUR_NAMES=["Coyote Cutoff","Lizard Spur","Juniper Link","Sandy Wash","Mag
 // full pipeline -> {nodes:[{p,deg}], edges:[{a,b,pts,name,lenM,color,kind}]}
 function buildGraph(rawLines,snapTol,simpTol){
   let lines=rawLines.map(L=>({name:L.name,kind:L.kind||'trail',
-                             paved:L.paved==null ? (L.kind==='road') : !!L.paved, ford:!!L.ford,
+                             paved:L.paved==null ? (L.kind==='road') : !!L.paved, ford:!!L.ford, rackTag:!!L.rackTag,
                              pts:L.pts.map(p=>p.slice())}));
   lines.forEach(L=>{L.pts=L.pts.filter((p,i)=>i===0||d2(p,L.pts[i-1])>1e-6);});
   lines=lines.filter(L=>L.pts.length>=2&&polyLen(L.pts)>snapTol*0.5);
@@ -7041,7 +7481,7 @@ function buildGraph(rawLines,snapTol,simpTol){
     if(!nameColor.has(route))nameColor.set(route,palette[nameColor.size%palette.length]);
     nodes[a].deg++;if(b!==a)nodes[b].deg++;
     edges.push({a,b,pts,name,route,named:!!L.named,lenM,
-                color:nameColor.get(route),kind:L.kind||'trail',paved:!!L.paved,ford:!!L.ford});
+                color:nameColor.get(route),kind:L.kind||'trail',paved:!!L.paved,ford:!!L.ford,rackTag:!!L.rackTag});
   });
   /* Per-node census of what actually meets here. Computed once, in the module that owns
      the topology, because every consumer downstream needs the same answer: world.js has
@@ -7061,6 +7501,76 @@ function buildGraph(rawLines,snapTol,simpTol){
     }
   });
   return{nodes,edges,nameColor};
+}
+
+/* ---------- cropping to the DEM ----------
+   A bundle's heightfield is a rectangle, and outside it terrain.js clamps to the edge
+   cell -- so anything drawn past the edge stands on a copy of the rim, stretched out
+   over ground that does not exist. fetch_dem.py sizes that rectangle from whichever
+   layers --bbox-layers names, and a raw OSM points/areas export routinely reaches well
+   past the trails (BarrTrailWorld.json: 8 POIs and 16 polygons, the forest out to 3 km
+   beyond the edge). world.js crops every layer to the rectangle with these. `r` is
+   {x0,z0,x1,z1} in projected world units. */
+function inRect(x,z,r){ return x>=r.x0 && x<=r.x1 && z>=r.z0 && z<=r.z1; }
+/* Liang-Barsky on one segment: the [t0,t1] part of a->b inside r, or null. */
+function clipSegT(a,b,r){
+  const dx=b[0]-a[0], dz=b[1]-a[1];
+  let t0=0, t1=1;
+  const P=[-dx,dx,-dz,dz], Q=[a[0]-r.x0, r.x1-a[0], a[1]-r.z0, r.z1-a[1]];
+  for(let k=0;k<4;k++){
+    if(P[k]===0){ if(Q[k]<0) return null; continue; }
+    const t=Q[k]/P[k];
+    if(P[k]<0){ if(t>t1) return null; if(t>t0) t0=t; }
+    else      { if(t<t0) return null; if(t<t1) t1=t; }
+  }
+  return [t0,t1];
+}
+/* A polyline cut to the rectangle: every inside run as its own polyline, with the
+   crossing points added so a trail ends exactly on the edge rather than one vertex
+   short of it. Runs shorter than two points are dropped. */
+function clipLineToRect(pts,r){
+  const runs=[]; let cur=null;
+  const at=(a,b,t)=>[a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t];
+  const same=(p,q)=>p && Math.abs(p[0]-q[0])<1e-9 && Math.abs(p[1]-q[1])<1e-9;
+  for(let i=1;i<pts.length;i++){
+    const a=pts[i-1], b=pts[i];
+    const T=clipSegT(a,b,r);
+    if(!T){ if(cur){ runs.push(cur); cur=null; } continue; }
+    const p=T[0]===0?a:at(a,b,T[0]), q=T[1]===1?b:at(a,b,T[1]);
+    if(!cur) cur=[p];
+    else if(!same(cur[cur.length-1],p)){ runs.push(cur); cur=[p]; }
+    if(!same(cur[cur.length-1],q)) cur.push(q);
+    if(T[1]<1){ runs.push(cur); cur=null; }
+  }
+  if(cur) runs.push(cur);
+  return runs.filter(run=>run.length>=2);
+}
+/* Sutherland-Hodgman against the four edges. Returns a closed ring (first point repeated
+   last, the GeoJSON form every area consumer expects) or null when too little is left. */
+function clipRingToRect(ring,r){
+  let pts=ring.slice();
+  if(pts.length>1 && pts[0][0]===pts[pts.length-1][0] && pts[0][1]===pts[pts.length-1][1]) pts.pop();
+  const edges=[
+    [p=>p[0]>=r.x0, (a,b)=>{ const t=(r.x0-a[0])/(b[0]-a[0]); return [r.x0, a[1]+(b[1]-a[1])*t]; }],
+    [p=>p[0]<=r.x1, (a,b)=>{ const t=(r.x1-a[0])/(b[0]-a[0]); return [r.x1, a[1]+(b[1]-a[1])*t]; }],
+    [p=>p[1]>=r.z0, (a,b)=>{ const t=(r.z0-a[1])/(b[1]-a[1]); return [a[0]+(b[0]-a[0])*t, r.z0]; }],
+    [p=>p[1]<=r.z1, (a,b)=>{ const t=(r.z1-a[1])/(b[1]-a[1]); return [a[0]+(b[0]-a[0])*t, r.z1]; }]];
+  for(const [inside,cut] of edges){
+    if(!pts.length) break;
+    const out=[];
+    for(let i=0;i<pts.length;i++){
+      const cur=pts[i], prev=pts[(i+pts.length-1)%pts.length];
+      const ci=inside(cur), pi=inside(prev);
+      if(ci){ if(!pi) out.push(cut(prev,cur)); out.push(cur); }
+      else if(pi) out.push(cut(prev,cur));
+    }
+    pts=out;
+  }
+  if(pts.length<3) return null;
+  let A=0; for(let i=0;i<pts.length;i++){ const p=pts[i], q=pts[(i+1)%pts.length]; A+=p[0]*q[1]-q[0]*p[1]; }
+  if(Math.abs(A)<1e-6) return null;
+  pts.push(pts[0].slice());
+  return pts;
 }
 
 /* ==== src/trails/spatial.js ==== */
@@ -8029,6 +8539,233 @@ function skyOcclusion(){
   return {sun: flags(sunSprite), moon: flags(moonSprite)};
 }
 
+/* ==== src/trails/ground-cover.js ==== */
+/* Ground cover: what the ground itself is made of, where a map says so.
+
+   A cover polygon (terrain.js flattenAreaCells: too much hill under it to be a slab) is
+   left as the hillside the DEM describes, dressed with what stands on it -- trees for a
+   forest, boulders for scree. That is right for a forest, whose floor looks like any
+   other ground. It is not enough for scree: a scree field IS its ground, a slope of
+   broken stone above the tree line, and a scatter of boulders on grass reads as a meadow
+   with rocks in it. On BarrTrailWorld.json that is the 8 km^2 natural=scree field that
+   wraps the summit cone.
+
+   So the terrain is painted, the way the noise ring is (noise-ring.js): PROJECTED in the
+   fragment shader, not draped geometry. A mask texture at the DEM's own resolution says
+   how much of each cell is scree; the terrain material samples it at the fragment's world
+   x/z and, where it is set, replaces the grass texel with broken stone. Consequences:
+
+     - it lies on exactly whatever terrain is there -- terraces, risers, cut banks --
+       with nothing to z-fight and no geometry to rebuild;
+     - it is on the TERRAIN material only. Trail treads, lots and bridge decks keep their
+       own surfaces, so a path across the scree still reads as a path;
+     - the edge is soft (the mask is linearly filtered between cell centres) and then
+       broken up with noise, so it is a ragged boundary, not a staircase of cells.
+
+   The stone pattern is procedural: offset rows of cobbles with dark joints between them,
+   each stone its own shade, the whole modulated at a larger scale so a hillside of it
+   does not tile visibly. Sized in world units, like the tread widths, because it is
+   read against the pup standing on it. */
+
+/* Shared uniforms, referenced (never copied) by every patched material, so rebuilding a
+   world is writing these once. uCoverRect = originX, originZ, width, depth of the mask in
+   world units; uCoverOn 0 disables the whole branch on a map with no scree. */
+const COVER_UNIFORMS = {
+  uCoverMask: {value: null},
+  uCoverRect: {value: [0, 0, 1, 1]},
+  uCoverOn:   {value: 0},
+  uCoverCell: {value: 1},        // one mask cell in world units: how far the edge may wander
+};
+let STATE = {on:false, width:0, height:0, cells:0, rect:[0,0,1,1]};
+
+const COVER_VERT_DECL = 'varying vec3 vCoverW;\n';
+const COVER_VERT_BODY = '\n  vCoverW = (modelMatrix * vec4(transformed, 1.0)).xyz;\n';
+/* THE STONE PATTERN. Scree is broken rock sorted by nothing but gravity: angular stones
+   of every size, packed with smaller rubble, no rows and no grid. So, three sizes:
+
+     - BOULDERS: a coarse jittered Voronoi layer (each fragment finds its nearest of the
+       scattered centres), of which only about a quarter of the cells are kept, so big
+       blocks lie scattered through the field rather than tiling it;
+     - STONES: the same at the main scale, filling everything the boulders do not;
+     - RUBBLE: a finer layer again, which is what shows in the joints between stones --
+       broken stone in the gaps, not a black grout line.
+   F2-F1 (how much nearer the nearest centre is than the next) is the distance to a joint.
+   Every stone takes its own grey and a slight warm or cool cast from its id, is lighter
+   at its middle than its rim, and carries a fine grain, which is what turns a flat cell
+   into a rounded block. All three layers are sampled through a gentle noise WARP so no
+   stone edge runs dead straight, and smooth noise at two larger scales mottles the field
+   and lays a faint lichen tint over it so a whole hillside does not repeat.
+
+   THE EDGE. The mask is one value per DEM cell, so on its own it outlines the field in
+   cell-sized steps. Two things undo that, and both are careful never to create cover
+   AWAY from the field (the first version of this added noise to the mask outright, which
+   lifted the empty mask everywhere and would have sprinkled stones across every meadow
+   on the map):
+     - the mask is looked up at a point displaced by ~1.5 cells of smooth noise, which
+       bends the whole boundary organically but only moves where it is;
+     - fine noise is added only in the transition, scaled by 4m(1-m), which is 0 where
+       the mask is fully off or fully on.
+   Across that margin the rubble bed fades in, and each stone appears only once the
+   cover passes its own random threshold -- boulders only well inside -- so the field
+   frays into scattered rocks rather than stopping at a line.
+
+   Linear-space colours (diffuseColor is linear at <map_fragment>): stones run about
+   sRGB #736d64..#aca597, rubble #625d56..#89847b. Developed against a numpy port and then
+   rendered for real in headless WebGL (Mesa), which matched it to ~1/255 on average. */
+const COVER_FRAG_DECL = `
+uniform sampler2D uCoverMask; uniform vec4 uCoverRect; uniform float uCoverOn; uniform float uCoverCell;
+varying vec3 vCoverW;
+/* Sine-free hashes (Dave Hoskins' hash12 / hash22). The usual fract(sin(x)*43758) is
+   taken here at arguments near 1e6 -- the far side of a big map, times the stone scale --
+   and many mobile GPUs evaluate sin() poorly out there, which shows as stripes. These use
+   only fract/dot/multiply, so they behave the same on every GPU at map-sized inputs. */
+float coverHash(vec2 p){
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+vec2 coverHash2(vec2 p){
+  vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.xx + p3.yz) * p3.zy);
+}
+float coverNoise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(coverHash(i), coverHash(i + vec2(1.0, 0.0)), u.x),
+             mix(coverHash(i + vec2(0.0, 1.0)), coverHash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+/* x = distance to the nearest centre, y = distance to the joint (F2 - F1), z = id 0..1 */
+vec3 coverStones(vec2 p){
+  vec2 n = floor(p), f = fract(p);
+  float d1 = 8.0, d2 = 8.0, id = 0.0;
+  for(int j = -1; j <= 1; j++){
+    for(int i = -1; i <= 1; i++){
+      vec2 g = vec2(float(i), float(j));
+      vec2 r = g + coverHash2(n + g) * 0.9 + 0.05 - f;
+      float d = dot(r, r);
+      if(d < d1){ d2 = d1; d1 = d; id = coverHash(n + g + 3.1); }
+      else if(d < d2){ d2 = d; }
+    }
+  }
+  float s1 = sqrt(d1);
+  return vec3(s1, sqrt(d2) - s1, id);
+}
+vec3 coverStoneCol(vec3 s, float k){
+  vec3 c = mix(vec3(0.17, 0.16, 0.145), vec3(0.42, 0.40, 0.36), k);
+  c *= mix(vec3(1.0, 0.98, 0.94), vec3(0.95, 0.98, 1.02), fract(k * 7.3));
+  return c * (1.1 - 0.34 * s.x);
+}
+float coverAmount(vec2 w){
+  vec2 wob = (vec2(coverNoise(w * 0.09), coverNoise(w * 0.09 + 9.1)) - 0.5) * 3.0 * uCoverCell;
+  vec2 uv = (w + wob - uCoverRect.xy) / uCoverRect.zw;
+  if(uv.x <= 0.0 || uv.x >= 1.0 || uv.y <= 0.0 || uv.y >= 1.0) return 0.0;
+  float m = texture2D(uCoverMask, uv).r;
+  float n = (coverNoise(w * 0.35) - 0.5) * 0.5 + (coverNoise(w * 1.3 + 7.7) - 0.5) * 0.22;
+  return clamp(m + n * 4.0 * m * (1.0 - m) * 1.4, 0.0, 1.0);
+}
+/* The scree colour and, in .a, how much of it shows here. */
+vec4 screeColor(vec2 w, float k){
+  vec2 q = w * 1.5 + (vec2(coverNoise(w * 0.8), coverNoise(w * 0.8 + 17.3)) - 0.5) * 0.7;
+  vec3 B = coverStones(q * 0.45 + 11.0);
+  vec3 S = coverStones(q);
+  vec3 R = coverStones(q * 3.1 + 5.0);
+  vec3 rub = mix(vec3(0.12, 0.11, 0.10), vec3(0.24, 0.23, 0.21), R.z) * mix(0.5, 1.0, smoothstep(0.0, 0.14, R.y));
+  float grain = 0.9 + 0.2 * coverNoise(w * 7.0);
+  vec3 sc = coverStoneCol(S, S.z) * grain * (1.0 - 0.25 * (1.0 - smoothstep(0.07, 0.30, S.y)));
+  vec3 bc = coverStoneCol(B, B.z * 3.4) * grain * (1.0 - 0.35 * (1.0 - smoothstep(0.04, 0.28, B.y)));
+  float onB = smoothstep(0.04, 0.12, B.y) * (1.0 - step(0.28, B.z));
+  float onS = smoothstep(0.07, 0.17, S.y);
+  float showB = onB * smoothstep(B.z - 0.04, B.z + 0.04, k * 0.4 - 0.12);
+  float showS = onS * smoothstep(S.z - 0.08, S.z + 0.08, k * 1.25 - 0.1);
+  vec3 col = mix(rub, sc, showS);
+  col = mix(col, bc, showB);
+  col *= 0.82 + 0.36 * coverNoise(w * 0.12);
+  col = mix(col, col * vec3(0.93, 1.0, 0.82), smoothstep(0.55, 0.9, coverNoise(w * 0.3 + 41.0)) * 0.5);
+  return vec4(col, max(smoothstep(0.30, 0.75, k), max(showS, showB)));
+}
+`;
+const COVER_FRAG_BODY = `
+  if(uCoverOn > 0.5){
+    float coverK = coverAmount(vCoverW.xz);
+    if(coverK > 0.0){
+      vec4 scree = screeColor(vCoverW.xz, coverK);
+      diffuseColor.rgb = mix(diffuseColor.rgb, scree.rgb, scree.a);
+    }
+  }
+`;
+
+/* Teach the terrain material about cover. Same contract as patchGroundRing: idempotent,
+   chains any onBeforeCompile already there, keys the program cache. Injected after
+   <map_fragment>, so the stone replaces the grass TEXEL and is then lit, toon-banded and
+   shadowed exactly as the grass would have been. */
+function patchGroundCover(mat){
+  if(!mat || (mat.userData && mat.userData.groundCover)) return mat;
+  mat.userData = mat.userData || {};
+  mat.userData.groundCover = true;
+  const prev = mat.onBeforeCompile;
+  mat.onBeforeCompile = function(sh, renderer){
+    if(typeof prev === 'function') prev.call(this, sh, renderer);
+    Object.assign(sh.uniforms, COVER_UNIFORMS);
+    sh.vertexShader = COVER_VERT_DECL + sh.vertexShader.replace(
+      '#include <project_vertex>', '#include <project_vertex>' + COVER_VERT_BODY);
+    sh.fragmentShader = COVER_FRAG_DECL + sh.fragmentShader.replace(
+      '#include <map_fragment>', '#include <map_fragment>' + COVER_FRAG_BODY);
+  };
+  const prevKey = mat.customProgramCacheKey;
+  mat.customProgramCacheKey = function(){
+    return 'groundCover|' + (typeof prevKey === 'function' ? prevKey.call(this) : '');
+  };
+  mat.needsUpdate = true;
+  return mat;
+}
+
+/* Build the mask for a world. `W` is the loaded World (cell grid), `isCover(x,z)` says
+   whether a cell centre is scree. One byte per DEM cell, 255 = scree. Replaces any
+   previous mask; with nothing to paint, the branch is switched off entirely. */
+function setGroundCover(W, isCover){
+  const old = COVER_UNIFORMS.uCoverMask.value;
+  if(old && typeof old.dispose === 'function') old.dispose();
+  COVER_UNIFORMS.uCoverMask.value = null;
+  COVER_UNIFORMS.uCoverOn.value = 0;
+  STATE = {on:false, width:0, height:0, cells:0, rect:[0,0,1,1]};
+  if(!W || !isCover) return STATE;
+  const w = W.width, h = W.height, data = new Uint8Array(w*h);
+  let cells = 0;
+  for(let j=0;j<h;j++) for(let i=0;i<w;i++){
+    const c = W.cellCentre(i, j);
+    if(isCover(c.x, c.z)){ data[j*w+i] = 255; cells++; }
+  }
+  if(!cells) return STATE;
+  const tex = new THREE.DataTexture(data, w, h, THREE.LuminanceFormat);
+  // one byte per texel: rows are not 4-byte aligned unless the width happens to be
+  tex.unpackAlignment = 1;
+  tex.magFilter = THREE.LinearFilter; tex.minFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+  tex.__data = data;                      // test seam: what was uploaded
+  const rect = [W.originX, W.originZ, w*W.cell, h*W.cell];
+  COVER_UNIFORMS.uCoverMask.value = tex;
+  COVER_UNIFORMS.uCoverRect.value = rect;
+  COVER_UNIFORMS.uCoverOn.value = 1;
+  COVER_UNIFORMS.uCoverCell.value = W.cell;
+  STATE = {on:true, width:w, height:h, cells, rect};
+  return STATE;
+}
+/* Mask value at a world point, straight from the uploaded bytes: 0..255. For the harness
+   and for anything (scenery placement) that needs the same answer the shader gives. */
+function groundCoverAt(x, z){
+  const tex = COVER_UNIFORMS.uCoverMask.value;
+  if(!STATE.on || !tex) return 0;
+  const [ox, oz, rw, rh] = STATE.rect;
+  const i = Math.floor((x-ox)/rw*STATE.width), j = Math.floor((z-oz)/rh*STATE.height);
+  if(i < 0 || j < 0 || i >= STATE.width || j >= STATE.height) return 0;
+  return tex.__data[j*STATE.width+i];
+}
+function groundCoverState(){ return Object.assign({}, STATE); }
+function groundCoverSource(){ return {vertDecl:COVER_VERT_DECL, vertBody:COVER_VERT_BODY, fragDecl:COVER_FRAG_DECL, fragBody:COVER_FRAG_BODY}; }
+function groundCoverUniforms(){ return COVER_UNIFORMS; }
+
 /* ==== src/trails/world.js ==== */
 /* Scene state + rebuildWorld(). Owns GRAPH, POIS, AREAS, TRAILHEADS, bboxW -- read
    elsewhere as live bindings, mutated only through the functions here, same rule as
@@ -8062,7 +8799,14 @@ function skyOcclusion(){
 
 
 
+
 let GRAPH=null, TRAILHEADS=[], POIS=[], AREAS=[], WATER=[];
+/* Points that are built but are not landmarks (pieces.js POI_STYLE `fixture`): pylons,
+   gates, crossing signs. Kept apart from POIS so discovery, the minimap and the landmark
+   count never see them. RAIL_STATS is what the last build did with the railway, for the
+   smoke harness and for anyone asking why a line has a rack rail. */
+let FIXTURES=[], POWER_SPANS=[], TREE_SPOT=null;
+let RAIL_STATS={edges:0, km:0, rackEdges:0, tieGap:0, ties:0};
 /* Every floating area name currently in the scene. Collected at build time so the
    per-frame size cap does not have to walk the whole graph looking for sprites.
    Cleared IN PLACE on rebuild -- see the module header on shared mutable arrays. */
@@ -8374,6 +9118,15 @@ function fallbackProjector(layers){
 }
 let worldG=null;               // THREE.Group holding everything rebuildWorld() creates
 let BUNDLE=null;                // the loaded World instance
+/* What the last rebuild cut away at the DEM edge -- features clipped or dropped, per layer
+   kind. Read by the smoke harness (getCropStats); zeros on a map that fits its DEM. */
+let CROP={lines:0, points:0, areas:0, waterways:0};
+/* The heightfield's own rectangle in projected world units, the exact region terrain.js
+   answers from real cells rather than a clamped edge (World.contains). */
+function demRect(W){
+  return {x0:W.originX, z0:W.originZ, x1:W.originX+W.width*W.cell, z1:W.originZ+W.height*W.cell};
+}
+function getCropStats(){ return Object.assign({}, CROP); }
 let startHead=0;
 /* A stable identity for "which map is this", so anything persisted between sessions --
    saved spots, today -- can be filed against the right one. Derived from the bundle's
@@ -8532,6 +9285,156 @@ function applyThemeLighting(){
 function getGraph(){ return GRAPH; }
 function getTrailheads(){ return TRAILHEADS; }
 function getPOIs(){ return POIS; }
+function getFixtures(){ return FIXTURES; }
+function treeSpotOK(x,z){ return TREE_SPOT ? TREE_SPOT(x,z) : true; }
+function getPowerSpans(){ return POWER_SPANS; }
+
+/* ---------- fixtures: aligned to what they belong to ----------
+   rot uses three.js's convention: rotation.y = t turns local +z to world (sin t, cos t)
+   and local +x to (cos t, -sin t). */
+const faceZ = (vx, vz) => Math.atan2(vx, vz);          // local +z points along (vx,vz)
+const faceX = (dx, dz) => Math.atan2(-dz, dx);         // local +x points along (dx,dz)
+/* Nearest point on any edge of the given kinds within `reach` world units, with the
+   edge's direction there and the side of the line the query point is on. */
+function nearestOnEdges(x, z, kinds, reach){
+  let best=null;
+  for(const e of GRAPH ? GRAPH.edges : []){
+    if(kinds && !kinds.has(e.kind)) continue;
+    const r=projectOnPolyline(e.pts, x, z);
+    if(r.d<=reach && (!best || r.d<best.d)) best=Object.assign(r, {edge:e});
+  }
+  if(best){
+    const nx=-best.dir[1], nz=best.dir[0];
+    best.side=((x-best.px)*nx+(z-best.pz)*nz)>=0 ? 1 : -1;
+    best.n=[nx*best.side, nz*best.side];               // unit normal toward the query point
+  }
+  return best;
+}
+const RAIL_KINDS=new Set(['rail']);
+const STATION_REACH_M=40, FIXTURE_REACH_M=15, DEPOT_NEAR_M=30;
+function placeStation(p){
+  p.signOnly = AREAS.some(a=>{
+    if(a.kind!=='depot' && a.kind!=='platform') return false;
+    const bb=areaBBox(a), m=DEPOT_NEAR_M*MAP_SCALE;
+    return p.x>=bb.mnx-m && p.x<=bb.mxx+m && p.z>=bb.mnz-m && p.z<=bb.mxz+m;
+  });
+  const t=nearestOnEdges(p.x, p.z, RAIL_KINDS, STATION_REACH_M*MAP_SCALE);
+  if(!t) return null;
+  /* True metres from the centreline: half the ballast's outline, then the model's own
+     depth -- the depot's platform front is 4.2 m in front of its origin, the lone board is
+     a pace off the ballast. Offsets are real metres like the model, not MAP_SCALE'd. */
+  const back=pathOutlineWidth('rail')/2 + (p.signOnly ? 1.5 : 4.2);
+  return {x:t.px+t.n[0]*back, z:t.pz+t.n[1]*back, rot:faceZ(-t.n[0], -t.n[1])};
+}
+function buildFixtures(){
+  const frng=mulberry(4242);   // its own sequence: fixtures never shift the scenery's
+  POWER_SPANS=[];
+  const pylons=[];
+  for(const f of FIXTURES){
+    let x=f.x, z=f.z, rot=frng()*6.28;
+    const extra=[];
+    /* A gate, a crossing sign or a buffer stop only means something ON the way it belongs
+       to. The source often has the node but not the way (BarrTrailWorld.json: 4 of 6 gates
+       sit on driveways its line layer never included), and one standing alone in the
+       trees, turned at random, reads as litter. Those are skipped, and counted. */
+    const needsPath = f.kind==='gate' || f.kind==='buffer' || f.kind==='crossbuck';
+    if(f.kind==='gate'){
+      const t=nearestOnEdges(x, z, null, FIXTURE_REACH_M*MAP_SCALE);
+      if(t){ x=t.px; z=t.pz; rot=faceX(t.dir[0], t.dir[1]); f.gateHalf=pathOutlineWidth(t.edge.kind)/2+0.25; f.on=t.edge.kind; }
+    }else if(f.kind==='buffer'){
+      const t=nearestOnEdges(x, z, RAIL_KINDS, FIXTURE_REACH_M*MAP_SCALE);
+      if(t){ x=t.px; z=t.pz; rot=faceX(t.dir[0], t.dir[1]); f.on='rail'; }
+    }else if(f.kind==='crossbuck'){
+      /* One each side of the track, diagonally opposite (each on the right of the road
+         for traffic approaching it), boards turned to face along the road -- i.e. across
+         the rails. */
+      const t=nearestOnEdges(x, z, RAIL_KINDS, FIXTURE_REACH_M*MAP_SCALE);
+      if(t){
+        const off=pathOutlineWidth('rail')/2+1.4, along=2.2;
+        const [dx,dz]=t.dir, [nx,nz]=[-dz,dx];
+        x=t.px+nx*off-dx*along; z=t.pz+nz*off-dz*along; rot=faceZ(nx,nz);
+        extra.push({x:t.px-nx*off+dx*along, z:t.pz-nz*off+dz*along, rot:faceZ(-nx,-nz)});
+        f.on='rail';
+      }
+    }else if(f.kind==='pylon'){
+      pylons.push(f); continue;          // turned once its neighbours are known, below
+    }
+    if(needsPath && !f.on){ f.skipped=true; continue; }
+    for(const at of [{x,z,rot}, ...extra]){
+      const grp=buildPOI(f, frng);
+      grp.position.set(at.x, terrainY(at.x,at.z,VERT_SCALE), at.z); grp.rotation.y=at.rot;
+      grp.name='fixture:'+f.kind; worldG.add(grp);
+    }
+    f.x=x; f.z=z; f.rot=rot;
+  }
+  buildPowerLine(pylons, frng);
+}
+/* POWER LINES FROM PYLONS ALONE. A raw export carries power=tower nodes but not always the
+   power=line way through them, and pylons standing unconnected read as broken. Their
+   minimum spanning tree reproduces a single line exactly (consecutive towers are each
+   other's nearest), and a span longer than any real one is refused rather than drawn
+   across a valley between two different lines. Each pylon then turns to face along its
+   own spans, so its arms stand square to the wires. */
+const MAX_SPAN_M = 450;
+function buildPowerLine(pylons, frng){
+  const n=pylons.length;
+  if(!n) return;
+  const maxD=MAX_SPAN_M*MAP_SCALE, inTree=new Array(n).fill(false), best=new Array(n).fill(Infinity), from=new Array(n).fill(-1);
+  const nbr=pylons.map(()=>[]);
+  best[0]=0;
+  for(let it=0; it<n; it++){
+    let u=-1; for(let i=0;i<n;i++) if(!inTree[i] && (u<0 || best[i]<best[u])) u=i;
+    if(best[u]===Infinity){ best[u]=0; from[u]=-1; }   // a new, separate line starts here
+    inTree[u]=true;
+    if(from[u]>=0){ nbr[u].push(from[u]); nbr[from[u]].push(u); POWER_SPANS.push([from[u], u]); }
+    for(let v=0; v<n; v++){
+      if(inTree[v]) continue;
+      const d=Math.hypot(pylons[u].x-pylons[v].x, pylons[u].z-pylons[v].z);
+      if(d<=maxD && d<best[v]){ best[v]=d; from[v]=u; }
+    }
+  }
+  // face along the line: average of the unit directions to each neighbour, the second
+  // flipped so a straight run through the tower adds rather than cancels
+  pylons.forEach((p,i)=>{
+    let dx=0, dz=0;
+    nbr[i].forEach((j,k)=>{
+      let ux=pylons[j].x-p.x, uz=pylons[j].z-p.z; const L=Math.hypot(ux,uz)||1; ux/=L; uz/=L;
+      if(k>0 && ux*dx+uz*dz<0){ ux=-ux; uz=-uz; }
+      dx+=ux; dz+=uz;
+    });
+    p.rot = (dx||dz) ? faceX(dx, dz) : frng()*6.28;
+    p.y = terrainY(p.x, p.z, VERT_SCALE);
+    const grp=buildPOI(p, frng);
+    grp.position.set(p.x, p.y, p.z); grp.rotation.y=p.rot; grp.name='fixture:pylon';
+    worldG.add(grp);
+  });
+  if(!POWER_SPANS.length) return;
+  /* Wires: from each attachment point to its partner on the next tower, sagging in a
+     parabola. Partners are matched by side -- if the two towers' +z axes point opposite
+     ways, left pairs with right -- so no wire crosses its neighbour mid-span. */
+  const W=pylonWirePoints(), SEG=10, P=[];
+  const world=(p,l)=>{ const c=Math.cos(p.rot), sn=Math.sin(p.rot); return [p.x+l[0]*c+l[2]*sn, p.y+l[1], p.z-l[0]*sn+l[2]*c]; };
+  for(const [i,j] of POWER_SPANS){
+    const A=pylons[i], B=pylons[j];
+    const flip=(Math.sin(A.rot)*Math.sin(B.rot)+Math.cos(A.rot)*Math.cos(B.rot))<0;
+    for(const l of W){
+      const a=world(A,l), b=world(B, flip ? [l[0],l[1],-l[2]] : l);
+      const span=Math.hypot(b[0]-a[0], b[2]-a[2]);
+      const sag=clamp(span*0.035, 0.3, 6);
+      let prev=a;
+      for(let k=1;k<=SEG;k++){
+        const t=k/SEG;
+        const q=[a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t - 4*sag*t*(1-t), a[2]+(b[2]-a[2])*t];
+        P.push(prev[0],prev[1],prev[2], q[0],q[1],q[2]); prev=q;
+      }
+    }
+  }
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(P),3));
+  const wires=new THREE.LineSegments(geo, new THREE.LineBasicMaterial({color:new THREE.Color('#2e3236')}));
+  wires.name='power-wires';
+  worldG.add(wires);
+}
 function getAreas(){ return AREAS; }
 function getBBox(){ return bboxW; }
 function getWorldGroup(){ return worldG; }
@@ -8744,7 +9647,10 @@ function updateAreaLabels(camX, camY, camZ){
    because the terrain-carving pass needs the widths BEFORE the ribbon loop runs (it has
    to cut the bench before buildTerrainMesh bakes the grid), and both must agree on the
    number or the carve and the ribbon end up different widths. */
-const PATH_W = {trail:1.1, track:1.9, dirtroad:2.8, road:3.0};
+const PATH_W = {trail:1.1, track:1.9, dirtroad:2.8, road:3.0, rail:2.6};
+/* rail: the sleeper length of standard gauge. The tread ribbon IS the ballast bed, so the
+   bench, the spatial hash and the walkable corridor are all exactly the width of the track
+   the pup can see -- it walks the sleepers, between the rails. */
 /* dirtroad is a graded dirt/gravel road (Gold Camp Road, Rampart Range Road): nearly a
    road's width, but a track in every way that matters to the rest of this file -- no
    kerb, no crosswalk, nothing trimmed back from it. See geo.js's pathKind. */
@@ -8785,7 +9691,10 @@ function buriesTread(x, z, yTop){
    so the ink outline of the upper path visibly overlaps the lower surface rather than
    fighting it. 4.5 cm is under a twentieth of a tread width -- invisible as float, plenty
    for a depth buffer. */
-const PATH_RANK = {road:0, dirtroad:1, track:1, trail:2};
+const PATH_RANK = {road:0, dirtroad:1, track:1, rail:1, trail:2};
+/* rail sits with the tracks: a footpath that crosses it is painted over it (it is the
+   smaller surface), and a road it crosses is the ground its rails lie on -- which is how a
+   level crossing actually looks, rails set into the tarmac. */
 function pathRank(kind){ return PATH_RANK[kind] == null ? PATH_RANK.trail : PATH_RANK[kind]; }
 const KIND_LIFT_M = 0.045;
 function kindLift(kind){ return pathRank(kind)*KIND_LIFT_M; }
@@ -10017,13 +10926,63 @@ function wadeSurfaceAt(x, z){
 function getWaterways(){ return WATERWAYS; }
 function getBridges(){ return BRIDGES; }
 
+/* RAILWAY PLANNING, once per build, before any track is drawn.
+
+   RACK OR ADHESION. An ordinary railway cannot climb much past 4-6%: the wheels slip.
+   Anything steeper is a rack (cog) railway, with a toothed centre rail the locomotive's
+   pinion climbs -- and the Manitou and Pike's Peak line runs at up to 25%. The source
+   rarely says so (railway:rack is seldom tagged, and this export kept no tags at all), but
+   the DEM does: take each named line's steepest sustained grade over RACK_WINDOW_M of real
+   distance, and a line that exceeds RACK_GRADE anywhere gets the rack along its whole
+   length -- a cog railway does not drop its rack on the flat bits of the timetable.
+   An explicit railway:rack tag, or "cog" in the name, decides it outright.
+
+   SLEEPER BUDGET. Real spacing is 0.65 m, but a long line at 1:1 would be 20,000+
+   sleepers; the spacing opens up just enough to keep the whole network under
+   RAIL_TIE_BUDGET, so a short spur looks exactly right and a mountain railway at full
+   scale still draws on a tablet. */
+const RACK_GRADE = 0.08, RACK_WINDOW_M = 40, RAIL_TIE_BUDGET = 6000, RAIL_TIE_GAP_M = 0.65;
+function steepestGrade(pr){
+  if(!pr || !pr.hm || pr.pts.length<2) return 0;
+  const d=[0];
+  for(let i=1;i<pr.pts.length;i++) d.push(d[i-1]+Math.hypot(pr.pts[i][0]-pr.pts[i-1][0], pr.pts[i][1]-pr.pts[i-1][1])/MAP_SCALE);
+  let worst=0, j=0;
+  for(let i=0;i<pr.pts.length;i++){
+    while(j<pr.pts.length-1 && d[j]-d[i]<RACK_WINDOW_M) j++;
+    const run=d[j]-d[i];
+    if(run>=RACK_WINDOW_M*0.5) worst=Math.max(worst, Math.abs(pr.hm[j]-pr.hm[i])/run);
+  }
+  return worst;
+}
+function planRails(edges){
+  const rails=edges.filter(e=>e.kind==='rail' && e.prof);
+  const byLine=new Map();
+  for(const e of rails){ const k=e.name||'#'+e.a+'-'+e.b; if(!byLine.has(k)) byLine.set(k,[]); byLine.get(k).push(e); }
+  const rack=new Set();
+  for(const [name, list] of byLine){
+    const tagged=list.some(e=>e.rackTag) || /\bcog\b/i.test(name);
+    const steep=Math.max(0, ...list.map(e=>steepestGrade(e.prof)));
+    if(tagged || steep>RACK_GRADE) for(const e of list) rack.add(e);
+  }
+  let len=0;
+  for(const e of rails) for(let i=1;i<e.prof.pts.length;i++)
+    len+=Math.hypot(e.prof.pts[i][0]-e.prof.pts[i-1][0], e.prof.pts[i][1]-e.prof.pts[i-1][1]);
+  const tieGap=Math.max(RAIL_TIE_GAP_M, len/RAIL_TIE_BUDGET);
+  RAIL_STATS={edges:rails.length, km:+(len/MAP_SCALE/1000).toFixed(2), rackEdges:rack.size,
+              tieGap:+tieGap.toFixed(3), ties:0,
+              rackNames:[...new Set([...rack].map(e=>e.name||''))],
+              steepest:+Math.max(0,...rails.map(e=>steepestGrade(e.prof))).toFixed(3)};
+  return {rack, tieGap};
+}
+function getRailStats(){ return Object.assign({}, RAIL_STATS); }
+
 /* The rendering class of an edge: its kind, refined by surface. A concrete cycleway is a
    trail to everything else in this file, but it is not brown. */
 function styleKey(e){
   if(e.paved && (e.kind==='trail' || e.kind==='track')) return 'paved_'+e.kind;
   return PATH_STYLE_KEYS.has(e.kind) ? e.kind : 'trail';
 }
-const PATH_STYLE_KEYS = new Set(['trail','track','dirtroad','road','paved_trail','paved_track']);
+const PATH_STYLE_KEYS = new Set(['trail','track','dirtroad','road','rail','paved_trail','paved_track']);
 
 /* Bumped on every rebuildWorld so cached derived data (minimap.js's relief image, the
    critter roster) can tell "same world, new frame" from "whole world replaced" without
@@ -10338,23 +11297,58 @@ function rebuildWorld(){
     rawLines.push(...F.lines); rawPoints.push(...F.points); rawAreas.push(...F.areas);
     rawWaters.push(...(F.waters||[]));
   }
-  const lines=rawLines.map(L=>({name:L.name,kind:L.kind,paved:L.paved,ford:L.ford,
-                                pts:PROJ.projectCoords(L.pts)}));
+  /* CROPPED TO THE DEM whenever a bundle is loaded. Outside the heightfield rectangle
+     terrain.js reads the clamped edge cell, so anything past the edge sits on a smeared
+     copy of the rim -- and a polygon reaching past it gets graded against those copies
+     too. The rectangle is the bundle's own, in the same projected units as everything
+     below, so this holds at every World scale. Without a bundle there is nothing to crop
+     to and every layer is kept whole. Done here, before the graph, so topology, the
+     minimap, the bbox and every later pass see one cropped copy of the geometry. */
+  const R = BUNDLE ? demRect(BUNDLE) : null;
+  CROP = {lines:0, points:0, areas:0, waterways:0};
+  let lines=[];
+  for(const L of rawLines){
+    const pts=PROJ.projectCoords(L.pts);
+    const runs=R ? clipLineToRect(pts,R) : [pts];
+    if(R && pts.some(c=>!inRect(c[0],c[1],R))) CROP.lines++;
+    for(const run of runs) lines.push({name:L.name,kind:L.kind,paved:L.paved,ford:L.ford,rackTag:!!L.rackTag,bridge:!!L.bridge,pts:run});
+  }
   // the source's own bridge ways, kept aside: buildGraph snaps most of them out of
   // existence (see planBridges), so they survive only as hints for where spans go
-  const bridgeHints=lines.filter((L,i)=>rawLines[i].bridge).map(L=>L.pts);
+  const bridgeHints=lines.filter(L=>L.bridge).map(L=>L.pts);
   WATERWAYS.length=0;
-  for(const W of rawWaters)
-    WATERWAYS.push({name:W.name, kind:W.kind, width:W.width, intermittent:!!W.intermittent,
-                    pts:PROJ.projectCoords(W.pts), prof:null});
-  const points=rawPoints.map(P=>({name:P.name,kind:P.kind,props:P.props,p:PROJ.project(P.ll[0],P.ll[1])}));
+  for(const W of rawWaters){
+    const pts=PROJ.projectCoords(W.pts);
+    const runs=R ? clipLineToRect(pts,R) : [pts];
+    if(R && pts.some(c=>!inRect(c[0],c[1],R))) CROP.waterways++;
+    for(const run of runs)
+      WATERWAYS.push({name:W.name, kind:W.kind, width:W.width, intermittent:!!W.intermittent,
+                      pts:run, prof:null});
+  }
+  const points=[];
+  for(const P of rawPoints){
+    const p=PROJ.project(P.ll[0],P.ll[1]);
+    if(R && !inRect(p.x,p.z,R)){ CROP.points++; continue; }
+    points.push({name:P.name,kind:P.kind,props:P.props,p});
+  }
   // projectCoords() already returns plain [x,z] pairs at every leaf (verified against
   // world_bundle.js: it recurses until coords[0] is a number, then returns [p.x,p.z] --
   // never {x,z} objects). Re-mapping through .x/.z here, as areas previously did, reads
   // undefined off a plain array and collapses every polygon to NaN bounds -- confirmed by
   // running the real pipeline against a synthetic bundle, not assumed.
-  const areasProjected=rawAreas.map(A=>({name:A.name,kind:A.kind,props:A.props,
-    rings:A.rings.map(r=>PROJ.projectCoords(r))}));
+  /* A polygon's outer ring decides whether it survives; a hole cut away to nothing is
+     simply dropped, which is what a hole entirely off the map should do. */
+  const areasProjected=[];
+  for(const A of rawAreas){
+    let rings=A.rings.map(r=>PROJ.projectCoords(r));
+    if(R){
+      const outer=clipRingToRect(rings[0],R);
+      if(!outer){ CROP.areas++; continue; }
+      if(outer.length!==rings[0].length || !rings[0].every(c=>inRect(c[0],c[1],R))) CROP.areas++;
+      rings=[outer, ...rings.slice(1).map(r=>clipRingToRect(r,R)).filter(Boolean)];
+    }
+    areasProjected.push({name:A.name,kind:A.kind,props:A.props,rings});
+  }
 
   // *MAP_SCALE: `lines` above are already projected at the current scale, so a FIXED
   // snap/simplify tolerance here would mean a different real-world tolerance at every
@@ -10384,9 +11378,14 @@ function rebuildWorld(){
      before the bench, the spatial hash, the ribbons and the minimap all read it. */
   PATH_MIX.displaced = clearOfWiderPaths();
   PATH_MIX.bridges = planBridges(bridgeHints);
-  POIS=points.map(p=>({name:p.name,kind:p.kind,props:p.props,x:p.p.x,z:p.p.z,found:false}));
+  /* Landmarks and fixtures part here. A fixture kind with a NAME stays a landmark: an
+     unnamed pylon is scenery, but "Barr Camp Information Board" is somewhere. */
+  const isFixture=p=>{ const st=POI_STYLE[p.kind]; return !!(st && st.fixture) && !p.name; };
+  POIS=points.filter(p=>!isFixture(p)).map(p=>({name:p.name,kind:p.kind,props:p.props,x:p.p.x,z:p.p.z,found:false}));
+  FIXTURES=points.filter(isFixture).map(p=>({name:p.name,kind:p.kind,props:p.props,x:p.p.x,z:p.p.z}));
   AREAS=areasProjected;
-  WATER=AREAS.filter(a=>a.kind==='water');
+  // WATER is taken after flattenAreaCells below: a polygon it leaves as cover has no
+  // surface drawn, so it must not count as somewhere to wade
 
   let mx=1e9,Mx=-1e9,mz=1e9,Mz=-1e9;
   const grow=(x,z)=>{mx=Math.min(mx,x);Mx=Math.max(Mx,x);mz=Math.min(mz,z);Mz=Math.max(Mz,z);};
@@ -10428,8 +11427,9 @@ function rebuildWorld(){
   // ground: with a DEM the terrace mesh IS the heightfield, already in real-metre world
   // coordinates. Without one, a single flat plane covering the map's extent -- so a bare
   // pair of .geojson files is still playable, just level.
-  const groundMat=patchGroundRing(new THREE.MeshToonMaterial({map:groundTexture(THEME),
-    gradientMap:toonTex, polygonOffset:true, polygonOffsetFactor:2, polygonOffsetUnits:2}));
+  // the TERRAIN alone gets cover painting (ground-cover.js): paths, lots and decks keep their own surfaces
+  const groundMat=patchGroundCover(patchGroundRing(new THREE.MeshToonMaterial({map:groundTexture(THEME),
+    gradientMap:toonTex, polygonOffset:true, polygonOffsetFactor:2, polygonOffsetUnits:2})));
   // buildTerrainMesh now writes UVs straight from world x/z (see its own comment) at a
   // fixed real-world tile size, so the texture is already correctly scaled by
   // construction -- no separate repeat.set() needed, and one WOULD be wrong here: it
@@ -10446,6 +11446,13 @@ function rebuildWorld(){
   // do. The visible result was exactly what it sounds like: areas of interest hovering
   // above ground that had already been drawn one terrace step below them.
   flattenAreaCells(AREAS, pointInArea, areaBBox);
+  WATER=AREAS.filter(a=>a.kind==='water' && !a.cover);
+  /* Scree ground: every rock-family polygon left as COVER paints its cells as broken
+     stone (ground-cover.js). A graded rock is an extruded mass and already looks like
+     rock; a cover one is a hillside, and the hillside is what has to change. */
+  { const scree=AREAS.filter(a=>a.cover && AREA_STYLE[a.kind] && AREA_STYLE[a.kind].landform);
+    setGroundCover(BUNDLE && scree.length ? BUNDLE : null,
+                   scree.length ? (x,z)=>scree.some(a=>pointInArea(x,z,a)) : null); }
 
   /* Trail benches, for the same before-the-mesh reason as the area flatten above, and in
      this order relative to it: an area polygon (a parking lot) is a bigger, flatter claim
@@ -10549,7 +11556,8 @@ function rebuildWorld(){
     const st=AREA_STYLE[a.kind];
     // `top` comes off the built group, so the surface the player stands on is by
     // construction the top of the mesh they can see -- see pieces.js's buildArea
-    if(st && st.solid) AREA_SOLIDS.push({area:a, kind:a.kind, bb:areaBBox(a),
+    // cover has no mass to stand on or bump into -- see flattenAreaCells
+    if(st && st.solid && !a.cover) AREA_SOLIDS.push({area:a, kind:a.kind, bb:areaBBox(a),
                                          top:ag.userData ? ag.userData.solidTop : null,
                                          // the drawn surface reaches this far past the
                                          // outline; see pieces.js's buildLandform
@@ -10576,6 +11584,12 @@ function rebuildWorld(){
     road:{deco:false, dashes:true, tread:'#716d64', inner:'#8a867a', shoulder:'#4a473f'},
     paved_trail:{deco:false, tread:'#b4aea2', inner:'#c3bdb1', shoulder:'#6e695f'},
     paved_track:{deco:false, tread:'#9a958b', inner:'#aca79c', shoulder:'#5c584f'},
+    /* Railway: the tread is the ballast bed (crushed grey stone, a shade warmer than the
+       tarmac so the two never read as one where they meet), the shoulder its sloping
+       edge. No inner stripe, ruts or dashes -- the sleepers and rails drawn on top ARE the
+       detail. */
+    rail:{deco:false, rail:true, tread:'#8a847a', inner:'#8a847a', shoulder:'#6a655d',
+          tie:'#5b4331', steel:'#b9bcc0', rackCol:'#4a4c50', tooth:'#9ea2a8'},
   };
   const styleOf = e => PATH_STYLE[styleKey(e)] || PATH_STYLE.trail;
   // one ink material per class rank, so the outline of a path sitting on top of another
@@ -10585,6 +11599,7 @@ function rebuildWorld(){
      decides who wins, but painter's order costs nothing and makes the result stable even
      where two surfaces are exactly coplanar and the bias ties. */
   const drawOrder=GRAPH.edges.slice().sort((a,b)=>pathRank(a.kind)-pathRank(b.kind));
+  const railPlan=planRails(GRAPH.edges);
   /* Deck and railings over every run of bridge stations on this edge. Built from the
      (possibly trimmed) profile the ribbon itself was drawn from, so the planks sit exactly
      on the tread they cover. A paved road gets a concrete slab and parapet and keeps its
@@ -10684,6 +11699,17 @@ function rebuildWorld(){
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*OUTLINE_MUL,lift+0.012,hs),inkMats[rank]));
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*SHOULDER_MUL,lift+0.02,hs),trailMat(st.shoulder,rank)));
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W,lift+0.05,hs),trailMat(st.tread,rank)));
+    if(st.rail){
+      const tg=railTrackGeoms(rpts, hs, lift, railPlan.tieGap, railPlan.rack.has(e));
+      const add=(geo,col,name)=>{ if(!geo) return; const m=new THREE.Mesh(geo,toon(col)); m.name=name; worldG.add(m); };
+      add(tg.ties, st.tie, 'rail-ties');
+      add(tg.rails, st.steel, 'rail-rails');
+      add(tg.rack, st.rackCol, 'rail-rack');
+      add(tg.teeth, st.tooth, 'rail-teeth');
+      if(tg.ties) RAIL_STATS.ties += tg.ties.attributes.position.count/18;
+      buildDecks(e, prof, W, lift);
+      return;
+    }
     if(st.ruts){
       const rutMat=trailMat(st.rut || shade(st.tread,0.55),rank);
       [-1,1].forEach(sd=>{
@@ -11021,25 +12047,42 @@ function rebuildWorld(){
 
   // POIs
   POIS.forEach(p=>{
+    /* A station stands beside its track, not on it: it is turned to face the nearest
+       railway and set back so its platform edge meets the ballast. If the map also has
+       the station's own footprint (a depot or platform area close by), only the name
+       board goes up -- the real building is already there. Rotation for a station comes
+       from the track; every other landmark keeps its random turn. The draws are made in the
+       original order (model, then turn) whether or not the turn is used, so neither the
+       models here nor the scenery after this loop shift on any existing map. */
+    const place=p.kind==='station' ? placeStation(p) : null;   // no rng: before or after is moot
     const grp=buildPOI(p,rng);
-    grp.position.set(p.x,terrainY(p.x,p.z,VERT_SCALE),p.z);
-    grp.rotation.y=rng()*6.28;
+    const spin=rng()*6.28;                                      // same draw, same order as always
+    p.at = place;                     // test seam: where a station actually went
+    if(place){ grp.position.set(place.x,terrainY(place.x,place.z,VERT_SCALE),place.z); grp.rotation.y=place.rot; }
+    else{ grp.position.set(p.x,terrainY(p.x,p.z,VERT_SCALE),p.z); grp.rotation.y=spin; }
     worldG.add(grp);
   });
+  buildFixtures();
 
   // scenery
-  const clearOfPOI=(x,z,r)=>!POIS.some(p=>Math.hypot(p.x-x,p.z-z)<r);
+  const clearOfPOI=(x,z,r)=>!POIS.some(p=>Math.hypot(p.x-x,p.z-z)<r) && !FIXTURES.some(p=>Math.hypot(p.x-x,p.z-z)<r);
   const inWater=(x,z)=>WATER.some(a=>pointInArea(x,z,a));
   const offTrail=(x,z,r)=>nearestTrail(x,z).d>r&&clearOfPOI(x,z,7)&&!inWater(x,z)
                           &&waterEdgeDist(x,z)>Math.min(r,2.5);
   const pad=70, W=Mx-mx+pad*2, H=Mz-mz+pad*2;
   let placed=0,tries=0;
   const targetTrees=Math.min(560,W*H/450*THEME.treeDensity);
+  /* Where a scenery tree may stand: off the paths and water, and not on scree -- scree is
+     above the tree line. One predicate, kept as TREE_SPOT for the harness, so the rule is
+     tested directly rather than by hoping a random tree lands in the wrong place. */
+  const treeSpot=(x,z)=>offTrail(x,z,4.2) && !groundCoverAt(x,z);
+  TREE_SPOT=treeSpot;
   while(placed<targetTrees&&tries++<targetTrees*7){
     const x=mx-pad+rng()*W, z=mz-pad+rng()*H;
-    if(!offTrail(x,z,4.2)) continue;
+    if(!treeSpot(x,z)) continue;
     const t=makeTree((1.1+rng()*1.6)*THEME.treeScale,pickTree(rng),rng);
     t.position.set(x,terrainY(x,z,VERT_SCALE),z); t.rotation.y=rng()*7;
+    t.name='scenery-tree';              // test seam: the harness checks where these grow
     worldG.add(t); placed++;
   }
   placed=0; tries=0;
@@ -12614,7 +13657,7 @@ function fmtCourseLen(m){
 
 const INK_MAP = '#3a2517';
 const TRAIL_INK = {trail:'#9c6a35', track:'#8a6a45', dirtroad:'#a08a68', road:'#6f6b62',
-                   paved_trail:'#9d978b', paved_track:'#8d887e'};
+                   paved_trail:'#9d978b', paved_track:'#8d887e', rail:'#3b3530'};
 const WATER_INK = '#3f8fc9';
 // the same magenta course-line.js paints on the ground (0xd94fa0), so the disc in the
 // corner and the strip underfoot are recognisably one object seen two ways
@@ -12996,6 +14039,23 @@ function buildAtlas(){
   };
   strokeEdges(Math.max(2.2, ppm*4.2), () => INK_MAP);
   strokeEdges(Math.max(1.2, ppm*2.4), e => TRAIL_INK[styleKey(e)] || TRAIL_INK.trail);
+  /* Railways in the map-maker's own symbol: the dark line above, broken by pale dashes
+     down its middle, so a railway can never be mistaken for a road at any zoom. */
+  if(typeof g.setLineDash === 'function'){
+    const dash = Math.max(3, ppm*6);
+    g.setLineDash([dash, dash]);
+    g.lineCap = 'butt';
+    for(const e of G.edges){
+      if(e.kind !== 'rail' || e.pts.length < 2) continue;
+      g.beginPath();
+      e.pts.forEach((p, i) => i ? g.lineTo(X(p[0]), Z(p[1])) : g.moveTo(X(p[0]), Z(p[1])));
+      g.lineWidth = Math.max(0.7, ppm*1.2);
+      g.strokeStyle = '#f2ead6';
+      g.stroke();
+    }
+    g.setLineDash([]);
+    g.lineCap = 'round';
+  }
 
   // points of interest
   for(const p of getPOIs()){
@@ -15646,7 +16706,8 @@ function loop(t){
      sealed road or path, dirt otherwise. Off it, a creek splashes -- asked of the same
      channel geometry the water is drawn from, so the sound starts where the blue does. */
   player.surface = (player.climbT > 0 || player.wall) ? 'rock'
-                 : inCorridor ? (nt.deck ? 'wood' : (nt.edge && nt.edge.paved) ? 'paved' : 'trail')
+                 : inCorridor ? (nt.deck ? 'wood' : (nt.edge && nt.edge.kind === 'rail') ? 'ballast'
+                                 : (nt.edge && nt.edge.paved) ? 'paved' : 'trail')
                  : (inWaterway(player.x, player.z) ? 'water' : 'grass');
   const surf = nearTrail ? 1 : 0.6;
   refreshOnTrail(nt);          // reuse the lookup above rather than hashing twice a frame
@@ -16694,7 +17755,7 @@ function showHerePoint(pt){
   if(!stats || !actions) return;
   stats.innerHTML = ''; actions.innerHTML = '';
 
-  const kindWord = {road:'Road', dirtroad:'Dirt road', track:'Track'}[p.kind] || 'Trail';
+  const kindWord = {road:'Road', dirtroad:'Dirt road', track:'Track', rail:'Railway'}[p.kind] || 'Trail';
   hereRow(stats, kindWord, p.name + ' (' + compass(p.x, p.z) + ')');
   const ft = elevationFt(p.x, p.z);
   if(ft != null) hereRow(stats, 'Elevation', Math.round(ft).toLocaleString() + ' ft');

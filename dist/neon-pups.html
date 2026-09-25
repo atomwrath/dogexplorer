@@ -1824,6 +1824,9 @@ const STEP_SURFACES = {
   sand:  {hz:1500, q:0.4, d:0.130, b:0,   be:0,   n:0.22, bg:0.00}, // dull, no tail at all
   paved: {hz:2350, q:1.2, d:0.050, b:240, be:150, n:0.24, bg:0.13}, // tarmac: short, dry tap
   water: {hz:1050, q:0.5, d:0.160, b:0,   be:0,   n:0.34, bg:0.00}, // splash: low hiss, long tail
+  // railway ballast: crushed stone under the sleepers -- a coarser, louder crunch than
+  // trail gravel, with a little of the sleeper's wooden knock in the head
+  ballast: {hz:2050, q:0.7, d:0.085, b:190, be:115, n:0.36, bg:0.12},
 };
 function stepSurface(name){ return STEP_SURFACES[name] || STEP_SURFACES.trail; }
 
@@ -2557,10 +2560,19 @@ const PAVED_ROAD_WORDS = 'highway|hwy|street|avenue|ave|boulevard|blvd|parkway|p
    trails at least as often ("Deer Run"), and a trail misread as a creek disappears from
    the walking network -- a far worse failure than a creek drawn as a path. */
 const WATER_WORDS = 'creek|river|brook|stream|canal|ditch';
+/* RAIL. railway=* says what the line carries; a disused or abandoned bed is usually a
+   rail-trail by now and is left as the trail it is walked as. The name fallback is for
+   exports that dropped the railway column (BarrTrailWorld.json kept only name/id, so
+   "Manitou and Pike's Peak Railway" arrived with no tag at all). A name with a trail
+   word in it -- "Midland Rail Trail" -- is a trail first. */
+const RAIL_TAGS = new Set(['rail','narrow_gauge','light_rail','funicular','preserved','tram','monorail','miniature']);
+const RAIL_WORDS = 'railway|railroad|rail|cog|funicular|tramway';
 
 function pathKind(p, name){
   const raw=rawKindOf(p);
   const hw=tag(p,'highway');
+  if(RAIL_TAGS.has(tag(p,'railway'))) return 'rail';
+  if(raw && wordIn(raw, 'rail|railway|railroad')) return 'rail';
   /* order matters: "single track trail" contains both "track" and "trail" — check the
      unambiguous road tokens first, then trail/singletrack phrasing, THEN bare "track" —
      otherwise a hiking singletrack gets misread as a vehicle track. "unpaved" contains
@@ -2576,6 +2588,7 @@ function pathKind(p, name){
   if(PATH_HW.has(hw)) return'trail';
   /* No usable tag: fall back to the name. "Longs Ranch Road" is a road whether or not
      anyone tagged it; "Pikes Peak Highway" is a paved one. */
+  if(!hw && name && !wordIn(name, TRAIL_WORDS) && wordIn(name, RAIL_WORDS)) return 'rail';
   if(!hw && name && !wordIn(name, TRAIL_WORDS) && wordIn(name, ROAD_WORDS))
     return pathPaved(p, 'road', name) ? 'road' : 'dirtroad';
   return'trail';
@@ -2640,6 +2653,23 @@ function isBridge(p){
   return /bridge/.test(rawKindOf(p));
 }
 function isFord(p){ const f=tag(p,'ford'); return !!f && f!=='no'; }
+const GATE_BARRIERS = new Set(['gate','lift_gate','swing_gate','kissing_gate','hampshire_gate','wicket_gate']);
+const MEMORIAL_HISTORIC = new Set(['memorial','monument','wayside_cross','wayside_shrine','plaque']);
+const NOISE_RAILWAY = new Set(['switch','railway_crossing','signal','derail','milestone','crossing_box','turntable']);
+const NOISE_HIGHWAY = new Set(['crossing','elevator','street_lamp','traffic_signals','stop','give_way',
+  'turning_circle','turning_loop','speed_camera','bus_stop','motorway_junction','mini_roundabout','passing_place']);
+const NOISE_AMENITY = new Set(['bicycle_parking','waste_basket','vending_machine','parking','parking_entrance',
+  'recycling','post_box','telephone']);
+const NOISE_BARRIER = new Set(['bollard','kerb','block','cycle_barrier','chain','entrance','height_restrictor']);
+/* A platform POINT is dropped: the station point beside it is the landmark, and the
+   platform itself, when mapped, is an area (see areaKind). */
+function isPoiNoise(p){
+  return NOISE_RAILWAY.has(tag(p,'railway')) || NOISE_HIGHWAY.has(tag(p,'highway'))
+      || NOISE_AMENITY.has(tag(p,'amenity')) || NOISE_BARRIER.has(tag(p,'barrier'))
+      || !!p.place || !!p.entrance
+      || tag(p,'public_transport')==='stop_position' || tag(p,'public_transport')==='platform'
+      || tag(p,'power')==='pole' || tag(p,'power')==='portal';
+}
 function poiKind(p){
   const raw=String(p.kind||p.type||p.poi||p.category||p.class||'').toLowerCase();
   const hit=(...k)=>k.some(s=>raw.includes(s));
@@ -2654,6 +2684,23 @@ function poiKind(p){
   if(hit('peak','summit','cairn','marker'))return'cairn';
   if(hit('tree','grove'))return'tree';
   // OSM tags
+  /* Parts of something already drawn, or points that name a place rather than a thing:
+     a railway switch is a point ON the track, a pedestrian crossing is a point on the
+     road, a hamlet is a label. A raw OSM export is full of them -- BarrTrailWorld.json
+     carries 13 switches and 8 crossings -- and each one used to fall through to the
+     default below and stand in the woods as a cairn called "Marker". */
+  if(isPoiNoise(p)) return null;
+  const rw=tag(p,'railway'), pt=tag(p,'public_transport'), am=tag(p,'amenity'), ts=tag(p,'tourism');
+  if(rw==='station'||rw==='halt'||pt==='station'||tag(p,'building')==='train_station')return'station';
+  if(rw==='level_crossing'||rw==='crossing')return'crossbuck';
+  if(rw==='buffer_stop')return'buffer';
+  if(tag(p,'power')==='tower')return'pylon';
+  if(GATE_BARRIERS.has(tag(p,'barrier')))return'gate';
+  if(am==='toilets')return'toilet';
+  if(ts==='information'||tag(p,'highway')==='trailhead')
+    return tag(p,'information')==='guidepost'?'guidepost':'infoboard';
+  if(MEMORIAL_HISTORIC.has(tag(p,'historic')))return'memorial';
+  if(p.shop||am==='cafe'||am==='restaurant'||ts==='museum'||tag(p,'power')==='generator')return'building';
   if(p.building&&p.building!=='no')return'building';
   if(p.man_made==='tower'||p.man_made==='water_tower')return'tower';
   if(p.tourism==='viewpoint')return'viewpoint';
@@ -2666,7 +2713,17 @@ function poiKind(p){
   if(p.natural==='tree')return'tree';
   return'cairn';
 }
+/* OSM tags that describe WHO OWNS or ZONES the land, not what is on it. A raw OSM export
+   carries them as polygons, and every unrecognised polygon falls through to 'meadow' below
+   -- so a residential zone covering a whole hillside town became a meadow, and then a
+   graded slab. None of them is a surface anyone could see on the ground, so they are not
+   areas at all: areaKind answers null and parseFeatures drops them. Measured on
+   BarrTrailWorld.json: five residential and one industrial polygon, the largest the 81 ha
+   "Crystal Park" zone with 484 m of relief under it. No shipped map carries any. */
+const NOT_A_SURFACE_LANDUSE=new Set(['residential','commercial','industrial','retail','military']);
 function areaKind(p){
+  if(p.boundary) return null;
+  if(NOT_A_SURFACE_LANDUSE.has(String(p.landuse||'').toLowerCase())) return null;
   const raw=String(p.kind||p.type||p.area||p.category||p.class||'').toLowerCase();
   const hit=(...k)=>k.some(s=>raw.includes(s));
   if(hit('water','pond','lake','reservoir','pool'))return'water';
@@ -2677,8 +2734,18 @@ function areaKind(p){
   if(hit('rock','scree','boulder','talus','formation','outcrop'))return'rock';
   if(hit('build','structure','house','cabin'))return'building';
   if(hit('park','lot','gravel'))return'parking';
+  /* Rail areas before the generic building test: a station building is a building, but
+     it should read as the station, and a platform is a raised concrete slab beside the
+     track, not the meadow it used to fall through to. */
+  if(tag(p,'railway')==='platform'||tag(p,'public_transport')==='platform')return'platform';
+  if(tag(p,'building')==='train_station'||tag(p,'railway')==='station')return'depot';
+  if(tag(p,'amenity')==='shelter')return'building';
   if(p.building&&p.building!=='no')return'building';
-  if(p.natural==='water'||p.water||p.waterway)return'water';
+  /* A dam or weir is tagged waterway=* but it is the WALL, not the water -- Lake Moraine
+     Dam is an 8 ha polygon of embankment. Graded as water it became a basin at its own
+     25th percentile beside the real lake. Left to the default instead. */
+  const dam=/^(dam|weir|lock_gate)$/.test(String(p.waterway||''));
+  if(p.natural==='water'||p.water||(p.waterway&&!dam))return'water';
   if(p.natural==='wood'||p.landuse==='forest')return'forest';
   if(p.natural==='scrub'||p.natural==='grassland'||p.landuse==='meadow'||p.landuse==='grass')return'meadow';
   if(p.natural==='bare_rock'||p.natural==='scree'||p.natural==='cliff')return'rock';
@@ -2709,19 +2776,23 @@ function parseFeatures(obj){
         continue;
       }
       const kind=pathKind(p, name);
-      const paved=kind==='road' ? true : kind==='dirtroad' ? false : pathPaved(p, kind, name);
+      const paved=kind==='road' ? true : (kind==='dirtroad'||kind==='rail') ? false : pathPaved(p, kind, name);
       const bridge=isBridge(p), ford=isFord(p);
+      // an explicit rack says cog railway outright; world.js infers it from grade otherwise
+      const rackTag=kind==='rail' && !!tag(p,'railway:rack') && tag(p,'railway:rack')!=='no';
       for(const part of parts)if(part&&part.length>=2)
-        lines.push({name,kind,paved,bridge,ford,pts:part.map(c=>[+c[0],+c[1]])});
+        lines.push({name,kind,paved,bridge,ford,rackTag,pts:part.map(c=>[+c[0],+c[1]])});
     }else if(g.type==='Point'||g.type==='MultiPoint'){
       const parts=g.type==='Point'?[g.coordinates]:g.coordinates;
       for(const c of parts)if(c&&c.length>=2)
-        points.push({name,kind:poiKind(p),props:p,ll:[+c[0],+c[1]]});
+        { const kind=poiKind(p); if(kind!==null) points.push({name,kind,props:p,ll:[+c[0],+c[1]]}); }
     }else if(g.type==='Polygon'||g.type==='MultiPolygon'){
       const parts=g.type==='Polygon'?[g.coordinates]:g.coordinates;
+      const kind=areaKind(p);
+      if(kind===null) continue;
       for(const poly of parts){
         if(!poly||!poly.length||poly[0].length<4)continue;
-        areas.push({name,kind:areaKind(p),props:p,rings:poly.map(r=>r.map(c=>[+c[0],+c[1]]))});
+        areas.push({name,kind,props:p,rings:poly.map(r=>r.map(c=>[+c[0],+c[1]]))});
       }
     }
   }
@@ -2836,7 +2907,7 @@ function applyCuts(L, cuts, tol){
     const end = to ? to.q.slice() : pts[pts.length-1];
     // a cut AT a vertex (a shared survey node) would otherwise repeat that vertex
     const body = pts.slice(k0, k1).filter(p => d2(p, a0) > 1e-12 && d2(p, end) > 1e-12);
-    return {name:L.name, kind:L.kind, paved:L.paved, ford:L.ford, named:L.named, route:L.route,
+    return {name:L.name, kind:L.kind, paved:L.paved, ford:L.ford, rackTag:L.rackTag, named:L.named, route:L.route,
             pts:[a0].concat(body, [end])};
   };
   const out=[];
@@ -2947,7 +3018,7 @@ const SPUR_NAMES=["Coyote Cutoff","Lizard Spur","Juniper Link","Sandy Wash","Mag
 // full pipeline -> {nodes:[{p,deg}], edges:[{a,b,pts,name,lenM,color,kind}]}
 function buildGraph(rawLines,snapTol,simpTol){
   let lines=rawLines.map(L=>({name:L.name,kind:L.kind||'trail',
-                             paved:L.paved==null ? (L.kind==='road') : !!L.paved, ford:!!L.ford,
+                             paved:L.paved==null ? (L.kind==='road') : !!L.paved, ford:!!L.ford, rackTag:!!L.rackTag,
                              pts:L.pts.map(p=>p.slice())}));
   lines.forEach(L=>{L.pts=L.pts.filter((p,i)=>i===0||d2(p,L.pts[i-1])>1e-6);});
   lines=lines.filter(L=>L.pts.length>=2&&polyLen(L.pts)>snapTol*0.5);
@@ -3001,7 +3072,7 @@ function buildGraph(rawLines,snapTol,simpTol){
     if(!nameColor.has(route))nameColor.set(route,palette[nameColor.size%palette.length]);
     nodes[a].deg++;if(b!==a)nodes[b].deg++;
     edges.push({a,b,pts,name,route,named:!!L.named,lenM,
-                color:nameColor.get(route),kind:L.kind||'trail',paved:!!L.paved,ford:!!L.ford});
+                color:nameColor.get(route),kind:L.kind||'trail',paved:!!L.paved,ford:!!L.ford,rackTag:!!L.rackTag});
   });
   /* Per-node census of what actually meets here. Computed once, in the module that owns
      the topology, because every consumer downstream needs the same answer: world.js has
@@ -3021,6 +3092,76 @@ function buildGraph(rawLines,snapTol,simpTol){
     }
   });
   return{nodes,edges,nameColor};
+}
+
+/* ---------- cropping to the DEM ----------
+   A bundle's heightfield is a rectangle, and outside it terrain.js clamps to the edge
+   cell -- so anything drawn past the edge stands on a copy of the rim, stretched out
+   over ground that does not exist. fetch_dem.py sizes that rectangle from whichever
+   layers --bbox-layers names, and a raw OSM points/areas export routinely reaches well
+   past the trails (BarrTrailWorld.json: 8 POIs and 16 polygons, the forest out to 3 km
+   beyond the edge). world.js crops every layer to the rectangle with these. `r` is
+   {x0,z0,x1,z1} in projected world units. */
+function inRect(x,z,r){ return x>=r.x0 && x<=r.x1 && z>=r.z0 && z<=r.z1; }
+/* Liang-Barsky on one segment: the [t0,t1] part of a->b inside r, or null. */
+function clipSegT(a,b,r){
+  const dx=b[0]-a[0], dz=b[1]-a[1];
+  let t0=0, t1=1;
+  const P=[-dx,dx,-dz,dz], Q=[a[0]-r.x0, r.x1-a[0], a[1]-r.z0, r.z1-a[1]];
+  for(let k=0;k<4;k++){
+    if(P[k]===0){ if(Q[k]<0) return null; continue; }
+    const t=Q[k]/P[k];
+    if(P[k]<0){ if(t>t1) return null; if(t>t0) t0=t; }
+    else      { if(t<t0) return null; if(t<t1) t1=t; }
+  }
+  return [t0,t1];
+}
+/* A polyline cut to the rectangle: every inside run as its own polyline, with the
+   crossing points added so a trail ends exactly on the edge rather than one vertex
+   short of it. Runs shorter than two points are dropped. */
+function clipLineToRect(pts,r){
+  const runs=[]; let cur=null;
+  const at=(a,b,t)=>[a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t];
+  const same=(p,q)=>p && Math.abs(p[0]-q[0])<1e-9 && Math.abs(p[1]-q[1])<1e-9;
+  for(let i=1;i<pts.length;i++){
+    const a=pts[i-1], b=pts[i];
+    const T=clipSegT(a,b,r);
+    if(!T){ if(cur){ runs.push(cur); cur=null; } continue; }
+    const p=T[0]===0?a:at(a,b,T[0]), q=T[1]===1?b:at(a,b,T[1]);
+    if(!cur) cur=[p];
+    else if(!same(cur[cur.length-1],p)){ runs.push(cur); cur=[p]; }
+    if(!same(cur[cur.length-1],q)) cur.push(q);
+    if(T[1]<1){ runs.push(cur); cur=null; }
+  }
+  if(cur) runs.push(cur);
+  return runs.filter(run=>run.length>=2);
+}
+/* Sutherland-Hodgman against the four edges. Returns a closed ring (first point repeated
+   last, the GeoJSON form every area consumer expects) or null when too little is left. */
+function clipRingToRect(ring,r){
+  let pts=ring.slice();
+  if(pts.length>1 && pts[0][0]===pts[pts.length-1][0] && pts[0][1]===pts[pts.length-1][1]) pts.pop();
+  const edges=[
+    [p=>p[0]>=r.x0, (a,b)=>{ const t=(r.x0-a[0])/(b[0]-a[0]); return [r.x0, a[1]+(b[1]-a[1])*t]; }],
+    [p=>p[0]<=r.x1, (a,b)=>{ const t=(r.x1-a[0])/(b[0]-a[0]); return [r.x1, a[1]+(b[1]-a[1])*t]; }],
+    [p=>p[1]>=r.z0, (a,b)=>{ const t=(r.z0-a[1])/(b[1]-a[1]); return [a[0]+(b[0]-a[0])*t, r.z0]; }],
+    [p=>p[1]<=r.z1, (a,b)=>{ const t=(r.z1-a[1])/(b[1]-a[1]); return [a[0]+(b[0]-a[0])*t, r.z1]; }]];
+  for(const [inside,cut] of edges){
+    if(!pts.length) break;
+    const out=[];
+    for(let i=0;i<pts.length;i++){
+      const cur=pts[i], prev=pts[(i+pts.length-1)%pts.length];
+      const ci=inside(cur), pi=inside(prev);
+      if(ci){ if(!pi) out.push(cut(prev,cur)); out.push(cur); }
+      else if(pi) out.push(cut(prev,cur));
+    }
+    pts=out;
+  }
+  if(pts.length<3) return null;
+  let A=0; for(let i=0;i<pts.length;i++){ const p=pts[i], q=pts[(i+1)%pts.length]; A+=p[0]*q[1]-q[0]*p[1]; }
+  if(Math.abs(A)<1e-6) return null;
+  pts.push(pts[0].slice());
+  return pts;
 }
 
 /* ==== src/neon/tuning.js ==== */
@@ -3133,7 +3274,7 @@ const NEON = {
 const NEON_SKILL = {
   chill:  {pace: 0.90, grip: 0.86, wobble: 0.14, label: 'Chill'},
   fair:   {pace: 1.0, grip: 0.93, wobble: 0.08, label: 'Fair'},
-  fierce: {pace: 1.1, grip: 0.98, wobble: 0.04, label: 'Fierce'},
+  fierce: {pace: 1.07, grip: .99, wobble: 0.04, label: 'Fierce'},
 };
 
 /* DRIVING STYLES. The field is animals, and they should not all drive one algorithm

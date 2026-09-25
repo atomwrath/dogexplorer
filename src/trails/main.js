@@ -1795,7 +1795,8 @@ function loop(t){
      sealed road or path, dirt otherwise. Off it, a creek splashes -- asked of the same
      channel geometry the water is drawn from, so the sound starts where the blue does. */
   player.surface = (player.climbT > 0 || player.wall) ? 'rock'
-                 : inCorridor ? (nt.deck ? 'wood' : (nt.edge && nt.edge.paved) ? 'paved' : 'trail')
+                 : inCorridor ? (nt.deck ? 'wood' : (nt.edge && nt.edge.kind === 'rail') ? 'ballast'
+                                 : (nt.edge && nt.edge.paved) ? 'paved' : 'trail')
                  : (inWaterway(player.x, player.z) ? 'water' : 'grass');
   const surf = nearTrail ? 1 : 0.6;
   refreshOnTrail(nt);          // reuse the lookup above rather than hashing twice a frame
@@ -2843,7 +2844,7 @@ function showHerePoint(pt){
   if(!stats || !actions) return;
   stats.innerHTML = ''; actions.innerHTML = '';
 
-  const kindWord = {road:'Road', dirtroad:'Dirt road', track:'Track'}[p.kind] || 'Trail';
+  const kindWord = {road:'Road', dirtroad:'Dirt road', track:'Track', rail:'Railway'}[p.kind] || 'Trail';
   hereRow(stats, kindWord, p.name + ' (' + compass(p.x, p.z) + ')');
   const ft = elevationFt(p.x, p.z);
   if(ft != null) hereRow(stats, 'Elevation', Math.round(ft).toLocaleString() + ' ft');

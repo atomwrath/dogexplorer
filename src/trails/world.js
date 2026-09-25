@@ -19,7 +19,7 @@ import { areaCells, stepChannelBanks, buildTerrainMesh, flattenAreaCells, gradeP
 import { scene, camera, disposeGroup, sun, hemi } from '../core/render.js';
 import { toon, toonTex } from '../core/materials.js';
 import { loadWorldBundle, fetchWorldBundle } from '../data/world_bundle.js';
-import { parseFeatures, buildGraph, ptSeg, segCross } from './geo.js';
+import { parseFeatures, buildGraph, ptSeg, segCross, inRect, clipLineToRect, clipRingToRect } from './geo.js';
 import { pointInArea, areaBBox } from './geom2d.js';
 import { resetSpatialHash, hashSeg, nearestTrail } from './spatial.js';
 import { THEME, THEMES, setTheme } from './themes.js';
@@ -28,12 +28,19 @@ import { THEME, THEMES, setTheme } from './themes.js';
    applyThemeLighting without a cycle -- the chain is themes -> sky -> world -> main. */
 import { refreshSky, setSkyBackdrop, setSkyPlace } from './sky.js';
 import { patchGroundRing } from './noise-ring.js';
+import { patchGroundCover, setGroundCover, groundCoverAt } from './ground-cover.js';
 import { ribbonGeom, junctionGapGeom, waterSideGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
          pickTree, buildPOI, buildArea, buildAreaSign, POI_STYLE, AREA_STYLE, shade,
          buildBackdrop, backdropRadius, embankmentGeom, bridgeDeckGeom, bridgeFrameGeom,
-         deckMat, frameMat } from './pieces.js';
+         deckMat, frameMat, railTrackGeoms, PYLON, pylonWirePoints } from './pieces.js';
 
 let GRAPH=null, TRAILHEADS=[], POIS=[], AREAS=[], WATER=[];
+/* Points that are built but are not landmarks (pieces.js POI_STYLE `fixture`): pylons,
+   gates, crossing signs. Kept apart from POIS so discovery, the minimap and the landmark
+   count never see them. RAIL_STATS is what the last build did with the railway, for the
+   smoke harness and for anyone asking why a line has a rack rail. */
+let FIXTURES=[], POWER_SPANS=[], TREE_SPOT=null;
+let RAIL_STATS={edges:0, km:0, rackEdges:0, tieGap:0, ties:0};
 /* Every floating area name currently in the scene. Collected at build time so the
    per-frame size cap does not have to walk the whole graph looking for sprites.
    Cleared IN PLACE on rebuild -- see the module header on shared mutable arrays. */
@@ -345,6 +352,15 @@ function fallbackProjector(layers){
 }
 let worldG=null;               // THREE.Group holding everything rebuildWorld() creates
 let BUNDLE=null;                // the loaded World instance
+/* What the last rebuild cut away at the DEM edge -- features clipped or dropped, per layer
+   kind. Read by the smoke harness (getCropStats); zeros on a map that fits its DEM. */
+let CROP={lines:0, points:0, areas:0, waterways:0};
+/* The heightfield's own rectangle in projected world units, the exact region terrain.js
+   answers from real cells rather than a clamped edge (World.contains). */
+function demRect(W){
+  return {x0:W.originX, z0:W.originZ, x1:W.originX+W.width*W.cell, z1:W.originZ+W.height*W.cell};
+}
+function getCropStats(){ return Object.assign({}, CROP); }
 let startHead=0;
 /* A stable identity for "which map is this", so anything persisted between sessions --
    saved spots, today -- can be filed against the right one. Derived from the bundle's
@@ -503,6 +519,156 @@ function applyThemeLighting(){
 function getGraph(){ return GRAPH; }
 function getTrailheads(){ return TRAILHEADS; }
 function getPOIs(){ return POIS; }
+function getFixtures(){ return FIXTURES; }
+function treeSpotOK(x,z){ return TREE_SPOT ? TREE_SPOT(x,z) : true; }
+function getPowerSpans(){ return POWER_SPANS; }
+
+/* ---------- fixtures: aligned to what they belong to ----------
+   rot uses three.js's convention: rotation.y = t turns local +z to world (sin t, cos t)
+   and local +x to (cos t, -sin t). */
+const faceZ = (vx, vz) => Math.atan2(vx, vz);          // local +z points along (vx,vz)
+const faceX = (dx, dz) => Math.atan2(-dz, dx);         // local +x points along (dx,dz)
+/* Nearest point on any edge of the given kinds within `reach` world units, with the
+   edge's direction there and the side of the line the query point is on. */
+function nearestOnEdges(x, z, kinds, reach){
+  let best=null;
+  for(const e of GRAPH ? GRAPH.edges : []){
+    if(kinds && !kinds.has(e.kind)) continue;
+    const r=projectOnPolyline(e.pts, x, z);
+    if(r.d<=reach && (!best || r.d<best.d)) best=Object.assign(r, {edge:e});
+  }
+  if(best){
+    const nx=-best.dir[1], nz=best.dir[0];
+    best.side=((x-best.px)*nx+(z-best.pz)*nz)>=0 ? 1 : -1;
+    best.n=[nx*best.side, nz*best.side];               // unit normal toward the query point
+  }
+  return best;
+}
+const RAIL_KINDS=new Set(['rail']);
+const STATION_REACH_M=40, FIXTURE_REACH_M=15, DEPOT_NEAR_M=30;
+function placeStation(p){
+  p.signOnly = AREAS.some(a=>{
+    if(a.kind!=='depot' && a.kind!=='platform') return false;
+    const bb=areaBBox(a), m=DEPOT_NEAR_M*MAP_SCALE;
+    return p.x>=bb.mnx-m && p.x<=bb.mxx+m && p.z>=bb.mnz-m && p.z<=bb.mxz+m;
+  });
+  const t=nearestOnEdges(p.x, p.z, RAIL_KINDS, STATION_REACH_M*MAP_SCALE);
+  if(!t) return null;
+  /* True metres from the centreline: half the ballast's outline, then the model's own
+     depth -- the depot's platform front is 4.2 m in front of its origin, the lone board is
+     a pace off the ballast. Offsets are real metres like the model, not MAP_SCALE'd. */
+  const back=pathOutlineWidth('rail')/2 + (p.signOnly ? 1.5 : 4.2);
+  return {x:t.px+t.n[0]*back, z:t.pz+t.n[1]*back, rot:faceZ(-t.n[0], -t.n[1])};
+}
+function buildFixtures(){
+  const frng=mulberry(4242);   // its own sequence: fixtures never shift the scenery's
+  POWER_SPANS=[];
+  const pylons=[];
+  for(const f of FIXTURES){
+    let x=f.x, z=f.z, rot=frng()*6.28;
+    const extra=[];
+    /* A gate, a crossing sign or a buffer stop only means something ON the way it belongs
+       to. The source often has the node but not the way (BarrTrailWorld.json: 4 of 6 gates
+       sit on driveways its line layer never included), and one standing alone in the
+       trees, turned at random, reads as litter. Those are skipped, and counted. */
+    const needsPath = f.kind==='gate' || f.kind==='buffer' || f.kind==='crossbuck';
+    if(f.kind==='gate'){
+      const t=nearestOnEdges(x, z, null, FIXTURE_REACH_M*MAP_SCALE);
+      if(t){ x=t.px; z=t.pz; rot=faceX(t.dir[0], t.dir[1]); f.gateHalf=pathOutlineWidth(t.edge.kind)/2+0.25; f.on=t.edge.kind; }
+    }else if(f.kind==='buffer'){
+      const t=nearestOnEdges(x, z, RAIL_KINDS, FIXTURE_REACH_M*MAP_SCALE);
+      if(t){ x=t.px; z=t.pz; rot=faceX(t.dir[0], t.dir[1]); f.on='rail'; }
+    }else if(f.kind==='crossbuck'){
+      /* One each side of the track, diagonally opposite (each on the right of the road
+         for traffic approaching it), boards turned to face along the road -- i.e. across
+         the rails. */
+      const t=nearestOnEdges(x, z, RAIL_KINDS, FIXTURE_REACH_M*MAP_SCALE);
+      if(t){
+        const off=pathOutlineWidth('rail')/2+1.4, along=2.2;
+        const [dx,dz]=t.dir, [nx,nz]=[-dz,dx];
+        x=t.px+nx*off-dx*along; z=t.pz+nz*off-dz*along; rot=faceZ(nx,nz);
+        extra.push({x:t.px-nx*off+dx*along, z:t.pz-nz*off+dz*along, rot:faceZ(-nx,-nz)});
+        f.on='rail';
+      }
+    }else if(f.kind==='pylon'){
+      pylons.push(f); continue;          // turned once its neighbours are known, below
+    }
+    if(needsPath && !f.on){ f.skipped=true; continue; }
+    for(const at of [{x,z,rot}, ...extra]){
+      const grp=buildPOI(f, frng);
+      grp.position.set(at.x, terrainY(at.x,at.z,VERT_SCALE), at.z); grp.rotation.y=at.rot;
+      grp.name='fixture:'+f.kind; worldG.add(grp);
+    }
+    f.x=x; f.z=z; f.rot=rot;
+  }
+  buildPowerLine(pylons, frng);
+}
+/* POWER LINES FROM PYLONS ALONE. A raw export carries power=tower nodes but not always the
+   power=line way through them, and pylons standing unconnected read as broken. Their
+   minimum spanning tree reproduces a single line exactly (consecutive towers are each
+   other's nearest), and a span longer than any real one is refused rather than drawn
+   across a valley between two different lines. Each pylon then turns to face along its
+   own spans, so its arms stand square to the wires. */
+const MAX_SPAN_M = 450;
+function buildPowerLine(pylons, frng){
+  const n=pylons.length;
+  if(!n) return;
+  const maxD=MAX_SPAN_M*MAP_SCALE, inTree=new Array(n).fill(false), best=new Array(n).fill(Infinity), from=new Array(n).fill(-1);
+  const nbr=pylons.map(()=>[]);
+  best[0]=0;
+  for(let it=0; it<n; it++){
+    let u=-1; for(let i=0;i<n;i++) if(!inTree[i] && (u<0 || best[i]<best[u])) u=i;
+    if(best[u]===Infinity){ best[u]=0; from[u]=-1; }   // a new, separate line starts here
+    inTree[u]=true;
+    if(from[u]>=0){ nbr[u].push(from[u]); nbr[from[u]].push(u); POWER_SPANS.push([from[u], u]); }
+    for(let v=0; v<n; v++){
+      if(inTree[v]) continue;
+      const d=Math.hypot(pylons[u].x-pylons[v].x, pylons[u].z-pylons[v].z);
+      if(d<=maxD && d<best[v]){ best[v]=d; from[v]=u; }
+    }
+  }
+  // face along the line: average of the unit directions to each neighbour, the second
+  // flipped so a straight run through the tower adds rather than cancels
+  pylons.forEach((p,i)=>{
+    let dx=0, dz=0;
+    nbr[i].forEach((j,k)=>{
+      let ux=pylons[j].x-p.x, uz=pylons[j].z-p.z; const L=Math.hypot(ux,uz)||1; ux/=L; uz/=L;
+      if(k>0 && ux*dx+uz*dz<0){ ux=-ux; uz=-uz; }
+      dx+=ux; dz+=uz;
+    });
+    p.rot = (dx||dz) ? faceX(dx, dz) : frng()*6.28;
+    p.y = terrainY(p.x, p.z, VERT_SCALE);
+    const grp=buildPOI(p, frng);
+    grp.position.set(p.x, p.y, p.z); grp.rotation.y=p.rot; grp.name='fixture:pylon';
+    worldG.add(grp);
+  });
+  if(!POWER_SPANS.length) return;
+  /* Wires: from each attachment point to its partner on the next tower, sagging in a
+     parabola. Partners are matched by side -- if the two towers' +z axes point opposite
+     ways, left pairs with right -- so no wire crosses its neighbour mid-span. */
+  const W=pylonWirePoints(), SEG=10, P=[];
+  const world=(p,l)=>{ const c=Math.cos(p.rot), sn=Math.sin(p.rot); return [p.x+l[0]*c+l[2]*sn, p.y+l[1], p.z-l[0]*sn+l[2]*c]; };
+  for(const [i,j] of POWER_SPANS){
+    const A=pylons[i], B=pylons[j];
+    const flip=(Math.sin(A.rot)*Math.sin(B.rot)+Math.cos(A.rot)*Math.cos(B.rot))<0;
+    for(const l of W){
+      const a=world(A,l), b=world(B, flip ? [l[0],l[1],-l[2]] : l);
+      const span=Math.hypot(b[0]-a[0], b[2]-a[2]);
+      const sag=clamp(span*0.035, 0.3, 6);
+      let prev=a;
+      for(let k=1;k<=SEG;k++){
+        const t=k/SEG;
+        const q=[a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t - 4*sag*t*(1-t), a[2]+(b[2]-a[2])*t];
+        P.push(prev[0],prev[1],prev[2], q[0],q[1],q[2]); prev=q;
+      }
+    }
+  }
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(P),3));
+  const wires=new THREE.LineSegments(geo, new THREE.LineBasicMaterial({color:new THREE.Color('#2e3236')}));
+  wires.name='power-wires';
+  worldG.add(wires);
+}
 function getAreas(){ return AREAS; }
 function getBBox(){ return bboxW; }
 function getWorldGroup(){ return worldG; }
@@ -715,7 +881,10 @@ function updateAreaLabels(camX, camY, camZ){
    because the terrain-carving pass needs the widths BEFORE the ribbon loop runs (it has
    to cut the bench before buildTerrainMesh bakes the grid), and both must agree on the
    number or the carve and the ribbon end up different widths. */
-const PATH_W = {trail:1.1, track:1.9, dirtroad:2.8, road:3.0};
+const PATH_W = {trail:1.1, track:1.9, dirtroad:2.8, road:3.0, rail:2.6};
+/* rail: the sleeper length of standard gauge. The tread ribbon IS the ballast bed, so the
+   bench, the spatial hash and the walkable corridor are all exactly the width of the track
+   the pup can see -- it walks the sleepers, between the rails. */
 /* dirtroad is a graded dirt/gravel road (Gold Camp Road, Rampart Range Road): nearly a
    road's width, but a track in every way that matters to the rest of this file -- no
    kerb, no crosswalk, nothing trimmed back from it. See geo.js's pathKind. */
@@ -756,7 +925,10 @@ function buriesTread(x, z, yTop){
    so the ink outline of the upper path visibly overlaps the lower surface rather than
    fighting it. 4.5 cm is under a twentieth of a tread width -- invisible as float, plenty
    for a depth buffer. */
-const PATH_RANK = {road:0, dirtroad:1, track:1, trail:2};
+const PATH_RANK = {road:0, dirtroad:1, track:1, rail:1, trail:2};
+/* rail sits with the tracks: a footpath that crosses it is painted over it (it is the
+   smaller surface), and a road it crosses is the ground its rails lie on -- which is how a
+   level crossing actually looks, rails set into the tarmac. */
 function pathRank(kind){ return PATH_RANK[kind] == null ? PATH_RANK.trail : PATH_RANK[kind]; }
 const KIND_LIFT_M = 0.045;
 function kindLift(kind){ return pathRank(kind)*KIND_LIFT_M; }
@@ -1988,13 +2160,63 @@ function wadeSurfaceAt(x, z){
 function getWaterways(){ return WATERWAYS; }
 function getBridges(){ return BRIDGES; }
 
+/* RAILWAY PLANNING, once per build, before any track is drawn.
+
+   RACK OR ADHESION. An ordinary railway cannot climb much past 4-6%: the wheels slip.
+   Anything steeper is a rack (cog) railway, with a toothed centre rail the locomotive's
+   pinion climbs -- and the Manitou and Pike's Peak line runs at up to 25%. The source
+   rarely says so (railway:rack is seldom tagged, and this export kept no tags at all), but
+   the DEM does: take each named line's steepest sustained grade over RACK_WINDOW_M of real
+   distance, and a line that exceeds RACK_GRADE anywhere gets the rack along its whole
+   length -- a cog railway does not drop its rack on the flat bits of the timetable.
+   An explicit railway:rack tag, or "cog" in the name, decides it outright.
+
+   SLEEPER BUDGET. Real spacing is 0.65 m, but a long line at 1:1 would be 20,000+
+   sleepers; the spacing opens up just enough to keep the whole network under
+   RAIL_TIE_BUDGET, so a short spur looks exactly right and a mountain railway at full
+   scale still draws on a tablet. */
+const RACK_GRADE = 0.08, RACK_WINDOW_M = 40, RAIL_TIE_BUDGET = 6000, RAIL_TIE_GAP_M = 0.65;
+function steepestGrade(pr){
+  if(!pr || !pr.hm || pr.pts.length<2) return 0;
+  const d=[0];
+  for(let i=1;i<pr.pts.length;i++) d.push(d[i-1]+Math.hypot(pr.pts[i][0]-pr.pts[i-1][0], pr.pts[i][1]-pr.pts[i-1][1])/MAP_SCALE);
+  let worst=0, j=0;
+  for(let i=0;i<pr.pts.length;i++){
+    while(j<pr.pts.length-1 && d[j]-d[i]<RACK_WINDOW_M) j++;
+    const run=d[j]-d[i];
+    if(run>=RACK_WINDOW_M*0.5) worst=Math.max(worst, Math.abs(pr.hm[j]-pr.hm[i])/run);
+  }
+  return worst;
+}
+function planRails(edges){
+  const rails=edges.filter(e=>e.kind==='rail' && e.prof);
+  const byLine=new Map();
+  for(const e of rails){ const k=e.name||'#'+e.a+'-'+e.b; if(!byLine.has(k)) byLine.set(k,[]); byLine.get(k).push(e); }
+  const rack=new Set();
+  for(const [name, list] of byLine){
+    const tagged=list.some(e=>e.rackTag) || /\bcog\b/i.test(name);
+    const steep=Math.max(0, ...list.map(e=>steepestGrade(e.prof)));
+    if(tagged || steep>RACK_GRADE) for(const e of list) rack.add(e);
+  }
+  let len=0;
+  for(const e of rails) for(let i=1;i<e.prof.pts.length;i++)
+    len+=Math.hypot(e.prof.pts[i][0]-e.prof.pts[i-1][0], e.prof.pts[i][1]-e.prof.pts[i-1][1]);
+  const tieGap=Math.max(RAIL_TIE_GAP_M, len/RAIL_TIE_BUDGET);
+  RAIL_STATS={edges:rails.length, km:+(len/MAP_SCALE/1000).toFixed(2), rackEdges:rack.size,
+              tieGap:+tieGap.toFixed(3), ties:0,
+              rackNames:[...new Set([...rack].map(e=>e.name||''))],
+              steepest:+Math.max(0,...rails.map(e=>steepestGrade(e.prof))).toFixed(3)};
+  return {rack, tieGap};
+}
+function getRailStats(){ return Object.assign({}, RAIL_STATS); }
+
 /* The rendering class of an edge: its kind, refined by surface. A concrete cycleway is a
    trail to everything else in this file, but it is not brown. */
 function styleKey(e){
   if(e.paved && (e.kind==='trail' || e.kind==='track')) return 'paved_'+e.kind;
   return PATH_STYLE_KEYS.has(e.kind) ? e.kind : 'trail';
 }
-const PATH_STYLE_KEYS = new Set(['trail','track','dirtroad','road','paved_trail','paved_track']);
+const PATH_STYLE_KEYS = new Set(['trail','track','dirtroad','road','rail','paved_trail','paved_track']);
 
 /* Bumped on every rebuildWorld so cached derived data (minimap.js's relief image, the
    critter roster) can tell "same world, new frame" from "whole world replaced" without
@@ -2309,23 +2531,58 @@ function rebuildWorld(){
     rawLines.push(...F.lines); rawPoints.push(...F.points); rawAreas.push(...F.areas);
     rawWaters.push(...(F.waters||[]));
   }
-  const lines=rawLines.map(L=>({name:L.name,kind:L.kind,paved:L.paved,ford:L.ford,
-                                pts:PROJ.projectCoords(L.pts)}));
+  /* CROPPED TO THE DEM whenever a bundle is loaded. Outside the heightfield rectangle
+     terrain.js reads the clamped edge cell, so anything past the edge sits on a smeared
+     copy of the rim -- and a polygon reaching past it gets graded against those copies
+     too. The rectangle is the bundle's own, in the same projected units as everything
+     below, so this holds at every World scale. Without a bundle there is nothing to crop
+     to and every layer is kept whole. Done here, before the graph, so topology, the
+     minimap, the bbox and every later pass see one cropped copy of the geometry. */
+  const R = BUNDLE ? demRect(BUNDLE) : null;
+  CROP = {lines:0, points:0, areas:0, waterways:0};
+  let lines=[];
+  for(const L of rawLines){
+    const pts=PROJ.projectCoords(L.pts);
+    const runs=R ? clipLineToRect(pts,R) : [pts];
+    if(R && pts.some(c=>!inRect(c[0],c[1],R))) CROP.lines++;
+    for(const run of runs) lines.push({name:L.name,kind:L.kind,paved:L.paved,ford:L.ford,rackTag:!!L.rackTag,bridge:!!L.bridge,pts:run});
+  }
   // the source's own bridge ways, kept aside: buildGraph snaps most of them out of
   // existence (see planBridges), so they survive only as hints for where spans go
-  const bridgeHints=lines.filter((L,i)=>rawLines[i].bridge).map(L=>L.pts);
+  const bridgeHints=lines.filter(L=>L.bridge).map(L=>L.pts);
   WATERWAYS.length=0;
-  for(const W of rawWaters)
-    WATERWAYS.push({name:W.name, kind:W.kind, width:W.width, intermittent:!!W.intermittent,
-                    pts:PROJ.projectCoords(W.pts), prof:null});
-  const points=rawPoints.map(P=>({name:P.name,kind:P.kind,props:P.props,p:PROJ.project(P.ll[0],P.ll[1])}));
+  for(const W of rawWaters){
+    const pts=PROJ.projectCoords(W.pts);
+    const runs=R ? clipLineToRect(pts,R) : [pts];
+    if(R && pts.some(c=>!inRect(c[0],c[1],R))) CROP.waterways++;
+    for(const run of runs)
+      WATERWAYS.push({name:W.name, kind:W.kind, width:W.width, intermittent:!!W.intermittent,
+                      pts:run, prof:null});
+  }
+  const points=[];
+  for(const P of rawPoints){
+    const p=PROJ.project(P.ll[0],P.ll[1]);
+    if(R && !inRect(p.x,p.z,R)){ CROP.points++; continue; }
+    points.push({name:P.name,kind:P.kind,props:P.props,p});
+  }
   // projectCoords() already returns plain [x,z] pairs at every leaf (verified against
   // world_bundle.js: it recurses until coords[0] is a number, then returns [p.x,p.z] --
   // never {x,z} objects). Re-mapping through .x/.z here, as areas previously did, reads
   // undefined off a plain array and collapses every polygon to NaN bounds -- confirmed by
   // running the real pipeline against a synthetic bundle, not assumed.
-  const areasProjected=rawAreas.map(A=>({name:A.name,kind:A.kind,props:A.props,
-    rings:A.rings.map(r=>PROJ.projectCoords(r))}));
+  /* A polygon's outer ring decides whether it survives; a hole cut away to nothing is
+     simply dropped, which is what a hole entirely off the map should do. */
+  const areasProjected=[];
+  for(const A of rawAreas){
+    let rings=A.rings.map(r=>PROJ.projectCoords(r));
+    if(R){
+      const outer=clipRingToRect(rings[0],R);
+      if(!outer){ CROP.areas++; continue; }
+      if(outer.length!==rings[0].length || !rings[0].every(c=>inRect(c[0],c[1],R))) CROP.areas++;
+      rings=[outer, ...rings.slice(1).map(r=>clipRingToRect(r,R)).filter(Boolean)];
+    }
+    areasProjected.push({name:A.name,kind:A.kind,props:A.props,rings});
+  }
 
   // *MAP_SCALE: `lines` above are already projected at the current scale, so a FIXED
   // snap/simplify tolerance here would mean a different real-world tolerance at every
@@ -2355,9 +2612,14 @@ function rebuildWorld(){
      before the bench, the spatial hash, the ribbons and the minimap all read it. */
   PATH_MIX.displaced = clearOfWiderPaths();
   PATH_MIX.bridges = planBridges(bridgeHints);
-  POIS=points.map(p=>({name:p.name,kind:p.kind,props:p.props,x:p.p.x,z:p.p.z,found:false}));
+  /* Landmarks and fixtures part here. A fixture kind with a NAME stays a landmark: an
+     unnamed pylon is scenery, but "Barr Camp Information Board" is somewhere. */
+  const isFixture=p=>{ const st=POI_STYLE[p.kind]; return !!(st && st.fixture) && !p.name; };
+  POIS=points.filter(p=>!isFixture(p)).map(p=>({name:p.name,kind:p.kind,props:p.props,x:p.p.x,z:p.p.z,found:false}));
+  FIXTURES=points.filter(isFixture).map(p=>({name:p.name,kind:p.kind,props:p.props,x:p.p.x,z:p.p.z}));
   AREAS=areasProjected;
-  WATER=AREAS.filter(a=>a.kind==='water');
+  // WATER is taken after flattenAreaCells below: a polygon it leaves as cover has no
+  // surface drawn, so it must not count as somewhere to wade
 
   let mx=1e9,Mx=-1e9,mz=1e9,Mz=-1e9;
   const grow=(x,z)=>{mx=Math.min(mx,x);Mx=Math.max(Mx,x);mz=Math.min(mz,z);Mz=Math.max(Mz,z);};
@@ -2399,8 +2661,9 @@ function rebuildWorld(){
   // ground: with a DEM the terrace mesh IS the heightfield, already in real-metre world
   // coordinates. Without one, a single flat plane covering the map's extent -- so a bare
   // pair of .geojson files is still playable, just level.
-  const groundMat=patchGroundRing(new THREE.MeshToonMaterial({map:groundTexture(THEME),
-    gradientMap:toonTex, polygonOffset:true, polygonOffsetFactor:2, polygonOffsetUnits:2}));
+  // the TERRAIN alone gets cover painting (ground-cover.js): paths, lots and decks keep their own surfaces
+  const groundMat=patchGroundCover(patchGroundRing(new THREE.MeshToonMaterial({map:groundTexture(THEME),
+    gradientMap:toonTex, polygonOffset:true, polygonOffsetFactor:2, polygonOffsetUnits:2})));
   // buildTerrainMesh now writes UVs straight from world x/z (see its own comment) at a
   // fixed real-world tile size, so the texture is already correctly scaled by
   // construction -- no separate repeat.set() needed, and one WOULD be wrong here: it
@@ -2417,6 +2680,13 @@ function rebuildWorld(){
   // do. The visible result was exactly what it sounds like: areas of interest hovering
   // above ground that had already been drawn one terrace step below them.
   flattenAreaCells(AREAS, pointInArea, areaBBox);
+  WATER=AREAS.filter(a=>a.kind==='water' && !a.cover);
+  /* Scree ground: every rock-family polygon left as COVER paints its cells as broken
+     stone (ground-cover.js). A graded rock is an extruded mass and already looks like
+     rock; a cover one is a hillside, and the hillside is what has to change. */
+  { const scree=AREAS.filter(a=>a.cover && AREA_STYLE[a.kind] && AREA_STYLE[a.kind].landform);
+    setGroundCover(BUNDLE && scree.length ? BUNDLE : null,
+                   scree.length ? (x,z)=>scree.some(a=>pointInArea(x,z,a)) : null); }
 
   /* Trail benches, for the same before-the-mesh reason as the area flatten above, and in
      this order relative to it: an area polygon (a parking lot) is a bigger, flatter claim
@@ -2520,7 +2790,8 @@ function rebuildWorld(){
     const st=AREA_STYLE[a.kind];
     // `top` comes off the built group, so the surface the player stands on is by
     // construction the top of the mesh they can see -- see pieces.js's buildArea
-    if(st && st.solid) AREA_SOLIDS.push({area:a, kind:a.kind, bb:areaBBox(a),
+    // cover has no mass to stand on or bump into -- see flattenAreaCells
+    if(st && st.solid && !a.cover) AREA_SOLIDS.push({area:a, kind:a.kind, bb:areaBBox(a),
                                          top:ag.userData ? ag.userData.solidTop : null,
                                          // the drawn surface reaches this far past the
                                          // outline; see pieces.js's buildLandform
@@ -2547,6 +2818,12 @@ function rebuildWorld(){
     road:{deco:false, dashes:true, tread:'#716d64', inner:'#8a867a', shoulder:'#4a473f'},
     paved_trail:{deco:false, tread:'#b4aea2', inner:'#c3bdb1', shoulder:'#6e695f'},
     paved_track:{deco:false, tread:'#9a958b', inner:'#aca79c', shoulder:'#5c584f'},
+    /* Railway: the tread is the ballast bed (crushed grey stone, a shade warmer than the
+       tarmac so the two never read as one where they meet), the shoulder its sloping
+       edge. No inner stripe, ruts or dashes -- the sleepers and rails drawn on top ARE the
+       detail. */
+    rail:{deco:false, rail:true, tread:'#8a847a', inner:'#8a847a', shoulder:'#6a655d',
+          tie:'#5b4331', steel:'#b9bcc0', rackCol:'#4a4c50', tooth:'#9ea2a8'},
   };
   const styleOf = e => PATH_STYLE[styleKey(e)] || PATH_STYLE.trail;
   // one ink material per class rank, so the outline of a path sitting on top of another
@@ -2556,6 +2833,7 @@ function rebuildWorld(){
      decides who wins, but painter's order costs nothing and makes the result stable even
      where two surfaces are exactly coplanar and the bias ties. */
   const drawOrder=GRAPH.edges.slice().sort((a,b)=>pathRank(a.kind)-pathRank(b.kind));
+  const railPlan=planRails(GRAPH.edges);
   /* Deck and railings over every run of bridge stations on this edge. Built from the
      (possibly trimmed) profile the ribbon itself was drawn from, so the planks sit exactly
      on the tread they cover. A paved road gets a concrete slab and parapet and keeps its
@@ -2655,6 +2933,17 @@ function rebuildWorld(){
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*OUTLINE_MUL,lift+0.012,hs),inkMats[rank]));
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*SHOULDER_MUL,lift+0.02,hs),trailMat(st.shoulder,rank)));
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W,lift+0.05,hs),trailMat(st.tread,rank)));
+    if(st.rail){
+      const tg=railTrackGeoms(rpts, hs, lift, railPlan.tieGap, railPlan.rack.has(e));
+      const add=(geo,col,name)=>{ if(!geo) return; const m=new THREE.Mesh(geo,toon(col)); m.name=name; worldG.add(m); };
+      add(tg.ties, st.tie, 'rail-ties');
+      add(tg.rails, st.steel, 'rail-rails');
+      add(tg.rack, st.rackCol, 'rail-rack');
+      add(tg.teeth, st.tooth, 'rail-teeth');
+      if(tg.ties) RAIL_STATS.ties += tg.ties.attributes.position.count/18;
+      buildDecks(e, prof, W, lift);
+      return;
+    }
     if(st.ruts){
       const rutMat=trailMat(st.rut || shade(st.tread,0.55),rank);
       [-1,1].forEach(sd=>{
@@ -2992,25 +3281,42 @@ function rebuildWorld(){
 
   // POIs
   POIS.forEach(p=>{
+    /* A station stands beside its track, not on it: it is turned to face the nearest
+       railway and set back so its platform edge meets the ballast. If the map also has
+       the station's own footprint (a depot or platform area close by), only the name
+       board goes up -- the real building is already there. Rotation for a station comes
+       from the track; every other landmark keeps its random turn. The draws are made in the
+       original order (model, then turn) whether or not the turn is used, so neither the
+       models here nor the scenery after this loop shift on any existing map. */
+    const place=p.kind==='station' ? placeStation(p) : null;   // no rng: before or after is moot
     const grp=buildPOI(p,rng);
-    grp.position.set(p.x,terrainY(p.x,p.z,VERT_SCALE),p.z);
-    grp.rotation.y=rng()*6.28;
+    const spin=rng()*6.28;                                      // same draw, same order as always
+    p.at = place;                     // test seam: where a station actually went
+    if(place){ grp.position.set(place.x,terrainY(place.x,place.z,VERT_SCALE),place.z); grp.rotation.y=place.rot; }
+    else{ grp.position.set(p.x,terrainY(p.x,p.z,VERT_SCALE),p.z); grp.rotation.y=spin; }
     worldG.add(grp);
   });
+  buildFixtures();
 
   // scenery
-  const clearOfPOI=(x,z,r)=>!POIS.some(p=>Math.hypot(p.x-x,p.z-z)<r);
+  const clearOfPOI=(x,z,r)=>!POIS.some(p=>Math.hypot(p.x-x,p.z-z)<r) && !FIXTURES.some(p=>Math.hypot(p.x-x,p.z-z)<r);
   const inWater=(x,z)=>WATER.some(a=>pointInArea(x,z,a));
   const offTrail=(x,z,r)=>nearestTrail(x,z).d>r&&clearOfPOI(x,z,7)&&!inWater(x,z)
                           &&waterEdgeDist(x,z)>Math.min(r,2.5);
   const pad=70, W=Mx-mx+pad*2, H=Mz-mz+pad*2;
   let placed=0,tries=0;
   const targetTrees=Math.min(560,W*H/450*THEME.treeDensity);
+  /* Where a scenery tree may stand: off the paths and water, and not on scree -- scree is
+     above the tree line. One predicate, kept as TREE_SPOT for the harness, so the rule is
+     tested directly rather than by hoping a random tree lands in the wrong place. */
+  const treeSpot=(x,z)=>offTrail(x,z,4.2) && !groundCoverAt(x,z);
+  TREE_SPOT=treeSpot;
   while(placed<targetTrees&&tries++<targetTrees*7){
     const x=mx-pad+rng()*W, z=mz-pad+rng()*H;
-    if(!offTrail(x,z,4.2)) continue;
+    if(!treeSpot(x,z)) continue;
     const t=makeTree((1.1+rng()*1.6)*THEME.treeScale,pickTree(rng),rng);
     t.position.set(x,terrainY(x,z,VERT_SCALE),z); t.rotation.y=rng()*7;
+    t.name='scenery-tree';              // test seam: the harness checks where these grow
     worldG.add(t); placed++;
   }
   placed=0; tries=0;
@@ -3088,5 +3394,5 @@ export { loadWorld, rebuildWorld, addLayers, clearLayers, hasBundle, setContourS
          getAreaLabels, updateAreaLabels, getAreaSolids, areaBlocked, areaSolidTop, lineOfSight, nearestSolidFace, solidEmbed, distToSolid,
          setThemeById, getTheme, setMapScale, getMapScale, getExaggeration, getBackdrop,
          setFogMultiplier, getFogMultiplier, setTerrainQuadBudget, getDemStride, applyThemeLighting,
-         getGraph, getTrailheads, getPOIs, getAreas, getBBox,
+         getGraph, getTrailheads, getPOIs, getFixtures, treeSpotOK, getPowerSpans, getRailStats, getAreas, getBBox, getCropStats,
          getWorldGroup, setStartHead, getStartHead, setVertScale, getVertScale, compass, THEMES, THEME };

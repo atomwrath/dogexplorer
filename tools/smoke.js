@@ -5711,6 +5711,299 @@ async function assertAll(window, errors, stats) {
     sb.deckMeshes >= 7 && sb.frameMeshes >= sb.deckMeshes,
     `${sb.deckMeshes} decks, ${sb.frameMeshes} frames`);
 
+  /* ---------- raw OSM on a mountain: cover, not slabs, and cropped to the DEM ----------
+     A synthetic bundle standing in for BarrTrailWorld.json's shape of problem, so the
+     guard does not depend on any one map staying in the repo. A 60x40-cell hillside at a
+     60% grade (288 m of relief), with: a forest polygon over the whole slope that also
+     runs 200 m off the DEM edge; a 2-cell parking lot (a genuine slab); a residential
+     zone and a dam, the two OSM tags that are not surfaces; a trail that leaves the DEM;
+     and a POI beyond it. On that input the old grading levelled the forest to its median
+     band -- a 144 m cliff at each end of the map -- and kept every off-DEM feature. */
+  const osm = await (0,eval)(`(async()=>{
+    const W=60, H=40, CELL=8, OX=-240, OZ=-160, BASE=2000, lon0=-105, lat0=38.8, MLON=86800, MLAT=111000;
+    const hts=new Int16Array(W*H);
+    for(let j=0;j<H;j++)for(let i=0;i<W;i++) hts[j*W+i]=Math.round((0.6*(i+0.5)*CELL)*10);
+    const u8=new Uint8Array(hts.buffer); let bin=''; for(const b of u8) bin+=String.fromCharCode(b);
+    const LL=(x,z)=>[lon0+x/MLON, lat0-z/MLAT];
+    const ring=pts=>[...pts,pts[0]].map(([x,z])=>LL(x,z));
+    const feat=(g,props)=>({type:'Feature',properties:props,geometry:g});
+    const bundle={format:'pup-world/1',
+      projection:{kind:'equirectangular-local',originLon:lon0,originLat:lat0,metresPerDegreeLon:MLON,metresPerDegreeLat:MLAT,zAxis:'south',geodesy:'wgs84'},
+      bounds:{minX:OX,minZ:OZ,maxX:OX+W*CELL,maxZ:OZ+H*CELL},
+      heightfield:{cell:CELL,width:W,height:H,originX:OX,originZ:OZ,encoding:'int16le-base64',baseM:BASE,scale:10,
+                   minM:BASE,maxM:BASE+0.6*W*CELL,data:btoa(bin)},
+      layers:{osm:{type:'FeatureCollection',features:[
+        feat({type:'LineString',coordinates:[LL(-200,0),LL(-60,5),LL(60,-5),LL(430,0)]},{highway:'path',name:'Synthetic Trail'}),
+        feat({type:'Point',coordinates:LL(0,10)},{tourism:'viewpoint',name:'Inside View'}),
+        feat({type:'Point',coordinates:LL(600,10)},{tourism:'viewpoint',name:'Off The Map'}),
+        feat({type:'Polygon',coordinates:[ring([[-230,-150],[430,-150],[430,150],[-230,150]])]},{natural:'wood'}),
+        feat({type:'Polygon',coordinates:[ring([[-150,40],[-134,40],[-134,56],[-150,56]])]},{amenity:'parking',name:'Tiny Lot'}),
+        feat({type:'Polygon',coordinates:[ring([[-230,100],[200,100],[200,140],[-230,140]])]},{natural:'scree',name:'Scree Field'}),
+        feat({type:'Polygon',coordinates:[ring([[-100,-120],[-60,-120],[-60,-90],[-100,-90]])]},{landuse:'residential',name:'Zoned'}),
+        feat({type:'Polygon',coordinates:[ring([[100,-120],[124,-120],[124,-112],[100,-112]])]},{waterway:'dam',name:'A Dam'})
+      ]}}};
+    await loadWorld(bundle, [], 3);
+    const Wd=getWorld(), A=getAreas(), R=demRect(Wd);
+    const out={};
+    const forest=A.find(a=>a.kind==='forest');
+    out.forest=forest ? {cover:!!forest.cover, graded:forest.groundY!=null, relief:forest.reliefM,
+                         inside:forest.rings.every(r=>r.every(c=>inRect(c[0],c[1],R)))} : null;
+    const lot=A.find(a=>a.name==='Tiny Lot');
+    out.lot=lot ? {cover:!!lot.cover, graded:lot.groundY!=null} : null;
+    out.zoned=A.some(a=>a.name==='Zoned');
+    const dam=A.find(a=>a.name==='A Dam'); out.damKind=dam ? dam.kind : null;
+    /* Worst rise between neighbouring cells beyond what the raw DEM itself has, metres.
+       Excluded: the cells the two deliberate slabs claim (the lot and the dam are graded
+       flat on purpose, and a 14 m-relief dam graded to its median has ~7 m edges by
+       design) and the trail bench. Distances are REAL metres: the map loads at 1:5, so
+       40 world units would be 200 m -- which once blanketed this whole hillside and let
+       the check pass with the grading fix reverted. */
+    const slabCells=new Set();
+    for(const sl of [lot, dam]) if(sl) for(const k of areaCells(sl, pointInArea, areaBBox)) slabCells.add(k);
+    const tsegs=[]; for(const e of getGraph().edges) for(let k=1;k<e.pts.length;k++) tsegs.push([e.pts[k-1],e.pts[k]]);
+    const tdist=(x,z)=>Math.min(...tsegs.map(([a,b])=>ptSeg([x,z],a,b).d));
+    const TRAIL_M=40*getMapScale();
+    const skip=(x,z)=>slabCells.has(Wd.cellJ(z)*Wd.width+Wd.cellI(x)) || tdist(x,z)<TRAIL_M;
+    let worst=0;
+    for(let j=0;j<Wd.height;j++)for(let i=0;i<Wd.width;i++)for(const [di,dj] of [[1,0],[0,1]]){
+      if(i+di>=Wd.width || j+dj>=Wd.height) continue;
+      const a=Wd.cellCentre(i,j), b=Wd.cellCentre(i+di,j+dj);
+      if(skip(a.x,a.z)||skip(b.x,b.z)) continue;
+      const ex=Math.abs(heightM(a.x,a.z)-heightM(b.x,b.z)) - Math.abs(Wd.heightAt(a.x,a.z)-Wd.heightAt(b.x,b.z));
+      if(ex>worst) worst=ex;
+    }
+    out.cliffM=+worst.toFixed(1); out.step=getStep();
+    const scree=A.find(a=>a.name==='Scree Field');
+    out.scree=scree ? {kind:scree.kind, cover:!!scree.cover, relief:scree.reliefM,
+                       solid:getAreaSolids().some(s=>s.area===scree)} : null;
+    /* what is DRAWN for cover: no floor, and every piece standing on its own ground. A
+       slab build of the same polygon puts one flat sheet at a single height, and its
+       trees at that height too -- up to 144 m in the air at the downhill end here. */
+    const fg=getWorldGroup().getObjectByName('area:'+A.indexOf(forest));
+    out.coverDraw={flag:!!(fg&&fg.userData.cover), floors:0, pieces:0, off:0, worst:0};
+    if(fg){
+      const V=getVertScale();
+      for(const c of fg.children){
+        if(c.isMesh){ out.coverDraw.floors++; continue; }
+        if(!c.children || !c.children.length || c.userData.areaLabel) continue;
+        out.coverDraw.pieces++;
+        const wy=fg.position.y+c.position.y, gy=terrainY(c.position.x,c.position.z,V);
+        const d=Math.abs(wy-gy); if(d>1e-6) out.coverDraw.off++;
+        if(d>out.coverDraw.worst) out.coverDraw.worst=+d.toFixed(2);
+      }
+    }
+    const P=getPOIs(); out.pois=P.map(p=>p.name);
+    const G=getGraph(); out.edgePtsOutside=0; out.edgePts=0;
+    for(const e of G.edges) for(const q of e.pts){ out.edgePts++; if(!inRect(q[0],q[1],R)) out.edgePtsOutside++; }
+    out.reachesEdge=G.edges.some(e=>e.pts.some(q=>Math.abs(q[0]-R.x1)<1e-6));
+    out.crop=getCropStats(); out.mapScale=getMapScale();
+    /* scree ground: the mask is set under the scree cover and nowhere else, the terrain
+       material (and only the terrain) is patched to read it, and the patch lands in a
+       real three.js shader at the right place -- checked by running it on the two
+       include markers it hooks, as three would. */
+    { const gs=groundCoverState();
+      const scr=A.find(a=>a.name==='Scree Field'), fo=A.find(a=>a.kind==='forest');
+      const sb=scr?areaBBox(scr):null;
+      const inScree=sb?groundCoverAt(sb.cx, sb.cz):null;
+      // a forest point well clear of the scree band (which lies at z 100..140 m)
+      const fx=-100*getMapScale(), fz=-100*getMapScale();
+      const ground=getWorldGroup().getObjectByName('ground');
+      const gm=ground && ground.material;
+      let inject=null;
+      if(gm && typeof gm.onBeforeCompile==='function'){
+        const sh={uniforms:{}, vertexShader:'void main(){\\n#include <project_vertex>\\n}',
+                  fragmentShader:'void main(){\\n#include <map_fragment>\\n#include <tonemapping_fragment>\\n}'};
+        gm.onBeforeCompile(sh);
+        const src=groundCoverSource();
+        const iMap=sh.fragmentShader.indexOf('#include <map_fragment>'), iBody=sh.fragmentShader.indexOf(src.fragBody.trim());
+        const iTone=sh.fragmentShader.indexOf('#include <tonemapping_fragment>');
+        inject={uniforms:['uCoverMask','uCoverRect','uCoverOn','uCoverCell'].every(k=>k in sh.uniforms),
+                // after the grass texel is read, and before the colour is finished: in
+                // between is where diffuseColor still means something
+                afterMap: iMap >= 0 && iBody > iMap && iBody < iTone,
+                vert: sh.vertexShader.includes('vCoverW = '),
+                ring: 'uRing0' in sh.uniforms};
+      }
+      /* the placement rule itself, on a grid over the scree and over the open forest:
+         never on scree, sometimes elsewhere */
+      let spotScree=0, spotScreeN=0, spotOpen=0;
+      if(sb) for(let gx=0;gx<=20;gx++) for(let gz=0;gz<=4;gz++){
+        const x=sb.mnx+(sb.mxx-sb.mnx)*gx/20, z=sb.mnz+(sb.mxz-sb.mnz)*gz/4;
+        if(!pointInArea(x,z,scr) || !groundCoverAt(x,z)) continue;
+        spotScreeN++; if(treeSpotOK(x,z)) spotScree++;
+      }
+      for(let gx=0;gx<=20;gx++){ const x=(-200+gx*15)*getMapScale(), z=-120*getMapScale(); if(treeSpotOK(x,z)) spotOpen++; }
+      let treesInScree=0, trees=0;
+      getWorldGroup().traverse(o=>{ if(o.name!=='scenery-tree') return; trees++;
+        if(scr && pointInArea(o.position.x,o.position.z,scr)) treesInScree++; });
+      out.screeGround={on:gs.on, cells:gs.cells, inScree, inForest:groundCoverAt(fx,fz),
+                 forestHere:!!(fo && pointInArea(fx,fz,fo)), inject, trees, treesInScree, spotScree, spotScreeN, spotOpen,
+                 patchedGround:!!(gm && gm.userData && gm.userData.groundCover)};
+    }
+    await loadWorld('../data/world.json', [], 3);
+    out.defaultCover=groundCoverState().on;
+    return out;
+  })()`);
+  check('a forest spanning a mountainside is left as cover, not levelled into a plateau',
+    !!osm.forest && osm.forest.cover && !osm.forest.graded,
+    osm.forest ? `cover=${osm.forest.cover}, graded=${osm.forest.graded}, ${osm.forest.relief.toFixed(0)} m of relief under it` : 'no forest');
+  check('cover leaves the hillside as the DEM has it -- no cliff a terrace taller than the slope',
+    osm.cliffM <= osm.step, `worst added rise ${osm.cliffM} m vs a ${osm.step} m step`);
+  check('cover is drawn as pieces on the real hillside, not a floor at one height',
+    /* piece COUNT follows world-unit area, as slab scatter always has, so it shrinks at
+       compacted scales (14 at the scale the suite is left in here, 81 at 1:5); what is
+       asserted is that there are some, none is a floor, and none leaves the ground */
+    osm.coverDraw.flag && osm.coverDraw.floors === 0 && osm.coverDraw.pieces > 0 && osm.coverDraw.off === 0,
+    `cover=${osm.coverDraw.flag}, ${osm.coverDraw.floors} floor meshes, ${osm.coverDraw.off} of ${osm.coverDraw.pieces} pieces off the ground (worst ${osm.coverDraw.worst}u) at 1:${Math.round(1/osm.mapScale)}`);
+  check('rock cover is not a solid: nothing to bump into on an open hillside',
+    !!osm.scree && osm.scree.kind === 'rock' && osm.scree.cover && !osm.scree.solid,
+    osm.scree ? `kind ${osm.scree.kind}, cover=${osm.scree.cover}, solid=${osm.scree.solid}, ${osm.scree.relief.toFixed(0)} m relief` : 'no scree');
+  check('a small lot on the same slope is still graded flat',
+    !!osm.lot && osm.lot.graded && !osm.lot.cover, osm.lot ? `graded=${osm.lot.graded}` : 'no lot');
+  check('zoning polygons (landuse=residential) are not areas', !osm.zoned);
+  check('a dam is not water', osm.damKind && osm.damKind !== 'water', `kind ${osm.damKind}`);
+  check('points beyond the DEM are dropped',
+    osm.pois.includes('Inside View') && !osm.pois.includes('Off The Map'), osm.pois.join(', '));
+  check('a trail leaving the DEM is cut at its edge, not dropped',
+    osm.edgePts > 0 && osm.edgePtsOutside === 0 && osm.reachesEdge,
+    `${osm.edgePtsOutside} of ${osm.edgePts} trail points outside, reaches edge: ${osm.reachesEdge}`);
+  check('an area reaching past the DEM is clipped to it',
+    !!osm.forest && osm.forest.inside && osm.crop.areas >= 1, `crop ${JSON.stringify(osm.crop)}`);
+  check('a scree field paints the ground under it, and a forest does not',
+    osm.screeGround.on && osm.screeGround.cells > 0 && osm.screeGround.inScree === 255 && osm.screeGround.forestHere && osm.screeGround.inForest === 0,
+    `mask on=${osm.screeGround.on}, ${osm.screeGround.cells} cells; scree centre ${osm.screeGround.inScree}, forest point ${osm.screeGround.inForest}`);
+  check('the scree paint is on the terrain material, lands after the texel is read, and keeps the noise ring',
+    osm.screeGround.patchedGround && !!osm.screeGround.inject && osm.screeGround.inject.uniforms && osm.screeGround.inject.afterMap
+      && osm.screeGround.inject.vert && osm.screeGround.inject.ring,
+    JSON.stringify(osm.screeGround.inject));
+  check('no scenery trees grow on the scree (it is above the tree line)',
+    osm.screeGround.spotScreeN >= 20 && osm.screeGround.spotScree === 0 && osm.screeGround.spotOpen > 0
+      && osm.screeGround.treesInScree === 0,
+    `placement allowed at ${osm.screeGround.spotScree} of ${osm.screeGround.spotScreeN} scree points, ${osm.screeGround.spotOpen} of 21 open points; ${osm.screeGround.treesInScree} of ${osm.screeGround.trees} placed trees on it`);
+  check('a map with no scree leaves the ground paint switched off', osm.defaultCover === false);
+  check('the crop is counted: a trail cut at the edge shows in the stats',
+    osm.crop.lines >= 1 && osm.crop.points >= 1, `crop ${JSON.stringify(osm.crop)}`);
+
+  /* ---------- railways, rail fixtures and landmark vs fixture ----------
+     A synthetic valley: the south half rises at 2%, the north at 25%. Two railways -- a
+     tagged one up the steep side and an UNTAGGED one named "Valley Railroad" on the gentle
+     side (the BarrTrailWorld.json case: the export dropped the railway column) -- plus a
+     "Old Rail Trail" that must stay a trail, and the points a raw OSM export carries round
+     a railway: a switch, a station, level crossings (one on the track, one orphaned),
+     three pylons in a row, a gate on the trail, and a platform and depot footprint. */
+  const rl = await (0,eval)(`(async()=>{
+    const W=60, H=40, CELL=8, OX=-240, OZ=-160, BASE=2000, lon0=-105, lat0=38.8, MLON=86800, MLAT=111000;
+    const hts=new Int16Array(W*H);
+    for(let j=0;j<H;j++)for(let i=0;i<W;i++){
+      const x=(i+0.5)*CELL, z=OZ+(j+0.5)*CELL;
+      hts[j*W+i]=Math.round((z<0 ? 0.02*x : 0.25*x)*10);
+    }
+    const u8=new Uint8Array(hts.buffer); let bin=''; for(const b of u8) bin+=String.fromCharCode(b);
+    const LL=(x,z)=>[lon0+x/MLON, lat0-z/MLAT];
+    const ring=pts=>[...pts,pts[0]].map(([x,z])=>LL(x,z));
+    const line=(pts,props)=>({type:'Feature',properties:props,geometry:{type:'LineString',coordinates:pts.map(([x,z])=>LL(x,z))}});
+    const pt=(x,z,props)=>({type:'Feature',properties:props,geometry:{type:'Point',coordinates:LL(x,z)}});
+    const poly=(pts,props)=>({type:'Feature',properties:props,geometry:{type:'Polygon',coordinates:[ring(pts)]}});
+    const bundle={format:'pup-world/1',
+      projection:{kind:'equirectangular-local',originLon:lon0,originLat:lat0,metresPerDegreeLon:MLON,metresPerDegreeLat:MLAT,zAxis:'south',geodesy:'wgs84'},
+      bounds:{minX:OX,minZ:OZ,maxX:OX+W*CELL,maxZ:OZ+H*CELL},
+      heightfield:{cell:CELL,width:W,height:H,originX:OX,originZ:OZ,encoding:'int16le-base64',baseM:BASE,scale:10,
+                   minM:BASE,maxM:BASE+0.25*W*CELL,data:btoa(bin)},
+      layers:{osm:{type:'FeatureCollection',features:[
+        line([[-200,100],[200,100]],{railway:'rail',name:'Steep Line'}),
+        line([[-200,-100],[200,-100]],{name:'Valley Railroad'}),
+        // UNTAGGED on purpose: a highway tag would decide it before the name is ever read
+        line([[-200,-40],[200,-40]],{name:'Old Rail Trail'}),
+        pt(0,-100,{railway:'switch'}),
+        pt(50,-92,{railway:'station',name:'Valley Halt'}),
+        pt(-50,-100,{railway:'level_crossing'}),
+        pt(0,-150,{railway:'level_crossing'}),
+        pt(-150,-130,{power:'tower'}), pt(0,-130,{power:'tower'}), pt(150,-130,{power:'tower'}),
+        pt(100,-39,{barrier:'gate'}),
+        poly([[40,-95],[90,-95],[90,-91],[40,-91]],{railway:'platform'}),
+        poly([[60,-88],[80,-88],[80,-80],[60,-80]],{building:'train_station'})
+      ]}}};
+    await loadWorld(bundle, [], 3);
+    const G=getGraph(), out={};
+    const kindOf=n=>[...new Set(G.edges.filter(e=>e.name===n).map(e=>e.kind))];
+    out.steep=kindOf('Steep Line'); out.valley=kindOf('Valley Railroad'); out.railTrail=kindOf('Old Rail Trail');
+    out.stats=getRailStats();
+    const cnt={}; getWorldGroup().traverse(o=>{ if(o.name) cnt[o.name]=(cnt[o.name]||0)+1; });
+    out.mesh={ties:cnt['rail-ties']||0, rails:cnt['rail-rails']||0, rack:cnt['rail-rack']||0,
+              teeth:cnt['rail-teeth']||0, wires:cnt['power-wires']||0,
+              crossbucks:cnt['fixture:crossbuck']||0, pylons:cnt['fixture:pylon']||0, gates:cnt['fixture:gate']||0};
+    /* sleepers sit ON the ballast. nearestTrail().y is already the drawn tread top
+       (profile + class lift + TREAD_TOP -- see drawnTopLifts); the ballast ribbon is
+       0.03 under that, and every sleeper BOTTOM vertex should be on the ribbon and every TOP vertex one sleeper
+       thickness above. Each box is 18 vertices: 0-5 the top, 6-17 the two long faces,
+       whose bottoms are 6,9,11 and 12,15,17. */
+    { let worst=0, n=0, worstTop=0;
+      getWorldGroup().traverse(o=>{
+        if(o.name!=='rail-ties') return;
+        const P=o.geometry.attributes.position.array;
+        for(let b=0;b<P.length/3;b+=18){
+          for(const v of [6,9,11,12,15,17, 0,1,2]){
+            const k=(b+v)*3, x=P[k], y=P[k+1], z=P[k+2];
+            const nt=nearestTrail(x,z); if(nt.y==null) continue;
+            // nt.y is the WALKING surface, TREAD_TOP (0.08) over the lift; the visible
+            // ballast ribbon is drawn at 0.05 (no inner stripe on a railway), 0.03 below
+            const d=Math.abs(y-(nt.y-0.03)-(v<6?0.10:0)); n++;
+            if(v<6){ if(d>worstTop) worstTop=d; } else if(d>worst) worst=d;
+          }
+        }
+      });
+      out.tieFit={n, worst:+worst.toFixed(3), worstTop:+worstTop.toFixed(3)}; }
+    out.poiKinds=getPOIs().map(p=>p.kind);
+    out.fixtures=getFixtures().map(f=>f.kind+(f.skipped?'(skipped)':'')+(f.on?'@'+f.on:''));
+    out.spans=getPowerSpans().length;
+    const st=getPOIs().find(p=>p.kind==='station');
+    if(st){
+      const t=nearestOnEdges(st.at?st.at.x:st.x, st.at?st.at.z:st.z, new Set(['rail']), 1e9);
+      out.station={placed:!!st.at, signOnly:!!st.signOnly, offM:t?+(t.d).toFixed(2):null, need:+(pathOutlineWidth('rail')/2).toFixed(2)};
+    }
+    const gate=getFixtures().find(f=>f.kind==='gate');
+    if(gate && gate.on){
+      const t=nearestOnEdges(gate.x, gate.z, null, 1e9);
+      const want=Math.atan2(-t.dir[1], t.dir[0]);
+      const dAng=Math.abs(Math.atan2(Math.sin(gate.rot-want), Math.cos(gate.rot-want)));
+      out.gate={onPathM:+t.d.toFixed(3), angleOff:+Math.min(dAng, Math.PI-dAng).toFixed(3)};
+    }
+    out.areas=getAreas().map(a=>a.kind);
+    out.platformSolid=getAreaSolids().some(s=>s.kind==='platform');
+    out.ballast=stepSurface('ballast')!==stepSurface('trail');
+    await loadWorld('../data/world.json', [], 3);
+    return out;
+  })()`);
+  check('a railway=rail line is a railway', rl.steep.length === 1 && rl.steep[0] === 'rail', rl.steep.join(','));
+  check('an untagged line named "... Railroad" is a railway', rl.valley.length === 1 && rl.valley[0] === 'rail', rl.valley.join(','));
+  check('a "Rail Trail" stays a trail', rl.railTrail.length === 1 && rl.railTrail[0] === 'trail', rl.railTrail.join(','));
+  check('a railway too steep for adhesion gets a rack rail, and only that one',
+    rl.stats.rackNames.length === 1 && rl.stats.rackNames[0] === 'Steep Line' && rl.mesh.rack >= 1 && rl.mesh.teeth >= 1,
+    `rack on [${rl.stats.rackNames.join(', ')}], steepest ${(rl.stats.steepest*100).toFixed(0)}%, ${rl.mesh.rack} rack meshes`);
+  check('railway track is drawn: sleepers and rails on every rail edge',
+    rl.stats.edges >= 2 && rl.mesh.ties === rl.stats.edges && rl.mesh.rails === rl.stats.edges && rl.stats.ties > 100,
+    `${rl.stats.edges} edges, ${rl.mesh.ties} sleeper meshes (${Math.round(rl.stats.ties)} sleepers), ${rl.mesh.rails} rail meshes`);
+  check('sleepers lie on the ballast, not floating or buried',
+    rl.tieFit.n > 100 && rl.tieFit.worst <= 0.02 && rl.tieFit.worstTop <= 0.02,
+    `${rl.tieFit.n} vertices: bottoms worst ${rl.tieFit.worst}u off the ballast, tops worst ${rl.tieFit.worstTop}u off 0.10 above it`);
+  check('railway switches are not landmarks or cairns',
+    !rl.poiKinds.includes('cairn') && !rl.fixtures.some(f => /cairn/.test(f)), rl.poiKinds.join(','));
+  check('pylons are fixtures, not landmarks, and a line is strung between them',
+    !rl.poiKinds.includes('pylon') && rl.mesh.pylons === 3 && rl.spans === 2 && rl.mesh.wires === 1,
+    `${rl.mesh.pylons} pylons, ${rl.spans} spans, landmarks: ${rl.poiKinds.join(',')}`);
+  check('a level crossing on the track gets a crossbuck each side; one with no track is skipped',
+    rl.mesh.crossbucks === 2 && rl.fixtures.filter(f => f === 'crossbuck(skipped)').length === 1,
+    rl.fixtures.join(', '));
+  check('a gate stands on its path, turned along it',
+    !!rl.gate && rl.gate.onPathM < 1e-6 && rl.gate.angleOff < 1e-6 && rl.mesh.gates === 1,
+    rl.gate ? `${rl.gate.onPathM}u off the path, ${rl.gate.angleOff} rad off its line` : 'no gate');
+  check('a station stands beside its track, not on it, and is not doubled beside its own depot',
+    !!rl.station && rl.station.placed && rl.station.signOnly && rl.station.offM >= rl.station.need,
+    rl.station ? `${rl.station.offM}u from the centreline (ballast edge ${rl.station.need}), signOnly=${rl.station.signOnly}` : 'no station');
+  check('platform and station footprints are their own kinds; a platform is solid',
+    rl.areas.includes('platform') && rl.areas.includes('depot') && rl.platformSolid, rl.areas.join(','));
+  check('walking the railway sounds like ballast, not dirt', rl.ballast);
+
   const failed = results.filter(r => !r.ok);
   console.log('\n---------------- smoke test ----------------');
   for (const r of results) {

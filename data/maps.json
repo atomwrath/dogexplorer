@@ -19,6 +19,7 @@
     { "name": "Red Rocks",          "url": "../data/rrworld.json" },
     { "name": "Seven Bridges",          "url": "../data/sevenBridgesWorld.json" },
     { "name": "Mt Cutler/Muscoco",          "url": "../data/cheyworld.json" },
+    { "name": "Barr Trail",          "url": "../data/BarrTrailWorld.json" },
     { "name": "Pikes Peak",         "url": "../data/pikesworld.json" }
   ]
 }

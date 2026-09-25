@@ -14,6 +14,7 @@ its own -- keeping vectors and terrain aligned by construction.
 Usage:
     python3 tools/fetch_dem.py data/geojson -o data/world.json --cell 8
     python3 tools/fetch_dem.py data/geojson -o data/world.json --cell 8 --origin -104.8697 38.8783
+    python3 tools/fetch_dem.py data/geojson -o data/world.json --bbox-layers v   # trails only
 
 Deps: numpy, Pillow
 """
@@ -166,14 +167,33 @@ def choose_zoom(lat, cell_m, oversample=2.0):
 # GeoJSON reading
 # --------------------------------------------------------------------------
 
-def iter_positions(geom):
-    """Yield every (lon, lat) position in any GeoJSON geometry."""
+# Which --bbox-layers letter each GeoJSON geometry type counts as.
+# v = vector/line layers (trails), p = points (trailheads, POIs),
+# a = areas (polygons -- lawns, ponds, buildings, etc).
+GEOM_CATEGORY = {
+    "Point": "p", "MultiPoint": "p",
+    "LineString": "v", "MultiLineString": "v",
+    "Polygon": "a", "MultiPolygon": "a",
+}
+
+
+def iter_positions(geom, allowed=None):
+    """Yield every (lon, lat) position in any GeoJSON geometry.
+
+    `allowed`, if given, is a set of GEOM_CATEGORY letters ("v"/"p"/"a");
+    geometries whose category isn't in it are skipped. GeometryCollection
+    has no category of its own -- each member geometry is checked
+    individually, so a mixed collection can contribute some positions and
+    not others. `allowed=None` means "everything", the old behaviour.
+    """
     if geom is None:
         return
     gtype = geom.get("type")
     if gtype == "GeometryCollection":
         for g in geom.get("geometries", []):
-            yield from iter_positions(g)
+            yield from iter_positions(g, allowed)
+        return
+    if allowed is not None and GEOM_CATEGORY.get(gtype) not in allowed:
         return
     coords = geom.get("coordinates")
     if coords is None:
@@ -229,21 +249,27 @@ def load_layers(input_dir):
     return layers
 
 
-def union_bounds(layers):
-    """Union lon/lat bbox across every feature in every layer."""
+def union_bounds(layers, allowed=None):
+    """Union lon/lat bbox across every feature in every layer.
+
+    `allowed` restricts which geometry types count towards the bbox (see
+    GEOM_CATEGORY / iter_positions); the layers dict itself is untouched --
+    this only clamps the area used to size the DEM fetch.
+    """
     min_lon = min_lat = math.inf
     max_lon = max_lat = -math.inf
     count = 0
     for doc in layers.values():
         for feat in doc.get("features", []):
-            for lon, lat in iter_positions(feat.get("geometry")):
+            for lon, lat in iter_positions(feat.get("geometry"), allowed):
                 min_lon = min(min_lon, lon)
                 max_lon = max(max_lon, lon)
                 min_lat = min(min_lat, lat)
                 max_lat = max(max_lat, lat)
                 count += 1
     if count == 0:
-        raise SystemExit("No coordinates found in any layer.")
+        what = "any layer" if allowed is None else f"any layer of type {''.join(sorted(allowed))!r}"
+        raise SystemExit(f"No coordinates found in {what}.")
     return min_lon, min_lat, max_lon, max_lat
 
 
@@ -359,6 +385,12 @@ def main():
                     help="Metres of terrain to include beyond the vector bbox. Default 100")
     ap.add_argument("--origin", nargs=2, type=float, metavar=("LON", "LAT"),
                     help="Projection origin. Default: centre of the vector bbox")
+    ap.add_argument("--bbox-layers", default="vpa", metavar="LETTERS",
+                    help="Which geometry types count towards the bbox used to size the "
+                         "DEM fetch: v=lines (trails), p=points, a=areas/polygons. "
+                         "Combine letters, e.g. 'v' for trails only, 'va' for trails+areas. "
+                         "Does not affect which layers are written to the output bundle. "
+                         "Default: vpa (all)")
     ap.add_argument("--zoom", type=int, default=None,
                     help=f"Tile zoom (0-{MAX_ZOOM}). Default: chosen from --cell")
     ap.add_argument("--geodesy", choices=["wgs84", "sphere"], default="wgs84",
@@ -371,11 +403,17 @@ def main():
     ap.add_argument("--indent", type=int, default=None, help="Pretty-print the JSON")
     args = ap.parse_args()
 
+    bbox_layers = set(args.bbox_layers.lower())
+    if not bbox_layers or not bbox_layers <= {"v", "p", "a"}:
+        ap.error(f"--bbox-layers must be made up of only v/p/a letters, got {args.bbox_layers!r}")
+
     print(f"Reading GeoJSON from {args.input_dir}")
     layers = load_layers(args.input_dir)
 
-    min_lon, min_lat, max_lon, max_lat = union_bounds(layers)
-    print(f"  vector bbox: {min_lon:.6f},{min_lat:.6f} .. {max_lon:.6f},{max_lat:.6f}")
+    min_lon, min_lat, max_lon, max_lat = union_bounds(layers, bbox_layers)
+    label = {"v": "vector", "p": "point", "a": "area"}
+    kinds = "+".join(label[c] for c in "vpa" if c in bbox_layers)
+    print(f"  bbox ({kinds} layers): {min_lon:.6f},{min_lat:.6f} .. {max_lon:.6f},{max_lat:.6f}")
 
     if args.origin:
         lon0, lat0 = args.origin

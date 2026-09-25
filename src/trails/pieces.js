@@ -824,8 +824,31 @@ const POI_STYLE={
   rock:{em:'🪨',label:'Rock formation'}, viewpoint:{em:'🔭',label:'Viewpoint'},
   picnic:{em:'🧺',label:'Picnic spot'},  ruin:{em:'🏛️',label:'Ruin'},
   camp:{em:'⛺',label:'Campsite'},       water:{em:'💧',label:'Spring'},
-  cairn:{em:'🗿',label:'Marker'},        tree:{em:'🌳',label:'Landmark tree'}
+  cairn:{em:'🗿',label:'Marker'},        tree:{em:'🌳',label:'Landmark tree'},
+  station:{em:'🚉',label:'Station'},     memorial:{em:'🪦',label:'Memorial'},
+  /* FIXTURES: built into the scene but not landmarks. world.js keeps them out of POIS --
+     no discovery burst, no minimap dot, no "waiting out there" count -- unless the source
+     gave one a name, in which case it is somebody's named thing and is findable. A row of
+     15 pylons and 3 crossing signs are scenery, not 18 places to go and look at. */
+  pylon:{em:'⚡',label:'Power pylon',fixture:true},
+  crossbuck:{em:'🚦',label:'Railroad crossing',fixture:true},
+  buffer:{em:'🛑',label:'Buffer stop',fixture:true},
+  gate:{em:'🚧',label:'Gate',fixture:true},
+  toilet:{em:'🚻',label:'Toilets',fixture:true},
+  infoboard:{em:'ℹ️',label:'Information',fixture:true},
+  guidepost:{em:'🪧',label:'Guidepost',fixture:true}
 };
+/* The pylon's wire attachment points, shared with world.js which strings the spans:
+   the model and the wires must agree on where the insulators are, or every wire ends in
+   mid-air a metre off its arm. Local to a pylon facing +x along its line: arms run along
+   z, so a span leaves each arm tip heading roughly +/-x. */
+const PYLON = {h:12.5, armY:[10.4, 8.2], armHalf:[2.3, 3.0], wireDrop:0.55};
+function pylonWirePoints(){
+  const out=[];
+  PYLON.armY.forEach((y,i)=>{ for(const sd of [-1,1]) out.push([0, y-PYLON.wireDrop, sd*PYLON.armHalf[i]]); });
+  out.push([0, PYLON.h+0.1, 0]);          // earth wire off the peak
+  return out;
+}
 /* `solid` is a PHYSICS fact and it lives here, beside the drawing, because the two have
    to agree: an area is solid exactly when this table gives it real height off the ground.
    The landforms are extruded rock masses and a building is an extruded footprint with a
@@ -850,7 +873,13 @@ const AREA_STYLE={
      kerb wall's side) that face is a wall, not something to walk into. Its top is the
      slab (buildArea's solidTop), and world.js levels the slab to its entrance road, so
      the way in is flush and every other edge is a retaining wall or a cut bank. */
-  parking:{fill:'#8d8578',op:0.85,em:'🅿️',paved:true,solid:true,label:'Parking'}
+  parking:{fill:'#8d8578',op:0.85,em:'🅿️',paved:true,solid:true,label:'Parking'},
+  /* A platform is a slab you step UP onto beside the track, so it is drawn and collided
+     exactly as a very low building: `slab` is its fixed height in metres, `cap` the top
+     colour, `edge` the painted safety line round the rim. A station building is a
+     building with a station's colours. */
+  platform:{fill:'#9d968a',op:1,em:'🚉',solid:true,slab:0.85,cap:'#c9c2b3',edge:'#e8c53a',label:'Platform'},
+  depot:{fill:'#e3d3a8',op:1,em:'🚉',solid:true,roof:'#3f6b4a',label:'Station'}
 };
 function plaqueTex(title,sub){
   const c=document.createElement('canvas');c.width=384;c.height=112;
@@ -959,6 +988,135 @@ function buildPOI(poi,rng){
     }
   }else if(k==='tree'){
     const t=makeTree(2.6*THEME.treeScale,'blob',rng);g.add(t);
+  }else if(k==='station'){
+    /* A little mountain depot: cream board walls, a green hipped roof with deep eaves, a
+       concrete platform along the front. When the map also has the station's real
+       footprint as an area, world.js sets `signOnly` and the building is not doubled --
+       the landmark is then just the name board, beside the building it names. */
+    if(!poi.signOnly){
+      const w=6.4, d=3.6, hgt=3.0;
+      const wall=M(new THREE.BoxGeometry(w,hgt,d),toon('#e3d3a8')); wall.position.y=hgt/2; g.add(wall);
+      const trim=M(new THREE.BoxGeometry(w+0.12,0.28,d+0.12),toon('#7a4e28')); trim.position.y=0.14; g.add(trim);
+      const roof=M(new THREE.ConeGeometry(Math.hypot(w,d)*0.62,1.7,4),toon('#3f6b4a'));
+      roof.rotation.y=Math.PI/4; roof.scale.set(1,1,d/w*1.25); roof.position.y=hgt+0.84; g.add(roof);
+      for(const sx of [-0.3,0.3]){
+        const win=M(new THREE.BoxGeometry(0.9,0.9,0.06),toon('#8fd0e6')); win.position.set(sx*w,1.8,d/2+0.02); g.add(win);
+      }
+      const door=M(new THREE.BoxGeometry(1.0,2.0,0.06),toon('#5c3a1c')); door.position.set(0,1.0,d/2+0.03); g.add(door);
+      const plat=M(new THREE.BoxGeometry(w+3,0.6,2.4),toon('#c9c2b3')); plat.position.set(0,0.3,d/2+1.2); g.add(plat);
+      const edge=M(new THREE.BoxGeometry(w+3,0.04,0.2),toon('#e8c53a')); edge.position.set(0,0.62,d/2+2.3); g.add(edge);
+    }
+    // the running-in board: the station's name, on two posts, facing the track side
+    for(const sx of [-1,1]){
+      const post=M(new THREE.CylinderGeometry(0.07,0.08,2.3,6),toon('#3a3a3a')); post.position.set(sx*1.3,1.15,poi.signOnly?0:4.6); g.add(post);
+    }
+    const board=M(new THREE.BoxGeometry(3.0,0.7,0.1),toon('#1f3d6b')); board.position.set(0,2.1,poi.signOnly?0:4.6); g.add(board);
+    // the name itself, painted on: its own textured material, not a shared toon()
+    const faceMat=poi.name
+      ? new THREE.MeshToonMaterial({map:plaqueTex(poi.name,'Station'),gradientMap:toonTex})
+      : toon('#f2ead6');
+    for(const sz of [1,-1]){            // both faces: the board is read from either platform side
+      const face=M(new THREE.BoxGeometry(2.7,0.5,0.02),faceMat);
+      face.position.set(0,2.1,(poi.signOnly?0:4.6)+sz*0.06); if(sz<0) face.rotation.y=Math.PI; g.add(face);
+    }
+  }else if(k==='memorial'){
+    // stepped granite base, a dressed block, a bronze plaque on the face
+    const base=M(new THREE.BoxGeometry(1.8,0.3,1.4),toon('#8f8a82')); base.position.y=0.15; g.add(base);
+    const step=M(new THREE.BoxGeometry(1.4,0.25,1.0),toon('#9d978e')); step.position.y=0.42; g.add(step);
+    const block=M(new THREE.BoxGeometry(1.0,1.3,0.55),toon('#a8a39a')); block.position.y=1.2; g.add(block);
+    const plaque=M(new THREE.BoxGeometry(0.62,0.44,0.05),toon('#8a6a2a')); plaque.position.set(0,1.3,0.3); g.add(plaque);
+  }else if(k==='pylon'){
+    /* Lattice tower, facing +x along its line (world.js turns it to face its neighbours).
+       Four tapering legs, horizontal bracing at three levels, two cross-arms along z with
+       insulators hanging from the tips -- the tips are PYLON.armHalf out, the same
+       numbers pylonWirePoints() gives world.js for the wires. */
+    const steel='#8e959b', base=1.7, top=0.35;
+    const lerp=(a,b,t)=>a+(b-a)*t;
+    for(const sx of [-1,1])for(const sz of [-1,1]){
+      const L=Math.hypot(PYLON.h, (base-top)*Math.SQRT2);
+      const leg=M(new THREE.CylinderGeometry(0.07,0.1,L,4),toon(steel));
+      leg.position.set(sx*(base+top)/2, PYLON.h/2, sz*(base+top)/2);
+      leg.rotation.z=-sx*Math.atan((base-top)/PYLON.h); leg.rotation.x=sz*Math.atan((base-top)/PYLON.h);
+      g.add(leg);
+    }
+    for(const t of [0.25,0.5,0.75]){
+      const hw=lerp(base,top,t), y=PYLON.h*t;
+      for(const ax of [0,1]){
+        for(const sd of [-1,1]){
+          const bar=M(new THREE.BoxGeometry(ax?0.08:hw*2,0.08,ax?hw*2:0.08),toon(steel));
+          bar.position.set(ax?sd*hw:0, y, ax?0:sd*hw); g.add(bar);
+        }
+      }
+    }
+    PYLON.armY.forEach((y,i)=>{
+      const arm=M(new THREE.BoxGeometry(0.22,0.22,PYLON.armHalf[i]*2),toon(steel)); arm.position.y=y; g.add(arm);
+      for(const sd of [-1,1]){
+        const ins=M(new THREE.CylinderGeometry(0.09,0.09,PYLON.wireDrop,6),toon('#6a8fa8'));
+        ins.position.set(0, y-PYLON.wireDrop/2, sd*PYLON.armHalf[i]); g.add(ins);
+      }
+    });
+    const peak=M(new THREE.ConeGeometry(0.4,1.4,4),toon(steel)); peak.position.y=PYLON.h-0.4; g.add(peak);
+  }else if(k==='crossbuck'){
+    /* A railroad crossbuck: white X boards with a dark border on a grey post, a pair of red
+       lamps below. world.js stands one each side of the track, turned to face the road. */
+    const post=M(new THREE.CylinderGeometry(0.08,0.09,3.4,8),toon('#b5b5b0')); post.position.y=1.7; g.add(post);
+    for(const r of [Math.PI/4,-Math.PI/4]){
+      const back=M(new THREE.BoxGeometry(1.95,0.36,0.05),toon('#2a2a2a')); back.position.y=3.0; back.rotation.z=r; g.add(back);
+      const face=M(new THREE.BoxGeometry(1.8,0.26,0.07),toon('#f4f1e8')); face.position.y=3.0; face.rotation.z=r; g.add(face);
+    }
+    const bar=M(new THREE.BoxGeometry(1.1,0.1,0.1),toon('#2a2a2a')); bar.position.y=2.1; g.add(bar);
+    for(const sx of [-1,1]){
+      const lamp=M(new THREE.CylinderGeometry(0.17,0.17,0.12,10),toon('#c33b2c'));
+      lamp.rotation.x=Math.PI/2; lamp.position.set(sx*0.5,2.1,0.08); g.add(lamp);
+    }
+  }else if(k==='buffer'){
+    // end of the line: two posts and a red-and-white beam across the rails
+    for(const sx of [-1,1]){
+      const post=M(new THREE.BoxGeometry(0.28,1.0,0.28),toon('#4a4038')); post.position.set(0,0.5,sx*0.72); g.add(post);
+    }
+    const beam=M(new THREE.BoxGeometry(0.36,0.4,2.3),toon('#c33b2c')); beam.position.y=0.9; g.add(beam);
+    for(const sz of [-0.6,0,0.6]){
+      const stripe=M(new THREE.BoxGeometry(0.38,0.42,0.22),toon('#f4f1e8')); stripe.position.set(0,0.9,sz); g.add(stripe);
+    }
+  }else if(k==='gate'){
+    /* A field gate, left OPEN: posts either side of the path, the five-bar leaf swung back
+       along it -- a closed gate across a trail the player can walk through would be a lie.
+       Local +x is along the path (world.js turns it); the posts stand GATE_POST_OFF out. */
+    const off=poi.gateHalf || 1.2;
+    for(const sd of [-1,1]){
+      const post=M(new THREE.CylinderGeometry(0.1,0.12,1.5,6),toon('#6b4a2c')); post.position.set(0,0.75,sd*off); g.add(post);
+    }
+    const leaf=new THREE.Group(); leaf.position.set(0,0,off);
+    for(let i=0;i<4;i++){
+      const bar=M(new THREE.BoxGeometry(off*1.8,0.07,0.05),toon('#a9743f')); bar.position.set(-off*0.9,0.3+i*0.3,0); leaf.add(bar);
+    }
+    const brace=M(new THREE.BoxGeometry(Math.hypot(off*1.8,0.9),0.07,0.05),toon('#a9743f'));
+    brace.position.set(-off*0.9,0.75,0); brace.rotation.z=Math.atan2(0.9,off*1.8); leaf.add(brace);
+    leaf.rotation.y=-0.25; g.add(leaf);
+  }else if(k==='toilet'){
+    // an outhouse: plank box, sloped roof, door with the crescent moon
+    const box=M(new THREE.BoxGeometry(1.3,2.1,1.3),toon('#8a6a45')); box.position.y=1.05; g.add(box);
+    const roof=M(new THREE.BoxGeometry(1.6,0.12,1.7),toon('#5c4a3a')); roof.position.y=2.2; roof.rotation.x=0.12; g.add(roof);
+    const door=M(new THREE.BoxGeometry(0.8,1.7,0.05),toon('#6b4a2c')); door.position.set(0,0.9,0.67); g.add(door);
+    const moon=M(new THREE.TorusGeometry(0.1,0.03,5,10,Math.PI*1.2),toon('#f2e3a0')); moon.position.set(0,1.45,0.7); g.add(moon);
+  }else if(k==='infoboard'){
+    // a trailhead kiosk: two posts, a shingled roof, a map panel under glass
+    for(const sx of [-1,1]){
+      const post=M(new THREE.BoxGeometry(0.16,2.3,0.16),toon('#6b4a2c')); post.position.set(sx*0.9,1.15,0); g.add(post);
+    }
+    const panel=M(new THREE.BoxGeometry(1.6,1.0,0.08),toon('#6b4a2c')); panel.position.y=1.45; g.add(panel);
+    const map=M(new THREE.BoxGeometry(1.4,0.82,0.1),toon('#cfe0b0')); map.position.y=1.45; g.add(map);
+    const trail=M(new THREE.BoxGeometry(0.9,0.05,0.11),toon('#b0472e')); trail.position.set(0.05,1.5,0); trail.rotation.z=0.35; g.add(trail);
+    const roof=M(new THREE.ConeGeometry(1.35,0.55,4),toon('#5c4a3a')); roof.rotation.y=Math.PI/4; roof.scale.set(1,1,0.4); roof.position.y=2.55; g.add(roof);
+  }else if(k==='guidepost'){
+    // a fingerpost: one post, arms pointing three ways
+    const post=M(new THREE.CylinderGeometry(0.07,0.08,2.2,6),toon('#7a4e28')); post.position.y=1.1; g.add(post);
+    [[0,1.85],[2.1,1.6],[4.2,1.35]].forEach(([a,y])=>{
+      const arm=new THREE.Group(); arm.position.y=y; arm.rotation.y=a;
+      const board=M(new THREE.BoxGeometry(0.9,0.2,0.05),toon('#e8d9b0')); board.position.x=0.45; arm.add(board);
+      const tip=M(new THREE.ConeGeometry(0.14,0.2,3),toon('#e8d9b0')); tip.rotation.z=-Math.PI/2; tip.position.x=0.99; arm.add(tip);
+      g.add(arm);
+    });
   }else{ // cairn / generic marker
     let y=0;
     for(let i=0;i<5;i++){
@@ -971,10 +1129,124 @@ function buildPOI(poi,rng){
   }
   if(poi.name){
     const st=POI_STYLE[k]||POI_STYLE.cairn;
-    const plate=nameplate(poi.name,st.label,k==='building'||k==='tower'?1.5:1.1);
-    plate.position.set(0,0,k==='rock'?3.4:2.4);g.add(plate);
+    /* The station's own running-in board already carries its name, and a pylon's plate
+       would stand under a live wire; everything else gets the usual plaque */
+    if(k!=='station'){
+      const plate=nameplate(poi.name,st.label,k==='building'||k==='tower'?1.5:1.1);
+      plate.position.set(0,0,k==='rock'?3.4:k==='pylon'?3.2:2.4);g.add(plate);
+    }
   }
   return g;
+}
+/* ---------- railway track ----------
+   Built as a few MERGED geometries per edge rather than a mesh per sleeper: a 14 km cog
+   line at 1:5 is ~4,000 sleepers, and one draw call each would be the tablet stutter the
+   material cache exists to prevent. Dimensions are real metres (standard gauge), because
+   the track is an object the pup stands on, like the tread widths in world.js's PATH_W.
+
+   Stacked on the graded profile the ballast ribbon was drawn from, all offsets relative
+   to it: ballast at +0.05 (the tread height every path uses), sleepers on the ballast,
+   rails on the sleepers. `rack` adds the toothed centre rail of a cog railway. */
+const RAIL = {gaugeHalf:0.72, railW:0.1, railH:0.13, tieLen:2.5, tieW:0.24, tieH:0.1,
+              tieGap:0.65, rackW:0.16, rackH:0.1, toothGap:0.4, toothW:0.1};
+function segFrame(pts, i){
+  // unit direction at vertex i: the average of the segments either side (a mitre-free
+  // bisector, good enough for track whose bends are gentle by construction)
+  const a=pts[Math.max(0,i-1)], b=pts[Math.min(pts.length-1,i+1)];
+  let dx=b[0]-a[0], dz=b[1]-a[1]; const L=Math.hypot(dx,dz)||1;
+  return [dx/L, dz/L];
+}
+/* A solid strip along the line, offset `off` to the side: top face plus both walls,
+   from y0 to y1 above the profile. Non-indexed so flat shading shows the edges. */
+function stripGeom(pts, ys, off, w, y0, y1){
+  const P=[];
+  const at=i=>{ const [dx,dz]=segFrame(pts,i); const nx=-dz, nz=dx; return {x:pts[i][0]+nx*off, z:pts[i][1]+nz*off, nx, nz, y:ys?ys[i]:0}; };
+  for(let i=0;i+1<pts.length;i++){
+    const A=at(i), B=at(i+1), hw=w/2;
+    const aL=[A.x+A.nx*hw, A.z+A.nz*hw], aR=[A.x-A.nx*hw, A.z-A.nz*hw];
+    const bL=[B.x+B.nx*hw, B.z+B.nz*hw], bR=[B.x-B.nx*hw, B.z-B.nz*hw];
+    const q=(p1,y1a,p2,y2a,p3,y3a,p4,y4a)=>P.push(p1[0],y1a,p1[1], p2[0],y2a,p2[1], p3[0],y3a,p3[1],
+                                                   p1[0],y1a,p1[1], p3[0],y3a,p3[1], p4[0],y4a,p4[1]);
+    q(aL,A.y+y1, bL,B.y+y1, bR,B.y+y1, aR,A.y+y1);         // top
+    q(aL,A.y+y0, bL,B.y+y0, bL,B.y+y1, aL,A.y+y1);         // left wall
+    q(aR,A.y+y1, bR,B.y+y1, bR,B.y+y0, aR,A.y+y0);         // right wall
+  }
+  if(!P.length) return null;
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(P),3));
+  g.computeVertexNormals();
+  return g;
+}
+/* Evenly spaced stations along the polyline, `gap` apart, each with its height
+   interpolated from the profile and the local direction. */
+function stationsAlong(pts, ys, gap){
+  const out=[]; let carry=gap/2;
+  for(let i=0;i+1<pts.length;i++){
+    const a=pts[i], b=pts[i+1], L=Math.hypot(b[0]-a[0], b[1]-a[1]);
+    if(L<1e-9) continue;
+    const dx=(b[0]-a[0])/L, dz=(b[1]-a[1])/L;
+    for(let t=carry; t<L; t+=gap){
+      const f=t/L;
+      out.push({x:a[0]+dx*t, z:a[1]+dz*t, y:ys?ys[i]+(ys[i+1]-ys[i])*f:0, dx, dz,
+                slope:ys?(ys[i+1]-ys[i])/L:0});
+    }
+    carry=(carry-L)%gap; if(carry<0) carry+=gap;
+  }
+  return out;
+}
+/* Oriented boxes at those stations: `along` x `across` in plan, y0..y1 high. Top and the
+   two long faces only -- the ends are a sleeper's 24 cm, invisible past a few metres, and
+   dropping them is 40% of the vertices on the biggest mesh in the rail set. */
+function boxesGeom(list, along, across, y0, y1){
+  if(!list.length) return null;
+  const P=new Float32Array(list.length*18*3); let o=0;
+  const put=(x,y,z)=>{ P[o++]=x; P[o++]=y; P[o++]=z; };
+  for(const s of list){
+    const fx=s.dx*along/2, fz=s.dz*along/2, rx=-s.dz*across/2, rz=s.dx*across/2;
+    const c=[[s.x-fx-rx, s.z-fz-rz],[s.x+fx-rx, s.z+fz-rz],[s.x+fx+rx, s.z+fz+rz],[s.x-fx+rx, s.z-fz+rz]];
+    /* Tilted WITH the grade, as a real sleeper is: the rails climb, so what they sit on
+       climbs. A level box on a 25% line has one edge in the air and the other in the
+       ballast. c1,c2 are the forward pair (+along), c0,c3 the back. */
+    const k=(s.slope||0)*along/2;
+    const Tb=s.y+y1-k, Tf=s.y+y1+k, Bb=s.y+y0-k, Bf=s.y+y0+k;
+    const T=[Tb,Tf,Tf,Tb], B=[Bb,Bf,Bf,Bb];
+    // top
+    put(c[0][0],T[0],c[0][1]); put(c[2][0],T[2],c[2][1]); put(c[1][0],T[1],c[1][1]);
+    put(c[0][0],T[0],c[0][1]); put(c[3][0],T[3],c[3][1]); put(c[2][0],T[2],c[2][1]);
+    /* the two long faces: c1->c2 and c3->c0 run ACROSS the track (the `across` span), so
+       they face up and down the line. (c0->c1 and c2->c3 are the short ends, dropped.) */
+    put(c[1][0],B[1],c[1][1]); put(c[1][0],T[1],c[1][1]); put(c[2][0],T[2],c[2][1]);
+    put(c[1][0],B[1],c[1][1]); put(c[2][0],T[2],c[2][1]); put(c[2][0],B[2],c[2][1]);
+    put(c[3][0],B[3],c[3][1]); put(c[3][0],T[3],c[3][1]); put(c[0][0],T[0],c[0][1]);
+    put(c[3][0],B[3],c[3][1]); put(c[0][0],T[0],c[0][1]); put(c[0][0],B[0],c[0][1]);
+  }
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(P,3));
+  g.computeVertexNormals();
+  return g;
+}
+/* Everything drawn on top of the ballast, as {ties, rails, rack, teeth} geometries (any
+   may be null). `lift` is the edge's class lift, `tieGap` the sleeper spacing world.js
+   chose under its budget. Sleepers run ACROSS the track: along = sleeper width. */
+function railTrackGeoms(pts, ys, lift, tieGap, rack){
+  const base=lift+0.05;
+  const tieTop=base+RAIL.tieH, railTop=tieTop+RAIL.railH;
+  const ties=boxesGeom(stationsAlong(pts, ys, tieGap), RAIL.tieW, RAIL.tieLen, base, tieTop);
+  const parts=[stripGeom(pts, ys, RAIL.gaugeHalf, RAIL.railW, tieTop, railTop),
+               stripGeom(pts, ys, -RAIL.gaugeHalf, RAIL.railW, tieTop, railTop)].filter(Boolean);
+  let rails=null;
+  if(parts.length){
+    const n=parts.reduce((m,g)=>m+g.attributes.position.array.length,0), P=new Float32Array(n); let o=0;
+    for(const g of parts){ P.set(g.attributes.position.array,o); o+=g.attributes.position.array.length; }
+    rails=new THREE.BufferGeometry(); rails.setAttribute('position', new THREE.BufferAttribute(P,3)); rails.computeVertexNormals();
+  }
+  let rackG=null, teeth=null;
+  if(rack){
+    rackG=stripGeom(pts, ys, 0, RAIL.rackW, tieTop, tieTop+RAIL.rackH);
+    teeth=boxesGeom(stationsAlong(pts, ys, RAIL.toothGap), RAIL.toothW, RAIL.rackW*1.25,
+                    tieTop+RAIL.rackH, tieTop+RAIL.rackH+0.05);
+  }
+  return {ties, rails, rack:rackG, teeth};
 }
 let PAVE_TEX=null;
 function pavementTexture(){
@@ -1118,9 +1390,58 @@ function areaWallGeom(rings, topY, groundLocal){
   return geo;
 }
 
-function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
+/* A polygon terrain.js left as COVER (too much hill under it to be a slab -- see
+   flattenAreaCells). Nothing is drawn as a floor, extruded, or made solid: the ground IS
+   the DEM hillside, and what makes it read as a forest or a scree field is what stands on
+   it. Every piece is planted at its own terrain height, so the group itself stays at 0 --
+   one rigid shift to a single height is precisely what cannot work across a mountain.
+
+   Sampled uniformly over the polygon, capped. The cap is higher than a slab's because a
+   cover polygon is by definition big; it is still a cap, not a density, since the tablet
+   pays for every mesh and the largest of these spans most of a map. Trees keep off the
+   trail corridor exactly as a slab's do. Water as cover gets nothing: a polygon with that
+   much hill under it is not a surface water could have, whatever it is tagged. */
+const COVER_MAX_PIECES = 160;
+function buildCoverArea(a,st,rng,groundYAt,nearestTrail){
   const g=new THREE.Group();
+  const bb=areaBBox(a);
+  const rock=!!st.landform;
+  const want=a.kind==='water' ? 0 : Math.min(COVER_MAX_PIECES, Math.round(bb.w*bb.h/(rock?90:70)));
+  const rockMat=rock ? [toon(st.fill), toon(shade(st.fill,1.16)), toon(shade(st.fill,0.8))] : null;
+  let placed=0,tries=0;
+  while(placed<want&&tries++<want*12){
+    const x=bb.mnx+rng()*bb.w,z=bb.mnz+rng()*bb.h;
+    if(!pointInArea(x,z,a))continue;
+    if(nearestTrail(x,z).d<4)continue;
+    let o;
+    if(a.kind==='forest') o=makeTree((1.2+rng()*1.5)*THEME.treeScale,pickTree(rng),rng);
+    else if(rock){
+      const r=0.4+rng()*1.1;
+      o=M(new THREE.DodecahedronGeometry(r,0), rockMat[(rng()*rockMat.length)|0]);
+      o.scale.set(1, 0.55+rng()*0.4, 1); o.rotation.y=rng()*6.28;
+      o.position.y=r*0.25;
+    }else{
+      o=M(new THREE.ConeGeometry(0.17,0.55,5),toon(THEME.tuft)); o.position.y=0.25;
+    }
+    const holder=new THREE.Group();
+    holder.position.set(x, groundYAt(x,z), z);
+    holder.add(o); g.add(holder); placed++;
+  }
+  if(a.name){
+    const label=buildFloatingLabel(a.name,st.em,Math.max(7,a.name.length*0.7),3.5);
+    label.position.x=bb.cx; label.position.z=bb.cz;
+    label.position.y+=groundYAt(bb.cx,bb.cz);
+    g.add(label);
+  }
+  g.position.y=0;
+  g.userData.cover=true;
+  return g;
+}
+
+function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
   const st=AREA_STYLE[a.kind]||AREA_STYLE.meadow;
+  if(a.cover) return buildCoverArea(a,st,rng,groundYAt,nearestTrail);
+  const g=new THREE.Group();
   const shape=areaShape(a);
   const bb=areaBBox(a);
   let labelY=3.5; // flat ground cover: just enough clearance to read as floating signage
@@ -1138,16 +1459,23 @@ function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
     g.add(built.group);labelY=built.topY+2.2;
     solidTop=built.slabY;
     solidInflate=built.inflate;
-  }else if(a.kind==='building'){
-    const hgt=clamp(+(a.props.height||a.props.levels*3||0)||3.4,1.5,14);
+  }else if(a.kind==='building'||a.kind==='depot'||a.kind==='platform'){
+    const hgt=st.slab ? st.slab : clamp(+(a.props.height||a.props.levels*3||a.props['building:levels']*3||0)||3.4,1.5,14);
     solidTop=hgt;
     const geo=new THREE.ExtrudeGeometry(shape,{depth:hgt,bevelEnabled:false});
     const m=M(geo,toon(st.fill));
     // see buildLandform: rotation alone maps the extrude's base to y=0, no offset needed
     m.rotation.x=-Math.PI/2;g.add(m);
     const capGeo=new THREE.ShapeGeometry(shape);
-    const cap=M(capGeo,toon('#8c4a33'));
+    const cap=M(capGeo,toon(st.cap||st.roof||'#8c4a33'));
     cap.rotation.x=-Math.PI/2;cap.position.y=hgt+0.03;g.add(cap);
+    if(st.edge){
+      // the safety line round the rim, as painted on a real platform. Outer ring only; the
+      // group sits at x=z=0 (only y is shifted below), so the ring is used as it stands
+      const ring=a.rings[0], closed=ring.length>1 && ring[0][0]===ring[ring.length-1][0] && ring[0][1]===ring[ring.length-1][1];
+      const pts=closed ? ring.slice(0,-1) : ring.slice();
+      if(pts.length>=3) g.add(M(ribbonGeom([...pts, pts[0]], 0.22, hgt+0.05, null), toon(st.edge)));
+    }
     labelY=hgt+2.4;
   }else{
     const geo=new THREE.ShapeGeometry(shape);
@@ -1418,6 +1746,6 @@ function buildBackdrop(theme, rng, mapScale=1){
 
 
 export { ribbonGeom, junctionGapGeom, waterSideGeom, densifyEdge, embankmentGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
-         POI_STYLE, AREA_STYLE, nameplate, buildPOI, pavementTexture, buildLandform,
+         POI_STYLE, AREA_STYLE, PYLON, pylonWirePoints, railTrackGeoms, nameplate, buildPOI, pavementTexture, buildLandform,
          buildFloatingLabel, buildArea, buildAreaSign, makeShadow, pickTree, shade,
          buildBackdrop, backdropRadius, ridgeProfile, bridgeDeckGeom, bridgeFrameGeom, deckMat, frameMat };

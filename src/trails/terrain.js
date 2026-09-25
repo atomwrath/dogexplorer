@@ -78,6 +78,38 @@ const CLAIM_SHARE = 0.5;
 const WATER_PCTILE = 0.25;
 function isWaterArea(a){ return a && a.kind === 'water'; }
 
+/* HOW MUCH HILL A POLYGON MAY SIT ON AND STILL BE GRADED FLAT.
+
+   Grading is right for the things this game was built around -- a lot, a footprint, a
+   pond, a rock mass -- because each is small next to the slope under it. It is exactly
+   wrong for a landscape. A raw OSM export carries natural=wood and natural=scree
+   polygons the size of the mountain: on BarrTrailWorld.json one forest covers 44 km^2
+   with 1,518 m of relief beneath it, and levelling that to its median band carved a
+   plateau with cliffs up to 896 m high round its rim (2,803 cell edges over 30 m that
+   the DEM does not have). No slab is a fair model for that polygon at any size of step.
+
+   So the decision is made on the relief under the footprint, p10 to p90 of the RAW DEM
+   (robust to a noisy cell at a corner, independent of the contour step and the
+   exaggeration). Above the limit the polygon is COVER, not a slab: the terrain under it
+   is left as the DEM says and pieces.js dresses the real hillside with its trees, tufts
+   or stones instead of drawing a floor.
+
+   Two limits because the two families differ by design. A landform is MEANT to be a mass
+   standing off its slope -- Kissing Camels sits on 74 m of relief and is graded on
+   purpose -- so it gets room above the steepest shipped rock. Everything else is paint
+   or a pad, where the tallest shipped case is 25 m (a cheyzoo enclosure). Both limits
+   leave every shipped map exactly as it was; measured, not assumed, per map and kind. */
+const SLAB_MAX_RELIEF_M = 40;
+const LANDFORM_MAX_RELIEF_M = 120;
+const RELIEF_LO = 0.1, RELIEF_HI = 0.9;
+function footprintReliefM(mark){
+  const h=[...mark].map(k=>WORLD.heights[k]).sort((p,q)=>p-q);
+  if(!h.length) return 0;
+  const at=t=>h[clamp(Math.floor((h.length-1)*t),0,h.length-1)];
+  return at(RELIEF_HI)-at(RELIEF_LO);
+}
+function isLandformKind(kind){ return kind==='rock' || kind==='redrock' || kind==='lightrock'; }
+
 /* Flatten every DEM cell under an area polygon to one shared terrace band — the same
    grading pass as before, now operating on the band array instead of a bespoke grid.
    Overlapping polygons (this project has ~20 parking-lot polygons that touch) adopt a
@@ -87,8 +119,17 @@ function flattenAreaCells(areas, pointInArea, areaBBox){
   if(!WORLD||!BAND)return;
   const claimed=new Map();
   for(const a of areas){
+    a.cover=false; a.reliefM=null;
     const mark=areaCells(a, pointInArea, areaBBox);
     if(!mark.size)continue;
+    /* Cover is decided before any claim is looked at: a hillside forest overlapping a lot
+       must not adopt the lot's level, and must not leave claims a later polygon would
+       adopt either. Its cells are simply not touched. */
+    a.reliefM=footprintReliefM(mark);
+    if(a.reliefM > (isLandformKind(a.kind) ? LANDFORM_MAX_RELIEF_M : SLAB_MAX_RELIEF_M)){
+      a.cover=true; a.groundY=null;
+      continue;
+    }
     let lvl=null;
     /* Adopt a neighbour's level only when this polygon is MOSTLY sitting on one, and take
        the level the most shared cells actually hold rather than whichever the Set happened

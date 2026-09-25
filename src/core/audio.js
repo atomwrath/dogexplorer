@@ -462,6 +462,9 @@ const STEP_SURFACES = {
   sand:  {hz:1500, q:0.4, d:0.130, b:0,   be:0,   n:0.22, bg:0.00}, // dull, no tail at all
   paved: {hz:2350, q:1.2, d:0.050, b:240, be:150, n:0.24, bg:0.13}, // tarmac: short, dry tap
   water: {hz:1050, q:0.5, d:0.160, b:0,   be:0,   n:0.34, bg:0.00}, // splash: low hiss, long tail
+  // railway ballast: crushed stone under the sleepers -- a coarser, louder crunch than
+  // trail gravel, with a little of the sleeper's wooden knock in the head
+  ballast: {hz:2050, q:0.7, d:0.085, b:190, be:115, n:0.36, bg:0.12},
 };
 function stepSurface(name){ return STEP_SURFACES[name] || STEP_SURFACES.trail; }
 
