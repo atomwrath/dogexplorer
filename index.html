@@ -2,336 +2,81 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="Pup Trails">
-<meta name="theme-color" content="#fdf3e3">
-<meta name="description" content="Explore real trails as a dog or a wild animal — draped over actual terrain.">
-<link rel="manifest" href="../manifest.webmanifest">
-<link rel="apple-touch-icon" href="../icons/icon-192.png">
-<title>Pup Trails</title>
-<link rel="stylesheet" href="../styles/base.css">
-<link rel="stylesheet" href="../styles/trails.css">
+<meta name="theme-color" content="#ffefcd">
+<meta name="description" content="Backyard Pups, Pup City, and Pup Trails — cartoon 3D dog games that run in any browser.">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<title>Pup Games</title>
+<link rel="stylesheet" href="./styles/base.css">
+<style>
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{height:100%; margin:0;}
+  body{
+    font-family:"Comic Sans MS","Chalkboard SE","Segoe UI",system-ui,sans-serif;
+    background:var(--cream);
+    background-image:radial-gradient(circle at 12% 18%, #fff6e0 0 32%, transparent 33%),
+                     radial-gradient(circle at 88% 78%, #ffe4b8 0 26%, transparent 27%);
+    color:var(--ink);
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    padding:24px calc(20px + var(--safe-l)) calc(24px + var(--safe-b)) calc(20px + var(--safe-r));
+    gap:22px;
+  }
+  h1{font-size:clamp(28px,7vw,46px); margin:0; letter-spacing:.5px;}
+  h1 span{color:var(--orange);}
+  .tag{margin:0; opacity:.72; font-size:clamp(13px,3.4vw,16px); text-align:center; max-width:34ch;}
+  .games{display:flex; flex-wrap:wrap; gap:18px; justify-content:center; width:100%; max-width:760px;}
+  .game{
+    flex:1 1 300px; max-width:360px; text-decoration:none; color:inherit;
+    background:var(--card); border:4px solid var(--ink); border-radius:22px;
+    box-shadow:6px 6px 0 rgba(61,42,32,.22);
+    padding:22px; display:flex; flex-direction:column; gap:8px;
+    transition:transform .12s, box-shadow .12s;
+  }
+  .game:active{transform:translate(3px,3px); box-shadow:2px 2px 0 rgba(61,42,32,.22);}
+  .game .em{font-size:44px; line-height:1;}
+  .game h2{margin:0; font-size:22px;}
+  .game p{margin:0; font-size:14px; opacity:.75; line-height:1.45;}
+  .game .go{margin-top:6px; font-weight:bold; color:var(--orange);}
+  footer{font-size:12px; opacity:.55; text-align:center; line-height:1.6;}
+  @media (hover:hover){ .game:hover{transform:translate(-2px,-2px); box-shadow:8px 8px 0 rgba(61,42,32,.22);} }
+</style>
 </head>
 <body>
-<div id="app">
-  <header>
-    <div class="logo">
-      <div class="pawbadge">🥾</div>
-      <h1>PUP <span>TRAILS</span><small>real trails · real terrain</small></h1>
-    </div>
-    <div class="spacer"></div>
-  </header>
-  <main>
-    <div id="stage">
-      <canvas id="c"></canvas>
+  <h1>PUP <span>GAMES</span></h1>
+  <p class="tag">Four little cartoon dog games. They run in the browser, work offline, and share the same pups.</p>
 
-      <!-- THE DRAWER, and the two index tabs that open it. See src/trails/panes.js for
-           what this replaced: two unrelated toggles, four body classes, and a ⚙ button
-           that changed corners depending on state you could not see.
-
-           Shut, you get the tabs. Open, the same two choices move into the drawer's own
-           header as a segmented control, so switching between "where am I going" and "how
-           does this look" never closes anything. One ✕, one Esc, one open-state. -->
-      <div id="paneTabs">
-        <button class="pane-tab" id="paneTabMap" title="Map (M)" aria-label="Open the map">🗺</button>
-        <button class="pane-tab" id="paneTabSet" title="Settings (Tab)" aria-label="Open settings">⚙️</button>
-      </div>
-      <div id="paneDrawer">
-        <div id="paneHead">
-          <div id="paneSeg" role="tablist">
-            <button data-pane="map" role="tab" aria-selected="false">🗺 Map</button>
-            <button data-pane="settings" role="tab" aria-selected="false">⚙️ Settings</button>
-          </div>
-          <button class="btn" id="paneClose" title="Close (Esc)" aria-label="Close">✕</button>
-        </div>
-        <div id="paneBody">
-          <aside id="panel">
-            <p class="hint panel-lede">Change anything while you walk — you stay where you
-              are standing. Switch to 🗺 Map to move somewhere else.</p>
-            <div class="sect" id="mapSect">
-              <div class="sect-head">
-                <h2>🗺️ Trail map</h2>
-                <button class="sect-toggle" id="mapSectToggle" type="button"
-                        aria-expanded="true" aria-controls="mapSectBody"
-                        title="Collapse" aria-label="Collapse trail map settings">▾</button>
-              </div>
-              <!-- Lives outside #mapSectBody on purpose: collapsing the section hides the
-                   file drop zone, sliders and stats, but switching maps has to keep working
-                   with it collapsed, or collapsing becomes a trap for anyone who only wanted
-                   the clutter gone. THE OPTIONS COME FROM data/maps.json (see loadMapList in
-                   main.js); the three below are the offline/file:// fallback only. -->
-              <div class="io-row" id="mapListRow">
-                <select id="mapList" aria-label="Choose a map">
-                  <option value="../data/world.json">Garden of the Gods</option>
-                  <option value="../data/rrworld.json">Red Rocks</option>
-                  <option value="../data/pikesworld.json">Pikes Peak</option>
-                </select>
-              </div>
-              <div id="mapSectBody">
-                <label class="dropzone" id="dropzone" for="worldFile">
-                  <span class="dz-main">Drop your <code>.geojson</code> layers here<br>or tap to browse</span>
-                  <span class="dz-sub">trails, points &amp; areas &mdash; <code>.txt</code> is fine too</span>
-                </label>
-                <!-- .txt and text/plain are here for iPadOS, which appends .txt to anything it
-                     downloads and gives you no way to take it off again. The picker filters by
-                     name; loadFiles has never cared about the name, so widening the filter is
-                     the whole fix. -->
-                <input type="file" id="worldFile" accept=".geojson,.json,.txt,application/geo+json,application/json,text/plain" multiple hidden>
-                <div id="fileChips" class="file-chips"></div>
-                <div class="io-row">
-                  <button class="btn small" id="saveCombinedBtn">↓ Save combined</button>
-                  <button class="btn small" id="clearLayersBtn">Clear map</button>
-                </div>
-                <div class="ctl">
-                  <label>World scale <span class="val" id="worldScaleVal">1 : 1</span></label>
-                  <input type="range" id="worldScale" min="0" max="1000" step="1" value="0">
-                </div>
-                <div class="ctl">
-                  <label>Hill exaggeration <span class="val" id="vertScaleVal">1.00×</span></label>
-                  <input type="range" id="vertScale" min="0" max="1000" step="1" value="707">
-                </div>
-                <div class="ctl">
-                  <label>Contour step <span class="val" id="contourVal">3.0 m</span></label>
-                  <input type="range" id="contourStep" min="0.5" max="12" step="0.5" value="3">
-                </div>
-                <p class="hint">1:1 is true size; a bigger N packs the map into a shorter walk.
-                  Hill exaggeration follows it automatically so slopes stay true — nudge it
-                  yourself afterwards if you want them flatter or wilder. Contour step is metres
-                  of real elevation per terrace.</p>
-                <div class="statbox" id="mapStats"></div>
-                <div id="trailList" class="trail-list"></div>
-                <p class="hint" id="mapNote">Loading map…</p>
-                <p class="hint">Pick a map above, or drop your own <code>.geojson</code> layers on
-                  top of it. Pass <code>?world=…</code> in the URL to open one directly. Maps
-                  listed in <code>data/maps.json</code> show up in the dropdown on every device.</p>
-              </div>
-            </div>
-            <div class="sect">
-              <h2>🏞️ Landscape</h2>
-              <div id="envGrid" class="env-grid"></div>
-              <p class="hint">Same trails, different country.</p>
-              <div class="ctl">
-                <label>Fog <span class="val" id="fogAmtVal">1.00×</span></label>
-                <input type="range" id="fogAmt" min="0.15" max="5" step="0.05" value="1">
-              </div>
-            </div>
-            <!-- Time of day sits directly under Landscape because it is the same
-                 question asked twice: that one picks WHERE you are walking, this one
-                 picks WHEN. The date and clock only appear once day/night is on -- they
-                 do nothing under default lighting, and a live control that does nothing
-                 is worse than an absent one. -->
-            <div class="sect">
-              <h2>🕐 Time of day</h2>
-              <div class="toggle-row" id="skyToggle">
-                <button class="toggle sel" data-sky="default">☀️ Default</button>
-                <button class="toggle" data-sky="daynight">🌗 Day &amp; night</button>
-              </div>
-              <div id="skyControls" hidden>
-                <div class="io-row">
-                  <input type="date" id="skyDate" class="url-in" aria-label="Date at the map">
-                  <button class="btn small" id="skyNowBtn">🕐 Now</button>
-                </div>
-                <div class="ctl">
-                  <label>Time <span class="val" id="skyTimeVal">12:00</span></label>
-                  <input type="range" id="skyTime" min="0" max="1439" step="1" value="720">
-                </div>
-              </div>
-              <div class="statbox" id="skyNote"></div>
-              <p class="hint">The sun and moon go where they really are for this map's own
-                latitude and longitude, so sunrise lands where the terrain says it should.
-                Shadows follow whichever one is lighting the sky; after dark that is the
-                moon, and how much light you get depends on its phase.</p>
-            </div>
-            <div class="sect">
-              <h2>⛰️ Terrain detail</h2>
-              <div class="toggle-row" id="detailToggle">
-                <button class="toggle sel" data-detail="auto">⚖️ Auto</button>
-                <button class="toggle" data-detail="high">🗻 Fine</button>
-                <button class="toggle" data-detail="low">🪶 Coarse</button>
-              </div>
-              <p class="hint" id="detailNote">Auto keeps big maps light on phones and tablets and fine everywhere else. Drop to Coarse if a large map won't load; raise to Fine for crisper ground on a fast machine.</p>
-            </div>
-            <div class="sect">
-              <h2>🔊 Sound</h2>
-              <div class="toggle-row" id="soundToggle">
-                <button class="toggle sel" data-sound="on">🔊 On</button>
-                <button class="toggle" data-sound="off">🔇 Off</button>
-              </div>
-              <p class="hint">Footfalls, barks and the wildlife. Your choice is remembered.</p>
-            </div>
-            <div class="sect">
-              <h2>🐾 Who's exploring</h2>
-              <div class="toggle-row" id="pupModeToggle">
-                <button class="toggle sel" data-mode="dog">🐕 Dogs</button>
-                <button class="toggle" data-mode="wild">🦊 Wildlife</button>
-              </div>
-              <div id="dogGrid" class="pup-grid"></div>
-              <div id="animalGrid" class="pup-grid" hidden></div>
-              <div class="io-row">
-                <button class="btn small" id="randomPupBtn">🎲 Random pup</button>
-                <label class="btn small" for="pupFile">📥 Import</label>
-              </div>
-              <input type="file" id="pupFile" accept=".json,application/json" multiple hidden>
-              <p class="hint" id="pupNote"></p>
-              <p class="hint">Blue bar is speed, pink is how far off you spook the locals.</p>
-            </div>
-          </aside>
-          <div id="bigmapWrap">
-            <canvas id="bigmap"></canvas>
-            <div id="bigmapZoom">
-              <button class="btn small" id="bigZoomIn" title="Zoom in">➕</button>
-              <button class="btn small" id="bigZoomOut" title="Zoom out">➖</button>
-            </div>
-            <div id="bigmapSide">
-              <div class="bm-card" id="hereCard">
-                <h3 id="hereTitle">🚩 Start here</h3>
-                <div id="hereIdle">
-                  <p class="hint" id="startNow">—</p>
-                  <p class="hint">Tap any trail on the map to start from that spot, a
-                    lettered badge for a trailhead, or a course below.</p>
-                </div>
-                <div id="hereStats" class="here-stats"></div>
-                <div id="hereActions" class="here-actions"></div>
-              </div>
-              <div class="bm-card">
-                <h3>🏁 Courses</h3>
-                <div id="courseList" class="course-list"></div>
-                <button class="btn small wide" id="recStartBtn">⏺ Record a path</button>
-                <div id="recSaveRow" class="rec-save">
-                  <input type="text" id="recName" maxlength="40" placeholder="Name this course"
-                         autocomplete="off" spellcheck="false">
-                  <div class="io-row">
-                    <button class="btn small" id="recSaveBtn">✓ Save</button>
-                    <button class="btn small" id="recDropBtn">✕ Discard</button>
-                  </div>
-                </div>
-                <p class="hint" id="recNote">Recording snaps to whatever trail you are on.
-                  Off-trail stretches are skipped.</p>
-                <div class="ghost-pick">
-                  <span>👻 Ghost</span>
-                  <div id="ghostMode" class="seg">
-                    <button data-ghost="best" class="on">🏆 Record</button>
-                    <button data-ghost="mine">⭐ Yours</button>
-                    <button data-ghost="off">Off</button>
-                  </div>
-                </div>
-                <p class="hint">Tap a course to see it on the map, then race or forget it above.</p>
-              </div>
-              <div class="bm-card">
-                <h3>📍 Saved spots</h3>
-                <div id="spotList" class="spot-list"></div>
-                <button class="btn small wide" id="mapSaveSpotBtn">📍 Save where I am</button>
-                <p class="hint">Tap a pin on the map or a row here to go back to it.</p>
-              </div>
-            </div>
-            <p class="hint bigmap-hint">Drag to pan, scroll or ➕/➖ to zoom.</p>
-          </div>
-        </div>
-      </div>
-      <div id="playHud">
-        <div id="hudTally">
-          <span class="tally" id="hudSeen" title="Wildlife watched">✨ 0</span>
-          <span class="tally" id="hudSpooked" title="Wildlife you sent running">💨 0</span>
-          <span class="tally" id="hudCaught" title="Wildlife you caught and carried">🤗 0</span>
-        </div>
-        <div id="hudReadout">
-          <span class="tally" id="hudElev" title="Elevation above sea level">⛰ —</span>
-          <span class="tally" id="hudDist" title="Distance travelled">👣 —</span>
-        </div>
-        <!-- Who is riding along, and how to put them down. Only up while carrying. -->
-        <div id="hudCarry" class="tally">🤗 —</div>
-        <!-- Recording state, with its own stop. A walker who tapped Record on the map sheet
-             and walked off has no reason to reopen the sheet just to stop. -->
-        <div id="recHud">
-          <span class="rec-dot"></span><span id="recStat">0 m</span>
-          <button class="btn small" id="recStop" title="Stop recording">⏹</button>
-        </div>
-        <!-- The race readout: clock, how far round, the record to beat and your own best
-             with whoever you are playing as. Both times are shown because they are
-             different questions and a runner is usually chasing one of them specifically. -->
-        <div id="raceHud">
-          <div class="rc-top"><span id="raceName">—</span><span id="raceProg">0%</span></div>
-          <div class="rc-clock" id="raceClock">0:00.0</div>
-          <div class="rc-times"><span id="raceBest">—</span><span id="raceMine">⭐ —</span></div>
-          <div class="rc-gap" id="raceGap">👻 —</div>
-          <div class="rc-off" id="raceOff">↩ back to the course line</div>
-          <button class="btn small wide" id="raceQuit">✕ Give up (Esc)</button>
-        </div>
-        <div id="watchMeter">
-          <span id="watchName">Watching…</span>
-          <span class="wm-bar"><i id="watchFill"></i></span>
-        </div>
-
-      </div>
-      <div id="miniWrap">
-        <canvas id="minimap"></canvas>
-        <span class="tally" id="hudTrail" title="The trail you are on">—</span>
-      </div>
-
-      <!-- On-screen controls for phones and tablets. Hidden until <body> is marked
-           `touch` (see main.js): a finger has no WASD, no space bar and no B key, so
-           without these the whole movement, jump and bark vocabulary is unreachable. -->
-      <div id="touchCtl">
-        <div id="stickBase"><div id="stickKnob">🐾</div></div>
-        <div id="tbtns">
-          <button class="tbtn" id="tSneak" title="Sneak (C)"><span class="ic">🤫</span><span class="lb">SNEAK</span></button>
-          <button class="tbtn" id="touchBarkBtn" title="Bark (B)"><span class="ic">🐕</span><span class="lb">BARK</span></button>
-          <button class="tbtn" id="tJump" title="Jump (Space)"><span class="ic">🦘</span><span class="lb">JUMP</span></button>
-        </div>
-      </div>
-      <!-- The 3-2-1. Over the scene rather than in the HUD corner, because it is the one
-           thing on screen for those three seconds and it has to be readable at a glance
-           from wherever the eye happens to be. -->
-      <div id="raceCount">3</div>
-      <div id="raceWrap">
-        <div id="raceCard">
-          <h2 id="raceCardTitle">🏁 Finished!</h2>
-          <p class="arr-sub" id="raceCardSub"></p>
-          <div class="arr-score"><b id="raceCardTime">0:00.0</b><span id="raceCardWho">—</span></div>
-          <p class="rc-delta" id="raceCardDelta"></p>
-          <div class="arr-panel">
-            <h3>🏆 Best times</h3>
-            <div id="raceBoard"></div>
-          </div>
-          <div class="arr-actions">
-            <button class="btn" id="raceAgain">↻ Race again</button>
-            <button class="btn primary" id="raceDone">✓ Done</button>
-          </div>
-        </div>
-      </div>
-      <div id="arrivalWrap">
-        <div id="arrivalCard">
-          <h2 id="arrTitle">You reached the trailhead!</h2>
-          <p class="arr-sub" id="arrSub"></p>
-          <div class="arr-score"><b id="arrScore">0</b><span>trail score</span></div>
-          <div class="arr-grid">
-            <div class="arr-stat"><b id="arrDist">0 m</b><span>explored</span></div>
-            <div class="arr-stat"><b id="arrTime">0:00</b><span>on the trail</span></div>
-            <div class="arr-stat"><b id="arrSeen">0</b><span>animals watched</span></div>
-            <div class="arr-stat"><b id="arrSpooked">0</b><span>animals spooked</span></div>
-            <div class="arr-stat"><b id="arrCaught">0</b><span>animals carried</span></div>
-          </div>
-          <div class="arr-panel">
-            <h3>📍 Landmarks found</h3>
-            <div id="arrLandmarks"></div>
-          </div>
-          <div class="arr-panel">
-            <h3>👀 Sightings log</h3>
-            <div id="arrLog"></div>
-          </div>
-          <div class="arr-actions">
-            <button class="btn" id="arrStay">↩ Keep exploring</button>
-            <button class="btn primary" id="arrFinish">✓ Finish here</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  </main>
+  <div class="games">
+    <a class="game" href="./dist/pup-trails.html">
+      <div class="em">🥾</div>
+      <h2>Pup Trails</h2>
+      <p>Explore real trail networks as a dog or wildlife avatar — walk Garden of the Gods and other real-world trails in 3D.</p>
+      <div class="go">Hit the trail →</div>
+    </a>
+    <a class="game" href="./dist/neon-pups.html">
+      <div class="em">🛹</div>
+      <h2>Neon Pups</h2>
+      <p>Hoverboard racing on the same real trail maps, in neon. Auto-built circuits and sprints, bouncy bumpers, animal rivals, gravity on or off.</p>
+      <div class="go">Drop in →</div>
+    </a>
+    <a class="game" href="./dist/backyard-pups.html">
+      <div class="em">🐶</div>
+      <h2>Backyard Pups</h2>
+      <p>Design a pup from the paws up — size, ears, tail, spots, collar. Save your favorites and export them to take into the city.</p>
+      <div class="go">Open the creator →</div>
+    </a>
+    <a class="game" href="./dist/pup-city.html">
+      <div class="em">🌆</div>
+      <h2>Pup City</h2>
+      <p>Downtown dash. Sneak the block, scare the strays, dodge traffic, chomp the golden bone — and don't startle the neighbors.</p>
+      <div class="go">Run the block →</div>
+    </a>
 </div>
-<script src="../vendor/three.min.js"></script>
-<script type="module" src="../src/trails/main.js"></script>
+<footer>
+    Works on phones, tablets and desktops · Add to Home Screen for fullscreen play<br>
+    Built with three.js
+ </footer>
 </body>
 </html>
