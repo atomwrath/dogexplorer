@@ -43,6 +43,14 @@
              immediately; it stays reachable without scrolling past class, pace, gravity,
              direction, camera, ghosts, scale and the map picker to find it. -->
         <button class="btn go" id="startBtn" disabled>START</button>
+        <!-- FASTEST TIMES on the selected course as it is set up now: one line per
+             character, who set it, and the time. Repainted whenever the course or a
+             setting that changes the record (class, scale, direction, gravity) does. -->
+        <section id="leaderboard" aria-label="Fastest times">
+          <h3>Fastest times <span id="leaderMode"></span></h3>
+          <ol id="leaderList"></ol>
+          <p class="hint" id="leaderEmpty">No times yet on this course. Finish a race to set one.</p>
+        </section>
         <!-- Mode comes first of the rows because it is the only setting that changes the
              LIST on the left rather than the race on the right. -->
         <div class="row">Courses
@@ -269,6 +277,14 @@
     <h2 id="finTitle">FINISHED</h2>
     <div id="finTime">0:00.0</div>
     <p id="finNote"></p>
+    <!-- Only when this run is the character's record here: sign it. -->
+    <div id="signRow" hidden>
+      <label id="signLabel" for="playerName">Your name:</label>
+      <div class="signIn">
+        <input id="playerName" type="text" maxlength="16" autocomplete="off" placeholder="Your name" aria-label="Your name">
+        <button class="btn go" id="nameSave">Save</button>
+      </div>
+    </div>
     <ol id="finBoard"></ol>
     <div class="actions">
       <button class="btn" id="againBtn">↻ Again</button>

@@ -97,7 +97,22 @@ function makeBoard(len, wide, color){
   core.position.x = -len*0.45;
   const shock = new THREE.Mesh(new THREE.OctahedronGeometry(wide*0.11), addMat(0xbfe8ff, 0));
   shock.position.x = -len*0.62;
-  jet.add(flame, core, shock);
+  /* THE PILOT FLAME: a little blue-cored flicker at the nozzle whenever the GAS is down.
+     Much smaller than the burn and gone the moment the burn lights (the big flame takes
+     over), so it says "motor on" without ever being mistaken for nitro. Animated from
+     zero like the rest of the jet, which is what keeps a ghost's fade from touching it. */
+  /* Base at the nozzle, not the middle: the cones are shifted so they scale OUT from the
+     nozzle, and a flame that shrinks as the gas eases stays attached instead of floating
+     off behind the board. */
+  const pilotGeo = new THREE.ConeGeometry(wide*0.16, len*0.55, 10); pilotGeo.translate(0, len*0.275, 0);
+  const pilotCoreGeo = new THREE.ConeGeometry(wide*0.085, len*0.30, 8); pilotCoreGeo.translate(0, len*0.15, 0);
+  const pilot = new THREE.Mesh(pilotGeo, addMat(0xff7a2a, 0));
+  pilot.rotation.z = Math.PI/2;
+  pilot.position.x = -len*0.05;
+  const pilotCore = new THREE.Mesh(pilotCoreGeo, addMat(0x6fd4ff, 0));
+  pilotCore.rotation.z = Math.PI/2;
+  pilotCore.position.x = -len*0.05;
+  jet.add(flame, core, shock, pilot, pilotCore);
   jet.position.set(-len*0.62, -0.02, 0);
   /* ANGLED DOWN, and that is not decoration. The chase camera looks straight along the
      board's own axis, so a plume fired dead astern is pointed at the lens: it renders as a
@@ -107,7 +122,7 @@ function makeBoard(len, wide, color){
   jet.rotation.z = -0.35;
   nozzle.rotation.z = Math.PI/2 - 0.35;
   g.add(jet);
-  return {g, glowMat, jet, flame, core, shock, nozzle, scorch, scorchMat, pads};
+  return {g, glowMat, jet, flame, core, shock, pilot, pilotCore, nozzle, scorch, scorchMat, pads};
 }
 
 /* who: {kind:'dog', params} | {kind:'wild', key} */
@@ -209,6 +224,16 @@ function poseRider(R, racer, x, y, z, pitch, t, dt){
   R.board.core.scale.set(1, 0.5 + R.burnAmt*0.55, 1);
   R.board.shock.scale.setScalar(0.5 + 0.35*R.burnAmt);
   R.board.scorchMat.opacity = R.burnAmt*0.4*flick;
+  /* The pilot flame follows the GAS: quick to light, a touch slower to die so a feathered
+     throttle reads as a flicker rather than a strobe, and smothered by the burn. */
+  const gas = racer.done || racer.spinT > 0 ? 0 : Math.max(0, Math.min(1, racer.throttleIn || 0));
+  R.gasAmt = (R.gasAmt || 0) + (gas - (R.gasAmt || 0))*Math.min(1, dt*(gas > (R.gasAmt || 0) ? 18 : 8));
+  const pilotOn = R.gasAmt*(1 - R.burnAmt);
+  const pf = 0.8 + 0.2*Math.sin(t*53 + R.seed*5);
+  R.board.pilot.material.opacity = pilotOn*0.7*pf;
+  R.board.pilotCore.material.opacity = pilotOn*0.8;
+  R.board.pilot.scale.set(1, 0.4 + pilotOn*(0.6 + 0.2*Math.sin(t*41 + R.seed)), 1);
+  R.board.pilotCore.scale.set(1, 0.5 + pilotOn*0.5, 1);
   R.board.scorch.scale.set(0.6 + 0.6*R.burnAmt, 1, 0.7 + 0.5*R.burnAmt);
   if(racer.burnT > 0 && !R.isGhost){
     // two puffs a frame at 60 Hz is a continuous trail without emptying the pool in a second

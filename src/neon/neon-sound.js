@@ -160,15 +160,30 @@ function humLevel(v, burn, throttle){
   const drive = th*(0.012 + spool*0.030) + (v < 0.3 && th > 0 ? 0.006 : 0);
   return {jet: drive + b*0.055, sub: th*(0.008 + spool*0.012) + b*0.03, b, spool};
 }
-function setHum(v, burn, throttle){
+/* LETTING OFF FADES THE MOTOR, it does not switch it off. With `dt` (the race loop passes
+   its frame time) the gas the motor hears is an envelope: it spools up almost at once
+   when you press (GAS_ATTACK_S) and winds down over GAS_RELEASE_S when you let go, the
+   top end closing first so it sounds like a turbine running down rather than a volume
+   knob. Without dt it follows the pedal exactly, which is what the pure checks want. */
+const GAS_ATTACK_S = 0.08, GAS_RELEASE_S = 0.9;
+let gasEnv = 0;
+function gasEnvelope(prev, want, dt){
+  if(!(dt > 0)) return want;
+  return want > prev ? Math.min(want, prev + dt/GAS_ATTACK_S)
+                     : Math.max(want, prev - dt/GAS_RELEASE_S);
+}
+function setHum(v, burn, throttle, dt){
   if(!jet || !AC) return;
   const tN = AC.currentTime + 0.06;
-  const L = humLevel(v, burn, throttle);
+  gasEnv = gasEnvelope(gasEnv, throttle == null ? 1 : Math.max(0, Math.min(1, throttle)), dt);
+  // squared on the way down: the gain falls away smoothly instead of hanging and then dropping
+  const L = humLevel(v, burn, gasEnv*gasEnv*(3 - 2*gasEnv));
   const b = L.b, spool = L.spool;
   jet.band.frequency.linearRampToValueAtTime(380 + spool*760 + b*900, tN);
   jet.band.Q.linearRampToValueAtTime(0.75 + b*0.9, tN);
-  // the lowpass is what "opening the throttle" sounds like: the top end arrives with it
-  jet.low.frequency.linearRampToValueAtTime(700 + spool*1900 + b*5200, tN);
+  // the lowpass is what "opening the throttle" sounds like: the top end arrives with it,
+  // and closes down with the gas as the motor winds down
+  jet.low.frequency.linearRampToValueAtTime((700 + spool*1900)*(0.55 + 0.45*gasEnv) + b*5200, tN);
   jet.gain.gain.linearRampToValueAtTime(Math.max(0.0001, L.jet), tN);
   jet.sub.frequency.linearRampToValueAtTime(62 + spool*26 + b*22, tN);
   jet.subGain.gain.linearRampToValueAtTime(Math.max(0.0001, L.sub), tN);
@@ -218,6 +233,7 @@ function cellSound(){
   });
 }
 function stopHum(){
+  gasEnv = 0;
   if(!jet || !AC) return;
   jet.gain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.1);
   jet.subGain.gain.linearRampToValueAtTime(0.0001, AC.currentTime + 0.1);
@@ -228,5 +244,5 @@ function brakeState(){ return brakeN; }
 function humState(){ return jet; }
 function windState(){ return wind; }
 
-export { startHum, setHum, humLevel, stopHum, burnSound, cellSound, setWind, windLevel, windState,
+export { startHum, setHum, humLevel, gasEnvelope, GAS_RELEASE_S, stopHum, burnSound, cellSound, setWind, windLevel, windState,
          setBrakeSound, brakeLevel, brakeState, humState };

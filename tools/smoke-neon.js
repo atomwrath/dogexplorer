@@ -229,7 +229,7 @@ const probe = `
   makeRecorder, recordFrame, finishRecording, bestGhosts, keepGhost, ghostDt: GHOST_DT, poseRider,
   buildCellMeshes, clearSmoke, paintMap, pylonM: PYLON_M,
   pauseRace, resumeRace, togglePause, setCtlInset, setCtlBottom, resetControlLayout, loadMapList,
-  mapBox: () => mapBox };`;
+  mapBox: () => mapBox, bestKey, records: () => records };`;
 try { (0, eval)(app + probe); }
 catch (e) { origError('THREW during boot:', e.message, '\n', e.stack.split('\n').slice(0, 6).join('\n')); process.exit(1); }
 
@@ -930,7 +930,53 @@ const arraysClose = (a, b, eps = 1e-9) => {
         check('smoke comes out near the rocket, not from the deck under it',
           tot > 0 && nearNozzle / tot > 0.8, `${nearNozzle} of ${tot} puffs clear of the deck (board height ${boardY.toFixed(2)})`);
         me2.burnT = 0;
+
+        /* THE PILOT FLAME: lit by the gas, out without it, smothered by a burn. */
+        const pose = (n) => { for (let i = 0; i < n; i++) poseRider(R, me2, x0, y0, z0, 0, i / 30, 1 / 60); };
+        const was = { th: me2.throttleIn, done: me2.done, spin: me2.spinT };
+        me2.done = false; me2.spinT = 0;
+        me2.throttleIn = 0; pose(40);
+        const pOff = R.board.pilot.material.opacity;
+        me2.throttleIn = 1; pose(20);
+        const pOn = R.board.pilot.material.opacity, cOn = R.board.pilotCore.material.opacity;
+        check('the gas lights a little flame on the back of the board', !!R.board.pilot && pOn > 0.35 && cOn > 0.5 && pOff < 0.02,
+          `off ${pOff.toFixed(3)}, on ${pOn.toFixed(2)} / core ${cOn.toFixed(2)}`);
+        check('the gas flame is small next to the nitro flame',
+          R.board.pilot.geometry.args[1] < R.board.flame.geometry.args[1] * 0.5 && R.board.pilot.geometry.args[0] < R.board.flame.geometry.args[0]);
+        me2.throttleIn = 0; pose(40);
+        check('letting off puts the gas flame out', R.board.pilot.material.opacity < 0.02, R.board.pilot.material.opacity.toFixed(3));
+        me2.throttleIn = 1; me2.burnT = N.state().tuning.burnS; pose(30);
+        check('a nitro burn takes over from the gas flame', R.board.pilot.material.opacity < 0.08 && R.board.flame.material.opacity > 0.3,
+          `pilot ${R.board.pilot.material.opacity.toFixed(3)}, burn ${R.board.flame.material.opacity.toFixed(2)}`);
+        me2.burnT = 0; me2.throttleIn = was.th; me2.done = was.done; me2.spinT = was.spin;
+        N.clearSmoke();
       }
+    }
+    /* PADS IN THE RACE: laid, drawn, on the minimap's dots path, and a pad's burn is
+       shown as BOOST with no tank draining on the rack. */
+    {
+      S = N.state();
+      const Rc = S.race;
+      let padGrp = null; N.scene().traverse(o => { if (o.name === 'neonPads') padGrp = o; });
+      check('a race lays boost pads and draws them', !!Rc && Array.isArray(Rc.pads) && Rc.pads.length > 0
+        && !!padGrp && padGrp.children.length === Rc.pads.length, `${Rc && Rc.pads && Rc.pads.length} pads`);
+      const meP = Rc.racers[Rc.me];
+      const was = { fuel: meP.fuel, burnT: meP.burnT, pb: meP.padBurn };
+      meP.fuel = 2; meP.burnT = S.tuning.burnS; meP.padBurn = true;
+      d.getElementById('fuelRack').dataset.lit = '';     // force a repaint, not the cached one
+      await pump(2, 100);
+      const pip = d.getElementById('burnPip').textContent;
+      const firing = d.querySelectorAll('#fuelRack .tank.firing').length, on = d.querySelectorAll('#fuelRack .tank.on').length;
+      check('a pad burn reads BOOST, and no tank drains on the rack for it', pip === 'BOOST' && firing === 0 && on === 2,
+        `${pip}, ${on} on, ${firing} firing`);
+      meP.padBurn = false; meP.burnT = S.tuning.burnS;
+      await pump(2, 100);
+      check('a nitro burn still reads NITRO and drains a tank', d.getElementById('burnPip').textContent === 'NITRO'
+        && d.querySelectorAll('#fuelRack .tank.firing').length === 1);
+      meP.fuel = was.fuel; meP.burnT = 0; meP.padBurn = was.pb;
+      const mainSrc = fs.readFileSync(path.join(ROOT, 'src/neon/main.js'), 'utf8');
+      check('the race steps the pads and shows them on the minimap', /stepPads\(R\.pads, R\.racers, T, dt\)/.test(mainSrc)
+        && /for\(const p of R\.pads\)/.test(mainSrc) && /clearPads\(\)/.test(mainSrc));
     }
     check('the camera chases the player', Number.isFinite(cam.position.x) && Math.hypot(cam.position.x - cam.lookedAt.x, cam.position.z - cam.lookedAt.z) < 80);
 
@@ -1320,6 +1366,41 @@ const arraysClose = (a, b, eps = 1e-9) => {
     const T = trackFor(N.state().courses.find(c => c.kind === 'sprint') || N.state().courses[0]);
     const tune = N.state().tuning;
     const cells = N.placeCells(T);
+    /* SETS. Tanks come two or three abreast at one spot, and a rider gets one per set. */
+    const sets = new Map();
+    for (const c of cells) { if (!sets.has(c.g)) sets.set(c.g, []); sets.get(c.g).push(c); }
+    const setList = [...sets.values()];
+    check('nitro tanks come in sets of two or three, side by side',
+      setList.length >= Math.floor(T.L / tune.cellEveryM) - 1
+      && setList.every(g => g.length >= 2 && g.length <= 3 && g.every(c => c.s === g[0].s)
+        && new Set(g.map(c => c.d.toFixed(2))).size === g.length)
+      && setList.some(g => g.length === 3) && setList.some(g => g.length === 2),
+      setList.map(g => g.length).join(''));
+    check('every tank has its own id', new Set(cells.map(c => c.i)).size === cells.length);
+    {
+      // one rider straight down the middle of a three-set, slowly, with room on the rack
+      const g3 = setList.find(g => g.length === 3);
+      const fresh = N.placeCells(T);
+      const set = fresh.filter(c => c.g === g3[0].g);
+      const one = makeRacer({ s: set[0].s - 3, d: set[1].d, v: 1, fuel: 0 });
+      let got = 0;
+      // sweep across the whole set, so every tank's window is visited
+      for (let k = 0; k <= 40; k++) {
+        one.s = set[0].s; one.d = set[0].d + (set[2].d - set[0].d) * k / 40; one.time = k * 0.01;
+        got += N.stepCells(fresh, [one], T, 1 / 60).length;
+      }
+      check('one rider takes ONE tank from a set, however it weaves across it', got === 1 && one.fuel === 1,
+        `${got} taken sweeping ${(set[2].d - set[0].d).toFixed(1)} m across`);
+      const two = makeRacer({ s: set[0].s, d: set[2].d, v: 1, fuel: 0 });
+      const three = makeRacer({ s: set[0].s, d: set[0].d, v: 1, fuel: 0 });
+      got = N.stepCells(fresh, [two], T, 1 / 60).length + N.stepCells(fresh, [three], T, 1 / 60).length;
+      check('the riders behind still find tanks left in the set', got >= 1 && set.filter(c => c.live).length <= 1,
+        `${got} more taken, ${set.filter(c => c.live).length} left`);
+      one.time = tune.cellBackS + 1;
+      N.stepCells(fresh, [], T, tune.cellBackS + 0.1);
+      one.s = set[1].s; one.d = set[1].d;
+      check('a set is yours again once its tanks have come back (next lap)', N.stepCells(fresh, [one], T, 1 / 60).length === 1);
+    }
     check('cells are laid along the whole course', cells.length >= Math.floor(T.L / tune.cellEveryM) - 1
       && cells.every(c => c.s >= 0 && c.s <= T.L), `${cells.length} cells over ${(T.L / 1000).toFixed(2)} km`);
     check('cells sit on the track, not in the bumpers',
@@ -1342,7 +1423,7 @@ const arraysClose = (a, b, eps = 1e-9) => {
     N.stepCells(cells, [], T, tune.cellBackS + 0.1);
     check('it is back after its timer', c0.live);
     // missing it by a wide margin takes nothing
-    const c1 = cells[2];
+    const c1 = cells.find(c => c.g !== c0.g && c.live);
     const wide = trackFrame(T, c1.s, {}).halfW;
     const miss = makeRacer({ s: c1.s - 20, d: c1.d + (c1.d > 0 ? -1 : 1) * Math.min(wide * 1.5, 4.5), yaw: trackFrame(T, c1.s - 20, {}).yaw, v: 18 });
     let missTook = 0;
@@ -1354,7 +1435,134 @@ const arraysClose = (a, b, eps = 1e-9) => {
       miss.d = keep;
       missTook += N.stepCells(cells, [miss], T, 1 / 120).length;
     }
-    check('passing wide of a cell leaves it there', missTook === 0 && cells[2].live);
+    // (its set-mates may be in the way now tanks come abreast -- at most one of those)
+    check('passing wide of a cell leaves it there', missTook <= 1 && c1.live);
+  }
+
+  // ---- boost pads ----
+  {
+    const tune = N.state().tuning;
+    const all = N.state().courses.map(c => trackFor(c)).filter(T => T && T.ok !== false && T.L > 600);
+    let placed = 0, bad = [], nearSet = 0, onCourse = 0, withPads = 0, crowded = 0;
+    for (const T of all) {
+      const cells = N.placeCells(T), pads = placePads(T, cells);
+      if (pads.length) withPads++;
+      for (const p of pads) {
+        placed++;
+        /* measured from the track itself, not through padSiteScore -- a qualifier that
+           let everything through would otherwise pass its own test */
+        {
+          let kMax = 0, sl = 0, m = 0;
+          for (let q = 0; q <= Math.ceil(tune.padRunM / T.ds); q++) {
+            let i = Math.floor(p.s / T.ds) + q; if (T.closed) i = ((i % T.n) + T.n) % T.n; else if (i >= T.n) break;
+            kMax = Math.max(kMax, Math.abs(T.k[i])); sl += T.slope[i]; m++;
+          }
+          sl /= m;
+          if (!(kMax <= tune.padStraightK || (sl >= tune.padClimbMin && kMax <= tune.padClimbK))) bad.push(p.s.toFixed(0) + ' k' + kMax.toFixed(3));
+        }
+        if (cells.some(c => { let g = Math.abs(c.s - p.s); if (T.closed) g = Math.min(g, T.L - g); return g < tune.padClearM; })) nearSet++;
+        if (Math.abs(p.d) < trackFrame(T, p.s, {}).halfW - T.bodyWide * 0.5) onCourse++;
+        for (const q of pads) if (q !== p) { let g = Math.abs(q.s - p.s); if (T.closed) g = Math.min(g, T.L - g); if (g < tune.padEveryM * 0.5) crowded++; }
+      }
+    }
+    check('boost pads are laid on the courses', all.length > 0 && placed > 0 && withPads > 0, `${placed} pads on ${withPads}/${all.length} courses`);
+    check('pads sit only on straights and climbs', bad.length === 0, bad.slice(0, 6).join(', '));
+    check('pads keep clear of the nitro sets, and on the deck', nearSet === 0 && onCourse === placed, `${nearSet} crowding a set`);
+    check('pads are spread out, across a circuit\'s start line too', crowded === 0, `${crowded} too close`);
+
+    /* The qualifier itself: a hairpin run never qualifies, a climb that bends a little does,
+       a descent that bends the same does not. Built on a copy of a real track. */
+    {
+      const T0 = all[0];
+      const mk = (k, slope) => Object.assign({}, T0, { k: T0.k.map(() => k), slope: T0.slope.map(() => slope) });
+      const mid = T0.L / 2;
+      check('a straight qualifies for a pad, a bend does not',
+        padSiteScore(mk(0, 0), mid) != null && padSiteScore(mk(tune.padClimbK * 2, 0), mid) == null);
+      check('a gentle climb qualifies where the same bend downhill does not',
+        padSiteScore(mk(tune.padStraightK * 1.5, 0.06), mid) != null && padSiteScore(mk(tune.padStraightK * 1.5, -0.06), mid) == null);
+      check('a climb beats a flat straight for the spot', padSiteScore(mk(0, 0.06), mid) > padSiteScore(mk(0, 0), mid));
+    }
+
+    // riding over one: a burn exactly like nitro, no tank spent, same trigger area as a tank
+    const T = all.find(T => placePads(T, N.placeCells(T)).length) || all[0];
+    const pads = placePads(T, N.placeCells(T));
+    if (pads.length) {
+      const p = pads[0];
+      const r = makeRacer({ s: p.s - 20, d: p.d, yaw: trackFrame(T, p.s - 20, {}).yaw, v: 18, fuel: 1 });
+      let fired = 0, burnAt = 0;
+      for (let i = 0; i < 120 * 3; i++) {
+        r.yaw = trackFrame(T, r.s, {}).yaw; r.d = p.d;
+        stepRacer(r, T, { steer: 0, throttle: 1, brake: 0, boost: false }, { gravity: false }, 1 / 120);
+        const n = stepPads(pads, [r], T, 1 / 120).length;
+        if (n) { fired += n; burnAt = r.burnT; }
+      }
+      check('riding over a boost pad lights a full nitro burn', fired === 1 && Math.abs(burnAt - tune.burnS) < 1e-9 && r.pads === 1,
+        `${fired} fired, burn ${burnAt.toFixed(2)} s`);
+      check('a pad costs no nitro, and marks the burn as the pad\'s', r.fuel === 1 && r.padBurn === true);
+      // the burn it lights is the burn: same extra thrust
+      const a = makeRacer({ s: p.s + 5, d: p.d, yaw: trackFrame(T, p.s + 5, {}).yaw, v: 15 });
+      const b = makeRacer({ s: p.s + 5, d: p.d, yaw: trackFrame(T, p.s + 5, {}).yaw, v: 15 });
+      b.burnT = tune.burnS;
+      stepRacer(a, T, { steer: 0, throttle: 1, brake: 0, boost: false }, { gravity: false }, 0.1);
+      stepRacer(b, T, { steer: 0, throttle: 1, brake: 0, boost: false }, { gravity: false }, 0.1);
+      check('the pad\'s burn pushes exactly like nitro', Math.abs((b.v - a.v) - tune.boostThrust * 0.1) < 1e-6);
+      // same trigger area as a tank: inside at the tank's reach, outside just past it
+      const reach = tune.cellGrab + T.bodyWide * 0.5;
+      const at = dd => { const q = makeRacer({ s: p.s, d: p.d + dd, v: 10, time: 100 }); return stepPads([p], [q], T, 1 / 60).length; };
+      const cellAt = dd => { const q = makeRacer({ s: p.s, d: p.d + dd, v: 10, fuel: 0 }); return N.stepCells([{ s: p.s, d: p.d, live: true, backT: 0, i: 0 }], [q], T, 1 / 60).length; };
+      check('a pad triggers over exactly the area a nitro tank does',
+        at(reach - 0.05) === 1 && at(reach + 0.05) === 0 && cellAt(reach - 0.05) === 1 && cellAt(reach + 0.05) === 0
+        && at(-(reach - 0.05)) === 1 && at(-(reach + 0.05)) === 0);
+      // crawling over one is one burn, not one per frame
+      const slow = makeRacer({ s: p.s - 2, d: p.d, v: 0.5 });
+      let n = 0;
+      for (let i = 0; i < 60; i++) { slow.time = i / 60; slow.s += 0.5 / 60; n += stepPads([p], [slow], T, 1 / 60).length; }
+      check('crawling across a pad is one burn, not one a frame', n === 1, `${n}`);
+      const spun = makeRacer({ s: p.s, d: p.d, v: 10, spinT: 0.5 });
+      const ghost = makeRacer({ s: p.s, d: p.d, v: 10, isGhost: true });
+      check('a spinning board or a ghost gets nothing from a pad', stepPads([p], [spun, ghost], T, 1 / 60).length === 0);
+      // a nitro fired afterwards is a nitro again, for the HUD
+      const nr = makeRacer({ s: p.s + 30, d: 0, v: 15, fuel: 2, padBurn: true, yaw: trackFrame(T, p.s + 30, {}).yaw });
+      stepRacer(nr, T, { steer: 0, throttle: 1, brake: 0, boost: true }, { gravity: false }, 1 / 60);
+      check('firing a tank clears the pad mark', nr.burnT > 0 && nr.padBurn === false && nr.fuel === 1);
+
+      // a rival lines up for a pad on its way down a straight
+      /* Starts well OUTSIDE the trigger area and in its own lane away from the pad, so it
+         only gets the burn by steering for it -- the same run with the pads hidden from
+         its eyes (but still on the track) must miss. */
+      /* the widest spot any course offers between a pad and the far side of the deck, so
+         the test is not decided by a ribbon too narrow to miss a pad on */
+      let TR = T, pR = p, room = -1;
+      for (const T2 of all) for (const p2 of placePads(T2, N.placeCells(T2))) {
+        const f2 = trackFrame(T2, p2.s - 35, {});
+        if (Math.abs(bendAhead(T2, p2.s - 35, 45).k) > 0.004) continue;
+        const r2 = Math.abs(p2.d) + (f2.halfW - T2.bodyWide);
+        if (r2 > room) { room = r2; TR = T2; pR = p2; }
+      }
+      {
+      const T = TR, p = pR, pads = [pR];
+      const f = trackFrame(T, p.s - 35, {});
+      const limR = f.halfW - T.bodyWide;
+      const reachR = tune.cellGrab + T.bodyWide * 0.5;
+      const side = p.d > 0 ? -1 : 1;
+      const startD = side * limR * 0.9;
+      const ride = (see) => {
+        const rv = makeRacer({ s: p.s - 35, d: startD, v: 15, yaw: f.yaw, skill: N.skills.fair, paceMul: 1,
+          lane: side, seed: 3, fuel: 0 });          // no tanks: it would burn one and stop looking
+        let n = 0;
+        for (let i = 0; i < 60 * 4 && rv.s < p.s + 10; i++) {
+          stepRacer(rv, T, rivalInput(rv, T, [rv], { gravity: false, pads: see ? pads : undefined }, i / 60), { gravity: false }, 1 / 60);
+          n += stepPads(pads, [rv], T, 1 / 60).length;
+        }
+        return n;
+      };
+      const seen = ride(true), blind = ride(false);
+      check('a rival steers over a boost pad in its reach', Math.abs(startD - p.d) > reachR && seen === 1 && blind === 0,
+        `start ${Math.abs(startD - p.d).toFixed(1)} m off it: ${seen} seeing it, ${blind} not`);
+      }
+    }
+    const src = fs.readFileSync(path.join(ROOT, 'src/neon/pads.js'), 'utf8');
+    check('pads use the pickup\'s own trigger test, not a copy of it', /inGrab\(T, r, p\.s, p\.d, dt\)/.test(src));
   }
 
   // ---- ghosts ----
@@ -1833,6 +2041,27 @@ const arraysClose = (a, b, eps = 1e-9) => {
         setHum(20, 0, 0); const gOff = h.gain.gain.value;
         setHum(20, 0, 1); const gOn = h.gain.gain.value;
         check('the engine gain follows the gas', gOff < 0.001 && gOn > 0.03, `${gOff} / ${gOn.toFixed(3)}`);
+        /* LETTING OFF FADES IT. With the race loop's dt, one frame after releasing the
+           gas the motor is still most of the way up; it has gone quiet within a second or
+           so, and it has come down steadily rather than in one step at the end. */
+        for (let i = 0; i < 30; i++) setHum(20, 0, 1, 1 / 60);
+        const held = h.gain.gain.value;
+        setHum(20, 0, 0, 1 / 60); const oneFrame = h.gain.gain.value;
+        const trail = [];
+        for (let i = 0; i < 90; i++) { setHum(20, 0, 0, 1 / 60); trail.push(h.gain.gain.value); }
+        const mid = trail[20], end = trail[trail.length - 1];
+        check('letting off the gas fades the motor out instead of cutting it',
+          oneFrame > held * 0.9 && mid < held * 0.8 && mid > held * 0.1 && end < 0.001
+          && trail.every((g, i) => i === 0 || g <= trail[i - 1] + 1e-12),
+          `held ${held.toFixed(3)}, +1 frame ${oneFrame.toFixed(3)}, +1/3 s ${mid.toFixed(3)}, +1.5 s ${end.toFixed(4)}`);
+        setHum(20, 0, 1, 1 / 60); const back = h.gain.gain.value;
+        for (let i = 0; i < 6; i++) setHum(20, 0, 1, 1 / 60);
+        check('pressing the gas again spools it straight back up', h.gain.gain.value > held * 0.95 && back > 0.0005,
+          `${back.toFixed(4)} -> ${h.gain.gain.value.toFixed(3)} in 0.1 s`);
+        stopHum();
+        setHum(20, 0, 0, 1 / 60);
+        check('stopping the hum (pause, quit) leaves nothing to fade back in', h.gain.gain.value < 0.001);
+        startHum();
       }
       check('braking scrubs, harder and faster is louder, stopped or released is silent',
         brakeLevel(1, 20) > brakeLevel(0.4, 20) && brakeLevel(1, 20) > brakeLevel(1, 5) && brakeLevel(0, 20) === 0 && brakeLevel(1, 0) === 0);
@@ -1845,6 +2074,7 @@ const arraysClose = (a, b, eps = 1e-9) => {
       }
       check('the race loop drives the motor from the gas and the brake sound from the brake',
         /setHum\([^;]*me\.throttleIn/.test(main) && /setBrakeSound\([^;]*me\.brakeIn[^;]*me\.v\)/.test(main));
+      check('the race loop hands the motor its frame time, so letting off can fade', /setHum\([^;]*me\.throttleIn[^;]*, dt\)/.test(main));
       const rac = fs.readFileSync(path.join(ROOT, 'src/neon/racer.js'), 'utf8');
       check('the board remembers its pedals for the sound', /r\.throttleIn = input\.throttle/.test(rac) && /r\.brakeIn = input\.brake/.test(rac));
     }
@@ -1953,6 +2183,33 @@ const arraysClose = (a, b, eps = 1e-9) => {
     press('tAccel', true);
     check('the controls still work swapped', readNeonInput(1 / 60).throttle === 1);
     press('tAccel', false);
+
+    /* PRESSED YOU CAN SEE UNDER A THUMB: a class from the pointer handler (iOS barely
+       does :active), and a pressed style that fills the button and rings it, not a tint. */
+    {
+      const lit = {};
+      for (const id of ['tAccel', 'tBrake', 'tBoost']) {
+        press(id, true); lit[id] = d.getElementById(id).classList.contains('pressed');
+        press(id, false); lit[id] = lit[id] && !d.getElementById(id).classList.contains('pressed');
+      }
+      check('gas, brake and nitro light up while held and go out when released', Object.values(lit).every(Boolean), JSON.stringify(lit));
+      press('tBoost', true);
+      window.dispatchEvent(new window.Event('blur'));
+      check('losing focus clears a held button\'s pressed look', !d.getElementById('tBoost').classList.contains('pressed'));
+      const pr = (css.match(/\.tbtn:active, \.tbtn\.pressed\{([^}]*)\}/) || [])[1] || '';
+      check('a pressed button fills solid with dark text, a thick ring and a glow',
+        /background:var\(--glow\)/.test(pr) && /color:#04050d/.test(pr) && /box-shadow:0 0 0 [4-9]px var\(--glow\)/.test(pr)
+        && /#tAccel\{[^}]*--glow:var\(--lime\)/.test(css) && /#tBrake\{[^}]*--glow:var\(--red\)/.test(css)
+        && /\.tbtn\.hot\{[^}]*--glow:var\(--mag\)/.test(css), pr);
+      check('the ring is drawn outside the button, so pressing does not shift the layout',
+        !/border(-width)?:\s*[3-9]px/.test(pr) && !/(width|height|margin|padding):/.test(pr));
+      const pad = d.getElementById('tSteer');
+      const pe = (type) => { const e = new window.Event(type, { bubbles: true, cancelable: true }); e.clientX = 150; e.clientY = 640; e.pointerId = 9; pad.dispatchEvent(e); };
+      pe('pointerdown'); const padOn = pad.classList.contains('pressed');
+      pe('pointerup'); const padOff = !pad.classList.contains('pressed');
+      check('the steering pad lights up while a thumb is on it', padOn && padOff
+        && /#tSteer:active, #tSteer\.pressed\{[^}]*box-shadow:0 0 0 [4-9]px/.test(css));
+    }
     d.querySelector('.sideSeg [data-side="left"]').click();
     check('and back to the left', !d.body.classList.contains('ctl-swap'));
 
@@ -2271,6 +2528,112 @@ const arraysClose = (a, b, eps = 1e-9) => {
       optsAfterFail.length >= 3, `${optsAfterFail.length} options left`);
     global.fetch = window.fetch = realFetch;
     await N.loadMapList();
+  }
+
+  // ---- the fastest-times board, and signing your record ----
+  /* The board IS the stored ghost recordings: one per character per course setting, the
+     name kept inside the recording. No recording, no high score. */
+  {
+    const d = window.document;
+    let T0 = 900000;
+    const tick = async n => { await pump(n, T0); T0 += n * 16.667 + 1000; };
+    const G = () => N.state().ghostStore;
+    const fakeGhost = (rider, label, time, player) => ({ dt: 0.25, time, rider, label, player, s: [0, 1, 2], d: [0, 0, 0] });
+    // pure parts
+    {
+      const key = 'test|k';
+      G()[key] = { 'w:fox': fakeGhost('w:fox', 'Fox', 55, 'Bob'), 'p:0': fakeGhost('p:0', 'Corgi', 58, '') };
+      const rows = leaderRows(key);
+      check('the board is the stored recordings, one line per character, fastest first',
+        rows.length === 2 && rows[0].rider === 'w:fox' && rows[0].player === 'Bob' && rows[1].rider === 'p:0',
+        rows.map(r => r.label + ' ' + r.time).join(', '));
+      check('names are tidied and capped', cleanName('  Ada   Love lace  ') === 'Ada Love lace' && cleanName('x'.repeat(40)).length === 16);
+      delete G()[key];
+      check('no recordings, no board', leaderRows(key).length === 0);
+      const stored = JSON.parse(localStorage.getItem('dogexplorer.neon') || '{}');
+      check('there is no separate record store to drift from the ghosts', !('records' in stored) && !('records' in N.state()));
+    }
+
+    // the menu shows the selected course's board
+    if (N.state().screen !== 'menu') { click('menuBtn'); await tick(3); }
+    let S = N.state();
+    const ci = S.courses.findIndex(c => trackFor(c).ok);
+    selectCourse(ci);
+    const key = N.bestKey(S.courses[ci], S.settings);
+    delete G()[key];
+    selectCourse(ci);
+    check('an empty course says so', d.getElementById('leaderList').children.length === 0 && !d.getElementById('leaderEmpty').hidden);
+    G()[key] = { 'w:fox': fakeGhost('w:fox', 'Fox', 75.5, 'Ann') };
+    G()[key][S.settings.rider] = fakeGhost(S.settings.rider, 'Mine', 70.25, '');
+    selectCourse(ci);
+    const li = [...d.querySelectorAll('#leaderList li')];
+    check('selecting a course shows its fastest times: character, player, time',
+      li.length === 2 && /Mine/.test(li[0].textContent) && /1:10\.3|1:10\.2/.test(li[0].querySelector('.tm').textContent)
+      && /🦊/.test(li[1].textContent) && li[1].querySelector('.pl').textContent === 'Ann' && d.getElementById('leaderEmpty').hidden,
+      li.map(x => x.textContent).join(' | '));
+    check('your chosen character\'s line is highlighted, an unsigned one says so',
+      li[0].classList.contains('me') && !li[1].classList.contains('me') && li[0].querySelector('.pl').classList.contains('anon'));
+    const cls0 = S.settings.cls;
+    setClass(cls0 === 'turbo' ? 'cruiser' : 'turbo');
+    check('the board follows the settings: another class is another board', d.getElementById('leaderList').children.length === 0
+      && /cruiser|turbo/.test(d.getElementById('leaderMode').textContent));
+    setClass(cls0);
+    check('and back', d.getElementById('leaderList').children.length === 2);
+    delete G()[key];
+    selectCourse(ci);
+
+    // a race: a new record for your character asks for your name
+    const finishNow = async () => {
+      const R = N.state().race, me = R.racers[R.me];
+      me.s = R.T.L - 3; if (R.T.closed) me.lap = R.T.laps - 1;
+      me.yaw = trackFrame(R.T, me.s, {}).yaw; me.d = 0; me.v = 20;
+      for (let k = 0; k < 20 && N.state().screen !== 'finish'; k++) await tick(10);
+    };
+    S.settings.ghosts = true;
+    const row = d.getElementById('signRow'), box = d.getElementById('playerName');
+    const mine = () => (G()[key] || {})[S.settings.rider];
+    const run = async () => { click(N.state().screen === 'finish' ? 'againBtn' : 'startBtn'); await tick(260); await finishNow(); S = N.state(); };
+    box.value = 'left over';
+    await run();
+    check('a record run shows the name box on the finish card', S.screen === 'finish' && !row.hidden
+      && /Fastest/.test(d.getElementById('signLabel').textContent));
+    check('the name box starts empty and the browser is told not to fill it', box.value === '' && box.getAttribute('autocomplete') === 'off');
+    check('the record is on the board, unsigned, as its recording', !!mine() && mine().player === '' && mine().s.length >= 3);
+    check('there is no "signed as" line any more', !d.getElementById('signNote'));
+    box.value = '  Adam  ';
+    click('nameSave');
+    let stored = JSON.parse(localStorage.getItem('dogexplorer.neon'));
+    check('Save stores the name in the ghost recording', mine().player === 'Adam' && stored.ghosts[key][S.settings.rider].player === 'Adam');
+    const meRow = d.querySelector('#finBoard li.me');
+    check('Save closes the name box and shows the results with the name in them', row.hidden && S.screen === 'finish'
+      && !!meRow && meRow.querySelector('.pl') && meRow.querySelector('.pl').textContent === 'Adam', meRow && meRow.textContent);
+    check('nothing remembers the name for next time', !('player' in N.state().settings) && !('player' in stored.settings));
+
+    // again: the ghost races and the results say whose it is; a slower run asks nothing
+    mine().time = 999;                        // so this next run is certainly a new record
+    await run();
+    const ghostLi = [...d.querySelectorAll('#finBoard li')].find(x => /👻/.test(x.textContent));
+    check('race results name the player behind each ghost', !!ghostLi && /Adam/.test(ghostLi.textContent)
+      && !!ghostLi.querySelector('.pl'), ghostLi && ghostLi.textContent);
+    const shownAgain = !row.hidden && box.value === '';
+    box.value = 'Adam'; box.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    check('the next record asks again, empty; Enter saves and closes it', shownAgain && row.hidden && mine().player === 'Adam');
+    mine().time = 1;                          // an unbeatable record
+    const before = JSON.stringify(mine());
+    await run();
+    check('a run that is not a record asks for no name and leaves the record alone',
+      row.hidden && JSON.stringify(mine()) === before);
+    // no recording, no high score
+    delete G()[key];
+    click('againBtn'); await tick(3);
+    N.state().race.rec.s.length = 0;         // as if nothing had been recorded
+    await finishNow();
+    S = N.state();
+    check('a run with no recording sets no high score and asks for no name', row.hidden && !mine()
+      && leaderRows(key).length === 0);
+    click('menuBtn'); await tick(3);
+    delete G()[key];
+    selectCourse(ci);
   }
 
   // ---- bundle hygiene ----

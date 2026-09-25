@@ -80,6 +80,7 @@ function stepRacer(r, T, input, env, dt){
     r.lockT = NEON.burnS + NEON.burnLock;
     r.fuel--;
     r.burns = (r.burns || 0) + 1;
+    r.padBurn = false;                      // this one came off the rack (pads.js sets it true)
     r.burnFired = true;                     // one frame's flag, for the sound and the flame
   }else r.burnFired = false;
   r.boostWasDown = wants;
@@ -220,20 +221,40 @@ function rivalInput(r, T, others, env, t){
   if(env.cells && st.hunt > 0 && wantsTank){
     const reach = 45*st.hunt;
     let best = null, bestGap = Infinity;
+    let bestCost = Infinity;
     for(const c of env.cells){
       if(!c.live) continue;
+      // tanks come in sets, one per rider per pass: a set it has had its tank from is spent
+      if(c.g != null && r.setT && r.setT[c.g] != null && (r.time || 0) - r.setT[c.g] < NEON.cellBackS) continue;
       let gap = c.s - r.s;
       if(T.closed){ gap = ((gap % T.L) + T.L) % T.L; if(gap > T.L/2) gap -= T.L; }
-      if(gap <= 2 || gap >= reach || gap >= bestGap) continue;
+      if(gap <= 2 || gap >= reach) continue;
       // the lane change has to be makeable in the distance there is
       const shift = Math.abs(c.d - r.d);
       if(shift > Math.max(1.2, gap*0.28*st.hunt)) continue;
+      // nearest first; across a set side by side, the one that needs the least steering
+      const cost = gap + shift*0.5;
+      if(cost >= bestCost) continue;
       // and it is never worth a corner, except to the reckless
       if(st.burn !== 'any' && bendAhead(T, r.s, gap).k >= 0.02) continue;
-      best = c; bestGap = gap;
+      best = c; bestGap = gap; bestCost = cost;
     }
     if(best){ dWant = best.d; r.hunting = best; aim = Math.max(6, Math.min(look, bestGap*0.5)); }
     else r.hunting = null;
+  }
+  /* BOOST PADS are free, so anyone who is not already burning lines up for one it can
+     reach without a lurch -- the same reach test as a tank, but a pad never tempts a
+     rider into a corner (they are only laid on straights and climbs anyway). */
+  if(env.pads && !r.hunting && r.burnT <= 0 && st.hunt > 0){
+    const reach = 40*Math.min(1.2, st.hunt);
+    for(const p of env.pads){
+      let gap = p.s - r.s;
+      if(T.closed){ gap = ((gap % T.L) + T.L) % T.L; if(gap > T.L/2) gap -= T.L; }
+      if(gap <= 2 || gap >= reach) continue;
+      if(Math.abs(p.d - r.d) > Math.max(1.2, gap*0.25*st.hunt)) continue;
+      dWant = p.d; aim = Math.max(6, Math.min(look, gap*0.5));
+      break;
+    }
   }
 
   /* TRAFFIC. Everyone solid in front of or beside us, by style: the timid see people

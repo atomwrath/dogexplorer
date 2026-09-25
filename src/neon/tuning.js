@@ -4,7 +4,7 @@
 const NEON = {
   // --- the ribbon ---
   sampleM:    4,        // centreline sample spacing
-  halfWidth:  {trail: 4.2, track: 5.0, road: 6.2},
+  halfWidth:  {trail: 5.2, track: 6.0, road: 6.5},
   minRadiusPad: 3.5,    // centreline radius is never tighter than halfWidth + this
   vertScale:  1.5,      // how much taller the hills LOOK. Physics uses true slope.
   lift:       2.2,      // deck height above the wireframe ground
@@ -23,7 +23,7 @@ const NEON = {
      the next thing to retune if you do. */
   thrust:     9.0,      // m/s^2 at full throttle -- RAISE THIS to make the game faster
   boostThrust:8.2,      // extra, while a burn is running
-  dragK:      0.0125,   // v^2 drag -- LOWER THIS to make the game faster (same effect, opposite knob)
+  dragK:      0.008125,   // v^2 drag -- LOWER THIS to make the game faster (same effect, opposite knob)
   rollK:      0.05,     // linear rolling loss
   brake:      15,
   steerRate:  2.1,      // rad/s at full lock, low speed
@@ -70,9 +70,26 @@ const NEON = {
   fuelStart:  2,        // nitro tanks on the rack at the lights
   fuelMax:    5,
   // --- nitro pickups sitting on the course ---
-  cellEveryM: 240,      // one every so many metres of track
+  /* IN SETS, side by side across the track: two on a narrow ribbon or every third set,
+     otherwise three. A rider can take ONE tank from a set per pass (see stepCells), so the
+     leader grabbing the first one leaves the rest for whoever is behind -- a single tank
+     used to go to whoever arrived first and nobody else. */
+  cellEveryM: 240,      // one SET every so many metres of track
+  cellSetMin: 2,        // tanks in the smallest set
+  cellSetMax: 3,        // tanks in the largest set
   cellGrab:   1.5,      // how close across the track you have to pass
   cellBackS:  9,        // seconds before a taken tank comes back
+  /* --- boost pads painted on the deck ---
+     Drive over one and it lights a burn exactly like a nitro tank does, without spending
+     a tank. Same trigger area as a pickup (cells.js inGrab). Only laid where a burn is
+     worth having and safe to take: a straight, or a climb that is not also a hard bend. */
+  padEveryM:  420,      // at most one pad per this much track
+  padRunM:    55,       // the track ahead of a pad has to qualify for this far (about one burn)
+  padStraightK: 0.006,  // 1/m: bendier than this over the run is not a straight
+  padClimbK:  0.016,    // 1/m: a climb may bend a little more than a straight may
+  padClimbMin:0.03,     // average grade over the run that counts as uphill
+  padClearM:  40,       // keep this far from any nitro set
+  padAgainS:  2.5,      // s before the same pad can fire for the same rider again
   // --- racers bumping each other ---
   bodyLen:    2.6,
   bodyWide:   1.5,
@@ -90,7 +107,7 @@ const NEON = {
 const NEON_SKILL = {
   chill:  {pace: 0.90, grip: 0.86, wobble: 0.14, label: 'Chill'},
   fair:   {pace: 1.0, grip: 0.93, wobble: 0.08, label: 'Fair'},
-  fierce: {pace: 1.05, grip: 0.98, wobble: 0.04, label: 'Fierce'},
+  fierce: {pace: 1.07, grip: .99, wobble: 0.04, label: 'Fierce'},
 };
 
 /* DRIVING STYLES. The field is animals, and they should not all drive one algorithm
@@ -115,10 +132,10 @@ const NEON_SKILL = {
    prey animals; the reckless are the ones that climb cliffs and raid bins. */
 const NEON_STYLE = {
   bruiser:  {pace: 0.99, corner: 1.00, wobble: 0.8, avoid: 0.45, aggro: 0.75, mass: 1.7, hunt: 0.6, burn: 'straight', sight: 1.0, edge: 1, apex: 0.45, label: 'Bruiser'},
-  skilled:  {pace: 1.03, corner: 1.02, wobble: 0.45, avoid: 1.15, aggro: 0.10, mass: 1.0, hunt: 1.0, burn: 'straight', sight: 0.6, edge: 1, apex: 0.6, label: 'Racer'},
+  skilled:  {pace: 1.03, corner: 1.03, wobble: 0.45, avoid: 1.15, aggro: 0.10, mass: 1.0, hunt: 1.0, burn: 'straight', sight: 0.6, edge: 1, apex: 0.6, label: 'Racer'},
   timid:    {pace: 0.98, corner: 0.95, wobble: 0.9, avoid: 1.65, aggro: 0.00, mass: 0.7, hunt: 1.2, burn: 'straight', sight: 1.2, edge: 1.4, apex: 0.4, label: 'Skittish'},
   reckless: {pace: 0.99, corner: 1.08, wobble: 2.2, avoid: 0.75, aggro: 0.35, mass: 1.1, hunt: 1.0, burn: 'any', sight: 0.9, edge: -0.6, apex: 1.0, label: 'Reckless'},
-  steady:   {pace: 0.99, corner: 0.97, wobble: 0.5, avoid: 1.25, aggro: 0.00, mass: 1.0, hunt: 1.0, burn: 'straight', sight: 1.1, edge: 1.2, apex: 0.5, label: 'Steady'},
+  steady:   {pace: 0.98, corner: 0.97, wobble: 0.5, avoid: 1.25, aggro: 0.00, mass: 1.0, hunt: 1.0, burn: 'straight', sight: 1.1, edge: 1.2, apex: 0.5, label: 'Steady'},
   hunter:   {pace: 1.00, corner: 1.00, wobble: 0.7, avoid: 1.0, aggro: 0.20, mass: 0.9, hunt: 1.7, burn: 'any', sight: 0.9, edge: 1, apex: 0.55, label: 'Scavenger'},
 };
 const SPECIES_STYLE = {

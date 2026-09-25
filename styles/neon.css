@@ -190,18 +190,25 @@ body.touch #speedVal{font-size:30px;}
 body.touch #fuelRack{gap:10px; height:24px; transform:scale(.8);}
 body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
 .tbtn{font:inherit; font-size:20px; width:84px; height:84px; border-radius:50%; color:var(--cyan);
-  background:rgba(8,12,28,.55); border:2px solid var(--cyan); touch-action:none;}
-.tbtn.hot{color:var(--mag); border-color:var(--mag);}
-/* .pressed mirrors :active for a button that can never actually be :active -- see
-   #tSteerBtns below, where pointer-events:none on tLeft/tRight means neither one is ever
-   really the event target to begin with. */
-.tbtn:active, .tbtn.pressed{background:rgba(25,240,255,.2);}
+  background:rgba(8,12,28,.55); border:2px solid var(--cyan); touch-action:none;
+  --glow:var(--cyan); transition:background-color .12s, box-shadow .12s, transform .08s;}
+.tbtn.hot{color:var(--mag); border-color:var(--mag); --glow:var(--mag);}
+/* PRESSED HAS TO READ UNDER A THUMB. The old pressed state was a 20% tint on a dark
+   button -- invisible with a thumb over the middle of it and the track moving behind.
+   Pressed now inverts: the button fills solid in its own colour with dark text, grows a
+   thick ring and a glow OUTSIDE its edge (box-shadow, so the ring shows round the thumb
+   and nothing in the layout moves), and dips a little. Released snaps straight back.
+   .pressed is set from the pointer handlers (neon-input.js) because iOS applies :active
+   late or not at all; :active stays as the fallback for a mouse. */
+.tbtn:active, .tbtn.pressed{background:var(--glow); color:#04050d; border-color:#fff;
+  box-shadow:0 0 0 5px var(--glow), 0 0 26px 6px var(--glow); transform:scale(.93);
+  transition:none;}
 /* Words, coloured by job: GAS green, BRAKE red, NITRO the magenta it has always been. */
 #tAccel, #tBrake, #tBoost{font-size:14px; font-weight:700; letter-spacing:.06em;}
-#tAccel{color:var(--lime); border-color:var(--lime);}
-#tAccel:active, #tAccel.pressed{background:rgba(182,255,60,.2);}
-#tBrake{color:var(--red); border-color:var(--red);}
-#tBrake:active, #tBrake.pressed{background:rgba(255,59,78,.22);}
+#tAccel{color:var(--lime); border-color:var(--lime); --glow:var(--lime);}
+#tAccel:active, #tAccel.pressed{color:#04050d; border-color:#fff;}
+#tBrake{color:var(--red); border-color:var(--red); --glow:var(--red);}
+#tBrake:active, #tBrake.pressed{color:#04050d; border-color:#fff;}
 
 /* STEERING: either the drag pad or the two buttons, never both -- settings.steerMode
    (see main.js applySteerMode) toggles a body class, and that is the only thing either
@@ -218,7 +225,14 @@ body.touch #slopeVal, body.touch #burnPip{font-size:10px;}
     rgba(8,12,28,.5) 65%, rgba(25,240,255,.16));}
 #tSteer b{font-weight:600; font-size:11px; letter-spacing:.2em; color:var(--dim);}
 #tSteer span{font-size:20px;}
-#tSteer:active{border-color:#fff;}
+/* The pad lights up the same way while a thumb is on it: white edge, thick cyan ring and
+   glow outside it, the dim STEER label brightened. */
+#tSteer{transition:box-shadow .12s, background-color .12s;}
+#tSteer:active, #tSteer.pressed{border-color:#fff; color:#fff;
+  background:linear-gradient(90deg, rgba(25,240,255,.6), rgba(25,240,255,.26) 35%,
+    rgba(25,240,255,.26) 65%, rgba(25,240,255,.6));
+  box-shadow:0 0 0 5px var(--cyan), 0 0 26px 6px var(--cyan); transition:none;}
+#tSteer.pressed b{color:#fff;}
 body.steer-buttons #tSteer{display:none;}
 /* The two-button alternative: same footprint as the pad, split into two rectangles
    instead of one pill. It LOOKS like two buttons but acts as one drag surface (see
@@ -271,6 +285,27 @@ body[data-screen="count"] #count{display:flex;}
 #finBoard li.me{color:var(--cyan);}
 #finBoard li i{font-style:normal; display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:8px;}
 .actions{display:flex; gap:10px; justify-content:center;}
+/* SIGN YOUR RECORD, on the finish card. */
+#signRow{margin:0 0 12px; padding:10px; border:1px solid var(--lime); border-radius:6px;
+  background:rgba(182,255,60,.07); text-align:left;}
+#signRow[hidden]{display:none;}
+#signLabel{display:block; color:var(--lime); font-size:13px; margin-bottom:6px;}
+.signIn{display:flex; gap:8px;}
+#playerName{flex:1; min-width:0; font:inherit; font-size:16px; padding:8px 10px; color:var(--text);
+  background:#05081a; border:1px solid var(--cyan); border-radius:4px;}
+#finBoard li .pl{font-style:normal; color:var(--dim); font-size:12px;}
+/* FASTEST TIMES, under START on the menu. */
+#leaderboard h3{margin:4px 0 4px; font-size:13px; letter-spacing:.16em; color:var(--lime); font-weight:600;}
+#leaderMode{color:var(--dim); font-size:11px; letter-spacing:.04em; font-weight:400; margin-left:6px;}
+#leaderList{list-style:none; margin:0; padding:0; max-height:190px; overflow-y:auto;}
+#leaderList li{display:grid; grid-template-columns:minmax(0,1.2fr) minmax(0,1fr) auto; gap:8px;
+  padding:4px 6px; border-bottom:1px solid var(--line); font-size:13px;}
+#leaderList li.me{color:var(--cyan); background:rgba(25,240,255,.07);}
+#leaderList .who, #leaderList .pl{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+#leaderList .pl{color:var(--text);}
+#leaderList .pl.anon{color:var(--dim); font-style:italic;}
+#leaderList .tm{color:var(--lime); font-variant-numeric:tabular-nums;}
+#leaderEmpty[hidden]{display:none;}
 
 /* PAUSE. Same panel language as #finishCard on purpose -- it is the other place a race
    stops to show the player something -- but narrower, since a stepper and two buttons

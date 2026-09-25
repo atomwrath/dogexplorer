@@ -27,6 +27,7 @@ let touchSteer = 0, steerPointer = null;
    touch bound to whichever element it started on) would never reach the second one. */
 let btnSteerPointer = null, steerBtnL = null, steerBtnR = null;
 const neonHandlers = {};
+const holdEls = [];                   // gas, brake, nitro: cleared of their pressed look on blur
 
 function initNeonInput(handlers){
   Object.assign(neonHandlers, handlers || {});
@@ -51,12 +52,21 @@ function initNeonInput(handlers){
   window.addEventListener('blur', () => {
     neonKeys.clear(); touchSteer = 0; steerPointer = null;
     for(const k in neonTouch) neonTouch[k] = false;
+    for(const el of holdEls) el.classList.remove('pressed');
+    const pad = document.getElementById('tSteer');
+    if(pad) pad.classList.remove('pressed');
+    clearSteerButtons();
   });
   const hold = (id, key) => {
     const el = document.getElementById(id);
     if(!el) return;
-    const on = e => { e.preventDefault(); neonTouch[key] = true; markTouch(); };
-    const off = e => { e.preventDefault(); neonTouch[key] = false; };
+    /* The pressed LOOK is a class set here, not :active. iOS Safari only applies :active
+       to an element with a touchstart listener, and applies it late even then; a class
+       toggled on the same pointer event that sets the input is on screen the same frame
+       the board responds, and off the same frame it lets go. */
+    const on = e => { e.preventDefault(); neonTouch[key] = true; el.classList.add('pressed'); markTouch(); };
+    const off = e => { e.preventDefault(); neonTouch[key] = false; el.classList.remove('pressed'); };
+    holdEls.push(el);
     el.addEventListener('pointerdown', on);
     el.addEventListener('pointerup', off);
     el.addEventListener('pointercancel', off);
@@ -94,6 +104,7 @@ function bindSteerPad(pad){
   pad.addEventListener('pointerdown', e => {
     e.preventDefault(); markTouch();
     steerPointer = e.pointerId;
+    pad.classList.add('pressed');
     /* Capture, or the first fast slide leaves the element and the steering sticks at
        whatever it was when the thumb crossed the edge. */
     if(pad.setPointerCapture) try{ pad.setPointerCapture(e.pointerId); }catch(err){}
@@ -108,6 +119,7 @@ function bindSteerPad(pad){
     if(steerPointer !== e.pointerId) return;
     e.preventDefault();
     steerPointer = null; touchSteer = 0;
+    pad.classList.remove('pressed');
   };
   pad.addEventListener('pointerup', up);
   pad.addEventListener('pointercancel', up);
@@ -237,6 +249,8 @@ function resetNeonInput(){ steerSmooth = 0; touchSteer = 0; steerPointer = null;
 function resetSteerTouch(){
   touchSteer = 0; steerPointer = null; btnSteerPointer = null;
   clearSteerButtons();
+  const pad = document.getElementById('tSteer');
+  if(pad) pad.classList.remove('pressed');
 }
 
 export { initNeonInput, readNeonInput, resetNeonInput, resetSteerTouch, neonKeys, neonTouch };

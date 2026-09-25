@@ -10,15 +10,18 @@ import { scene, disposeGroup } from '../core/render.js';
 import { NEON } from './tuning.js';
 import { trackFrame, deckY } from './track.js';
 
-/* One cell every NEON.cellEveryM, placed where the track is straight enough to reach for
-   it, and set left/right/centre in a fixed rotation so a lap is never a straight line. */
+/* One SET every NEON.cellEveryM, placed where the track is straight enough to reach for
+   it, spread side by side across the ribbon. Three where there is room for three halos
+   not to touch (and on two sets in every three), otherwise two. Each tank carries its set
+   number `g` and a unique `i`; the set is what stops one rider taking the lot. */
 function placeCells(T){
   const cells = [];
   const n = Math.max(1, Math.round(T.L/NEON.cellEveryM));
   const step = T.L/n;
-  for(let i = 0; i < n; i++){
-    // nudge off the exact multiple so a cell never lands on the start line itself
-    let s = (i + 0.5)*step;
+  const K = 1/(T.widthK || 1);
+  for(let g = 0; g < n; g++){
+    // nudge off the exact multiple so a set never lands on the start line itself
+    let s = (g + 0.5)*step;
     let best = s, bestK = Infinity;
     for(let o = -step*0.3; o <= step*0.3; o += Math.max(2, step*0.1)){
       const f = trackFrame(T, s + o, {});
@@ -27,15 +30,38 @@ function placeCells(T){
     }
     const f = trackFrame(T, best, {});
     const lim = f.halfW - (T.bodyWide || NEON.bodyWide);
-    const lane = [0, 1, -1, 0, -1, 1][i % 6];
-    cells.push({s: T.closed ? ((best % T.L) + T.L) % T.L : Math.min(T.L - 5, Math.max(5, best)),
-                d: lane*lim*0.62, live: true, backT: 0, i});
+    const spread = lim*0.65;
+    // three only if the halos (radius 1.25 K, see buildCellMeshes) stay apart
+    const roomFor3 = spread >= 2.6*K;
+    const count = (roomFor3 && g % 3 !== 2) ? NEON.cellSetMax : NEON.cellSetMin;
+    const at = T.closed ? ((best % T.L) + T.L) % T.L : Math.min(T.L - 5, Math.max(5, best));
+    for(let j = 0; j < count; j++){
+      const d = count === 1 ? 0 : spread*(-1 + 2*j/(count - 1));
+      cells.push({s: at, d, live: true, backT: 0, i: cells.length, g});
+    }
   }
   return cells;
 }
 
-/* Anyone passing through a live cell takes it. Returns the cells taken this step, so the
-   caller can make a noise about the ones the player got. */
+/* THE TRIGGER AREA, shared by nitro tanks and boost pads so the two can never drift apart:
+   along the track, a window wide enough to cover a whole frame of travel (or a fast board
+   steps over it); across, the grab distance plus half a board. */
+function inGrab(T, r, s, d, dt){
+  let gap = r.s - s;
+  if(T.closed){ gap = ((gap % T.L) + T.L) % T.L; if(gap > T.L/2) gap -= T.L; }
+  if(Math.abs(gap) > Math.max(2.5, r.v*dt*1.2)) return false;
+  return Math.abs(r.d - d) <= NEON.cellGrab + (T.bodyWide || NEON.bodyWide)*0.5;
+}
+/* Has this rider already had its tank out of set g on this pass? Remembered in race time
+   for as long as a taken tank takes to come back, so a rider cannot sweep a set by
+   weaving across it, but comes round a circuit to a set it may use again. */
+function tookFromSet(r, g){
+  const t = r.setT && r.setT[g];
+  return t != null && (r.time || 0) - t < NEON.cellBackS;
+}
+
+/* Anyone passing through a live cell takes it -- one per set. Returns the cells taken
+   this step, so the caller can make a noise about the ones the player got. */
 function stepCells(cells, racers, T, dt){
   const took = [];
   for(const c of cells){
@@ -46,14 +72,12 @@ function stepCells(cells, racers, T, dt){
     }
     for(const r of racers){
       if(r.done || r.isGhost) continue;
-      let gap = r.s - c.s;
-      if(T.closed){ gap = ((gap % T.L) + T.L) % T.L; if(gap > T.L/2) gap -= T.L; }
-      // the window has to cover a whole frame of travel or a fast board steps over it
-      if(Math.abs(gap) > Math.max(2.5, r.v*dt*1.2)) continue;
-      if(Math.abs(r.d - c.d) > NEON.cellGrab + (T.bodyWide || NEON.bodyWide)*0.5) continue;
+      if(!inGrab(T, r, c.s, c.d, dt)) continue;
       if(r.fuel >= NEON.fuelMax) continue;         // a full rack leaves it for someone else
+      if(c.g != null && tookFromSet(r, c.g)) continue;   // one per set
       r.fuel++;
       r.cells = (r.cells || 0) + 1;
+      if(c.g != null){ if(!r.setT) r.setT = {}; r.setT[c.g] = r.time || 0; }
       c.live = false; c.backT = NEON.cellBackS;
       took.push({cell: c, racer: r});
       break;
@@ -137,4 +161,4 @@ function clearCells(){
   cellGroup = null; cellMeshes = [];
 }
 
-export { placeCells, stepCells, buildCellMeshes, updateCellMeshes, clearCells };
+export { placeCells, stepCells, inGrab, tookFromSet, buildCellMeshes, updateCellMeshes, clearCells };

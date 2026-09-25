@@ -36,6 +36,7 @@ import { makeRider, poseRider, disposeRider } from './riders.js';
 import { initNeonInput, readNeonInput, resetNeonInput, resetSteerTouch } from './neon-input.js';
 import { startHum, setHum, stopHum, burnSound, cellSound, setWind, setBrakeSound } from './neon-sound.js';
 import { placeCells, stepCells, buildCellMeshes, updateCellMeshes, clearCells } from './cells.js';
+import { placePads, stepPads, buildPadMeshes, updatePadMeshes, clearPads } from './pads.js';
 import { makeRecorder, recordFrame, finishRecording, bestGhosts, keepGhost,
          makeGhostRacer, stepGhost } from './ghosts.js';
 import { paintMap, paintDots } from './map2d.js';
@@ -77,6 +78,12 @@ const settings = {rivals: 5, skill: 'fair', gravity: true, reverse: false, scale
                   // and a hue turn in degrees (0 = the original colours)
                   gridThick: 2, gridHue: 0, gridGlow: 100};   // gridGlow: percent, 0..200
 let bests = {}, ghostStore = {};
+/* THE LEADERBOARD IS THE GHOSTS. ghostStore already keeps, per course setting, one
+   recording per character -- the fastest that character has gone there -- so the board is
+   just those recordings, fastest first, each signed with the name stored IN it. No
+   recording, no high score: a run too short to record, or ghosts cleared to free storage,
+   leaves nothing on the board. */
+const PLAYER_NAME_MAX = 16;
 let customStore = {};           // mapId -> [{name, states, fp}]: the courses you built
 let customStale = 0;            // saved courses that no longer fit this map's trail data
 let graphTotalM = 0;            // raceable metres on the current map, for lapping customs
@@ -97,6 +104,18 @@ function neonReadStore(){
     if(s && s.custom) customStore = s.custom;
   }catch(e){ /* private mode: play without persistence */ }
 }
+/* A character's line on this course setting, fastest first: every stored recording,
+   not just the GHOST_KEEP that line up in a race. */
+function leaderRows(key){
+  const table = ghostStore[key] || {};
+  return Object.keys(table).map(k => table[k]).filter(g => g && g.time > 0)
+    .sort((a, b) => a.time - b.time || (a.rider < b.rider ? -1 : 1));
+}
+function cleanName(v){ return String(v || '').replace(/\s+/g, ' ').trim().slice(0, PLAYER_NAME_MAX); }
+const riderEmo = id => {
+  if(/^w:/.test(id)){ const sp = SPECIES[id.slice(2)]; return sp && sp.emo ? sp.emo : '🐾'; }
+  return '🐶';
+};
 function neonWriteStore(){
   try{ localStorage.setItem(NEON_STORE, JSON.stringify({settings, bests, ghosts: ghostStore, custom: customStore})); }
   catch(e){
@@ -380,6 +399,32 @@ function paintRow(i){
   }
   const b = bests[bestKey(c, settings)];
   best.textContent = b ? '★ ' + fmtTime(b) : '';
+  // every setting that changes the key repaints the rows, so the board follows it here
+  if(i === selCourse) renderLeaderboard();
+}
+/* FASTEST TIMES on the selected course, as it is set up right now (class, scale,
+   direction, gravity): one line per character, the player who set it, and the time. The
+   character you have picked is highlighted, so you can see the line you are racing for. */
+function renderLeaderboard(){
+  const box = $('leaderList'), c = courses[selCourse];
+  if(!box) return;
+  box.textContent = '';
+  $('leaderMode').textContent = modeChip().toLowerCase();
+  const rows = c ? leaderRows(bestKey(c, settings)) : [];
+  $('leaderEmpty').hidden = rows.length > 0;
+  rows.forEach((r, k) => {
+    const li = document.createElement('li');
+    if(r.rider === settings.rider) li.className = 'me';
+    const who = document.createElement('span'); who.className = 'who';
+    who.textContent = (k + 1) + '. ' + riderEmo(r.rider) + ' ' + r.label;
+    const pl = document.createElement('span'); pl.className = 'pl';
+    pl.textContent = r.player || 'unsigned';
+    if(!r.player) pl.classList.add('anon');
+    const tm = document.createElement('span'); tm.className = 'tm';
+    tm.textContent = fmtTime(r.time);
+    li.append(who, pl, tm);
+    box.appendChild(li);
+  });
 }
 function renderCourseList(){
   const box = $('courseList');
@@ -416,6 +461,7 @@ function selectCourse(i){
     paintRow(i);
   }
   $('startBtn').disabled = !T.ok;
+  renderLeaderboard();
   showTrack(T);
   menuS = 0;
   $('courseInfo').textContent = !T.ok ? 'Too tight to race at 1:' + settings.scale + ' — try a bigger scale.' : fmtMi(T.L) + (T.laps > 1 ? ' × ' + T.laps + ' laps' : '')
@@ -821,6 +867,7 @@ function endRace(){
   if(!race) return;
   for(const R of race.riders) disposeRider(R);
   clearCells();
+  clearPads();
   clearSmoke();
   race = null;
   stopHum();
@@ -868,6 +915,7 @@ function startRace(){
   const ghosts = settings.ghosts ? bestGhosts(ghostStore, bestKey(course, settings)) : [];
   ghosts.forEach((g, i) => {
     const gr = makeGhostRacer(g, T, GHOST_COLORS[i % GHOST_COLORS.length]);
+    gr.player = g.player || '';           // whoever signed the recording
     racers.push(gr);
     const R = makeRider(riderWho(g.rider) || choice.who, gr.color, 40 + i, sizeK);
     R.isGhost = true;
@@ -878,8 +926,10 @@ function startRace(){
   if(settings.reverse) line.reverse();
   const cells = placeCells(T);
   buildCellMeshes(T, cells, baseM(), 0xffe14a);
+  const pads = placePads(T, cells);
+  buildPadMeshes(T, pads, baseM());
   race = {T, course, racers, riders, me: cast.length, phase: 'count', countT: 3.4, lastPip: 4,
-          t: 0, finishShown: false, doneCount: 0, line, cells, rec: makeRecorder(),
+          t: 0, finishShown: false, doneCount: 0, line, cells, pads, rec: makeRecorder(),
           riderId: choice.v, riderLabel: choice.label, ghosts: ghosts.length,
           gravity: settings.gravity, scale: settings.scale, reverse: settings.reverse,
           cls: settings.cls, sizeK, ghostHit: settings.ghostHit !== false};
@@ -940,6 +990,7 @@ function stepRace(dt){
   const me = R.racers[R.me];
   const input = readNeonInput(dt);
   env.cells = R.cells;
+  env.pads = R.pads;
   for(const r of R.racers){
     if(r.isGhost){ r.lastDt = dt; stepGhost(r, T, dt, R.racers, env); continue; }
     const inp = r.isPlayer ? input : rivalInput(r, T, R.racers, env, R.t);
@@ -958,6 +1009,7 @@ function stepRace(dt){
   }
   resolveContacts(R.racers, T, env);
   for(const t of stepCells(R.cells, R.racers, T, dt)) if(t.racer === me) cellSound();
+  for(const t of stepPads(R.pads, R.racers, T, dt)) if(t.racer === me) burnSound();
   if(!me.done) recordFrame(R.rec, me, dt);
 }
 function onBump(r, ev){
@@ -978,7 +1030,12 @@ function finishPlayer(){
   const old = bests[key];
   let note = '';
   const ghost = finishRecording(R.rec, me, {id: R.riderId, label: R.riderLabel});
+  if(ghost) ghost.player = '';
   const keptGhost = keepGhost(ghostStore, key, ghost);
+  /* A kept ghost IS a new record for this character here: it is on the board at once,
+     unsigned, and the finish card asks for a name to store in it. */
+  R.signKey = keptGhost ? key : null;
+  showSignRow(keptGhost ? ghost : null);
   if(!old || me.finishT < old){ bests[key] = +me.finishT.toFixed(2); note = old ? '★ New best! (was ' + fmtTime(old) + ')' : '★ First time on the board.'; }
   else note = 'Best ' + fmtTime(old) + ' · +' + (me.finishT - old).toFixed(1) + ' s';
   if(keptGhost) note += ' · ghost saved';
@@ -999,11 +1056,41 @@ function renderBoard(){
     const a = document.createElement('span'), dot = document.createElement('i');
     dot.style.background = hex(r.color);
     a.append(dot, r.place + '. ' + (r.emo ? r.emo + ' ' : '') + r.name + (r.isGhost ? ' 👻' : ''));
+    // a ghost is somebody's run: say whose. Your own row too, once you have signed it.
+    if(r.isGhost || r.player){
+      const pl = document.createElement('em'); pl.className = 'pl';
+      pl.textContent = r.player || 'unsigned';
+      a.append(' ', pl);
+    }
     const b = document.createElement('span');
     b.textContent = r.done ? fmtTime(r.finishT) : '…';
     li.append(a, b);
     ol.appendChild(li);
   }
+}
+
+/* SIGN YOUR RECORD. Shown on the finish card only when this run was kept as the
+   character's recording on this course setting -- which is what a record is. The box
+   starts empty every time. Save writes the name into the recording, closes the box and
+   repaints the results with it. */
+function showSignRow(ghost){
+  const row = $('signRow');
+  row.hidden = !ghost;
+  if(!ghost) return;
+  $('signLabel').textContent = '🏆 Fastest ' + ghost.label + ' on this course — your name:';
+  $('playerName').value = '';
+}
+function saveSignature(){
+  const R = race;
+  if(!R || !R.signKey) return;
+  const name = cleanName($('playerName').value);
+  const g = (ghostStore[R.signKey] || {})[R.riderId];
+  if(g) g.player = name;
+  R.racers[R.me].player = name;
+  R.signKey = null;                        // signed once; the box is gone
+  neonWriteStore();
+  $('signRow').hidden = true;
+  renderBoard();
 }
 
 /* THE NITRO RACK. One icon per tank on board, spent ones left as empty outlines so the
@@ -1021,12 +1108,13 @@ function paintFuel(me){
     }
     box.dataset.lit = '';
   }
-  const key = lit + (me.burnT > 0 ? 'b' : '');
+  const key = lit + (me.burnT > 0 && !me.padBurn ? 'b' : '');
   if(box.dataset.lit === key) return;
   box.dataset.lit = key;
   [...box.children].forEach((el, i) => {
     el.classList.toggle('on', i < lit);
-    el.classList.toggle('firing', me.burnT > 0 && i === lit);
+    // a pad's burn took nothing off the rack, so no tank is shown draining for it
+    el.classList.toggle('firing', me.burnT > 0 && !me.padBurn && i === lit);
   });
 }
 
@@ -1113,10 +1201,11 @@ function drawRace(dt){
   /* The motor answers the GAS: no throttle, no hum (a burn still roars on its own). The
      brake gets its own scrub, as loud as the braking is hard and the board is fast. */
   const live = !me.done && R.phase !== 'count';
-  setHum(me.v, me.burnT > 0 ? Math.min(1, me.burnT/NEON.burnS + 0.35) : 0, live ? me.throttleIn || 0 : 0);
+  /* dt: the motor FADES when you let off rather than cutting out (neon-sound.js setHum) */
+  setHum(me.v, me.burnT > 0 ? Math.min(1, me.burnT/NEON.burnS + 0.35) : 0, live ? me.throttleIn || 0 : 0, dt);
   setBrakeSound(live ? me.brakeIn || 0 : 0, me.v);
   setWind(me.done || me.spinT > 0 ? 0 : me.steerIn, me.v);
-  $('burnPip').textContent = me.spinT > 0 ? 'SPUN OUT' : me.burnT > 0 ? 'NITRO' : me.fuel ? '' : 'OUT OF NITRO';
+  $('burnPip').textContent = me.spinT > 0 ? 'SPUN OUT' : me.burnT > 0 ? (me.padBurn ? 'BOOST' : 'NITRO') : me.fuel ? '' : 'OUT OF NITRO';
   $('burnPip').classList.toggle('hot', me.burnT > 0);
   const fit = paintMap($('minimap'), graph, mapBox, R.line, T.closed, 'mm|' + mapId + '|' + R.course.sig, true);
   const sc = R.scale;
@@ -1125,6 +1214,10 @@ function drawRace(dt){
     if(!c.live) continue;
     const w = trackToWorld(T, c.s, c.d, {});
     dots.push({x: w.wx*sc, z: w.wz*sc, color: '#ffe14a', small: true});
+  }
+  for(const p of R.pads){
+    const w = trackToWorld(T, p.s, p.d, {});
+    dots.push({x: w.wx*sc, z: w.wz*sc, color: '#ff9a3c', small: true});
   }
   dots.sort((p, q) => (p.big ? 1 : 0) - (q.big ? 1 : 0));
   paintDots($('minimap'), fit, dots);
@@ -1155,7 +1248,7 @@ function frame(ms){
   }
   updateCamera(dt);
   updateScene(dt);
-  if(race) updateCellMeshes(clockT);
+  if(race){ updateCellMeshes(clockT); updatePadMeshes(clockT); }
   renderer.render(scene, camera);
 }
 
@@ -1163,6 +1256,8 @@ function frame(ms){
 function wireUI(){
   $('startBtn').addEventListener('click', startRace);
   $('againBtn').addEventListener('click', startRace);
+  $('nameSave').addEventListener('click', saveSignature);
+  $('playerName').addEventListener('keydown', e => { if(e.key === 'Enter'){ e.preventDefault(); saveSignature(); } });
   $('menuBtn').addEventListener('click', quitToMenu);
   $('quitBtn').addEventListener('click', quitToMenu);
   $('pauseBtn').addEventListener('click', togglePause);
@@ -1188,7 +1283,7 @@ function wireUI(){
   document.querySelectorAll('.steerSeg .btn').forEach(b => b.addEventListener('click', () => setSteerMode(b.dataset.steer)));
   document.querySelectorAll('.sideSeg .btn').forEach(b => b.addEventListener('click', () => setCtlSide(b.dataset.side)));
   $('scaleSel').addEventListener('change', e => setScale(+e.target.value));
-  $('riderSel').addEventListener('change', e => { settings.rider = e.target.value; neonWriteStore(); });
+  $('riderSel').addEventListener('change', e => { settings.rider = e.target.value; neonWriteStore(); renderLeaderboard(); });
   $('mapSel').addEventListener('change', e => {
     settings.map = e.target.value; neonWriteStore(); selCourse = 0;
     loadNeonMap(settings.map, e.target.selectedOptions[0].textContent).catch(showLoadError);
