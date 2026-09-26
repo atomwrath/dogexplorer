@@ -1425,7 +1425,14 @@ addEventListener('keyup', e=> trailKeys[e.code]=false);
 const stick = {active:false,id:null,dx:0,dy:0,ox:0,oy:0};
 const look  = {active:false,id:null,lastX:0,lastY:0};
 const YAW_SENS=0.0055, PITCH_SENS=0.0042;
-const STICK_MAX=52;                     // px of thumb travel that means "full speed"
+/* AN OVAL STICK. Travel is wider than it is tall: full deflection is STICK_RX px of thumb
+   travel sideways but STICK_RY forward/back. Direction is read from the NORMALISED offset
+   (x/RX, y/RY), so a given sideways wobble of the thumb changes the steering angle about a
+   third less than on the old 52 px circle -- finer left/right on a tablet, where fine
+   thumb movement is hardest -- while forward/back (speed) keeps a short, easy throw.
+   The pad is also larger overall. Its CSS box (#stickBase) is sized to match. */
+const STICK_RX=84, STICK_RY=58;
+function stickTravel(){ return {rx:STICK_RX, ry:STICK_RY}; }
 
 /* THE TOUCH LAYER, and why it is a body class rather than a media query.
 
@@ -1470,10 +1477,11 @@ function stickHome(){
    reads exactly the same direction whichever handler asks -- there is only one formula for
    "how hard and which way", not a start-at-zero one and a follow-up one that could disagree. */
 function stickVectorFrom(cx, cy){
-  let dx=cx-stick.ox, dy=cy-stick.oy;
-  const L=Math.hypot(dx,dy), max=STICK_MAX;
-  if(L>max){dx*=max/L; dy*=max/L;}
-  return {dx: dx/max, dy: dy/max};
+  // normalise into the ellipse, then clamp to its rim: (dx,dy) is a unit-disc vector
+  let nx=(cx-stick.ox)/STICK_RX, ny=(cy-stick.oy)/STICK_RY;
+  const L=Math.hypot(nx,ny);
+  if(L>1){ nx/=L; ny/=L; }
+  return {dx: nx, dy: ny};
 }
 function paintStick(){
   if(!stickBase) return;
@@ -1484,7 +1492,7 @@ function paintStick(){
   stickBase.classList.toggle('run', mag>0.92 && !player.sneaking);
   stickBase.classList.toggle('sneak', !!player.sneaking);
   if(stickKnob) stickKnob.style.transform = stick.active
-    ? `translate(${(stick.dx*STICK_MAX).toFixed(1)}px, ${(stick.dy*STICK_MAX).toFixed(1)}px)`
+    ? `translate(${(stick.dx*STICK_RX).toFixed(1)}px, ${(stick.dy*STICK_RY).toFixed(1)}px)`
     : 'translate(0px, 0px)';
 }
 
@@ -1554,7 +1562,8 @@ function camFollowStep(dc, mag, onStick, run, dt){
   const lim = turnCap(run)*dt;
   return clamp(step, -lim, lim);
 }
-let steerHeading = null;       // world heading being walked, while the stick is held
+let steerHeading = null;       // world heading being walked, while stick or keys are held
+function getSteerHeading(){ return steerHeading; }   // test seam
 
 function isTextField(t){ return !!(t && t.closest && t.closest('input,textarea,[contenteditable]')); }
 document.addEventListener('contextmenu', e=>{ if(!isTextField(e.target)) e.preventDefault(); });
@@ -1564,17 +1573,23 @@ renderer.domElement.addEventListener('pointerdown', e=>{
   if(isTouchPointer(e)) markTouchDevice();
   if(!playing) return;
   if(!isTouchPointer(e)){
-    // mouse: camera only, from anywhere on the canvas
-    if(!look.active){
-      look.active=true; look.id=e.pointerId; look.lastX=e.clientX; look.lastY=e.clientY;
-    }
+    // mouse: camera only, from anywhere on the canvas; a new press always takes over
+    look.active=true; look.id=e.pointerId; look.lastX=e.clientX; look.lastY=e.clientY;
     return;
   }
+  /* THE NEWEST TOUCH ON A SIDE TAKES THAT SIDE OVER. Each side has one slot, and the
+     slot used to be taken only if it was free -- so if the browser ever failed to deliver
+     the pointerup/cancel for the old finger (iOS drops them in some multi-touch and system
+     gesture cases: a finger lifting during an edge swipe, a notification, switching apps)
+     the slot stayed held by a finger no longer on the glass, and every later drag on that
+     side was refused. That was "sometimes I lose the ability to look around". Two fingers
+     on one side cannot both steer anyway, so the newer one simply wins; a finger that is
+     genuinely still down loses nothing it could have used. */
   const rect=renderer.domElement.getBoundingClientRect();
   const rightHalf = (e.clientX-rect.left) > rect.width*0.5;
-  if(rightHalf && !look.active){
+  if(rightHalf){
     look.active=true; look.id=e.pointerId; look.lastX=e.clientX; look.lastY=e.clientY;
-  }else if(!rightHalf && !stick.active){
+  }else{
     // Grabbing the stick no longer means "the pad appears here" -- the origin is the
     // fixed pad centre, and a touch that lands away from it reads as an immediate
     // deflection in that direction rather than starting at zero. Touching anywhere on
@@ -1593,6 +1608,9 @@ addEventListener('pointermove', e=>{
     stick.dx=v.dx; stick.dy=v.dy;
     paintStick();
   }else if(look.active && e.pointerId===look.id){
+    // a mouse released outside the window never sends pointerup; with no button held
+    // this is a hover, not a drag, and must not turn the camera
+    if(e.pointerType==='mouse' && e.buttons===0){ look.active=false; return; }
     const dx=e.clientX-look.lastX, dy=e.clientY-look.lastY;
     look.lastX=e.clientX; look.lastY=e.clientY;
     addCamYaw(-dx*YAW_SENS);
@@ -1605,6 +1623,18 @@ const endPointer=e=>{
   if(look.active&&e.pointerId===look.id){ look.active=false; }
 };
 addEventListener('pointerup', endPointer); addEventListener('pointercancel', endPointer);
+addEventListener('lostpointercapture', endPointer);
+/* Every way a touch can end without telling us: the page hidden or backgrounded, the
+   window losing focus (a system sheet, a call), play starting or stopping. Both slots are
+   released so the next touch always finds them free. */
+function releaseTouchSlots(){
+  if(stick.active){ stick.active=false; stick.dx=stick.dy=0; stick.id=null; paintStick(); }
+  look.active=false; look.id=null;
+}
+
+
+addEventListener('blur', releaseTouchSlots);
+document.addEventListener('visibilitychange', ()=>{ if(document.hidden) releaseTouchSlots(); });
 
 /* ---------- the zoom gestures touch-action cannot reach ----------------------------
    `touch-action:none` closed the pinch that a stray finger on an overlay could start, and
@@ -2085,6 +2115,7 @@ function enterPlay(){
   trip.landmarks.length = 0;
   trip.bonks = 0;
   player.stillT = 0;
+  releaseTouchSlots();
   playing=true;
   document.body.classList.add('play');
   showPane(null);                   // walk full-bleed; the drawer is opt-in
@@ -2100,6 +2131,7 @@ function enterPlay(){
 }
 function exitPlay(){
   playing=false;
+  releaseTouchSlots();
   trip.paused=false;
   showPane(null);
   closeArrival();

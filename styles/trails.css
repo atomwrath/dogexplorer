@@ -526,8 +526,10 @@ body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
    so this stays easy to hit; it just no longer relocates itself once grabbed. Purely a
    readout -- the canvas owns the pointer maths, so this never intercepts a touch. */
 #stickBase{
-  position:absolute;left:calc(96px + var(--safe-l));bottom:calc(36px + var(--safe-b));
-  width:128px;height:128px;margin:-64px 0 0 -64px;border-radius:50%;
+  /* an OVAL, wider than tall, matching main.js's STICK_RX x STICK_RY travel (84 x 58 px)
+     plus the knob's radius: more sideways travel means finer left/right steering */
+  position:absolute;left:calc(126px + var(--safe-l));bottom:calc(36px + var(--safe-b));
+  width:204px;height:152px;margin:-76px 0 0 -102px;border-radius:50%;
   border:4px solid var(--ink);background:rgba(255,255,255,.40);
   box-shadow:0 4px 0 rgba(61,42,32,.2);opacity:.5;transition:opacity .18s;
   display:flex;align-items:center;justify-content:center;pointer-events:none;
@@ -535,7 +537,7 @@ body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
 #stickBase::before{content:'';position:absolute;inset:24px;border-radius:50%;
   border:3px dashed rgba(61,42,32,.28);}
 #stickBase.on{opacity:.95;background:rgba(255,255,255,.6);}
-#stickKnob{width:62px;height:62px;border-radius:50%;border:4px solid var(--ink);
+#stickKnob{width:66px;height:66px;border-radius:50%;border:4px solid var(--ink);
   background:var(--card);box-shadow:0 3px 0 rgba(61,42,32,.28);
   display:flex;align-items:center;justify-content:center;font-size:24px;will-change:transform;}
 #stickBase.run #stickKnob{background:var(--orange);}

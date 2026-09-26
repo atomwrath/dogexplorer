@@ -972,7 +972,9 @@ async function assertAll(window, errors, stats) {
     const dn = new window.MouseEvent('pointerdown', { bubbles:true, clientX:100, clientY:400 });
     dn.pointerId = id; Object.defineProperty(dn, 'pointerType', { value:type });
     canvas.dispatchEvent(dn);
-    const mv = new window.MouseEvent('pointermove', { bubbles:true, clientX:180, clientY:470 });
+    // buttons:1 -- a real drag reports the pressed button on every move (a mouse move with
+    // no button down is a hover, and main.js ends a look on one)
+    const mv = new window.MouseEvent('pointermove', { bubbles:true, clientX:180, clientY:470, buttons:1 });
     mv.pointerId = id; Object.defineProperty(mv, 'pointerType', { value:type });
     window.dispatchEvent(mv);
     const up = new window.MouseEvent('pointerup', { bubbles:true });
@@ -1035,9 +1037,10 @@ async function assertAll(window, errors, stats) {
     const mv = new window.MouseEvent('pointermove', { bubbles:true, clientX:240, clientY:530 });
     mv.pointerId = 91; Object.defineProperty(mv, 'pointerType', { value:'touch' });
     window.dispatchEvent(mv);
-    // knob offset must be real, and must be pinned inside the base's travel radius
+    // knob offset must be real, and must be pinned inside the base's (oval) travel
     const m = /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/.exec(knob.style.transform || '');
-    const moved = !!m && Math.hypot(+m[1], +m[2]) > 1 && Math.hypot(+m[1], +m[2]) <= 52.5;
+    const T = stickTravel();
+    const moved = !!m && Math.hypot(+m[1], +m[2]) > 1 && Math.hypot(+m[1]/T.rx, +m[2]/T.ry) <= 1.005;
     const up = new window.MouseEvent('pointerup', { bubbles:true });
     up.pointerId = 91; Object.defineProperty(up, 'pointerType', { value:'touch' });
     window.dispatchEvent(up);
@@ -1068,6 +1071,89 @@ async function assertAll(window, errors, stats) {
     };
     return grabAt(92, 150, 750) && grabAt(93, 500, 120);
   })());
+
+  /* ---------- the oval stick, and touches that never say goodbye ---------- */
+  {
+    const T = stickTravel();
+    const ev = (type, id, x, y, extra) => {
+      const e = new window.MouseEvent(type, Object.assign({ bubbles:true, clientX:x, clientY:y }, extra || {}));
+      e.pointerId = id; Object.defineProperty(e, 'pointerType', { value:(extra && extra.ptype) || 'touch' });
+      return e;
+    };
+    const knobXY = () => { const m = /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/.exec(d.querySelector('#stickKnob').style.transform || '');
+                           return m ? [+m[1], +m[2]] : [0, 0]; };
+    const home = (() => { const r = d.querySelector('#stickBase').getBoundingClientRect(); return {x:r.left+r.width/2, y:r.top+r.height/2}; })();
+    // steering angle the stick reports for a thumb at (x, y), via the painted knob
+    const angleAt = (id, x, y) => {
+      canvas.dispatchEvent(ev('pointerdown', id, x, y));
+      const [kx, ky] = knobXY();
+      window.dispatchEvent(ev('pointerup', id, x, y));
+      return Math.atan2(kx/T.rx, -ky/T.ry);
+    };
+    const straight = angleAt(401, home.x, home.y - T.ry);          // full forward
+    const wobble   = angleAt(402, home.x + 10, home.y - T.ry);     // 10 px of sideways wobble
+    const change = Math.abs(wobble - straight), roundChange = Math.atan2(10, 52);
+    check('the oval stick: 10 px of sideways wobble turns the steering less than the old round stick did',
+      T.rx > T.ry && change < roundChange*0.75,
+      `${(change*57.3).toFixed(1)} deg now vs ${(roundChange*57.3).toFixed(1)} deg on the 52 px circle (travel ${T.rx} x ${T.ry} px)`);
+    canvas.dispatchEvent(ev('pointerdown', 403, home.x + T.ry, home.y));
+    const partSide = knobXY()[0]/T.rx;
+    window.dispatchEvent(ev('pointerup', 403, 0, 0));
+    canvas.dispatchEvent(ev('pointerdown', 404, home.x + T.rx, home.y));
+    const fullSide = knobXY()[0]/T.rx;
+    window.dispatchEvent(ev('pointerup', 404, 0, 0));
+    check('full sideways deflection takes the whole wider travel',
+      Math.abs(fullSide - 1) < 0.01 && partSide < 0.75,
+      `at ${T.ry} px sideways: ${partSide.toFixed(2)}; at ${T.rx} px: ${fullSide.toFixed(2)}`);
+
+    // LOOK: a finger whose pointerup never arrives must not lock the camera
+    const W = canvas.getBoundingClientRect ? (canvas.getBoundingClientRect().width || 1024) : 1024;
+    const rx0 = Math.max(W*0.75, 700);
+    canvas.dispatchEvent(ev('pointerdown', 501, rx0, 300));                  // ... and never lifted
+    canvas.dispatchEvent(ev('pointerdown', 502, rx0, 320));                  // a new finger
+    const y0 = getCamYaw();
+    window.dispatchEvent(ev('pointermove', 502, rx0 + 60, 320));
+    const newTurns = Math.abs(getCamYaw() - y0) > 1e-4;
+    const y1 = getCamYaw();
+    window.dispatchEvent(ev('pointermove', 501, rx0 + 90, 300));             // the ghost
+    const ghostIgnored = Math.abs(getCamYaw() - y1) < 1e-9;
+    window.dispatchEvent(ev('pointerup', 502, rx0 + 60, 320));
+    check('a stuck finger cannot lock the camera: a new drag on the right takes over, the ghost is ignored',
+      newTurns && ghostIgnored, `new finger turned the camera: ${newTurns}; ghost ignored: ${ghostIgnored}`);
+
+    // STICK: the same, on the left
+    canvas.dispatchEvent(ev('pointerdown', 601, home.x, home.y - 30));       // never lifted
+    canvas.dispatchEvent(ev('pointerdown', 602, home.x, home.y));
+    window.dispatchEvent(ev('pointermove', 602, home.x + T.rx, home.y));
+    const followsNew = Math.abs(knobXY()[0] - T.rx) < 0.5;
+    window.dispatchEvent(ev('pointermove', 601, home.x - T.rx, home.y));     // the ghost
+    const ghostStill = Math.abs(knobXY()[0] - T.rx) < 0.5;
+    window.dispatchEvent(ev('pointerup', 602, 0, 0));
+    check('a stuck finger cannot lock the stick: a new touch on the left takes over, the ghost is ignored',
+      followsNew && ghostStill, `stick follows the new finger: ${followsNew}; ghost ignored: ${ghostStill}`);
+
+    // page hidden / window blurred mid-drag: both slots are freed
+    canvas.dispatchEvent(ev('pointerdown', 701, home.x + 20, home.y));
+    canvas.dispatchEvent(ev('pointerdown', 702, rx0, 300));
+    window.dispatchEvent(new window.Event('blur'));
+    const stickFreed = !d.querySelector('#stickBase').classList.contains('on');
+    const y2 = getCamYaw();
+    window.dispatchEvent(ev('pointermove', 702, rx0 + 80, 300));             // the blurred-away finger
+    const lookFreed = Math.abs(getCamYaw() - y2) < 1e-9;
+    check('losing focus mid-drag frees both the stick and the look', stickFreed && lookFreed,
+      `stick freed: ${stickFreed}; look freed: ${lookFreed}`);
+    // lift both fingers regardless, so a broken release fails HERE and does not leave a
+    // held stick walking the pup through every test after this one
+    window.dispatchEvent(ev('pointerup', 701, 0, 0)); window.dispatchEvent(ev('pointerup', 702, 0, 0));
+
+    // a mouse let go outside the window: hovering afterwards must not turn the camera
+    canvas.dispatchEvent(ev('pointerdown', 1, 400, 300, {ptype:'mouse', buttons:1}));
+    const y3 = getCamYaw();
+    window.dispatchEvent(ev('pointermove', 1, 480, 300, {ptype:'mouse', buttons:0}));
+    const hoverStill = Math.abs(getCamYaw() - y3) < 1e-9;
+    window.dispatchEvent(ev('pointermove', 1, 560, 300, {ptype:'mouse', buttons:0}));
+    check('a mouse released outside the window does not turn the camera on hover', hoverStill && Math.abs(getCamYaw() - y3) < 1e-9);
+  }
 
   /* A FIXED origin means a touch that lands away from the pad reads as an IMMEDIATE
      deflection, not a zero that builds as the thumb drags -- the old floating stick
@@ -6137,26 +6223,42 @@ async function assertAll(window, errors, stats) {
       key('KeyW',true);
       for(let f=0;f<40;f++) pump();                // get up to speed going straight
       key('KeyD',true);
-      let yaw=pl.yaw, cam=getCamYaw(), maxYaw=0, maxCam=0, worstCamOver=-1e9, n=0;
+      /* The STEERING HEADING, not the pup's facing: facing is also turned by a knock (a
+         bump into rock spins the pup), which is a collision reaction, not steering, and
+         once made a correct run look like it broke the cap. The heading is what the turn
+         limit governs, so it is what is measured. Knocks are counted for the record. */
+      let yaw=getSteerHeading(), cam=getCamYaw(), maxYaw=0, maxCam=0, worstCamOver=-1e9, n=0, knocks=0, walls=0, face=pl.yaw, maxFace=0;
       for(let f=0;f<50;f++){
-        pump(); const dy=Math.abs(wrap(pl.yaw-yaw))/0.04, dc=Math.abs(wrap(getCamYaw()-cam))/0.04;
+        pump();
+        const h=getSteerHeading();
+        const dy=(h==null||yaw==null)?0:Math.abs(wrap(h-yaw))/0.04, dc=Math.abs(wrap(getCamYaw()-cam))/0.04;
+        /* Only frames where STEERING is in charge count: a cling or climb snaps the facing
+           to the rock and a knock spins it, and where the pup runs into rock depends on the
+           camera direction earlier tests left -- this map is Garden of the Gods. */
+        const busy = pl.knockT>0 || pl.wall || pl.climbT>0;
+        if(pl.knockT>0) knocks++;
+        if(pl.wall||pl.climbT>0) walls++;
+        const fr=Math.abs(wrap(pl.yaw-face))/0.04; face=pl.yaw;
+        if(busy){ yaw=getSteerHeading(); cam=getCamYaw(); continue; }
+        maxFace=Math.max(maxFace, fr);
         // the cap that frame actually used: the camera step runs AFTER the frame's speed
         // update, so it is the speed the frame ended on, not the one it started with
         const capHere=turnCap(runFrac(pl.speed));
-        yaw=pl.yaw; cam=getCamYaw();
+        yaw=h; cam=getCamYaw();
         // from the very first frame: the snap onto a new key IS the twitch being guarded
         maxYaw=Math.max(maxYaw,dy); maxCam=Math.max(maxCam,dc); worstCamOver=Math.max(worstCamOver, dc-capHere); n++;
       }
       const sp=pl.speed, cap=turnCap(runFrac(sp));   // the cap for the speed it really had
       key('KeyD',false); key('KeyW',false); if(run) key('ShiftLeft',false);
       for(let f=0;f<30;f++) pump();
-      return {yaw:+maxYaw.toFixed(2), cam:+maxCam.toFixed(2), camOver:+worstCamOver.toFixed(3), speed:+sp.toFixed(2), run:+runFrac(sp).toFixed(2), cap:+cap.toFixed(2)};
+      return {yaw:+maxYaw.toFixed(2), cam:+maxCam.toFixed(2), camOver:+worstCamOver.toFixed(3), speed:+sp.toFixed(2), run:+runFrac(sp).toFixed(2), cap:+cap.toFixed(2), knocks, walls, face:+maxFace.toFixed(2), n};
     };
     return {walk:measure(false), run:measure(true), capWalk:turnCap(0), capRun:turnCap(1)};
   })();
   check('holding a direction key turns the pup no faster than the walking cap, and slower when running',
-    kt.walk.speed > 0.5 && kt.run.run > kt.walk.run && kt.walk.yaw <= kt.walk.cap*1.5 + 0.05 && kt.run.yaw <= kt.run.cap*1.5 + 0.05 && kt.run.cap < kt.walk.cap,
-    `peak turn walking ${kt.walk.yaw} rad/s (cap ${kt.walk.cap} at ${kt.walk.run} of full run, x1.5 max boost), running ${kt.run.yaw} rad/s (cap ${kt.run.cap} at ${kt.run.run})`);
+    kt.walk.n >= 25 && kt.run.n >= 25 && kt.walk.speed > 0.5 && kt.run.run > kt.walk.run
+      && kt.walk.yaw <= kt.walk.cap*1.5 + 0.05 && kt.run.yaw <= kt.run.cap*1.5 + 0.05 && kt.run.cap < kt.walk.cap,
+    `peak heading turn walking ${kt.walk.yaw} rad/s (cap ${kt.walk.cap} at ${kt.walk.run} of full run, x1.5 max boost), running ${kt.run.yaw} rad/s (cap ${kt.run.cap} at ${kt.run.run}); frames knocked ${kt.walk.knocks}/${kt.run.knocks}, on a wall ${kt.walk.walls}/${kt.run.walls} (excluded; ${kt.walk.n}/${kt.run.n} steering frames); pup's facing peaked ${kt.walk.face} / ${kt.run.face} rad/s`);
   check('holding a direction key swings the camera no faster than the pup can turn',
     kt.walk.camOver <= 0.02 && kt.run.camOver <= 0.02,
     `worst frame over its own cap: walking ${kt.walk.camOver} rad/s, running ${kt.run.camOver} rad/s (peaks ${kt.walk.cam} / ${kt.run.cam}); before this change it swung at up to ${(2.2*Math.PI/2).toFixed(2)}`);
