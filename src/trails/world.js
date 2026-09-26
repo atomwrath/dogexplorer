@@ -29,6 +29,7 @@ import { THEME, THEMES, setTheme } from './themes.js';
 import { refreshSky, setSkyBackdrop, setSkyPlace } from './sky.js';
 import { patchGroundRing } from './noise-ring.js';
 import { patchGroundCover, setGroundCover, groundCoverAt } from './ground-cover.js';
+import { buildTrain } from './train.js';
 import { ribbonGeom, junctionGapGeom, waterSideGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
          pickTree, buildPOI, buildArea, buildAreaSign, POI_STYLE, AREA_STYLE, shade,
          buildBackdrop, backdropRadius, embankmentGeom, bridgeDeckGeom, bridgeFrameGeom,
@@ -399,7 +400,7 @@ function getMapLatLon(){ return MAP_LATLON; }
    terrain from reading as a wall (see the trade-off note above), and 3x fog hides the
    flat draw-distance edge on the default map without anyone touching a slider. Contour
    step's own default (STEP_M above) already matched what we want, so it's untouched. */
-let EXAG=0.25;  // slider is 0..2 now; 1.8 was tuned back when MAP_SCALE divided it
+let EXAG=0.2;  // slider is 0..2 now; 1.8 was tuned back when MAP_SCALE divided it
 let MAP_SCALE=0.2;   // "1 : N" in the UI, N = 1/MAP_SCALE -> 1:5
 let VERT_SCALE=EXAG;
 /* Multiplies the theme's own fogNear/fogFar (a 1.0 default reproduces the theme exactly,
@@ -407,7 +408,7 @@ let VERT_SCALE=EXAG;
    MAP_SCALE because it only touches scene.fog -- no geometry, no rebuild -- so it can
    apply on every slider `input` event for a genuinely live preview instead of waiting
    for `change` the way the two rebuild-triggering sliders have to. */
-let FOG_MUL=3;
+let FOG_MUL=5;
 
 function setStartHead(i){ startHead=i; }
 function getStartHead(){ return startHead; }
@@ -2210,6 +2211,82 @@ function planRails(edges){
 }
 function getRailStats(){ return Object.assign({}, RAIL_STATS); }
 
+/* LEVEL CROSSINGS, wherever a path meets the railway at a graph node (buildGraph splits
+   both lines at every X crossing, so each one is a node with rail on two sides and the
+   path on the others).
+
+   What goes down is what a real one has:
+     - crossing PANELS set flush with the rail tops -- one between the rails, one outside
+       each -- so the path runs over the track instead of the rails standing proud of it.
+       Timber for a footpath or a track, black rubber for a road. Along the rail they run
+       the crossing path's width, lengthened for a skewed crossing (width / sin angle);
+     - for a ROAD, TRACK or DIRT ROAD: a crossbuck on each approach, on its right-hand
+       side -- unless the source already put a level_crossing sign within a few metres,
+       which buildFixtures has stood up;
+     - for a FOOTPATH: a small STOP / LOOK / LISTEN board on each approach, facing the
+       walker coming up to the rails.
+   Recorded in RAIL_CROSSINGS for the harness. */
+let RAIL_CROSSINGS=[];
+const SIGN_KINDS = new Set(['road','dirtroad','track']);
+function buildRailCrossings(){
+  RAIL_CROSSINGS=[];
+  if(!GRAPH) return;
+  const at=new Map();
+  for(const e of GRAPH.edges) for(const n of [e.a,e.b]){ if(!at.has(n)) at.set(n,[]); at.get(n).push(e); }
+  const endDir=(e,n)=>{
+    // unit direction leaving node n along edge e, and whether n is e's first point
+    const P=e.railDraw ? e.railDraw.pts : e.pts, first=e.a===n;
+    const a=first?P[0]:P[P.length-1], b=first?P[Math.min(1,P.length-1)]:P[Math.max(0,P.length-2)];
+    const dx=b[0]-a[0], dz=b[1]-a[1], L=Math.hypot(dx,dz)||1;
+    return {dx:dx/L, dz:dz/L, first};
+  };
+  const frng=mulberry(7331);
+  for(const [n, list] of at){
+    const rails=list.filter(e=>e.kind==='rail' && e.railDraw), paths=list.filter(e=>e.kind!=='rail');
+    if(!rails.length || !paths.length) continue;
+    const R=rails[0], rd=endDir(R,n);
+    const P=R.railDraw.pts, Y=R.railDraw.ys, i=rd.first?0:P.length-1;
+    const cx=P[i][0], cz=P[i][1];
+    const railTop=(Y?Y[i]:0)+R.railDraw.lift+0.05+0.10+0.13;
+    // panel length along the rail: the widest crosser, stretched by the skew
+    let len=0, kinds=[];
+    for(const e of paths){
+      const d=endDir(e,n), sin=Math.abs(rd.dx*d.dz-rd.dz*d.dx);
+      len=Math.max(len, Math.min(pathOutlineWidth(e.kind)/Math.max(0.35,sin), pathOutlineWidth(e.kind)*3));
+      kinds.push(e.kind);
+    }
+    len+=0.6;
+    const road=kinds.includes('road');
+    const mat=toon(road ? '#3a3835' : '#8a6a45');
+    const grp=new THREE.Group(); grp.name='rail-crossing';
+    grp.position.set(cx, railTop, cz); grp.rotation.y=faceX(rd.dx, rd.dz);
+    // local x along the rail, z across it; tops flush with the rail head
+    for(const [zc, w] of [[0, 1.24], [-(0.72+0.1+0.4), 0.8], [0.72+0.1+0.4, 0.8]]){
+      const m=new THREE.Mesh(new THREE.BoxGeometry(len, 0.2, w), mat);
+      m.position.set(0, -0.1, zc); grp.add(m);
+    }
+    worldG.add(grp);
+    // signs, one per approaching path edge
+    const railHalf=pathOutlineWidth('rail')/2;
+    let signs=0; const signKinds=[];
+    for(const e of paths){
+      const d=endDir(e,n);
+      const side=[d.dz, -d.dx];                          // the approach's right-hand side
+      const back=railHalf+1.1, aside=pathOutlineWidth(e.kind)/2+0.45;
+      const x=cx+d.dx*back+side[0]*aside, z=cz+d.dz*back+side[1]*aside;
+      const bigSign=SIGN_KINDS.has(e.kind);
+      if(bigSign && FIXTURES.some(f=>f.kind==='crossbuck' && Math.hypot(f.x-cx,f.z-cz)<12*MAP_SCALE)) continue;
+      const grpS=buildPOI({kind: bigSign ? 'crossbuck' : 'railsign', name:null}, frng);
+      grpS.position.set(x, terrainY(x,z,VERT_SCALE), z);
+      grpS.rotation.y=faceZ(d.dx, d.dz);                 // board faces out, toward whoever is coming
+      grpS.name='rail-crossing-sign'; worldG.add(grpS); signs++; signKinds.push(bigSign ? 'crossbuck' : 'railsign');
+    }
+    RAIL_CROSSINGS.push({x:cx, z:cz, y:railTop, kinds, len:+len.toFixed(2), signs, signKinds, road});
+  }
+  RAIL_STATS.crossings=RAIL_CROSSINGS.length;
+}
+function getRailCrossings(){ return RAIL_CROSSINGS.slice(); }
+
 /* The rendering class of an edge: its kind, refined by surface. A concrete cycleway is a
    trail to everything else in this file, but it is not brown. */
 function styleKey(e){
@@ -2935,6 +3012,7 @@ function rebuildWorld(){
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W,lift+0.05,hs),trailMat(st.tread,rank)));
     if(st.rail){
       const tg=railTrackGeoms(rpts, hs, lift, railPlan.tieGap, railPlan.rack.has(e));
+      e.railDraw={pts:rpts, ys:hs, lift};     // the train and the crossings ride exactly this
       const add=(geo,col,name)=>{ if(!geo) return; const m=new THREE.Mesh(geo,toon(col)); m.name=name; worldG.add(m); };
       add(tg.ties, st.tie, 'rail-ties');
       add(tg.rails, st.steel, 'rail-rails');
@@ -2965,6 +3043,9 @@ function rebuildWorld(){
     }
     buildDecks(e, prof, W, lift);
   });
+
+  buildRailCrossings();
+  buildTrain(GRAPH.edges.filter(e=>e.kind==='rail'), worldG);
 
   /* Creeks. Bed first (wet gravel, the full channel width, lying in the notch the bench
      cut), then the water, then a narrow pale band down the middle -- the toon shader's
@@ -3394,5 +3475,5 @@ export { loadWorld, rebuildWorld, addLayers, clearLayers, hasBundle, setContourS
          getAreaLabels, updateAreaLabels, getAreaSolids, areaBlocked, areaSolidTop, lineOfSight, nearestSolidFace, solidEmbed, distToSolid,
          setThemeById, getTheme, setMapScale, getMapScale, getExaggeration, getBackdrop,
          setFogMultiplier, getFogMultiplier, setTerrainQuadBudget, getDemStride, applyThemeLighting,
-         getGraph, getTrailheads, getPOIs, getFixtures, treeSpotOK, getPowerSpans, getRailStats, getAreas, getBBox, getCropStats,
+         getGraph, getTrailheads, getPOIs, getFixtures, treeSpotOK, getRailCrossings, getPowerSpans, getRailStats, getAreas, getBBox, getCropStats,
          getWorldGroup, setStartHead, getStartHead, setVertScale, getVertScale, compass, THEMES, THEME };

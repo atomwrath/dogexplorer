@@ -16,6 +16,15 @@ html, body{overflow:hidden;height:100%;max-width:100%;overscroll-behavior:none;t
 
 /* Pup Trails: layout only — colors/tokens come from styles/base.css. */
 body{margin:0;font-family:"Comic Sans MS","Chalkboard SE",system-ui,sans-serif;background:var(--cream);color:var(--ink);}
+/* NO SELECTION, NO CALLOUT. On a tablet every control is held, and a held finger is a
+   long-press: iOS and Android answer it by selecting the nearest text (a hint, a label,
+   the HUD) and raising their selection/callout bubble over the game -- the "selection
+   pop up as we use the controls". Nothing on this page is text to copy, so selection is
+   off everywhere, and the grey tap flash with it. Pup City and Neon do the same. Real text
+   fields get it back just below, or naming a course would be impossible. */
+html, body{-webkit-user-select:none; user-select:none; -webkit-touch-callout:none;
+           -webkit-tap-highlight-color:transparent;}
+input, textarea, [contenteditable]{-webkit-user-select:text; user-select:text; -webkit-touch-callout:default;}
 #app{display:flex;flex-direction:column;height:100dvh;}
 header{display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--card);border-bottom:4px solid var(--ink);}
 .logo{display:flex;align-items:center;gap:10px;}

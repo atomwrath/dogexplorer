@@ -44,13 +44,45 @@ sys.path.insert(0, str(ROOT))
 import build as builder
 
 DECL = re.compile(r'^(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)', re.M)
+# `let a = 1, b = [], c = null;` declares THREE names, and DECL alone sees only the first --
+# which once hid a real clash (two modules' top-level `STATE`, the second declared after
+# a comma) until the bundle threw on load. So every top-level let/const/var statement is
+# also read declarator by declarator: split at depth-0 commas up to its depth-0 `;`.
+VARSTMT = re.compile(r'^(?:const|let|var)\s+', re.M)
+IDENT = re.compile(r'\s*([A-Za-z_$][\w$]*)')
+def top_level_names(src):
+    names = set(DECL.findall(src))
+    for m in VARSTMT.finditer(src):
+        i, depth, part_start, q = m.end(), 0, m.end(), None
+        parts = []
+        while i < len(src):
+            ch = src[i]
+            if q:
+                if ch == '\\': i += 2; continue
+                if ch == q: q = None
+            elif ch in '\'"`': q = ch
+            elif ch in '([{': depth += 1
+            elif ch in ')]}': depth -= 1
+            elif depth == 0 and ch in ',;':
+                parts.append(src[part_start:i])
+                part_start = i + 1
+                if ch == ';': break
+            elif depth == 0 and ch == '\n' and not src[part_start:i].strip().endswith((',', '=')) and '=' in src[part_start:i] and not src[i+1:].lstrip().startswith((',', '.', '?', ':', '+', '-', '*', '/', '&', '|')):
+                # an ASI-terminated declaration with no semicolon
+                parts.append(src[part_start:i]); break
+            i += 1
+        for part in parts:
+            mm = IDENT.match(part)
+            if mm: names.add(mm.group(1))
+    return names
+
 for entry_rel in ['src/city/main.js', 'src/creator/main.js', 'src/trails/main.js', 'src/neon/main.js']:
     order = []
     builder.collect(ROOT / entry_rel, set(), order)
     seen = {}
     clashes = []
     for path in order:
-        for name in set(DECL.findall(path.read_text(encoding='utf-8'))):
+        for name in top_level_names(path.read_text(encoding='utf-8')):
             if name in seen:
                 clashes.append(f'{name}: {seen[name]} vs {path.relative_to(ROOT)}')
             else:

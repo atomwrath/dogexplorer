@@ -46,6 +46,15 @@ html, body{overflow:hidden;height:100%;max-width:100%;overscroll-behavior:none;t
 
 /* Pup Trails: layout only — colors/tokens come from styles/base.css. */
 body{margin:0;font-family:"Comic Sans MS","Chalkboard SE",system-ui,sans-serif;background:var(--cream);color:var(--ink);}
+/* NO SELECTION, NO CALLOUT. On a tablet every control is held, and a held finger is a
+   long-press: iOS and Android answer it by selecting the nearest text (a hint, a label,
+   the HUD) and raising their selection/callout bubble over the game -- the "selection
+   pop up as we use the controls". Nothing on this page is text to copy, so selection is
+   off everywhere, and the grey tap flash with it. Pup City and Neon do the same. Real text
+   fields get it back just below, or naming a course would be impossible. */
+html, body{-webkit-user-select:none; user-select:none; -webkit-touch-callout:none;
+           -webkit-tap-highlight-color:transparent;}
+input, textarea, [contenteditable]{-webkit-user-select:text; user-select:text; -webkit-touch-callout:default;}
 #app{display:flex;flex-direction:column;height:100dvh;}
 header{display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--card);border-bottom:4px solid var(--ink);}
 .logo{display:flex;align-items:center;gap:10px;}
@@ -5713,7 +5722,8 @@ const POI_STYLE={
   gate:{em:'🚧',label:'Gate',fixture:true},
   toilet:{em:'🚻',label:'Toilets',fixture:true},
   infoboard:{em:'ℹ️',label:'Information',fixture:true},
-  guidepost:{em:'🪧',label:'Guidepost',fixture:true}
+  guidepost:{em:'🪧',label:'Guidepost',fixture:true},
+  railsign:{em:'🚸',label:'Railway crossing',fixture:true}
 };
 /* The pylon's wire attachment points, shared with world.js which strings the spans:
    the model and the wires must agree on where the insulators are, or every wire ends in
@@ -5945,6 +5955,16 @@ function buildPOI(poi,rng){
     for(const sx of [-1,1]){
       const lamp=M(new THREE.CylinderGeometry(0.17,0.17,0.12,10),toon('#c33b2c'));
       lamp.rotation.x=Math.PI/2; lamp.position.set(sx*0.5,2.1,0.08); g.add(lamp);
+    }
+  }else if(k==='railsign'){
+    /* The footpath crossing board: STOP / LOOK / LISTEN on a short post, painted on both
+       faces, facing local +z -- world.js turns it toward the walker approaching the rails. */
+    const post=M(new THREE.CylinderGeometry(0.06,0.07,1.9,6),toon('#3a3a3a')); post.position.y=0.95; g.add(post);
+    const back=M(new THREE.BoxGeometry(1.25,0.62,0.05),toon('#c33b2c')); back.position.y=1.65; g.add(back);
+    const mat=new THREE.MeshToonMaterial({map:plaqueTex('STOP \u00b7 LOOK \u00b7 LISTEN','Railway crossing'),gradientMap:toonTex});
+    for(const sz of [1,-1]){
+      const face=M(new THREE.BoxGeometry(1.12,0.5,0.02),mat);
+      face.position.set(0,1.65,sz*0.04); if(sz<0) face.rotation.y=Math.PI; g.add(face);
     }
   }else if(k==='buffer'){
     // end of the line: two posts and a red-and-white beam across the rails
@@ -8766,6 +8786,227 @@ function groundCoverState(){ return Object.assign({}, STATE); }
 function groundCoverSource(){ return {vertDecl:COVER_VERT_DECL, vertBody:COVER_VERT_BODY, fragDecl:COVER_FRAG_DECL, fragBody:COVER_FRAG_BODY}; }
 function groundCoverUniforms(){ return COVER_UNIFORMS; }
 
+/* ==== src/trails/train.js ==== */
+/* A little passenger train on the railway.
+
+   Two red-and-cream railcars, cab at each end, shuttling end to end along the longest run
+   of track on the map: out, a pause at the terminus, and back. On the Barr map that is the
+   Manitou and Pike's Peak line -- the cog railway -- all 14 km of it.
+
+   TRAIN_ROUTE. The rail edges of the graph form a network (a line split at every junction and
+   crossing, plus any sidings). The train runs its DIAMETER: the pair of rail endpoints
+   farthest apart along the track, found by the usual double sweep (from any end, go to
+   the farthest; from there, go to the farthest again). Each edge is walked in whichever
+   direction the path needs, on exactly the polyline and heights the track itself was
+   drawn from (world.js keeps them on the edge as `railDraw`), so the wheels sit on the
+   rails the player can see, bridge decks and all.
+
+   MOTION. A top speed, gentle acceleration, and braking computed from the distance left
+   (v = sqrt(2*a*d)), so it eases into each terminus rather than stopping dead. Every car
+   is placed by its two bogies -- each at its own point on the track -- and turned and
+   pitched to the line between them, so a car on a 25% grade tilts up the hill and a car
+   on a bend follows it.
+
+   THE PUP. A train that runs a dog down is not a thing this game does. The track ahead of
+   the leading end is watched; a pup standing on it brings the train to a halt a few
+   metres short, and it waits until the pup steps off. A pup that walks into the side of
+   a car is nudged back out of it (trainPush), never passed through. */
+
+
+const TRAIN = {
+  cars: 2, carLen: 11.5, gap: 0.9, width: 2.7,
+  speed: 6.5,          // world units per second at full line speed
+  accel: 0.8,          // units/s^2 -- a heavy train, not a car
+  dwell: 12,           // seconds at each terminus
+  bogie: 0.36,         // bogie centres, as a fraction of the car length either side
+  look: 40,            // how far ahead of the leading end it watches for the pup
+  stopShort: 6,        // and how far short of the pup it stops
+  pupR: 1.3,           // how close to the track centreline counts as ON the track
+  minRoute: 40,        // no train on a stub shorter than this plus the train itself
+};
+const RAIL_TOP = 0.28;  // rail top above the tread profile: ballast 0.05 + sleeper 0.10 + rail 0.13
+
+let TRAIN_ROUTE = null, TRAIN_CARS = [], TRAIN_STATE = null;
+
+/* ---------- route ---------- */
+function polyLen2(pts){ let L=0; for(let i=1;i<pts.length;i++) L+=Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1]); return L; }
+/* edges: rail edges with {a, b, railDraw:{pts, ys, lift}}. Returns {pts:[[x,y,z]], cum, len}
+   for the longest route, or null. */
+function planTrainRoute(edges){
+  const E = edges.filter(e => e.railDraw && e.railDraw.pts.length >= 2);
+  if(!E.length) return null;
+  const adj = new Map();
+  const add = (n, e, other) => { if(!adj.has(n)) adj.set(n, []); adj.get(n).push({e, other}); };
+  for(const e of E){ e._rlen = polyLen2(e.railDraw.pts); add(e.a, e, e.b); add(e.b, e, e.a); }
+  const sweep = start => {
+    const dist = new Map([[start, 0]]), via = new Map(), todo = [start];
+    // Dijkstra on a graph of a handful of nodes: a linear scan for the minimum is plenty
+    const done = new Set();
+    while(todo.length){
+      let bi = 0; for(let i=1;i<todo.length;i++) if(dist.get(todo[i]) < dist.get(todo[bi])) bi = i;
+      const u = todo.splice(bi, 1)[0];
+      if(done.has(u)) continue; done.add(u);
+      for(const {e, other} of adj.get(u) || []){
+        const d = dist.get(u) + e._rlen;
+        if(!dist.has(other) || d < dist.get(other)){ dist.set(other, d); via.set(other, {e, from:u}); todo.push(other); }
+      }
+    }
+    let far = start; for(const [n, d] of dist) if(d > dist.get(far)) far = n;
+    return {far, dist, via};
+  };
+  // the diameter of each connected piece; keep the longest
+  let best = null;
+  const seen = new Set();
+  for(const n of adj.keys()){
+    if(seen.has(n)) continue;
+    const a = sweep(n); for(const k of a.dist.keys()) seen.add(k);
+    const b = sweep(a.far);
+    const L = b.dist.get(b.far);
+    if(!best || L > best.L) best = {L, from:a.far, to:b.far, via:b.via};
+  }
+  if(!best || best.L <= 0) return null;
+  // walk back from `to` to `from`, then lay the edges out in travel order
+  const chain = [];
+  for(let n = best.to; n !== best.from; ){ const v = best.via.get(n); chain.push({e:v.e, fwd: v.e.a === v.from}); n = v.from; }
+  chain.reverse();
+  const pts = [];
+  for(const {e, fwd} of chain){
+    const P = e.railDraw.pts, Y = e.railDraw.ys, top = (e.railDraw.lift || 0) + RAIL_TOP;
+    const idx = [...P.keys()]; if(!fwd) idx.reverse();
+    for(const i of idx){
+      const q = [P[i][0], (Y ? Y[i] : 0) + top, P[i][1]];
+      const last = pts[pts.length-1];
+      if(last && Math.hypot(last[0]-q[0], last[2]-q[2]) < 1e-6) continue;
+      pts.push(q);
+    }
+  }
+  const cum = [0];
+  for(let i=1;i<pts.length;i++) cum.push(cum[i-1] + Math.hypot(pts[i][0]-pts[i-1][0], pts[i][2]-pts[i-1][2]));
+  return {pts, cum, len: cum[cum.length-1], edges: chain.length};
+}
+/* the point `s` along the route, clamped to it */
+function routeAt(R, s){
+  s = Math.max(0, Math.min(R.len, s));
+  let lo = 0, hi = R.cum.length-1;
+  while(hi - lo > 1){ const m = (lo+hi) >> 1; if(R.cum[m] <= s) lo = m; else hi = m; }
+  const a = R.pts[lo], b = R.pts[hi], seg = R.cum[hi]-R.cum[lo], t = seg > 0 ? (s-R.cum[lo])/seg : 0;
+  return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
+}
+
+/* ---------- the railcar ----------
+   Built along +z, rail top at y=0, a cab at each end so it can lead either way. Real
+   metres, like every other object the pup stands beside. */
+function buildCar(){
+  const g = new THREE.Group(), L = TRAIN.carLen, W = TRAIN.width;
+  const red = toon('#c23b22'), cream = toon('#f1e3c1'), glass = toon('#2d3a46'), roofM = toon('#b9b8b0'),
+        dark = toon('#2b2b2b'), door = toon('#8e2a18'), lamp = toon('#ffe7a0');
+  const box = (w, h, d, mat, x, y, z) => { const m = M(new THREE.BoxGeometry(w, h, d), mat); m.position.set(x, y, z); g.add(m); return m; };
+  for(const bz of [-L*TRAIN.bogie, L*TRAIN.bogie]){
+    box(2.0, 0.55, 2.6, dark, 0, 0.42, bz);
+    for(const wz of [-0.75, 0.75]) for(const sx of [-1, 1]){
+      const w = M(new THREE.CylinderGeometry(0.42, 0.42, 0.14, 10), dark);
+      w.rotation.z = Math.PI/2; w.position.set(sx*0.78, 0.42, bz+wz); g.add(w);
+    }
+  }
+  box(W-0.2, 0.4, L-0.4, dark, 0, 0.95, 0);                 // underframe
+  box(W, 2.3, L-0.8, red, 0, 2.3, 0);                      // body
+  box(W+0.04, 0.18, L-0.7, cream, 0, 1.55, 0);             // waist stripe
+  box(W+0.03, 0.85, L-2.6, glass, 0, 2.6, 0);              // side windows
+  box(W-0.2, 0.3, L-0.9, roofM, 0, 3.6, 0);                // roof
+  for(const sz of [-1, 1]){
+    box(W-0.5, 0.9, 0.06, glass, 0, 2.6, sz*(L/2-0.37));   // cab windscreen
+    box(W-0.1, 0.5, 0.05, cream, 0, 1.6, sz*(L/2-0.38));   // cream end band
+    for(const sx of [-1, 1]){
+      const hl = M(new THREE.CylinderGeometry(0.16, 0.16, 0.1, 10), lamp);
+      hl.rotation.x = Math.PI/2; hl.position.set(sx*0.85, 1.6, sz*(L/2-0.33)); g.add(hl);
+      box(0.05, 2.0, 1.0, door, sx*(W/2+0.02), 2.1, sz*L*0.2);      // doors
+    }
+  }
+  g.name = 'train-car';
+  return g;
+}
+
+/* ---------- lifecycle ---------- */
+/* Called by world.js once the track is drawn. Replaces any previous train. */
+function buildTrain(edges, parent){
+  TRAIN_ROUTE = null; TRAIN_CARS = []; TRAIN_STATE = null;
+  const R = planTrainRoute(edges);
+  const Lt = TRAIN.cars*TRAIN.carLen + (TRAIN.cars-1)*TRAIN.gap;
+  if(!R || R.len < Lt + TRAIN.minRoute) return null;
+  TRAIN_ROUTE = R;
+  for(let i=0;i<TRAIN.cars;i++){ const c = buildCar(); parent.add(c); TRAIN_CARS.push(c); }
+  // start at the beginning of the route, about to set off
+  TRAIN_STATE = {r: 0, dir: 1, v: 0, dwellT: 3, blocked: false, trips: 0, Lt};
+  placeCars();
+  return TRAIN_STATE;
+}
+function placeCars(){
+  if(!TRAIN_STATE) return;
+  // car i counted from the r end; each car's two bogies at their own track points
+  for(let i=0;i<TRAIN_CARS.length;i++){
+    const c0 = TRAIN_STATE.r + i*(TRAIN.carLen + TRAIN.gap), mid = c0 + TRAIN.carLen/2;
+    const f = routeAt(TRAIN_ROUTE, mid + TRAIN.carLen*TRAIN.bogie), b = routeAt(TRAIN_ROUTE, mid - TRAIN.carLen*TRAIN.bogie);
+    const dx = f[0]-b[0], dy = f[1]-b[1], dz = f[2]-b[2], h = Math.hypot(dx, dz) || 1e-9;
+    const car = TRAIN_CARS[i];
+    car.position.set((f[0]+b[0])/2, (f[1]+b[1])/2, (f[2]+b[2])/2);
+    car.rotation.order = 'YXZ';
+    car.rotation.y = Math.atan2(dx, dz);          // local +z along the track
+    car.rotation.x = -Math.atan2(dy, h);          // and pitched up or down its grade
+  }
+}
+/* Distance along the track from the leading end to the pup, if the pup is ON the track
+   ahead within TRAIN.look; otherwise Infinity. Sampled every metre and a half. */
+function pupAhead(px, pz){
+  const lead = TRAIN_STATE.dir > 0 ? TRAIN_STATE.r + TRAIN_STATE.Lt : TRAIN_STATE.r;
+  for(let d = 0; d <= TRAIN.look; d += 1.5){
+    const q = routeAt(TRAIN_ROUTE, lead + TRAIN_STATE.dir*d);
+    if(Math.hypot(q[0]-px, q[2]-pz) < TRAIN.pupR) return d;
+  }
+  return Infinity;
+}
+function updateTrain(dt, px, pz){
+  if(!TRAIN_STATE) return;
+  const end = TRAIN_STATE.dir > 0 ? TRAIN_ROUTE.len - TRAIN_STATE.Lt : 0;
+  const left = Math.abs(end - TRAIN_STATE.r);
+  if(TRAIN_STATE.dwellT > 0){
+    TRAIN_STATE.dwellT -= dt; TRAIN_STATE.v = 0;
+    if(TRAIN_STATE.dwellT <= 0 && left < 0.05){ TRAIN_STATE.dir = -TRAIN_STATE.dir; TRAIN_STATE.trips++; }
+    placeCars(); return;
+  }
+  const ahead = (px == null) ? Infinity : pupAhead(px, pz);
+  TRAIN_STATE.blocked = ahead < Infinity;
+  const room = Math.min(left, TRAIN_STATE.blocked ? Math.max(0, ahead - TRAIN.stopShort) : Infinity);
+  const vCap = Math.min(TRAIN.speed, Math.sqrt(2*TRAIN.accel*room));
+  TRAIN_STATE.v = TRAIN_STATE.v < vCap ? Math.min(vCap, TRAIN_STATE.v + TRAIN.accel*dt) : vCap;
+  TRAIN_STATE.r += TRAIN_STATE.dir*Math.min(TRAIN_STATE.v*dt, left);
+  if(Math.abs(end - TRAIN_STATE.r) < 0.05 && TRAIN_STATE.v < 0.5){ TRAIN_STATE.r = end; TRAIN_STATE.v = 0; TRAIN_STATE.dwellT = TRAIN.dwell; }
+  placeCars();
+}
+/* How far to move the pup so it is not inside a car, or null. Each car is a box
+   TRAIN.width wide (plus a little) along its own bogie line. */
+function trainPush(px, pz){
+  if(!TRAIN_STATE) return null;
+  const half = TRAIN.width/2 + 0.45;
+  for(const car of TRAIN_CARS){
+    const yaw = car.rotation.y, ax = Math.sin(yaw), az = Math.cos(yaw);
+    const rx = px - car.position.x, rz = pz - car.position.z;
+    const along = rx*ax + rz*az, side = rx*az - rz*ax;
+    if(Math.abs(along) > TRAIN.carLen/2 || Math.abs(side) >= half) continue;
+    const out = (side >= 0 ? half : -half) - side;          // straight out the nearer side
+    return [out*az, -out*ax];
+  }
+  return null;
+}
+function getTrainState(){
+  if(!TRAIN_STATE) return {on:false};
+  return {on:true, top:TRAIN.speed, r:TRAIN_STATE.r, dir:TRAIN_STATE.dir, v:TRAIN_STATE.v, blocked:TRAIN_STATE.blocked, trips:TRAIN_STATE.trips,
+          dwell:TRAIN_STATE.dwellT > 0, len:TRAIN_ROUTE.len, routeEdges:TRAIN_ROUTE.edges, trainLen:TRAIN_STATE.Lt,
+          cars:TRAIN_CARS.map(c => ({x:c.position.x, y:c.position.y, z:c.position.z, yaw:c.rotation.y, pitch:c.rotation.x}))};
+}
+/* test seam: put the train somewhere and let the next update run from there */
+function setTrainForTest(r, dir, v){ if(!TRAIN_STATE) return; TRAIN_STATE.r = r; TRAIN_STATE.dir = dir; TRAIN_STATE.v = v; TRAIN_STATE.dwellT = 0; placeCars(); }
+function trainRouteAt(s){ return TRAIN_ROUTE ? routeAt(TRAIN_ROUTE, s) : null; }
+
 /* ==== src/trails/world.js ==== */
 /* Scene state + rebuildWorld(). Owns GRAPH, POIS, AREAS, TRAILHEADS, bboxW -- read
    elsewhere as live bindings, mutated only through the functions here, same rule as
@@ -8795,6 +9036,7 @@ function groundCoverUniforms(){ return COVER_UNIFORMS; }
 /* One-way: sky.js knows about the renderer's lights and the theme palette, and nothing
    about maps, graphs or bundles. That is what lets this file call into it from
    applyThemeLighting without a cycle -- the chain is themes -> sky -> world -> main. */
+
 
 
 
@@ -9165,7 +9407,7 @@ function getMapLatLon(){ return MAP_LATLON; }
    terrain from reading as a wall (see the trade-off note above), and 3x fog hides the
    flat draw-distance edge on the default map without anyone touching a slider. Contour
    step's own default (STEP_M above) already matched what we want, so it's untouched. */
-let EXAG=0.25;  // slider is 0..2 now; 1.8 was tuned back when MAP_SCALE divided it
+let EXAG=0.2;  // slider is 0..2 now; 1.8 was tuned back when MAP_SCALE divided it
 let MAP_SCALE=0.2;   // "1 : N" in the UI, N = 1/MAP_SCALE -> 1:5
 let VERT_SCALE=EXAG;
 /* Multiplies the theme's own fogNear/fogFar (a 1.0 default reproduces the theme exactly,
@@ -9173,7 +9415,7 @@ let VERT_SCALE=EXAG;
    MAP_SCALE because it only touches scene.fog -- no geometry, no rebuild -- so it can
    apply on every slider `input` event for a genuinely live preview instead of waiting
    for `change` the way the two rebuild-triggering sliders have to. */
-let FOG_MUL=3;
+let FOG_MUL=5;
 
 function setStartHead(i){ startHead=i; }
 function getStartHead(){ return startHead; }
@@ -10976,6 +11218,82 @@ function planRails(edges){
 }
 function getRailStats(){ return Object.assign({}, RAIL_STATS); }
 
+/* LEVEL CROSSINGS, wherever a path meets the railway at a graph node (buildGraph splits
+   both lines at every X crossing, so each one is a node with rail on two sides and the
+   path on the others).
+
+   What goes down is what a real one has:
+     - crossing PANELS set flush with the rail tops -- one between the rails, one outside
+       each -- so the path runs over the track instead of the rails standing proud of it.
+       Timber for a footpath or a track, black rubber for a road. Along the rail they run
+       the crossing path's width, lengthened for a skewed crossing (width / sin angle);
+     - for a ROAD, TRACK or DIRT ROAD: a crossbuck on each approach, on its right-hand
+       side -- unless the source already put a level_crossing sign within a few metres,
+       which buildFixtures has stood up;
+     - for a FOOTPATH: a small STOP / LOOK / LISTEN board on each approach, facing the
+       walker coming up to the rails.
+   Recorded in RAIL_CROSSINGS for the harness. */
+let RAIL_CROSSINGS=[];
+const SIGN_KINDS = new Set(['road','dirtroad','track']);
+function buildRailCrossings(){
+  RAIL_CROSSINGS=[];
+  if(!GRAPH) return;
+  const at=new Map();
+  for(const e of GRAPH.edges) for(const n of [e.a,e.b]){ if(!at.has(n)) at.set(n,[]); at.get(n).push(e); }
+  const endDir=(e,n)=>{
+    // unit direction leaving node n along edge e, and whether n is e's first point
+    const P=e.railDraw ? e.railDraw.pts : e.pts, first=e.a===n;
+    const a=first?P[0]:P[P.length-1], b=first?P[Math.min(1,P.length-1)]:P[Math.max(0,P.length-2)];
+    const dx=b[0]-a[0], dz=b[1]-a[1], L=Math.hypot(dx,dz)||1;
+    return {dx:dx/L, dz:dz/L, first};
+  };
+  const frng=mulberry(7331);
+  for(const [n, list] of at){
+    const rails=list.filter(e=>e.kind==='rail' && e.railDraw), paths=list.filter(e=>e.kind!=='rail');
+    if(!rails.length || !paths.length) continue;
+    const R=rails[0], rd=endDir(R,n);
+    const P=R.railDraw.pts, Y=R.railDraw.ys, i=rd.first?0:P.length-1;
+    const cx=P[i][0], cz=P[i][1];
+    const railTop=(Y?Y[i]:0)+R.railDraw.lift+0.05+0.10+0.13;
+    // panel length along the rail: the widest crosser, stretched by the skew
+    let len=0, kinds=[];
+    for(const e of paths){
+      const d=endDir(e,n), sin=Math.abs(rd.dx*d.dz-rd.dz*d.dx);
+      len=Math.max(len, Math.min(pathOutlineWidth(e.kind)/Math.max(0.35,sin), pathOutlineWidth(e.kind)*3));
+      kinds.push(e.kind);
+    }
+    len+=0.6;
+    const road=kinds.includes('road');
+    const mat=toon(road ? '#3a3835' : '#8a6a45');
+    const grp=new THREE.Group(); grp.name='rail-crossing';
+    grp.position.set(cx, railTop, cz); grp.rotation.y=faceX(rd.dx, rd.dz);
+    // local x along the rail, z across it; tops flush with the rail head
+    for(const [zc, w] of [[0, 1.24], [-(0.72+0.1+0.4), 0.8], [0.72+0.1+0.4, 0.8]]){
+      const m=new THREE.Mesh(new THREE.BoxGeometry(len, 0.2, w), mat);
+      m.position.set(0, -0.1, zc); grp.add(m);
+    }
+    worldG.add(grp);
+    // signs, one per approaching path edge
+    const railHalf=pathOutlineWidth('rail')/2;
+    let signs=0; const signKinds=[];
+    for(const e of paths){
+      const d=endDir(e,n);
+      const side=[d.dz, -d.dx];                          // the approach's right-hand side
+      const back=railHalf+1.1, aside=pathOutlineWidth(e.kind)/2+0.45;
+      const x=cx+d.dx*back+side[0]*aside, z=cz+d.dz*back+side[1]*aside;
+      const bigSign=SIGN_KINDS.has(e.kind);
+      if(bigSign && FIXTURES.some(f=>f.kind==='crossbuck' && Math.hypot(f.x-cx,f.z-cz)<12*MAP_SCALE)) continue;
+      const grpS=buildPOI({kind: bigSign ? 'crossbuck' : 'railsign', name:null}, frng);
+      grpS.position.set(x, terrainY(x,z,VERT_SCALE), z);
+      grpS.rotation.y=faceZ(d.dx, d.dz);                 // board faces out, toward whoever is coming
+      grpS.name='rail-crossing-sign'; worldG.add(grpS); signs++; signKinds.push(bigSign ? 'crossbuck' : 'railsign');
+    }
+    RAIL_CROSSINGS.push({x:cx, z:cz, y:railTop, kinds, len:+len.toFixed(2), signs, signKinds, road});
+  }
+  RAIL_STATS.crossings=RAIL_CROSSINGS.length;
+}
+function getRailCrossings(){ return RAIL_CROSSINGS.slice(); }
+
 /* The rendering class of an edge: its kind, refined by surface. A concrete cycleway is a
    trail to everything else in this file, but it is not brown. */
 function styleKey(e){
@@ -11701,6 +12019,7 @@ function rebuildWorld(){
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W,lift+0.05,hs),trailMat(st.tread,rank)));
     if(st.rail){
       const tg=railTrackGeoms(rpts, hs, lift, railPlan.tieGap, railPlan.rack.has(e));
+      e.railDraw={pts:rpts, ys:hs, lift};     // the train and the crossings ride exactly this
       const add=(geo,col,name)=>{ if(!geo) return; const m=new THREE.Mesh(geo,toon(col)); m.name=name; worldG.add(m); };
       add(tg.ties, st.tie, 'rail-ties');
       add(tg.rails, st.steel, 'rail-rails');
@@ -11731,6 +12050,9 @@ function rebuildWorld(){
     }
     buildDecks(e, prof, W, lift);
   });
+
+  buildRailCrossings();
+  buildTrain(GRAPH.edges.filter(e=>e.kind==='rail'), worldG);
 
   /* Creeks. Bed first (wet gravel, the full channel width, lying in the notch the bench
      cut), then the water, then a narrow pale band down the middle -- the toon shader's
@@ -14963,6 +15285,7 @@ function parsePupFile(data){
 
 
 
+
 /* fov: Pup City's 38 deg is a tight telephoto, chosen for its small enclosed blocks;
    trails is wide open country, so a wider, more natural-feeling field of view suits it.
 
@@ -16398,6 +16721,78 @@ function paintStick(){
     : 'translate(0px, 0px)';
 }
 
+/* The other half of trails.css's no-selection rule. CSS stops selection and the iOS
+   callout; Android also raises a context menu on a long-press, and a few WebViews start a
+   selection before the CSS applies. Both are cancelled everywhere except real text fields
+   (course names, dates), which keep their normal long-press behaviour. */
+/* STEERING ON THE STICK.
+   The stick gives an absolute direction relative to the camera, and the pup used to swing
+   onto it at one fixed rate however hard the stick was pushed -- so a gentle walk turned
+   exactly as fast as a sprint. Worse, near the centre of the stick the ANGLE is
+   hypersensitive: a few pixels of sideways wobble on a lightly held thumb is a 30-45
+   degree change of direction. Slow walking was twitchy for both reasons at once.
+
+   So on the stick the walking heading now TURNS toward the requested direction at a
+   limited rate, and that rate grows with deflection: a light push steers gently, a full
+   push is as quick as before. A big correction (turning round) is allowed to go faster
+   than a small one, so reversing never feels sluggish. From a standstill the pup still
+   pivots straight onto the stick -- nobody wants to walk off the wrong way first.
+   The keyboard steers through the same limited heading (as full deflection) -- see below.
+
+   TURNING HAS A TOP SPEED, TOO. Deflection alone was not enough: the keyboard is always
+   "full deflection", so holding a direction key snapped the walk onto it and the camera
+   swung round after it at full rate -- nearly 200 deg/s of spin holding A or D, at a
+   walk or a sprint alike. A running animal carries momentum and takes a wide line; so the
+   turn rate is also CAPPED BY SPEED, from ~170 deg/s walking down to ~90 deg/s at a full
+   run, for the stick and the keys alike. The camera's swing-behind obeys the same cap, so
+   the view can never whirl round faster than the pup itself could turn.
+
+   runFrac(): 0 standing .. 1 at full running speed.
+   steerRate(mag, err, run): the most the heading may turn this second, rad/s.
+   steerStep(cur, target, mag, speed, dt, run): the new heading. Angles in radians.
+   camFollowStep(dc, mag, onStick, run, dt): this frame's camera swing toward input dc. */
+/* STEER_SLOW: base turn rate at a light push, rad/s -- about 60 deg/s before the
+   big-correction boost, i.e. roughly a walker's pace of turning. STEER_FAST: at full
+   deflection. TURN_CAP_WALK / TURN_CAP_RUN: the speed cap at a walk and at a full run. */
+const STEER_SLOW = 1.0, STEER_FAST = 6.5, STEER_PIVOT_SPEED = 0.35;
+const TURN_CAP_WALK = 3.0, TURN_CAP_RUN = 1.6;
+function runFrac(speed){
+  const full = currentTopSpeed()*currentRunMul();
+  return full > 0 ? clamp(speed/full, 0, 1) : 0;
+}
+function turnCap(run){
+  const t = clamp((run - 0.35)/(1 - 0.35), 0, 1), k = t*t*(3 - 2*t);
+  return TURN_CAP_WALK + (TURN_CAP_RUN - TURN_CAP_WALK)*k;
+}
+function steerRate(mag, err, run = 0){
+  const t = clamp((mag - 0.12)/(0.9 - 0.12), 0, 1), k = t*t*(3 - 2*t);
+  const base = Math.min(STEER_SLOW + (STEER_FAST - STEER_SLOW)*k, turnCap(run));
+  return base * (0.7 + 0.8*Math.min(1, Math.abs(err)/Math.PI));
+}
+function steerStep(cur, target, mag, speed, dt, run = 0){
+  if(cur == null || speed < STEER_PIVOT_SPEED) return target;
+  let d = target - cur; while(d > Math.PI) d -= Math.PI*2; while(d < -Math.PI) d += Math.PI*2;
+  const lim = steerRate(mag, d, run)*dt;
+  return cur + clamp(d, -lim, lim);
+}
+/* The camera's swing-behind follows the same curve: at a light push it trails the pup
+   round at 40% of its full rate, so holding the stick a little to one side circles you
+   slowly rather than at the sprint's pace. */
+function camFollowScale(mag){
+  const t = clamp((mag - 0.12)/(0.9 - 0.12), 0, 1);
+  return 0.4 + 0.6*t*t*(3 - 2*t);
+}
+function camFollowStep(dc, mag, onStick, run, dt){
+  const step = dc*Math.min(1, dt*2.2*(onStick ? camFollowScale(mag) : 1));
+  const lim = turnCap(run)*dt;
+  return clamp(step, -lim, lim);
+}
+let steerHeading = null;       // world heading being walked, while the stick is held
+
+function isTextField(t){ return !!(t && t.closest && t.closest('input,textarea,[contenteditable]')); }
+document.addEventListener('contextmenu', e=>{ if(!isTextField(e.target)) e.preventDefault(); });
+document.addEventListener('selectstart', e=>{ if(!isTextField(e.target)) e.preventDefault(); });
+
 renderer.domElement.addEventListener('pointerdown', e=>{
   if(isTouchPointer(e)) markTouchDevice();
   if(!playing) return;
@@ -16631,7 +17026,16 @@ function loop(t){
      frame reads as the game having hung rather than as a start line. */
   if(raceFrozen()){ ix=0; iz=0; mag=0; run=false; }
   const fS=Math.sin(getCamYaw()), fC=Math.cos(getCamYaw());
-  const wx=-fC*ix-fS*iz, wz=fS*ix-fC*iz;
+  let wx=-fC*ix-fS*iz, wz=fS*ix-fC*iz;
+  /* Stick or keys, walk along a heading that turns toward the input at a limited rate
+     (steerStep above) instead of snapping to it. wx/wz stay the input's for the camera
+     code below; only the direction actually walked is smoothed. */
+  if(mag > 0){
+    steerHeading = steerStep(steerHeading, Math.atan2(wz, wx), mag, player.speed, dt, runFrac(player.speed));
+    wx = Math.cos(steerHeading); wz = Math.sin(steerHeading);
+  }else{
+    steerHeading = null;
+  }
   /* Knocked: the stick and the keys do nothing until you land. Checked here rather than
      inside movePlayer so the pup still gets carried by its own momentum -- input is what
      is suspended, not physics. */
@@ -16769,7 +17173,7 @@ function loop(t){
        answer anyway. Hold the view still and let the pup walk toward you. */
     const dc = Math.atan2(-ix, -iz);      // input direction, relative to the camera
     if(performance.now()-lastLookT>900 && Math.abs(dc) < BACKPEDAL_ARC){
-      addCamYaw(dc*Math.min(1,dt*2.2));
+      addCamYaw(camFollowStep(dc, mag, stick.active, runFrac(player.speed), dt));
     }
   }
   const bb=getBBox(), F=55;
@@ -16824,6 +17228,11 @@ function loop(t){
   }
 
   const settled = stillness();
+  /* The train: runs every frame (it keeps its timetable whatever the pup is doing),
+     watches the track ahead for the pup and stops short of it, and never lets a car and
+     the pup share the same space. */
+  updateTrain(dt, player.x, player.z);
+  { const push = trainPush(player.x, player.z); if(push){ player.x += push[0]; player.z += push[1]; } }
   updateCritters(dt, t, player.x, player.z, player.speed, noiseReference(),
                  player.sneaking, player.barkT>0, settled);
   applyImpacts(dt, groundY);

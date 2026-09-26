@@ -51,6 +51,7 @@ import { DEFAULTS, randomPupParams } from '../dog/params.js';
 import { computeStats } from '../dog/stats.js';
 import { addPups, kennelPups, loadKennel, parsePupFile } from '../data/kennel.js';
 import { nearestTrail } from './spatial.js';
+import { updateTrain, trainPush } from './train.js';
 
 /* fov: Pup City's 38 deg is a tight telephoto, chosen for its small enclosed blocks;
    trails is wide open country, so a wider, more natural-feeling field of view suits it.
@@ -1487,6 +1488,78 @@ function paintStick(){
     : 'translate(0px, 0px)';
 }
 
+/* The other half of trails.css's no-selection rule. CSS stops selection and the iOS
+   callout; Android also raises a context menu on a long-press, and a few WebViews start a
+   selection before the CSS applies. Both are cancelled everywhere except real text fields
+   (course names, dates), which keep their normal long-press behaviour. */
+/* STEERING ON THE STICK.
+   The stick gives an absolute direction relative to the camera, and the pup used to swing
+   onto it at one fixed rate however hard the stick was pushed -- so a gentle walk turned
+   exactly as fast as a sprint. Worse, near the centre of the stick the ANGLE is
+   hypersensitive: a few pixels of sideways wobble on a lightly held thumb is a 30-45
+   degree change of direction. Slow walking was twitchy for both reasons at once.
+
+   So on the stick the walking heading now TURNS toward the requested direction at a
+   limited rate, and that rate grows with deflection: a light push steers gently, a full
+   push is as quick as before. A big correction (turning round) is allowed to go faster
+   than a small one, so reversing never feels sluggish. From a standstill the pup still
+   pivots straight onto the stick -- nobody wants to walk off the wrong way first.
+   The keyboard steers through the same limited heading (as full deflection) -- see below.
+
+   TURNING HAS A TOP SPEED, TOO. Deflection alone was not enough: the keyboard is always
+   "full deflection", so holding a direction key snapped the walk onto it and the camera
+   swung round after it at full rate -- nearly 200 deg/s of spin holding A or D, at a
+   walk or a sprint alike. A running animal carries momentum and takes a wide line; so the
+   turn rate is also CAPPED BY SPEED, from ~170 deg/s walking down to ~90 deg/s at a full
+   run, for the stick and the keys alike. The camera's swing-behind obeys the same cap, so
+   the view can never whirl round faster than the pup itself could turn.
+
+   runFrac(): 0 standing .. 1 at full running speed.
+   steerRate(mag, err, run): the most the heading may turn this second, rad/s.
+   steerStep(cur, target, mag, speed, dt, run): the new heading. Angles in radians.
+   camFollowStep(dc, mag, onStick, run, dt): this frame's camera swing toward input dc. */
+/* STEER_SLOW: base turn rate at a light push, rad/s -- about 60 deg/s before the
+   big-correction boost, i.e. roughly a walker's pace of turning. STEER_FAST: at full
+   deflection. TURN_CAP_WALK / TURN_CAP_RUN: the speed cap at a walk and at a full run. */
+const STEER_SLOW = 1.0, STEER_FAST = 6.5, STEER_PIVOT_SPEED = 0.35;
+const TURN_CAP_WALK = 3.0, TURN_CAP_RUN = 1.6;
+function runFrac(speed){
+  const full = currentTopSpeed()*currentRunMul();
+  return full > 0 ? clamp(speed/full, 0, 1) : 0;
+}
+function turnCap(run){
+  const t = clamp((run - 0.35)/(1 - 0.35), 0, 1), k = t*t*(3 - 2*t);
+  return TURN_CAP_WALK + (TURN_CAP_RUN - TURN_CAP_WALK)*k;
+}
+function steerRate(mag, err, run = 0){
+  const t = clamp((mag - 0.12)/(0.9 - 0.12), 0, 1), k = t*t*(3 - 2*t);
+  const base = Math.min(STEER_SLOW + (STEER_FAST - STEER_SLOW)*k, turnCap(run));
+  return base * (0.7 + 0.8*Math.min(1, Math.abs(err)/Math.PI));
+}
+function steerStep(cur, target, mag, speed, dt, run = 0){
+  if(cur == null || speed < STEER_PIVOT_SPEED) return target;
+  let d = target - cur; while(d > Math.PI) d -= Math.PI*2; while(d < -Math.PI) d += Math.PI*2;
+  const lim = steerRate(mag, d, run)*dt;
+  return cur + clamp(d, -lim, lim);
+}
+/* The camera's swing-behind follows the same curve: at a light push it trails the pup
+   round at 40% of its full rate, so holding the stick a little to one side circles you
+   slowly rather than at the sprint's pace. */
+function camFollowScale(mag){
+  const t = clamp((mag - 0.12)/(0.9 - 0.12), 0, 1);
+  return 0.4 + 0.6*t*t*(3 - 2*t);
+}
+function camFollowStep(dc, mag, onStick, run, dt){
+  const step = dc*Math.min(1, dt*2.2*(onStick ? camFollowScale(mag) : 1));
+  const lim = turnCap(run)*dt;
+  return clamp(step, -lim, lim);
+}
+let steerHeading = null;       // world heading being walked, while the stick is held
+
+function isTextField(t){ return !!(t && t.closest && t.closest('input,textarea,[contenteditable]')); }
+document.addEventListener('contextmenu', e=>{ if(!isTextField(e.target)) e.preventDefault(); });
+document.addEventListener('selectstart', e=>{ if(!isTextField(e.target)) e.preventDefault(); });
+
 renderer.domElement.addEventListener('pointerdown', e=>{
   if(isTouchPointer(e)) markTouchDevice();
   if(!playing) return;
@@ -1720,7 +1793,16 @@ function loop(t){
      frame reads as the game having hung rather than as a start line. */
   if(raceFrozen()){ ix=0; iz=0; mag=0; run=false; }
   const fS=Math.sin(getCamYaw()), fC=Math.cos(getCamYaw());
-  const wx=-fC*ix-fS*iz, wz=fS*ix-fC*iz;
+  let wx=-fC*ix-fS*iz, wz=fS*ix-fC*iz;
+  /* Stick or keys, walk along a heading that turns toward the input at a limited rate
+     (steerStep above) instead of snapping to it. wx/wz stay the input's for the camera
+     code below; only the direction actually walked is smoothed. */
+  if(mag > 0){
+    steerHeading = steerStep(steerHeading, Math.atan2(wz, wx), mag, player.speed, dt, runFrac(player.speed));
+    wx = Math.cos(steerHeading); wz = Math.sin(steerHeading);
+  }else{
+    steerHeading = null;
+  }
   /* Knocked: the stick and the keys do nothing until you land. Checked here rather than
      inside movePlayer so the pup still gets carried by its own momentum -- input is what
      is suspended, not physics. */
@@ -1858,7 +1940,7 @@ function loop(t){
        answer anyway. Hold the view still and let the pup walk toward you. */
     const dc = Math.atan2(-ix, -iz);      // input direction, relative to the camera
     if(performance.now()-lastLookT>900 && Math.abs(dc) < BACKPEDAL_ARC){
-      addCamYaw(dc*Math.min(1,dt*2.2));
+      addCamYaw(camFollowStep(dc, mag, stick.active, runFrac(player.speed), dt));
     }
   }
   const bb=getBBox(), F=55;
@@ -1913,6 +1995,11 @@ function loop(t){
   }
 
   const settled = stillness();
+  /* The train: runs every frame (it keeps its timetable whatever the pup is doing),
+     watches the track ahead for the pup and stops short of it, and never lets a car and
+     the pup share the same space. */
+  updateTrain(dt, player.x, player.z);
+  { const push = trainPush(player.x, player.z); if(push){ player.x += push[0]; player.z += push[1]; } }
   updateCritters(dt, t, player.x, player.z, player.speed, noiseReference(),
                  player.sneaking, player.barkT>0, settled);
   applyImpacts(dt, groundY);

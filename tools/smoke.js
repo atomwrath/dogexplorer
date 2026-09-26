@@ -5914,6 +5914,9 @@ async function assertAll(window, errors, stats) {
         line([[-200,-100],[200,-100]],{name:'Valley Railroad'}),
         // UNTAGGED on purpose: a highway tag would decide it before the name is ever read
         line([[-200,-40],[200,-40]],{name:'Old Rail Trail'}),
+        // two paths crossing the valley line: a footpath and a track
+        line([[120,-150],[120,-60]],{highway:'path',name:'Cross Path'}),
+        line([[-120,-150],[-120,-60]],{highway:'track',name:'Cross Track'}),
         pt(0,-100,{railway:'switch'}),
         pt(50,-92,{railway:'station',name:'Valley Halt'}),
         pt(-50,-100,{railway:'level_crossing'}),
@@ -5923,6 +5926,10 @@ async function assertAll(window, errors, stats) {
         poly([[40,-95],[90,-95],[90,-91],[40,-91]],{railway:'platform'}),
         poly([[60,-88],[80,-88],[80,-80],[60,-80]],{building:'train_station'})
       ]}}};
+    /* pinned to 1:5: the train is true-size and needs its line to be longer than itself
+       plus a margin in WORLD units, and earlier tests leave the scale compacted -- at 1:12
+       these 400 m lines are 33 units, rightly too short for a 24-unit train */
+    const prevScale=getMapScale(); setMapScale(0.2);
     await loadWorld(bundle, [], 3);
     const G=getGraph(), out={};
     const kindOf=n=>[...new Set(G.edges.filter(e=>e.name===n).map(e=>e.kind))];
@@ -5945,6 +5952,9 @@ async function assertAll(window, errors, stats) {
           for(const v of [6,9,11,12,15,17, 0,1,2]){
             const k=(b+v)*3, x=P[k], y=P[k+1], z=P[k+2];
             const nt=nearestTrail(x,z); if(nt.y==null) continue;
+            // measured against the RAIL's own surface: beside a level crossing the nearest
+            // tread can be the crossing path's, which is not what the sleeper lies on
+            if(!nt.edge || nt.edge.kind!=='rail') continue;
             // nt.y is the WALKING surface, TREAD_TOP (0.08) over the lift; the visible
             // ballast ribbon is drawn at 0.05 (no inner stripe on a railway), 0.03 below
             const d=Math.abs(y-(nt.y-0.03)-(v<6?0.10:0)); n++;
@@ -5971,7 +5981,52 @@ async function assertAll(window, errors, stats) {
     out.areas=getAreas().map(a=>a.kind);
     out.platformSolid=getAreaSolids().some(s=>s.kind==='platform');
     out.ballast=stepSurface('ballast')!==stepSurface('trail');
+    /* level crossings: one per path, panels down, the right sign on each approach, and
+       the panel top close enough to the path's own surface that the pup steps over it */
+    { const S=getMapScale(), C=getRailCrossings();
+      const near=(x,z)=>C.find(c=>Math.hypot(c.x-x*S, c.z-z*S)<3);
+      const foot=near(120,-100), track=near(-120,-100);
+      // the PANEL MESH's own height, found in the scene -- not the height recorded for it,
+      // which would pass however the mesh itself was placed
+      const groups=[]; getWorldGroup().traverse(o=>{ if(o.name==='rail-crossing') groups.push(o); });
+      const panels=groups.length;
+      const fit=c=>{
+        if(!c) return null;
+        const g=groups.find(o=>Math.hypot(o.position.x-c.x, o.position.z-c.z)<1e-3); if(!g) return null;
+        const nt=nearestTrail(c.x+0.01, c.z+0.01); return nt.y==null?null:+Math.abs(g.position.y-nt.y).toFixed(3); };
+      out.crossing={n:C.length, panels,
+        foot: foot ? {kinds:foot.kinds.join('+'), signs:foot.signs, signKinds:foot.signKinds.join('+'), fit:fit(foot)} : null,
+        track: track ? {kinds:track.kinds.join('+'), signs:track.signs, signKinds:track.signKinds.join('+'), fit:fit(track)} : null};
+    }
+    /* the train: built on the longest line, moves, reverses at the end, stops short of a
+       pup on the track and never shares space with one */
+    { const T0=getTrainState(); out.train={on:T0.on};
+      if(T0.on){
+        out.train.len=+T0.len.toFixed(1); out.train.trainLen=T0.trainLen;
+        const r0=T0.r; for(let i=0;i<300;i++) updateTrain(0.1, 1e6, 1e6);
+        out.train.moved=+(getTrainState().r-r0).toFixed(2);
+        // run to the far end and past the dwell: direction must flip
+        setTrainForTest(T0.len-T0.trainLen-3, 1, 2);
+        for(let i=0;i<400;i++) updateTrain(0.1, 1e6, 1e6);
+        const T1=getTrainState(); out.train.flipped=T1.dir===-1; out.train.trips=T1.trips;
+        // a pup on the track 20 units ahead of the leading end
+        setTrainForTest(10, 1, T0.top);
+        const lead=10+T0.trainLen, pup=trainRouteAt(lead+20);
+        for(let i=0;i<300;i++) updateTrain(0.1, pup[0], pup[2]);
+        const T2=getTrainState(), gap=(lead+20)-(T2.r+T0.trainLen);
+        out.train.stop={v:+T2.v.toFixed(3), blocked:T2.blocked, gap:+gap.toFixed(2)};
+        for(let i=0;i<100;i++) updateTrain(0.1, 1e6, 1e6);
+        out.train.resumed=getTrainState().v>0.5;
+        // the pup inside a car is pushed out of it
+        const c=getTrainState().cars[0], p=trainPush(c.x+0.3, c.z);
+        out.train.push=p ? +Math.hypot(p[0],p[1]).toFixed(2) : 0;
+        const q=p ? trainPush(c.x+0.3+p[0], c.z+p[1]) : 'none';
+        out.train.pushedClear=q===null;
+      }
+    }
+    setMapScale(prevScale);
     await loadWorld('../data/world.json', [], 3);
+    out.defaultTrain=getTrainState().on;
     return out;
   })()`);
   check('a railway=rail line is a railway', rl.steep.length === 1 && rl.steep[0] === 'rail', rl.steep.join(','));
@@ -6003,6 +6058,111 @@ async function assertAll(window, errors, stats) {
   check('platform and station footprints are their own kinds; a platform is solid',
     rl.areas.includes('platform') && rl.areas.includes('depot') && rl.platformSolid, rl.areas.join(','));
   check('walking the railway sounds like ballast, not dirt', rl.ballast);
+  check('a footpath crossing the railway gets a crossing: panels and a STOP-LOOK-LISTEN board each side',
+    !!rl.crossing.foot && rl.crossing.foot.kinds === 'trail+trail' && rl.crossing.foot.signKinds === 'railsign+railsign' && rl.crossing.panels >= 2,
+    JSON.stringify(rl.crossing));
+  check('a track crossing the railway gets crossbucks on both approaches',
+    !!rl.crossing.track && rl.crossing.track.kinds === 'track+track' && rl.crossing.track.signKinds === 'crossbuck+crossbuck',
+    rl.crossing.track ? JSON.stringify(rl.crossing.track) : 'no track crossing');
+  check('crossing panels sit at the path surface, so the pup steps over the rails',
+    !!rl.crossing.foot && rl.crossing.foot.fit != null && rl.crossing.foot.fit <= 0.35
+      && !!rl.crossing.track && rl.crossing.track.fit != null && rl.crossing.track.fit <= 0.35,
+    `panel top vs path surface: footpath ${rl.crossing.foot && rl.crossing.foot.fit}u, track ${rl.crossing.track && rl.crossing.track.fit}u`);
+  check('a train is on the railway and runs along it',
+    rl.train.on && rl.train.moved > 20, JSON.stringify({on:rl.train.on, len:rl.train.len, moved:rl.train.moved}));
+  check('the train turns round at the end of the line', rl.train.on && rl.train.flipped && rl.train.trips === 1,
+    `flipped=${rl.train.flipped}, trips=${rl.train.trips}`);
+  check('the train stops short of a pup on the track, and goes again once it steps off',
+    rl.train.on && rl.train.stop.v < 0.05 && rl.train.stop.blocked && rl.train.stop.gap >= 4 && rl.train.resumed,
+    rl.train.stop ? `v=${rl.train.stop.v}, blocked=${rl.train.stop.blocked}, stopped ${rl.train.stop.gap}u short, resumed=${rl.train.resumed}` : '');
+  check('a pup inside a car is pushed out of it', rl.train.on && rl.train.push > 0 && rl.train.pushedClear,
+    `push ${rl.train.push}u, clear after: ${rl.train.pushedClear}`);
+  check('a map with no railway has no train', rl.defaultTrain === false);
+
+  /* ---------- tablet controls ---------- */
+  const tc = await (0,eval)(`(()=>{
+    const d=document, out={};
+    // steering: a light push turns gently, a full push briskly, a standstill pivots at once
+    const turn=(mag, speed, run)=>Math.abs(steerStep(0, Math.PI/2, mag, speed, 0.1, run));
+    out.slow=+turn(0.3, 2, 0.3).toFixed(3); out.fast=+turn(1.0, 2, 0.3).toFixed(3); out.still=+turn(0.3, 0, 0).toFixed(3);
+    out.runFull=+turn(1.0, 6, 1).toFixed(3);
+    out.bigVsSmall=steerRate(0.3, Math.PI, 0.3) > steerRate(0.3, 0.2, 0.3);
+    out.camSlow=camFollowScale(0.3); out.camFull=camFollowScale(1);
+    // the camera's swing is held to the pup's own turn cap: keys, running, 90 degrees asked
+    out.camRunRate=+(Math.abs(camFollowStep(Math.PI/2, 1, false, 1, 0.1))/0.1).toFixed(3);
+    out.capRun=turnCap(1); out.capWalk=turnCap(0.3);
+    // no text selection or callout on the page; text fields keep theirs
+    const cs=el=>d.defaultView.getComputedStyle(el);
+    const us=el=>cs(el).getPropertyValue('user-select') || cs(el).getPropertyValue('-webkit-user-select');
+    const inp=d.getElementById('recName');
+    out.bodySelect=us(d.body); out.inputSelect=inp ? us(inp) : null;
+    const fire=(el,type)=>{ const e=new d.defaultView.Event(type,{bubbles:true,cancelable:true}); el.dispatchEvent(e); return e.defaultPrevented; };
+    const canvas=d.querySelector('canvas')||d.body;
+    out.ctxCanvas=fire(canvas,'contextmenu'); out.selCanvas=fire(canvas,'selectstart');
+    out.ctxInput=inp ? fire(inp,'contextmenu') : null;
+    return out;
+  })()`);
+  check('stick steering: a light push turns gently, a full push briskly, a standstill pivots at once',
+    tc.slow < 0.2 && tc.fast > 0.3 && tc.still > 1.5 && tc.bigVsSmall,
+    `90-degree ask over 0.1 s at a walk: light ${tc.slow} rad, full ${tc.fast} rad; from standstill ${tc.still} rad`);
+  check('running turns wider than walking: the turn rate is capped by speed',
+    tc.runFull < tc.fast && tc.capRun < tc.capWalk && tc.runFull <= tc.capRun*1.5*0.1 + 1e-9,
+    `full push, 90 degrees asked over 0.1 s: walking ${tc.fast} rad, running ${tc.runFull} rad (cap ${tc.capRun} rad/s)`);
+  check('the camera never swings faster than the pup can turn', tc.camRunRate <= tc.capRun + 1e-9,
+    `camera swing running on keys: ${tc.camRunRate} rad/s, cap ${tc.capRun} rad/s (was ${(2.2*Math.PI/2).toFixed(2)})`);
+  check('the camera swings round slower on a light push', tc.camSlow < 0.6 && tc.camFull === 1,
+    `light ${tc.camSlow.toFixed(2)}, full ${tc.camFull}`);
+  check('no text selection or callout on the game page; text fields keep theirs',
+    tc.bodySelect === 'none' && tc.inputSelect === 'text',
+    `body user-select: ${tc.bodySelect}, course-name field: ${tc.inputSelect}`);
+  /* THE WIRING, through real frames: hold W+D (forward-right) walking, then with Shift
+     running, and measure how fast the pup's facing and the camera actually turn. The
+     pure-function checks above prove the maths; this proves the keys go through it. */
+  const kt = (() => {
+    try{ quitRace(); closeRaceCard(); }catch(e){}
+    const pl=getTrailPlayer(); pl.dist=0;
+    /* Start from a known state, not whatever the suite left. An earlier (pre-existing)
+       wall-cling test teleports the pup to computed rock-face positions and leaves
+       player.speed NaN in the full suite -- and a NaN speed never recovers, so a key test
+       inheriting it measures nothing. Put the pup standing still at a graph node. */
+    { const n=getGraph().nodes[0].p; pl.x=n[0]; pl.z=n[1]; pl.y=0; pl.vy=0; pl.speed=0; pl.yaw=0;
+      pl.wall=null; pl.climbT=0; pl.knockT=0; }
+    let clock=900000;
+    const pump=()=>{ if(global.__raf){ const fn=global.__raf; global.__raf=null; fn(clock+=40); } };
+    const key=(code,down)=>{ const ev=new window.KeyboardEvent(down?'keydown':'keyup',{bubbles:true});
+      Object.defineProperty(ev,'code',{value:code}); window.dispatchEvent(ev); };
+    const wrap=a=>{ while(a>Math.PI)a-=2*Math.PI; while(a<-Math.PI)a+=2*Math.PI; return a; };
+    const measure=(run)=>{
+      if(run) key('ShiftLeft',true);
+      key('KeyW',true);
+      for(let f=0;f<40;f++) pump();                // get up to speed going straight
+      key('KeyD',true);
+      let yaw=pl.yaw, cam=getCamYaw(), maxYaw=0, maxCam=0, worstCamOver=-1e9, n=0;
+      for(let f=0;f<50;f++){
+        pump(); const dy=Math.abs(wrap(pl.yaw-yaw))/0.04, dc=Math.abs(wrap(getCamYaw()-cam))/0.04;
+        // the cap that frame actually used: the camera step runs AFTER the frame's speed
+        // update, so it is the speed the frame ended on, not the one it started with
+        const capHere=turnCap(runFrac(pl.speed));
+        yaw=pl.yaw; cam=getCamYaw();
+        // from the very first frame: the snap onto a new key IS the twitch being guarded
+        maxYaw=Math.max(maxYaw,dy); maxCam=Math.max(maxCam,dc); worstCamOver=Math.max(worstCamOver, dc-capHere); n++;
+      }
+      const sp=pl.speed, cap=turnCap(runFrac(sp));   // the cap for the speed it really had
+      key('KeyD',false); key('KeyW',false); if(run) key('ShiftLeft',false);
+      for(let f=0;f<30;f++) pump();
+      return {yaw:+maxYaw.toFixed(2), cam:+maxCam.toFixed(2), camOver:+worstCamOver.toFixed(3), speed:+sp.toFixed(2), run:+runFrac(sp).toFixed(2), cap:+cap.toFixed(2)};
+    };
+    return {walk:measure(false), run:measure(true), capWalk:turnCap(0), capRun:turnCap(1)};
+  })();
+  check('holding a direction key turns the pup no faster than the walking cap, and slower when running',
+    kt.walk.speed > 0.5 && kt.run.run > kt.walk.run && kt.walk.yaw <= kt.walk.cap*1.5 + 0.05 && kt.run.yaw <= kt.run.cap*1.5 + 0.05 && kt.run.cap < kt.walk.cap,
+    `peak turn walking ${kt.walk.yaw} rad/s (cap ${kt.walk.cap} at ${kt.walk.run} of full run, x1.5 max boost), running ${kt.run.yaw} rad/s (cap ${kt.run.cap} at ${kt.run.run})`);
+  check('holding a direction key swings the camera no faster than the pup can turn',
+    kt.walk.camOver <= 0.02 && kt.run.camOver <= 0.02,
+    `worst frame over its own cap: walking ${kt.walk.camOver} rad/s, running ${kt.run.camOver} rad/s (peaks ${kt.walk.cam} / ${kt.run.cam}); before this change it swung at up to ${(2.2*Math.PI/2).toFixed(2)}`);
+  check('a long-press menu is suppressed on the game, not in text fields',
+    tc.ctxCanvas === true && tc.selCanvas === true && tc.ctxInput === false,
+    `canvas contextmenu cancelled=${tc.ctxCanvas}, selectstart cancelled=${tc.selCanvas}, text field cancelled=${tc.ctxInput}`);
 
   const failed = results.filter(r => !r.ok);
   console.log('\n---------------- smoke test ----------------');

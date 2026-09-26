@@ -836,7 +836,8 @@ const POI_STYLE={
   gate:{em:'🚧',label:'Gate',fixture:true},
   toilet:{em:'🚻',label:'Toilets',fixture:true},
   infoboard:{em:'ℹ️',label:'Information',fixture:true},
-  guidepost:{em:'🪧',label:'Guidepost',fixture:true}
+  guidepost:{em:'🪧',label:'Guidepost',fixture:true},
+  railsign:{em:'🚸',label:'Railway crossing',fixture:true}
 };
 /* The pylon's wire attachment points, shared with world.js which strings the spans:
    the model and the wires must agree on where the insulators are, or every wire ends in
@@ -1068,6 +1069,16 @@ function buildPOI(poi,rng){
     for(const sx of [-1,1]){
       const lamp=M(new THREE.CylinderGeometry(0.17,0.17,0.12,10),toon('#c33b2c'));
       lamp.rotation.x=Math.PI/2; lamp.position.set(sx*0.5,2.1,0.08); g.add(lamp);
+    }
+  }else if(k==='railsign'){
+    /* The footpath crossing board: STOP / LOOK / LISTEN on a short post, painted on both
+       faces, facing local +z -- world.js turns it toward the walker approaching the rails. */
+    const post=M(new THREE.CylinderGeometry(0.06,0.07,1.9,6),toon('#3a3a3a')); post.position.y=0.95; g.add(post);
+    const back=M(new THREE.BoxGeometry(1.25,0.62,0.05),toon('#c33b2c')); back.position.y=1.65; g.add(back);
+    const mat=new THREE.MeshToonMaterial({map:plaqueTex('STOP \u00b7 LOOK \u00b7 LISTEN','Railway crossing'),gradientMap:toonTex});
+    for(const sz of [1,-1]){
+      const face=M(new THREE.BoxGeometry(1.12,0.5,0.02),mat);
+      face.position.set(0,1.65,sz*0.04); if(sz<0) face.rotation.y=Math.PI; g.add(face);
     }
   }else if(k==='buffer'){
     // end of the line: two posts and a red-and-white beam across the rails
