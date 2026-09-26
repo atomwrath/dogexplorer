@@ -1072,6 +1072,29 @@ async function assertAll(window, errors, stats) {
     return grabAt(92, 150, 750) && grabAt(93, 500, 120);
   })());
 
+  /* ---------- the stick pad stays oval at EVERY breakpoint ----------
+     A responsive #stickBase rule inside a @media block once reset the pad to a square,
+     which is what an iPad's own breakpoint (min-width:820px and pointer:coarse) matched --
+     so the oval shipped in the base rule never reached a real tablet at all, and the pad
+     drew as a circle exactly where it mattered. jsdom does not reliably evaluate
+     `pointer:coarse` for getComputedStyle, so this reads the raw CSS TEXT instead: every
+     #stickBase{...} block in the file, base or inside any @media, must set an oval (width
+     != height) wherever it sets both -- a rule that only touches one of the two (inheriting
+     the other) is not by itself a violation. */
+  {
+    const css = fs.readFileSync(path.join(ROOT, 'styles/trails.css'), 'utf8');
+    const blocks = [...css.matchAll(/#stickBase\{([^}]*)\}/g)].map(m => m[1]);
+    const dims = blocks.map(b => {
+      const w = /width:\s*([\d.]+)px/.exec(b), h = /height:\s*([\d.]+)px/.exec(b);
+      return (w && h) ? {w:+w[1], h:+h[1]} : null;
+    }).filter(Boolean);
+    const square = dims.filter(d => Math.abs(d.w - d.h) < 1);
+    check('every #stickBase rule in the stylesheet is an oval, none square',
+      blocks.length >= 3 && square.length === 0,
+      `${blocks.length} #stickBase rules found, sizes ${dims.map(d=>`${d.w}x${d.h}`).join(', ')}`+
+      (square.length ? ` -- SQUARE: ${square.map(d=>`${d.w}x${d.h}`).join(', ')}` : ''));
+  }
+
   /* ---------- the oval stick, and touches that never say goodbye ---------- */
   {
     const T = stickTravel();

@@ -598,11 +598,15 @@ body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
 #tJump .ic{font-size:30px;}
 #tSneak.on{background:var(--blue);color:#fff;}
 
-/* Tablets have room for controls a whole thumb can find; short landscape phones do not. */
+/* Tablets have room for controls a whole thumb can find; short landscape phones do not.
+   Both KEEP THE OVAL (#stickBase's base rule, above) at the same width:height ratio
+   (204:152, about 1.34:1) -- these two rules used to reset it to a square pad, which is
+   exactly the breakpoint an iPad matches, so the fix above never reached the device it
+   was made for. Sized bigger here (a tablet has the room), smaller below. */
 @media (min-width:820px) and (pointer:coarse){
-  #stickBase{width:152px;height:152px;margin:-76px 0 0 -76px;
-    left:calc(118px + var(--safe-l));bottom:calc(44px + var(--safe-b));}
-  #stickKnob{width:76px;height:76px;font-size:30px;}
+  #stickBase{width:240px;height:179px;margin:-90px 0 0 -120px;
+    left:calc(126px + var(--safe-l));bottom:calc(44px + var(--safe-b));}
+  #stickKnob{width:78px;height:78px;font-size:30px;}
   .tbtn{width:86px;height:86px;}
   .tbtn .ic{font-size:28px;}
   #tJump{width:108px;height:108px;}
@@ -610,9 +614,9 @@ body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
   #tbtns{right:calc(26px + var(--safe-r));bottom:calc(26px + var(--safe-b));gap:14px;}
 }
 @media (max-height:480px){
-  #stickBase{width:108px;height:108px;margin:-54px 0 0 -54px;
-    left:calc(78px + var(--safe-l));bottom:calc(20px + var(--safe-b));}
-  #stickKnob{width:52px;height:52px;font-size:20px;}
+  #stickBase{width:172px;height:128px;margin:-64px 0 0 -86px;
+    left:calc(90px + var(--safe-l));bottom:calc(20px + var(--safe-b));}
+  #stickKnob{width:56px;height:56px;font-size:20px;}
   .tbtn{width:60px;height:60px;}
   .tbtn .ic{font-size:20px;}
   .tbtn .lb{display:none;}
