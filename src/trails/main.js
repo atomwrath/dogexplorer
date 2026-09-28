@@ -15,7 +15,7 @@ import { setWildVisible, setWildYaw, spawnWild, spookRadiusFor, topSpeedFor, upd
 import { dogRunMul, dogTopSpeed, setDogPos, setDogVisible, setYaw, spawnDog, updateDog, dogShadowRadius, dogLegLength } from './dog-driver.js';
 import { updateShadow, setShadowVisible } from './shadow.js';
 import { updateNoiseRing, setNoiseRingVisible, noiseRingRadius, updateCatchRing, setCatchRingVisible } from './noise-ring.js';
-import { getWorld, rawGroundY } from './terrain.js';
+import { getWorld, rawGroundY, terrainY } from './terrain.js';
 
 import { addCamPitch, addCamYaw, addCamZoom, getCamPitch, getCamYaw, getCamZoom, setCamYaw, snapChaseCam, updateChaseCam } from './camera.js';
 import { getCritterStats, spawnCritters, resetCritters, updateCritters, WATCH_SECONDS, playerNoise, typicalSpookRadius, takeImpacts,
@@ -50,7 +50,8 @@ import { PRESETS } from '../creator/presets.js';
 import { DEFAULTS, randomPupParams } from '../dog/params.js';
 import { computeStats } from '../dog/stats.js';
 import { addPups, kennelPups, loadKennel, parsePupFile } from '../data/kennel.js';
-import { nearestTrail } from './spatial.js';
+import { nearestTrail, skirtAt } from './spatial.js';
+import { updateSightCut } from './sight-cut.js';
 import { updateTrain, trainPush } from './train.js';
 
 /* fov: Pup City's 38 deg is a tight telephoto, chosen for its small enclosed blocks;
@@ -172,6 +173,16 @@ const KNOCK_DUR = 0.55;      // seconds of lost control per hit
 const KNOCK_DRAG = 0.06;     // per-second velocity retention; a shove, not a slide
 const CLIMB_DUR = 0.42;    // seconds of scramble per step-up, refreshed on each new step
 const CLIMB_SLOW = 0.45;   // top-speed multiplier while scrambling
+/* Walking on a fill embankment (spatial.js skirtAt). Uphill the top speed falls with the
+   grade, as 1/(1 + SKIRT_UP_DRAG*grade): a skirt at its natural ~32 degrees (grade 0.62)
+   is a bit over half speed, a steepened one near 76 degrees barely a crawl. Downhill it
+   eases off too, less so -- you pick your footing going down a bank, you don't haul. */
+const MOVE_SUBSTEP = 0.08;   // longest single ground check when moving (units)
+const SKIRT_UP_DRAG = 1.3, SKIRT_DOWN_DRAG = 0.35, SKIRT_MIN_SPEED = 0.28, SKIRT_DOWN_MIN = 0.7;
+/* How far either side of the pup the tread grade is measured, and the steepest tilt the
+   body is ever given -- about 45 degrees, past which a pitched rig reads as falling over
+   rather than climbing. */
+const SLOPE_PROBE = 0.6, SLOPE_MAX_PITCH = 0.8;
 /* Beyond this much turn, the auto-follow gives up rather than whipping the view round.
    ~115 degrees: comfortably past a diagonal (45) and a hard strafe (90), so only a real
    backpedal trips it. See the derivation at the call site. */
@@ -319,12 +330,16 @@ function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
   if(mode==='dog'){
     setDogPos(player.x, player.z);
     setYaw(player.yaw);
-    steps = updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise, !!player.wall);
+    /* Tipped with the ground under it: nose up climbing a bank or a steep trail, down on
+       the way back. Eased in the driver, so crossing onto a slope leans in rather than
+       snapping. */
+    const tilt = facingSlopePitch();
+    steps = updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise, !!player.wall, tilt);
     radius = dogShadowRadius();
   }else{
     wildPos.set(player.x, 0, player.z);
     setWildYaw(player.yaw);
-    steps = updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise, !!player.wall);
+    steps = updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise, !!player.wall, facingSlopePitch());
     radius = wildShadowRadius();
   }
   playFootfalls(steps, speed, sneaking);
@@ -1285,9 +1300,59 @@ function updateWall(dt){
    already turns walking off an edge into a fall, and the gravity clamp already puts
    anything that finds itself inside a footprint on top of it rather than in it. */
 function playerGroundY(x, z){
-  const g = standingY(x, z);
+  let g = standingY(x, z);
   const top = areaSolidTop(x, z);
-  return (top != null && top > g) ? top : g;
+  if(top != null && top > g) g = top;
+  /* ON TOP OF A FILL EMBANKMENT, NOT INSIDE IT. The skirt under a floating tread used to
+     be facade only, so the pup walking up to the trail across it climbed the terraces
+     hidden beneath it with the slope drawn over its back. The skirt is ground; where its
+     surface stands above whatever else is here, that is what the pup is standing on. */
+  const sk = skirtAt(x, z);
+  if(sk && sk.y > g) g = sk.y;
+  return g;
+}
+
+/* The slope underfoot, along the unit direction (dx,dz): height gained per unit moved, and
+   which surface it came from. Only the two smooth surfaces have a slope -- a fill
+   embankment (its triangle's own plane) and a trail tread (its graded profile, measured
+   SLOPE_PROBE either side). Terrace ground is flat by construction, and a riser is a step
+   that climbPose already animates; reading it as a slope would tip the pup back and forth
+   at every band edge. */
+function groundSlope(x, z, dx, dz){
+  const L = Math.hypot(dx, dz);
+  if(L < 1e-6) return {slope:0, on:null};
+  dx /= L; dz /= L;
+  const nt = nearestTrail(x, z);
+  if(nt.y != null && nt.d <= nt.hw){
+    const ax = x - dx*SLOPE_PROBE, az = z - dz*SLOPE_PROBE, bx = x + dx*SLOPE_PROBE, bz = z + dz*SLOPE_PROBE;
+    const na = nearestTrail(ax, az), nb = nearestTrail(bx, bz);
+    if(na.y != null && nb.y != null && na.d <= na.hw && nb.d <= nb.hw)
+      return {slope:(nb.y - na.y)/(2*SLOPE_PROBE), on:'tread'};
+    return {slope:0, on:'tread'};
+  }
+  const sk = skirtAt(x, z);
+  if(sk){
+    const g = standingY(x, z), top = areaSolidTop(x, z);
+    if(sk.y >= g - 0.02 && !(top != null && top > sk.y)) return {slope:sk.gx*dx + sk.gz*dz, on:'skirt'};
+  }
+  return {slope:0, on:null};
+}
+
+/* Top-speed multiplier for walking on a skirt along (dx,dz): 1 anywhere else. */
+function skirtDrag(x, z, dx, dz){
+  const gs = groundSlope(x, z, dx, dz);
+  if(gs.on !== 'skirt') return 1;
+  if(gs.slope > 0) return Math.max(SKIRT_MIN_SPEED, 1/(1 + SKIRT_UP_DRAG*gs.slope));
+  return Math.max(SKIRT_DOWN_MIN, 1/(1 + SKIRT_DOWN_DRAG*-gs.slope));
+}
+
+/* How far to tip the body, nose-up positive, for the slope along the way the pup FACES
+   (the rig's forward is +x, and yaw maps a world direction through atan2(-dz, dx), so
+   facing is (cos yaw, -sin yaw)). */
+function facingSlopePitch(){
+  if(player.wall || player.y > 0.02) return 0;
+  const gs = groundSlope(player.x, player.z, Math.cos(player.yaw), -Math.sin(player.yaw));
+  return clamp(Math.atan(gs.slope), -SLOPE_MAX_PITCH, SLOPE_MAX_PITCH);
 }
 
 function moveOffTrail(stepX, stepZ){
@@ -1328,6 +1393,15 @@ function moveOffTrail(stepX, stepZ){
        startClimb/updateClimb below, because it needs a face to hang on and an input to
        drive it and neither of those is a thing a movement step can express. */
     player.y = Math.max(0, feet - gThere);
+    /* DOWN A SLOPE, NOT OFF IT. Preserving absolute height is what makes a terrace edge a
+       drop -- but a skirt is a continuous slope, and walking down one left the pup a few
+       centimetres in the air every frame, so it pattered down the bank in tiny hops and
+       its legs flickered into the leap pose. A grounded pup on a skirt stays on it for any
+       drop well short of a riser; a real ledge is still a fall. */
+    if(player.y > 0 && player.y < lim*0.5 && player.vy <= 0 && feet <= gHere + 0.02){
+      const sk = skirtAt(nx, nz), sk0 = skirtAt(player.x - dx, player.z - dz);
+      if((sk && sk.y >= gThere - 0.02) || (sk0 && sk0.y >= gHere - 0.02)) player.y = 0;
+    }
     return true;
   };
   // Try the full move, then each axis alone, so a glancing approach to a bank slides
@@ -1933,7 +2007,9 @@ function loop(t){
   // "jump the big steps" the faster line through broken ground
   const climbDrag = player.climbT > 0 ? CLIMB_SLOW : 1;
   // carrySlow() is 1 with an empty back, so this costs nothing until it costs something
-  const top = currentTopSpeed()*(player.sneaking?0.5:(run?currentRunMul():1))*surf*climbDrag*carrySlow()*(stick.active?mag:1);
+  // a fill embankment is a slope, and a slope costs speed -- see skirtDrag
+  const bankDrag = moving ? skirtDrag(player.x, player.z, wx, wz) : 1;
+  const top = currentTopSpeed()*(player.sneaking?0.5:(run?currentRunMul():1))*surf*climbDrag*bankDrag*carrySlow()*(stick.active?mag:1);
   player.speed = lerp(player.speed, moving?top:0, 1-Math.pow(0.0009,dt));
   /* Settling. Measured off SPEED rather than off the input, so being knocked over or
      sliding to a halt counts as movement until you have actually stopped -- an animal
@@ -1945,7 +2021,14 @@ function loop(t){
     const L=Math.hypot(wx,wz);
     const stepX=wx/L*player.speed*dt, stepZ=wz/L*player.speed*dt;
     const before={x:player.x, z:player.z};
-    movePlayer(stepX, stepZ);
+    /* In substeps of at most MOVE_SUBSTEP. Every rule movePlayer applies -- the step-up
+       limit, the on-trail glide guard, the drop off a ledge -- compares the ground where
+       you are with the ground one step on, so how far a frame's step reached decided the
+       answer: a slope walkable at a trot could stop a sprint dead for a frame. Short
+       substeps make the answer a property of the ground alone. A terrace riser is a jump
+       in height over no distance, and still stops you at any speed. */
+    const nSub = Math.max(1, Math.ceil(Math.hypot(stepX, stepZ)/MOVE_SUBSTEP));
+    for(let k=0;k<nSub;k++) movePlayer(stepX/nSub, stepZ/nSub);
     player.dist += Math.hypot(player.x-before.x, player.z-before.z);
     const targetYaw=Math.atan2(-wz/L,wx/L);
     let dy=targetYaw-player.yaw; while(dy>Math.PI)dy-=Math.PI*2; while(dy<-Math.PI)dy+=Math.PI*2;
@@ -2012,6 +2095,9 @@ function loop(t){
   /* Boom length. Pulled in from 11 to 8.5: the pup is only about a metre nose to tail at
      TRAIL_DOG_SCALE, and from 11 m back it was a small shape in a large landscape. */
   updateChaseCam(dt, player.x, player.z, groundY, player.y, player.speed, getVertScale(), 8.5);
+  // the camera does not dodge terrain; terrain in the way of it fades instead (sight-cut.js)
+  { const vs = getVertScale();
+    updateSightCut(dt, camera.position, player.x, groundY + player.y + 0.8, player.z, (x,z)=>terrainY(x, z, vs)); }
   /* shake.js owns the NUMBER; somebody has to move a camera with it, and in trails that
      is here -- after the follow camera has settled, so the jolt is added to the framing
      rather than fought by the spring trying to undo it. Offsets are metres and tiny; the

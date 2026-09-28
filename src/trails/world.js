@@ -14,24 +14,25 @@
    remains adjustable, since stretching Y alone can't misalign vectors from terrain. */
 import { clamp } from '../core/math.js';
 import { QUALITY } from '../core/quality.js';
-import { areaCells, stepChannelBanks, buildTerrainMesh, flattenAreaCells, gradeProfile, setCellsHeightM, gradeTrailCells, GROUND_TILE_M, groundTexture, reliefCanvas, resample, setStep, setWorld, terrainY } from './terrain.js';
+import { areaCells, stepChannelBanks, buildTerrainMesh, flattenAreaCells, gradeProfile, setCellsHeightM, gradeTrailCells, GROUND_TILE_M, groundTexture, reliefCanvas, rawGroundY, resample, setStep, setWorld, terrainY } from './terrain.js';
 
 import { scene, camera, disposeGroup, sun, hemi } from '../core/render.js';
 import { toon, toonTex } from '../core/materials.js';
 import { loadWorldBundle, fetchWorldBundle } from '../data/world_bundle.js';
 import { parseFeatures, buildGraph, ptSeg, segCross, inRect, clipLineToRect, clipRingToRect } from './geo.js';
 import { pointInArea, areaBBox } from './geom2d.js';
-import { resetSpatialHash, hashSeg, nearestTrail } from './spatial.js';
+import { resetSpatialHash, hashSeg, nearestTrail, hashSkirt, skirtAt } from './spatial.js';
 import { THEME, THEMES, setTheme } from './themes.js';
 /* One-way: sky.js knows about the renderer's lights and the theme palette, and nothing
    about maps, graphs or bundles. That is what lets this file call into it from
    applyThemeLighting without a cycle -- the chain is themes -> sky -> world -> main. */
 import { refreshSky, setSkyBackdrop, setSkyPlace } from './sky.js';
 import { patchGroundRing } from './noise-ring.js';
+import { patchSightCut } from './sight-cut.js';
 import { patchGroundCover, setGroundCover, groundCoverAt } from './ground-cover.js';
 import { buildTrain } from './train.js';
-import { ribbonGeom, junctionGapGeom, waterSideGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
-         pickTree, buildPOI, buildArea, buildAreaSign, POI_STYLE, AREA_STYLE, shade,
+import { areaWallGeom, ribbonGeom, junctionGapGeom, waterSideGeom, trailMat, INK, buildSign, buildCrossing, buildGate, makeTree, makeRock,
+         pickTree, buildPOI, buildArea, POI_STYLE, AREA_STYLE, shade,
          buildBackdrop, backdropRadius, embankmentGeom, bridgeDeckGeom, bridgeFrameGeom,
          deckMat, frameMat, railTrackGeoms, PYLON, pylonWirePoints } from './pieces.js';
 
@@ -425,6 +426,76 @@ function getStartHead(){ return startHead; }
    footprint shrinks, the terrain gets genuinely steeper as you compact. Around 1:8 the
    slopes stop reading as hills. The slider's range is capped accordingly. */
 function syncScales(){ VERT_SCALE=EXAG; }
+/* SWITCHBACKS GET A MINIMUM RADIUS.
+
+   Positions compact with the world scale; tread widths do not. So a real switchback whose
+   legs are 12 m apart at the turn is 3 units apart at 1:4, against a tread 1.65 units
+   wide: near the apex the two legs' treads overlap, the ribbon folds over itself, and
+   walking up it you step from one leg straight onto the other. Worse on Coarse, where
+   the terrain cells are wide enough to hold both legs at once.
+
+   Each sharp turn (interior angle under HAIRPIN_MAX_ANGLE) has its apex replaced by an
+   arc tangent to both legs, of the radius that puts the legs a full tread plus
+   HAIRPIN_GAP apart where the arc meets them -- for legs meeting at interior angle a, the
+   tangent points sit t = (hw + gap/2)/sin(a/2) back from the apex. That is a real
+   switchback's shape: a rounded turn, not a spike. The arc is taken INSIDE the corner, so
+   the path gets a little shorter and never swings out towards a neighbouring leg.
+
+   Bounded by the legs themselves: a tangent point may use at most half a leg that runs to
+   another turn (the next turn needs the other half) and most of one that runs to the
+   edge's end -- but never the last HAIRPIN_END_KEEP, so the junction the edge ends at is
+   not moved. Where the legs are too short for the full radius the turn is rounded as far
+   as they allow; roads and railways are left alone (a road's hairpin is surveyed to its
+   own width already, and a rack railway's geometry is not ours to smooth). */
+const HAIRPIN_MAX_ANGLE = Math.PI*0.5;   // interior angle under 90 degrees is a hairpin
+const HAIRPIN_GAP = 0.35;                // clear ground between the two legs' treads
+const HAIRPIN_END_KEEP = 0.3;            // units of an edge's end a rounding may not take
+const HAIRPIN_ARC_STEP = Math.PI/10;     // arc sampled every 18 degrees of turn
+let PATH_MIX_HAIRPINS = 0;
+function roundHairpins(G){
+  let n = 0;
+  for(const e of G.edges){
+    if(e.kind === 'road' || e.kind === 'rail' || !e.pts || e.pts.length < 3) continue;
+    const hw = pathOutlineWidth(e.kind)/2;
+    const lenBefore = polyLenW(e.pts);
+    let pts = e.pts.map(p => p.slice());
+    for(let i=1; i<pts.length-1; i++){
+      const A = pts[i-1], B = pts[i], C = pts[i+1];
+      const ax = A[0]-B[0], az = A[1]-B[1], cx = C[0]-B[0], cz = C[1]-B[1];
+      const la = Math.hypot(ax, az), lc = Math.hypot(cx, cz);
+      if(la < 1e-6 || lc < 1e-6) continue;
+      const cosA = clamp((ax*cx + az*cz)/(la*lc), -1, 1), alpha = Math.acos(cosA);
+      if(alpha >= HAIRPIN_MAX_ANGLE || alpha < 1e-3) continue;
+      const want = (hw + HAIRPIN_GAP/2)/Math.sin(alpha/2);
+      const room = (len, isEnd) => isEnd ? Math.max(0, len - HAIRPIN_END_KEEP) : len*0.5;
+      const t = Math.min(want, room(la, i-1 === 0), room(lc, i+1 === pts.length-1));
+      if(t < hw*0.25) continue;
+      const ua = [ax/la, az/la], uc = [cx/lc, cz/lc];
+      const Ta = [B[0]+ua[0]*t, B[1]+ua[1]*t], Tc = [B[0]+uc[0]*t, B[1]+uc[1]*t];
+      // centre on the bisector, radius t*tan(a/2)
+      let bx = ua[0]+uc[0], bz = ua[1]+uc[1]; const bl = Math.hypot(bx, bz); bx /= bl; bz /= bl;
+      const dC = t/Math.cos(alpha/2), O = [B[0]+bx*dC, B[1]+bz*dC];
+      const a0 = Math.atan2(Ta[1]-O[1], Ta[0]-O[0]), a1 = Math.atan2(Tc[1]-O[1], Tc[0]-O[0]);
+      let sweep = a1 - a0; while(sweep > Math.PI) sweep -= 2*Math.PI; while(sweep < -Math.PI) sweep += 2*Math.PI;
+      const R = Math.hypot(Ta[0]-O[0], Ta[1]-O[1]);
+      const steps = Math.max(2, Math.ceil(Math.abs(sweep)/HAIRPIN_ARC_STEP));
+      const arc = [];
+      for(let k=0; k<=steps; k++){ const a = a0 + sweep*k/steps; arc.push([O[0]+Math.cos(a)*R, O[1]+Math.sin(a)*R]); }
+      pts.splice(i, 1, ...arc);
+      i += arc.length - 1;          // the arc is finished; carry on from its far tangent point
+      n++;
+    }
+    if(pts.length !== e.pts.length){
+      const lenAfter = polyLenW(pts);
+      if(e.lenM && lenBefore > 0) e.lenM *= lenAfter/lenBefore;
+      e.pts = pts;
+    }
+  }
+  return n;
+}
+function polyLenW(P){ let L=0; for(let i=1;i<P.length;i++) L+=Math.hypot(P[i][0]-P[i-1][0], P[i][1]-P[i-1][1]); return L; }
+function hairpinsRounded(){ return PATH_MIX_HAIRPINS; }
+
 /* 0 .. 2. The floor is 0, not 0.3: at heavy world-scale compaction the only way to keep
    real relief from becoming a wall is to flatten it, and 0 is a legitimate setting -- a
    pure plan view of the network. The ceiling came down from 4 because with VERT_SCALE no
@@ -873,7 +944,8 @@ function updateAreaLabels(camX, camY, camZ){
        out instead of lingering as a speck. */
     const k = Math.min(1, dist/LABEL_HOLD_DIST);
     const w = base*k;
-    spr.scale.set(w, w*0.25, 1);
+    // the texture's own shape: a long name has a wider canvas (pieces.js floatingLabelTex)
+    spr.scale.set(w, w*(spr.userData.aspect || 0.25), 1);
     if(spr.material) spr.material.opacity = clamp((dist - 2.5)/4, 0, 1);
   }
 }
@@ -2520,6 +2592,70 @@ function drawnTopLifts(e, pr){
   return out;
 }
 
+/* A TRIM THAT WOULD LEAVE THE PATH IN THE AIR IS UNDONE. A path is cut back at a road
+   contact so its dirt is not painted over the tarmac (planCrossings) -- which assumes the
+   path meets the road at the road's own level. On a steep start it does not: Barr Trail
+   leaves the end of Hydro Street climbing at 40%, so at the kerb, 1.9 units out, its
+   tread is 0.9 units above the road, and the trimmed ribbon began as a ledge hanging over
+   the car park with nothing between it and the pad (the "trail doesn't reach the ground"
+   screenshot). Where the path stands clear of the road surface at its trim point by more
+   than TRIM_KEEP_RISE it is not painting on the tarmac at all -- it is climbing away from
+   it -- so the trim is dropped and the ribbon runs from the node, rising out from under
+   the road's own surface (roads draw above paths). Needs the graded profiles, so it runs
+   after them and before anything reads the trims (the hash, the ribbons, the pads). */
+const TRIM_KEEP_RISE = 0.3;
+const NODE_PIN_TOL_M = 3;     // a node's agreed height stays within this of the real ground (m)
+function keepClimbingEnds(){
+  let kept = 0;
+  const roadTopAt = (roads, x, z)=>{
+    let best = null;
+    for(const r of roads){
+      const P = r.prof.pts;
+      for(let i=0;i+1<P.length;i++){
+        const dx=P[i+1][0]-P[i][0], dz=P[i+1][1]-P[i][1], L2=dx*dx+dz*dz;
+        let t = L2 ? ((x-P[i][0])*dx+(z-P[i][1])*dz)/L2 : 0; t = clamp(t,0,1);
+        const d = Math.hypot(x-P[i][0]-dx*t, z-P[i][1]-dz*t);
+        if(!best || d < best.d) best = {d, y: r.prof.ys[i]+(r.prof.ys[i+1]-r.prof.ys[i])*t + kindLift(r.kind) + TREAD_TOP};
+      }
+    }
+    return best ? best.y : null;
+  };
+  const atArc = (pr, s)=>{
+    let arc = 0;
+    for(let i=0;i+1<pr.pts.length;i++){
+      const a=pr.pts[i], b=pr.pts[i+1], L=Math.hypot(b[0]-a[0], b[1]-a[1]);
+      if(arc + L >= s || i+2 === pr.pts.length){ const u = L ? clamp((s-arc)/L,0,1) : 0;
+        return {x:a[0]+(b[0]-a[0])*u, z:a[1]+(b[1]-a[1])*u, y:pr.ys[i]+(pr.ys[i+1]-pr.ys[i])*u}; }
+      arc += L;
+    }
+    return null;
+  };
+  for(const e of GRAPH.edges){
+    if(e.buried || !e.prof) continue;
+    const total = e.prof.pts.reduce((t,p,i,P)=> i ? t+Math.hypot(p[0]-P[i-1][0], p[1]-P[i-1][1]) : 0, 0);
+    for(const end of ['a','b']){
+      const tr = end==='a' ? e.trimA : e.trimB;
+      if(!(tr > 0) || tr >= total) continue;
+      const ni = end==='a' ? e.a : e.b;
+      /* Only where the road ENDS here and nobody crosses: a crossing's trim is what keeps
+         the crosswalk the only thing on the carriageway, and a road running on past the
+         node has tarmac on both sides for the path to be painted over. At a road's end
+         the path simply carries on from it. */
+      const roads = GRAPH.edges.filter(r => r !== e && r.kind === 'road' && r.prof && (r.a === ni || r.b === ni));
+      if(roads.length !== 1 || roads[0].a === roads[0].b) continue;
+      if(CROSSINGS.some(c => c.node === ni)) continue;
+      const p = atArc(e.prof, end==='a' ? tr : total - tr);
+      const ry = p && roadTopAt(roads, p.x, p.z);
+      if(ry == null) continue;
+      if(p.y + kindLift(e.kind) + TREAD_TOP - ry > TRIM_KEEP_RISE){
+        if(end==='a'){ e.trimA = 0; e.trimKeptA = true; } else { e.trimB = 0; e.trimKeptB = true; }
+        kept++;
+      }
+    }
+  }
+  return kept;
+}
+
 /* The graded bench itself, with no paint on it: what the crosswalk markings are laid on,
    since they are drawn at their own fixed offsets above it like every other ribbon. */
 function benchY(x,z){
@@ -2578,9 +2714,44 @@ function standingY(x,z){
   // ease over the outer 40 cm of the corridor so stepping onto a trail that sits a hair
   // proud of the dirt isn't a visible pop. Unscaled, like the corridor width it eases
   // across -- both are true metres now.
+  /* ...but only across a gap a step could cover. Where the tread stands well above the
+     ground (a fill, with its skirt) or well below it (a cut), easing 0.4 m of corridor
+     edge through the whole height was a ramp steeper than any wall the pup cannot climb:
+     from the foot of a bank it hauled the pup up to the tread in a handful of frames
+     (the "pop"), and running along the tread at a bend, a frame's step into that band
+     rose more than a step-up and stopped the pup dead -- an invisible barrier that let
+     you through if you stopped and started, because the first slow steps were small
+     enough. Past EASE_MAX_GAP the edge is a real edge: tread inside, ground outside,
+     and on a fill the skirt (main.js playerGroundY) is the slope in between. The edge
+     sits where the ease began, which is where the skirt starts from the tread's top:
+     holding the tread any further out (tried, to catch a pup drifting wide at a bend)
+     left a step between the skirt's slope and the tread that popped a climbing pup up
+     it. Drifting wide is main.js's to prevent -- on a tread the pup can turn tightly
+     enough to follow the path (TRAIL_TURN_RADIUS). */
+  if(Math.abs(nt.y - g) > EASE_MAX_GAP){
+    // exactly the painted edge where the path's kind is known: the skirt's top edge is
+    // there, so the step from slope to tread is nothing (0.9 left a steep skirt's first
+    // few centimetres to climb in one go)
+    let edge = nt.edge ? Math.min(nt.hw - 0.4, pathOutlineWidth(nt.edge.kind)/2) : nt.hw - 0.4;
+    /* ...unless there is no skirt to step down onto. A floating tread with nothing under
+       its edge (a steep fill face, which is not walkable) is a cliff: dropping the pup
+       the whole height the instant its centre crossed the paint by a millimetre stranded
+       it under a switchback, a two-unit wall it could not climb. There the tread holds out
+       to the corridor's edge -- no slope below to climb, so nothing to pop up -- and a
+       pup has to mean it to go over. */
+    // "a skirt to step onto" is this tread's own, meeting its edge -- not another, lower
+    // leg's fill reaching under it at a switchback
+    // -- judged by carrying the skirt's own slope back up to the painted edge: a steep
+    // skirt is far below the tread a few centimetres out and is still this tread's own
+    const sk = nt.y > g ? skirtAt(x, z) : null;
+    const own = sk && (sk.y + Math.hypot(sk.gx, sk.gz)*Math.max(0, nt.d - edge) >= nt.y - 0.3);
+    if(nt.y > g && !own) edge = nt.hw;
+    return nt.d <= edge ? nt.y : g;
+  }
   const k = clamp((nt.hw - nt.d)/0.4, 0, 1);
   return g + (nt.y - g)*k;
 }
+const EASE_MAX_GAP = 0.5;
 
 function rebuildWorld(){
   WORLD_REV++;
@@ -2668,6 +2839,7 @@ function rebuildWorld(){
   // Scaling both keeps the topology (what merges into what) a function of real distance,
   // not of how compacted the display happens to be.
   GRAPH=buildGraph(lines,16*MAP_SCALE,6*MAP_SCALE);
+  PATH_MIX_HAIRPINS = roundHairpins(GRAPH);
   /* Adjacency, built once and used by everything below -- the crossing planner, the
      junction pads, the sign arms and the destination walk all need "what meets here".
      It has to exist BEFORE the geometry passes, not after, because those passes rewrite
@@ -2739,8 +2911,9 @@ function rebuildWorld(){
   // coordinates. Without one, a single flat plane covering the map's extent -- so a bare
   // pair of .geojson files is still playable, just level.
   // the TERRAIN alone gets cover painting (ground-cover.js): paths, lots and decks keep their own surfaces
-  const groundMat=patchGroundCover(patchGroundRing(new THREE.MeshToonMaterial({map:groundTexture(THEME),
-    gradientMap:toonTex, polygonOffset:true, polygonOffsetFactor:2, polygonOffsetUnits:2})));
+  // patchSightCut: the terrain fades where it stands between the camera and the pup (sight-cut.js)
+  const groundMat=patchSightCut(patchGroundCover(patchGroundRing(new THREE.MeshToonMaterial({map:groundTexture(THEME),
+    gradientMap:toonTex, polygonOffset:true, polygonOffsetFactor:2, polygonOffsetUnits:2}))));
   // buildTerrainMesh now writes UVs straight from world x/z (see its own comment) at a
   // fixed real-world tile size, so the texture is already correctly scaled by
   // construction -- no separate repeat.set() needed, and one WOULD be wrong here: it
@@ -2795,7 +2968,21 @@ function rebuildWorld(){
   const wantH = (id, h)=>{ if(id==null) return; const a=nodeH.get(id)||[]; a.push(h); nodeH.set(id,a); };
   GRAPH.edges.forEach(e=>{ wantH(e.a, e.prof.smA); wantH(e.b, e.prof.smB); });
   const agreed = new Map();
-  for(const [id, hs] of nodeH) agreed.set(id, hs.reduce((x,y)=>x+y,0)/hs.length);
+  /* ...held within NODE_PIN_TOL_M of the real ground at the node. The smoothing window is
+     8 cells, which on Coarse at 1:4 is 72 units -- so at a summit, where every path
+     arrives from below, the smoothed ends all agree on a height well under the top, and
+     averaging them agreed on it too. The cog railway reached Pikes Peak 36 real metres
+     below the summit house it serves, and its bench cut a trench through the summit to
+     get there (worse at 1:2, where the same window spans more of the mountain). The
+     average still decides everywhere the paths roughly agree with the ground; only a
+     disagreement bigger than a contour step is pulled back, and the decaying end offset
+     in gradeProfile spreads that over the whole window. */
+  for(const [id, hs] of nodeH){
+    const avg = hs.reduce((x,y)=>x+y,0)/hs.length;
+    const p = GRAPH.nodes[id] && GRAPH.nodes[id].p;
+    const raw = p ? rawGroundY(p[0], p[1]) : null;
+    agreed.set(id, (raw != null && isFinite(raw)) ? clamp(avg, raw - NODE_PIN_TOL_M, raw + NODE_PIN_TOL_M) : avg);
+  }
   GRAPH.edges.forEach(e=>{
     e.prof = gradeProfile(e.pts, VERT_SCALE, 0.7, 8, minStep(e),
                           agreed.has(e.a)?agreed.get(e.a):null,
@@ -2814,6 +3001,7 @@ function rebuildWorld(){
   PATH_MIX.lotRamps = gradePathsThroughLots();
   gradeWaterways();
   const bridgeZones = raiseBridgeDecks();
+  PATH_MIX.climbingEnds = keepClimbingEnds();
   const claimedCells = gradeTrailCells(GRAPH.edges.map(e=>e.prof),
                   WATERWAYS.map(w=>w.prof).filter(Boolean), bridgeZones);
   // creek banks step down to the water instead of standing as slot walls (terrain.js);
@@ -2988,7 +3176,7 @@ function rebuildWorld(){
       if(hs){
         const sk = embankmentGeom(rpts, fw*1.35*0.5, skirtTops(prof, lift+0.01),
                                   (x,z)=>terrainY(x,z,VERT_SCALE), buriesTread, waterEdgeDist);
-        if(sk) worldG.add(new THREE.Mesh(sk, trailMat(shade(st.shoulder,0.86),rank)));
+        if(sk){ worldG.add(new THREE.Mesh(sk, trailMat(shade(st.shoulder,0.86),rank))); hashSkirt(sk); }
       }
       // a kerb belongs to tarmac; a path beside a dirt road just runs along its edge
       if(e.buried.kind==='road')
@@ -3002,10 +3190,50 @@ function rebuildWorld(){
     /* Skirt FIRST, under everything else: it is ground, and the casing and tread are
        painted on top of ground. Built from the outline width so the fill starts where the
        ink ends and no ribbon layer overhangs it. */
+    /* From the TRIMMED profile, deliberately. The stretch cut back at a road contact is
+       exactly the road's half-width plus its kerb (see the trim at roadContact), so it
+       lies ON the carriageway, which has a surface and a skirt of its own. Skirting it
+       from the untrimmed profile was tried and stood slivers of fill up through the
+       tarmac round the Barr Trail / Raven Ridge junction at the car park. */
     if(hs){
-      const skirt = embankmentGeom(rpts, W*OUTLINE_MUL*0.5, skirtTops(prof, lift+0.01),
-                                   (x,z)=>terrainY(x,z,VERT_SCALE), buriesTread, waterEdgeDist);
-      if(skirt) worldG.add(new THREE.Mesh(skirt, trailMat(shade(st.shoulder,0.86),rank)));
+      /* A kept road-end (keepClimbingEnds) starts ON the road's cap, so its first stations
+         stand over the carriageway, where the slope of a full-height skirt stood up
+         through the tarmac beside the path. Over the carriageway the skirt's top is held
+         just under the road's own surface: hidden by it there, and full height again
+         once the path has climbed off the road's edge. Knocking those stations out
+         instead left the first metres of the path with nothing under them at all. */
+      let tops = skirtTops(prof, lift+0.01);
+      if(e.trimKeptA || e.trimKeptB){
+        const roads = GRAPH.edges.filter(r => r.kind === 'road' && r.prof &&
+          ((e.trimKeptA && (r.a === e.a || r.b === e.a)) || (e.trimKeptB && (r.a === e.b || r.b === e.b))));
+        tops = tops.map((v,i)=>{
+          const [x,z] = rpts[i];
+          let cap = Infinity;
+          for(const r of roads){
+            const P = r.prof.pts, clear = pathOutlineWidth(r.kind)/2;
+            for(let k=0;k+1<P.length;k++){
+              const dx=P[k+1][0]-P[k][0], dz=P[k+1][1]-P[k][1], L2=dx*dx+dz*dz;
+              let t=L2?((x-P[k][0])*dx+(z-P[k][1])*dz)/L2:0; t=clamp(t,0,1);
+              if(Math.hypot(x-P[k][0]-dx*t, z-P[k][1]-dz*t) < clear)
+                cap = Math.min(cap, r.prof.ys[k]+(r.prof.ys[k+1]-r.prof.ys[k])*t + kindLift(r.kind) - 0.05);
+            }
+          }
+          return Math.min(v, cap);
+        });
+      }
+      // and, for a kept road-end, a skirt reaching out over the road it rises from stops at
+      // the road's edge rather than 0.6 units above it (buriesTread's general margin)
+      const keptRoads = (e.trimKeptA || e.trimKeptB) ? new Set(GRAPH.edges.filter(r => r.kind === 'road' &&
+          ((e.trimKeptA && (r.a === e.a || r.b === e.a)) || (e.trimKeptB && (r.a === e.b || r.b === e.b))))) : null;
+      const stopAt = keptRoads ? (x,z,yTop)=>{
+          if(buriesTread(x,z,yTop)) return true;
+          const nt = nearestTrail(x,z);
+          return !!(nt.edge && keptRoads.has(nt.edge) && nt.d <= nt.hw && nt.y < yTop + 0.02);
+        } : buriesTread;
+      const skirt = embankmentGeom(rpts, W*OUTLINE_MUL*0.5, tops,
+                                   (x,z)=>terrainY(x,z,VERT_SCALE), stopAt, waterEdgeDist);
+      /* ...and hashed, so the slope drawn is the slope walked (spatial.js skirtAt). */
+      if(skirt){ worldG.add(new THREE.Mesh(skirt, trailMat(shade(st.shoulder,0.86),rank))); hashSkirt(skirt); }
     }
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*OUTLINE_MUL,lift+0.012,hs),inkMats[rank]));
     worldG.add(new THREE.Mesh(ribbonGeom(rpts,W*SHOULDER_MUL,lift+0.02,hs),trailMat(st.shoulder,rank)));
@@ -3079,11 +3307,10 @@ function rebuildWorld(){
     catch(err){ console.warn('crossing skipped', err); }
   });
 
-  AREAS.forEach(a=>{ if(a.name){
-    const sg=buildAreaSign(a,groundYAt,nearestTrail,(x,z)=>pushOffPaths(x,z,AREA_SIGN_CLEAR));
-    sg.__areaSign=true;               // test seam: found by the smoke harness like fingerposts
-    worldG.add(sg);
-  } });
+  /* No name BOARDS on areas any more. Every named area already carries its floating label
+     (pieces.js buildFloatingLabel), and the board repeated it on a post that stood in the
+     way at car parks and trailheads and, seen from the path, hid its own text behind the
+     post. The label is the one name an area shows. */
 
   // junction pads + signs
   // These discs are the ONLY thing that covers the seam where two edges meet: each
@@ -3115,6 +3342,7 @@ function rebuildWorld(){
      Buried edges are excluded from the census: they have no ribbon to seam, only a marker
      line, so a node where the only trail arms are buried gets a road pad and nothing
      else -- which is what "the route follows the road through here" should look like. */
+  const JUNCTION_PEDESTAL_MIN = 0.3;   // a junction fill this far over the ground stands on a pedestal
   const signWanted=[];      // collected here, thinned and built after the loop (see below)
   GRAPH.nodes.forEach((n,ni)=>{
     if(n.deg<1) return;
@@ -3134,8 +3362,10 @@ function rebuildWorld(){
       for(const e of here){
         if(e.buried || !e.prof || e.prof.pts.length<2) continue;
         const ends=[];
-        if(e.a===ni && !(e.trimA>0)) ends.push('a');
-        if(e.b===ni && !(e.trimB>0)) ends.push('b');
+        // an end whose trim keepClimbingEnds dropped rises out from under the road's cap,
+        // which is the fill here: a dirt pad of its own would sit on the carriageway
+        if(e.a===ni && !(e.trimA>0) && !e.trimKeptA) ends.push('a');
+        if(e.b===ni && !(e.trimB>0) && !e.trimKeptB) ends.push('b');
         for(const end of ends){
           const pp=e.prof.pts, ys=e.prof.ys;
           const p0=end==='a'?pp[0]:pp[pp.length-1], p1=end==='a'?pp[1]:pp[pp.length-2];
@@ -3156,6 +3386,43 @@ function rebuildWorld(){
         const layers=[[W*OUTLINE_MUL/2, 0.012, inkMats[rank]],
                       [W*SHOULDER_MUL/2, 0.02, trailMat(st.shoulder,rank)],
                       [W/2, 0.05, trailMat(st.tread,rank)]];
+        /* A PEDESTAL under the fill. The arms' ribbons get skirts where they float, but the
+           fill between them had nothing: on a coarse grid the junction's cell can sit well
+           below the arms (a road corner a unit lower claims it), and the pup stood on a
+           disc over open air -- the Barr Trail / Raven Ridge junction at the car park, 1.2
+           units up. The wall a lot's kerb gets, round the outline circle, from the fill
+           down to just under the ground, and only where there is a drop to cover. */
+        /* ...but only round the part of the circle the FILL is the edge of. Where an arm's
+           own ribbon carries on past the circle (a road leaving the node, sloping away
+           under it), a wall there stood up out of that ribbon as a curved kerb -- the "odd
+           cylinder in the road" -- so the circle is broken into runs wherever it passes
+           inside any arm that leaves this node, and only the runs between arms get a wall. */
+        if(!g.pedestal){
+          const R=W*OUTLINE_MUL/2, N=48;
+          const armsHere = here.filter(a=>!a.buried && a.prof && a.prof.pts.length>=2 &&
+                                       !(a.a===ni && a.trimA>0) && !(a.b===ni && a.trimB>0));
+          const underArm = (x,z)=>armsHere.some(a=>{
+            const P=a.prof.pts, hw=pathOutlineWidth(a.kind)/2;
+            for(let i=0;i+1<P.length;i++){
+              const dx=P[i+1][0]-P[i][0], dz=P[i+1][1]-P[i][1], L2=dx*dx+dz*dz;
+              let t=L2?((x-P[i][0])*dx+(z-P[i][1])*dz)/L2:0; t=clamp(t,0,1);
+              if(Math.hypot(x-P[i][0]-dx*t, z-P[i][1]-dz*t) < hw*0.98) return true;
+            }
+            return false;
+          });
+          const runs=[]; let run=null;
+          for(let k=0;k<=N;k++){
+            const a=k/N*Math.PI*2, pt=[n.p[0]+Math.cos(a)*R, n.p[1]+Math.sin(a)*R];
+            if(underArm(pt[0],pt[1])){ if(run && run.length>1) runs.push(run); run=null; continue; }
+            (run=run||[]).push(pt);
+          }
+          if(run && run.length>1) runs.push(run);
+          // the run that crosses angle 0 wraps round: join its two halves into one
+          if(runs.length>1 && !underArm(n.p[0]+R, n.p[1])){ const last=runs.pop(); runs[0]=last.concat(runs[0].slice(1)); }
+          const ped=runs.length ? areaWallGeom(runs, yb+lift+0.005, (x,z)=>terrainY(x,z,VERT_SCALE), JUNCTION_PEDESTAL_MIN, true) : null;
+          if(ped){ const m=new THREE.Mesh(ped, patchGroundRing(trailMat(shade(st.shoulder,0.86),rank))); m.name='junctionPedestal'; worldG.add(m); }
+          g.pedestal=true;
+        }
         for(const [r, dy, mat] of layers){
           const geo=junctionGapGeom(n.p[0], n.p[1], yb+lift+dy, g.angs, r);
           // test seam: which kind of path this fill belongs to, and the ribbon width it matches
@@ -3331,11 +3598,11 @@ function rebuildWorld(){
        placed at NaN -- silently, because three.js neither throws nor draws. The width
        these want is the tread's, which pathWidth() already owns. */
     const halfW=pathWidth(e.kind)/2, lift=kindLift(e.kind);
-    let acc=0,blazeAcc=999;
+    let acc=0;
     for(let i=1;i<e.pts.length;i++){
       const a=e.pts[i-1],b=e.pts[i];
       const L=Math.hypot(b[0]-a[0],b[1]-a[1]);
-      acc+=L; blazeAcc+=L;
+      acc+=L;
       if(acc>9){
         acc=0;
         const sx=(a[0]+b[0])/2, sz=(a[1]+b[1])/2;
@@ -3349,14 +3616,9 @@ function rebuildWorld(){
           s.scale.y=0.6; worldG.add(s);
         }
       }
-      if(blazeAcc>42){
-        blazeAcc=0;
-        const nx=-(b[1]-a[1])/L, nz=(b[0]-a[0])/L;
-        const bo=halfW+0.45;
-        const bx=a[0]+nx*bo, bz=a[1]+nz*bo;
-        if(onSpan(bx,bz) || waterEdgeDist(bx,bz) < 0.4){ blazeAcc=30; continue; }
-        const bz3=buildBlaze(bx,bz,e.color); bz3.position.y=terrainY(bx,bz,VERT_SCALE); worldG.add(bz3);
-      }
+      /* No blaze posts. They were planted at terrain height beside the tread, so on a
+         graded start they were buried to their caps in the junction pad and stood in the
+         pup's way; the route's colour is already on the map, the minimap and the signs. */
     }
   });
 

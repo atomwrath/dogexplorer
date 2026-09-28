@@ -1321,15 +1321,37 @@ function buildLandform(a,st,shape,bb,rng){
      is what keeps the bounds and the mesh from drifting apart. */
   return{group:g,topY,slabY:hgt+bevel,inflate:bevel*0.75};
 }
+/* SIZED TO ITS TEXT. The canvas used to be a fixed 512 px with the name centred on it
+   and never measured, so anything longer than about fifteen characters at this font ran
+   off both ends -- "Barr Trail Parkin", "Pikes Peak Summit Visit". Now the text is
+   measured first and the canvas is widened to fit it plus the halo stroke, never
+   narrowed below the old 512 so short names render exactly as before. The sprite reads
+   the resulting shape off `tex.userData.aspect` (height/width) instead of assuming 4:1,
+   or a wider texture would just be squeezed back into the old box. */
+const LABEL_TEX_H = 128, LABEL_TEX_MIN_W = 512, LABEL_TEX_PAD = 28;
+const LABEL_FONT = 'bold 56px "Comic Sans MS","Chalkboard SE",sans-serif';
+function labelTexWidth(textPx){
+  const want = Math.ceil((Number(textPx)||0) + LABEL_TEX_PAD*2);
+  return Math.max(LABEL_TEX_MIN_W, Math.ceil(want/64)*64);
+}
 function floatingLabelTex(name,em){
-  const c=document.createElement('canvas');c.width=512;c.height=128;
-  const x=c.getContext('2d');
+  const text=em+' '+name;
+  const c=document.createElement('canvas');
+  let x=c.getContext('2d');
+  x.font=LABEL_FONT;
+  const tw=x.measureText ? x.measureText(text).width : 0;
+  c.width=labelTexWidth(tw);c.height=LABEL_TEX_H;
+  x=c.getContext('2d');       // resizing a canvas resets its state; take it again
   x.textAlign='center';x.textBaseline='middle';
-  x.font='bold 56px "Comic Sans MS","Chalkboard SE",sans-serif';
+  x.font=LABEL_FONT;
   x.lineWidth=15;x.strokeStyle='rgba(253,243,227,.95)';
-  x.strokeText(em+' '+name,256,64);
-  x.fillStyle='#3d2a20';x.fillText(em+' '+name,256,64);
-  const t=new THREE.CanvasTexture(c);t.minFilter=THREE.LinearFilter;return t;
+  x.strokeText(text,c.width/2,64);
+  x.fillStyle='#3d2a20';x.fillText(text,c.width/2,64);
+  const t=new THREE.CanvasTexture(c);t.minFilter=THREE.LinearFilter;
+  // a non-power-of-two width: no mipmaps, which WebGL1 cannot build for it anyway
+  t.generateMipmaps=false;
+  t.userData=Object.assign(t.userData||{}, {aspect:LABEL_TEX_H/c.width});
+  return t;
 }
 /* A camera-facing Sprite, not a flat ground plane — this is what makes it readable from
    far away: it billboards automatically (three.js does this for free with Sprite).
@@ -1350,11 +1372,16 @@ function buildFloatingLabel(name,em,width,topY){
   const tex=floatingLabelTex(name,em);
   const mat=new THREE.SpriteMaterial({map:tex,transparent:true,depthTest:true,depthWrite:false});
   const spr=new THREE.Sprite(mat);
-  const w=clamp(width*0.62,4.5,12);
-  spr.scale.set(w,w*0.25,1);
+  /* The letter HEIGHT is what the old box set (w*0.25) and it stays that; the width now
+     follows the measured text, so a long name gets longer rather than cut or squeezed. */
+  const w0=clamp(width*0.62,4.5,12);
+  const aspect=(tex.userData && tex.userData.aspect) || 0.25;
+  const w=w0*0.25/aspect;
+  spr.scale.set(w,w*aspect,1);
   spr.position.set(0,topY,0);
   spr.renderOrder=999;
   spr.userData.baseScale=w;      // read by world.js's updateAreaLabels
+  spr.userData.aspect=aspect;    // height/width of the texture -- ditto
   spr.userData.areaLabel=true;
   return spr;
 }
@@ -1364,35 +1391,46 @@ function buildFloatingLabel(name,em,width,topY){
    LOWER of the ground at the outline and just outside it, since the outside is where the
    ground drops away. A wall that ends up inside a bank is simply hidden by it. */
 const AREA_WALL_STEP = 1.0, AREA_WALL_SINK = 0.35;
-function areaWallGeom(rings, topY, groundLocal){
+const BUILDING_FOUNDATION_MIN = 0.05;   // ground this far under a building's base gets a plinth
+/* `open`: the rings are open runs (arcs of a junction's pedestal between the arms), walled
+   point to point without the closing segment back to the start. */
+function areaWallGeom(rings, topY, groundLocal, minDrop, open){
   const P=[], I=[];
+  let deepest=0;                  // largest gap between the top and the ground it reaches
   for(const ring of rings){
-    if(!ring || ring.length<3) continue;
+    if(!ring || ring.length<(open?2:3)) continue;
     // signed area: which side of each edge is outside
     let A=0; for(let k=0;k<ring.length;k++){ const p=ring[k], q=ring[(k+1)%ring.length]; A+=p[0]*q[1]-q[0]*p[1]; }
     const out=A>0?-1:1;
     const pts=[];
-    for(let k=0;k<ring.length;k++){
+    const segs = open ? ring.length-1 : ring.length;
+    for(let k=0;k<segs;k++){
       const p=ring[k], q=ring[(k+1)%ring.length];
       const L=Math.hypot(q[0]-p[0], q[1]-p[1]);
       const n=Math.max(1, Math.ceil(L/AREA_WALL_STEP));
       const nx=L>1e-9?-(q[1]-p[1])/L*out:0, nz=L>1e-9?(q[0]-p[0])/L*out:0;
       for(let s=0;s<n;s++){ const t=s/n; pts.push([p[0]+(q[0]-p[0])*t, p[1]+(q[1]-p[1])*t, nx, nz]); }
+      if(open && k===segs-1) pts.push([q[0], q[1], nx, nz]);   // an open run keeps its last point
     }
-    if(pts.length<3) continue;
+    if(pts.length<(open?2:3)) continue;
     const base=P.length/3;
     for(const [x,z,nx,nz] of pts){
       const g=Math.min(groundLocal(x,z), groundLocal(x+nx*0.6, z+nz*0.6));
       const bot=Math.min(topY-0.02, g-AREA_WALL_SINK);
+      deepest=Math.max(deepest, topY-g);
       P.push(x,topY,z, x,bot,z);
     }
     const m=pts.length;
-    for(let i=0;i<m;i++){
+    for(let i=0;i<(open?m-1:m);i++){
       const a=base+i*2, b=base+((i+1)%m)*2;
       I.push(a,a+1,b+1, a,b+1,b);
     }
   }
   if(!I.length) return null;
+  /* Optional: no wall at all where the ground never falls away from the top by more than
+     `minDrop` -- a building on a level pad needs no foundation, and on a big map every
+     one of those would be a mesh buried in the ground for nothing. */
+  if(minDrop != null && deepest <= minDrop) return null;
   const geo=new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(P),3));
   geo.setIndex(I);
@@ -1486,6 +1524,23 @@ function buildArea(a,rng,groundYAt,nearestTrail,vertScale){
       const ring=a.rings[0], closed=ring.length>1 && ring[0][0]===ring[ring.length-1][0] && ring[0][1]===ring[ring.length-1][1];
       const pts=closed ? ring.slice(0,-1) : ring.slice();
       if(pts.length>=3) g.add(M(ribbonGeom([...pts, pts[0]], 0.22, hgt+0.05, null), toon(st.edge)));
+    }
+    /* A FOUNDATION. The extrude starts at the pad height, and flattenAreaCells only levels
+       the cells whose centres fall inside the footprint -- on a coarse grid a cell is
+       bigger than most buildings, so the ones round the edge keep their own terrace and
+       the walls stood in mid-air over the step down (the depot beside Barr Trail's car
+       park at 1:4, Coarse). The same wall a paved lot already gets, from the base down to
+       just under the ground at every point on the outline, in the wall colour darkened,
+       so it reads as a plinth the building stands on. Built only where there is a drop. */
+    const baseY=(a.groundY!=null)?a.groundY*vertScale:groundYAt(bb.cx,bb.cz);
+    const found=areaWallGeom(a.rings, 0.02, (x,z)=>groundYAt(x,z)-baseY, BUILDING_FOUNDATION_MIN);
+    if(found){
+      // patched like a lot's kerb wall: it stands in the ground, so the noise ring drawn
+      // on the ground has to cross it too
+      const fm=M(found, patchGroundRing(new THREE.MeshToonMaterial({color:new THREE.Color(shade(st.fill,0.7)),
+                                                   gradientMap:toonTex, side:THREE.DoubleSide})));
+      fm.name='foundation';
+      g.add(fm);
     }
     labelY=hgt+2.4;
   }else{
@@ -1756,7 +1811,7 @@ function buildBackdrop(theme, rng, mapScale=1){
 }
 
 
-export { ribbonGeom, junctionGapGeom, waterSideGeom, densifyEdge, embankmentGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
+export { areaWallGeom, ribbonGeom, junctionGapGeom, waterSideGeom, densifyEdge, embankmentGeom, trailMat, INK, buildSign, buildBlaze, buildCrossing, buildGate, makeTree, makeRock,
          POI_STYLE, AREA_STYLE, PYLON, pylonWirePoints, railTrackGeoms, nameplate, buildPOI, pavementTexture, buildLandform,
          buildFloatingLabel, buildArea, buildAreaSign, makeShadow, pickTree, shade,
          buildBackdrop, backdropRadius, ridgeProfile, bridgeDeckGeom, bridgeFrameGeom, deckMat, frameMat };

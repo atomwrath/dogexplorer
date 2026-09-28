@@ -4863,7 +4863,10 @@ async function assertAll(window, errors, stats) {
           if (e.kind === 'road' || e.buried) continue;
           contacts++;
           const t = (e.a === ni) ? e.trimA : e.trimB;
-          if (t > 0) trimmed++;
+          // or deliberately kept whole: a path climbing away from the end of a road, clear
+          // of its surface (world.js keepClimbingEnds) -- trimming it left it in mid-air
+          const kept = (e.a === ni) ? e.trimKeptA : e.trimKeptB;
+          if (t > 0 || kept) trimmed++;
         }
       }
       return contacts > 0 && contacts === trimmed;
@@ -5218,28 +5221,24 @@ async function assertAll(window, errors, stats) {
       return true;
     })());
 
-    /* An area's name board stands on the area, off every painted path -- "overlook
-       parking" was planted on the centre line of the road it faces. */
+    /* Areas are named by their floating label alone: the name board repeated it on a
+       post that stood in the way and hid its own text. No boards, and every named area
+       that was built still has its label. */
     let __areaSignNote = '';
-    check('no area name board stands on a painted path', (() => {
-      const G = getGraph(), wg = getWorldGroup();
-      const boards = [];
-      wg.traverse(o => { if (o.__areaSign) boards.push(o); });
-      if (!boards.length) return false;
-      let bad = 0;
-      for (const b of boards) {
-        for (const e of G.edges) {
-          if (e.pts.length < 2) continue;
-          const clear = pathOutlineWidth(e.kind) * 0.5;
-          let hit = false;
-          for (let i = 0; i < e.pts.length - 1 && !hit; i++)
-            if (ptSegSmoke([b.position.x, b.position.z], e.pts[i], e.pts[i + 1]).d < clear) hit = true;
-          if (hit) { bad++; break; }
-        }
-      }
-      __areaSignNote = `${bad} of ${boards.length} boards on a path`;
-      return bad === 0;
+    check('areas carry a floating name label and no name board', (() => {
+      const wg = getWorldGroup();
+      let boards = 0, labels = 0;
+      wg.traverse(o => { if (o.__areaSign) boards++; if (o.userData && o.userData.areaLabel) labels++; });
+      const named = getAreas().filter(a => a.name).length;
+      __areaSignNote = `${boards} boards, ${labels} labels for ${named} named areas`;
+      return boards === 0 && named > 0 && labels > 0;
     })(), () => __areaSignNote);
+    check('no blaze posts are planted beside the trails', (() => {
+      let blazes = 0;
+      getWorldGroup().traverse(o => { if (o.isMesh && o.geometry && o.geometry.parameters && o.geometry.type === 'SphereGeometry'
+                                          && Math.abs((o.geometry.parameters.radius||0) - 0.1) < 1e-6) blazes++; });
+      return blazes === 0;
+    })());
 
     /* A paved lot is a solid pad, not a slab with daylight under its edge: a kerb wall runs
        round it from the surface down to below the ground at every point. */
@@ -6234,8 +6233,19 @@ async function assertAll(window, errors, stats) {
        wall-cling test teleports the pup to computed rock-face positions and leaves
        player.speed NaN in the full suite -- and a NaN speed never recovers, so a key test
        inheriting it measures nothing. Put the pup standing still at a graph node. */
-    { const n=getGraph().nodes[0].p; pl.x=n[0]; pl.z=n[1]; pl.y=0; pl.vy=0; pl.speed=0; pl.yaw=0;
-      pl.wall=null; pl.climbT=0; pl.knockT=0; }
+    /* ...and OFF the trails: on a tread the pup may turn as tightly as the path it is
+       following (main.js TRAIL_TURN_RADIUS), and at a junction W+D can be steering onto
+       the next path. The run's momentum cap is a rule for open ground, so it is measured
+       on open ground: the nearest spot from a node with no trail within 10 units. */
+    const openSpots=[];
+    search: for(const nd of getGraph().nodes) for(let r=12;r<=40;r+=4) for(let a=0;a<6.28;a+=0.52){
+      const x=nd.p[0]+Math.cos(a)*r, z=nd.p[1]+Math.sin(a)*r, nt=nearestTrail(x,z);
+      let clear=nt.d>10;
+      for(let k=0;k<8 && clear;k++){ const b=k*0.785, q=nearestTrail(x+Math.cos(b)*10, z+Math.sin(b)*10); if(q.d<3) clear=false; }
+      if(clear){ openSpots.push([x,z]); if(openSpots.length>=8) break search; } }
+    if(!openSpots.length) openSpots.push(getGraph().nodes[0].p);
+    const placeOpen=(at)=>{ pl.x=at[0]; pl.z=at[1]; pl.y=0; pl.vy=0; pl.speed=0; pl.yaw=0;
+      pl.wall=null; pl.climbT=0; pl.knockT=0; };
     let clock=900000;
     const pump=()=>{ if(global.__raf){ const fn=global.__raf; global.__raf=null; fn(clock+=40); } };
     const key=(code,down)=>{ const ev=new window.KeyboardEvent(down?'keydown':'keyup',{bubbles:true});
@@ -6276,7 +6286,16 @@ async function assertAll(window, errors, stats) {
       for(let f=0;f<30;f++) pump();
       return {yaw:+maxYaw.toFixed(2), cam:+maxCam.toFixed(2), camOver:+worstCamOver.toFixed(3), speed:+sp.toFixed(2), run:+runFrac(sp).toFixed(2), cap:+cap.toFixed(2), knocks, walls, face:+maxFace.toFixed(2), n};
     };
-    return {walk:measure(false), run:measure(true), capWalk:turnCap(0), capRun:turnCap(1)};
+    /* Garden of the Gods is rock country: a spot can be open of trails and still put a
+       fin in the pup's way, and frames clinging to it do not count. Take the first open
+       spot where both runs got a full sample of steering. */
+    let got=null;
+    for(const at of openSpots){
+      placeOpen(at); const w=measure(false); placeOpen(at); const r=measure(true);
+      got={walk:w, run:r, capWalk:turnCap(0), capRun:turnCap(1)};
+      if(w.n>=25 && r.n>=25) break;
+    }
+    return got;
   })();
   check('holding a direction key turns the pup no faster than the walking cap, and slower when running',
     kt.walk.n >= 25 && kt.run.n >= 25 && kt.walk.speed > 0.5 && kt.run.run > kt.walk.run
@@ -6288,6 +6307,395 @@ async function assertAll(window, errors, stats) {
   check('a long-press menu is suppressed on the game, not in text fields',
     tc.ctxCanvas === true && tc.selCanvas === true && tc.ctxInput === false,
     `canvas contextmenu cancelled=${tc.ctxCanvas}, selectstart cancelled=${tc.selCanvas}, text field cancelled=${tc.ctxInput}`);
+
+  /* ---------- Barr Trail at 1:4 on Coarse ----------
+     The reported screenshot: the bottom of Barr Trail by its car park, world scale 1:4,
+     detail Coarse. A cell there is 9 units against a 0.8-unit painted half-width, which
+     is what every problem below comes from. Loaded last because it replaces the map. */
+  const barr = await (0,eval)(`(async()=>{
+    applyDetail('low', false);
+    await loadWorld('../data/BarrTrailWorld.json', [], 3);
+    setMapScale(0.25); setVertScale(0.25);
+    const VS=getVertScale(), out={cell:getWorld().cell};
+
+    /* Terrain standing up through a tread: sampled across the painted width of every
+       edge. A cell whose corner the tread crosses, with no centreline in it, used to keep
+       its raw terrace -- up to 5 units proud of the ribbon on the switchbacks. */
+    let n=0, poke=0, worst=0;
+    for(const e of getGraph().edges){
+      if(!e.prof || e.buried) continue;
+      const pr=e.prof, pts=pr.pts, hw=pathOutlineWidth(e.kind)/2, top=drawnTopLifts(e,pr);
+      for(let i=0;i<pts.length-1;i++){
+        const a=pts[i], b=pts[i+1], L=Math.hypot(b[0]-a[0],b[1]-a[1]); if(L<1e-6) continue;
+        if(pr.deck && (pr.deck[i]||pr.deck[i+1])) continue;
+        const nx=-(b[1]-a[1])/L, nz=(b[0]-a[0])/L;
+        for(let s0=0;s0<L;s0+=0.5){
+          const u=s0/L, cx=a[0]+(b[0]-a[0])*u, cz=a[1]+(b[1]-a[1])*u, y=pr.ys[i]+(pr.ys[i+1]-pr.ys[i])*u+top[i];
+          for(const f of [-0.95,0,0.95]){ n++; const d=terrainY(cx+nx*f*hw, cz+nz*f*hw, VS)-y; if(d>0.3) poke++; if(d>worst) worst=d; }
+        }
+      }
+    }
+    out.poke={n, poke, worst:+worst.toFixed(2)};
+
+    /* The Barr Trail / Raven Ridge junction at the car park: nothing -- no fill, no
+       terrain -- may stand up through the road or the paths there, and the ground under
+       the junction must not have been cut out from beneath it. Skirting the trimmed
+       stretch (it lies on the tarmac) stood slivers of fill through the road, and a
+       corner cut from Hydro Street dropped the junction's cell a unit under the pad. */
+    { const e=getGraph().edges.find(e=>e.name==='Barr Trail' && (e.trimA>0 || e.trimKeptA));
+      out.kept = { barr: !!(e && e.trimKeptA), n: getPathMix().climbingEnds };
+      /* the first drawn metre of Barr Trail: its tread top against the road cap and pad
+         it rises out of, and against the ground -- a ribbon that starts in mid-air shows
+         both gaps at once */
+      if(e){
+        const pr=e.prof, lift=kindLift(e.kind);
+        const rp=e.trimA>0 ? trimProfile(pr, e.trimA, 0) : pr;
+        const y0=rp.ys[0]+lift, x0=rp.pts[0][0], z0=rp.pts[0][1];
+        const nt0=nearestTrail(pr.pts[0][0], pr.pts[0][1]);
+        out.startGap=+(y0 - (nt0.y!=null ? nt0.y : terrainY(x0,z0,VS))).toFixed(2);
+      }
+      let n2=0, poke=0, worstPoke=0, under=0;
+      if(e){
+        const [nx0,nz0]=e.prof.pts[0];
+        for(let r=0.3;r<=5;r+=0.35) for(let a=0;a<Math.PI*2;a+=Math.PI/24){
+          const x=nx0+Math.cos(a)*r, z=nz0+Math.sin(a)*r, nt=nearestTrail(x,z);
+          if(nt.y==null || nt.d>nt.hw*0.9) continue;
+          n2++;
+          const sk=skirtAt(x,z), top=Math.max(sk?sk.y:-1e9, terrainY(x,z,VS));
+          const d=top-nt.y; if(d>0.15){ poke++; worstPoke=Math.max(worstPoke,d); }
+        }
+        const t0=terrainY(nx0,nz0,VS), s0=standingY(nx0,nz0);
+        under=+(s0-t0).toFixed(2);
+        // a pedestal wall round this node, if the junction stands over a drop
+        let ped=false;
+        getWorldGroup().traverse(o=>{ if(o.name!=='junctionPedestal' || ped) return;
+          const A=o.geometry.attributes.position.array;
+          for(let k=0;k<A.length;k+=3) if(Math.hypot(A[k]-nx0, A[k+2]-nz0) < 4){ ped=true; break; } });
+        out.trimPed=ped;
+        /* ...and no pedestal wall stands inside an arm's ribbon: a full circle of wall rose
+           out of the road leaving the node as a curved kerb (the "cylinder in the road") */
+        let inArm=0, pv=0; const G=getGraph();
+        getWorldGroup().traverse(o=>{ if(o.name!=='junctionPedestal') return;
+          const A=o.geometry.attributes.position.array;
+          for(let k=0;k<A.length;k+=6){
+            const x=A[k], z=A[k+2]; if(Math.hypot(x-nx0, z-nz0) > 4) continue; pv++;
+            for(const a of G.edges){
+              if(a.buried || !(a.a===e.a || a.b===e.a) || (a.a===e.a && a.trimA>0) || (a.b===e.a && a.trimB>0)) continue;
+              const P=a.prof.pts, hw=pathOutlineWidth(a.kind)/2; let hit=false;
+              // inline segment distance: this runs inside the (0,eval) string, where the
+              // harness's own ptSegSmoke is out of scope
+              for(let i=0;i+1<P.length && !hit;i++){
+                const dx=P[i+1][0]-P[i][0], dz=P[i+1][1]-P[i][1], L2=dx*dx+dz*dz;
+                let t=L2?((x-P[i][0])*dx+(z-P[i][1])*dz)/L2:0; t=Math.max(0,Math.min(1,t));
+                if(Math.hypot(x-P[i][0]-dx*t, z-P[i][1]-dz*t) < hw*0.9) hit=true;
+              }
+              if(hit){ inArm++; break; }
+            } } });
+        out.pedInArm={pv, inArm};
+      }
+      out.trim={found:!!e, n:n2, poke, worst:+worstPoke.toFixed(2), under}; }
+
+    /* Buildings on a terrace step: how far the ground falls away under any building's
+       outline, and how many of those have a foundation wall drawn down to it. */
+    { let over=0, walled=0; const wg=getWorldGroup();
+      getAreas().forEach((a,ai)=>{
+        if(a.kind!=='building' && a.kind!=='depot' && a.kind!=='platform') return;
+        const g=wg.getObjectByName('area:'+ai); if(!g) return;
+        let drop=0;
+        for(const r of a.rings) for(const p of r) drop=Math.max(drop, g.position.y-terrainY(p[0],p[1],VS));
+        if(drop>0.3){ over++; let w=false; g.traverse(o=>{ if(o.name==='foundation') w=true; }); if(w) walled++; }
+      });
+      out.bld={over, walled}; }
+
+    /* Long names fit their label. measureText is a stub here, so the canvas is given a
+       real-ish one for this call: ~30 px a character at the label font. */
+    { const orig=document.createElement.bind(document);
+      document.createElement=(tag,...r)=>{ const el=orig(tag,...r);
+        if(String(tag).toLowerCase()==='canvas'){ let w=512; Object.defineProperty(el,'width',{get:()=>w,set:v=>{w=v;},configurable:true});
+          el.getContext=()=>new Proxy({}, {get(_,k){ if(k==='measureText') return t=>({width:String(t).length*30}); return typeof k==='string'?(()=>{}):undefined; }, set(){ return true; }}); }
+        return el; };
+      try{
+        const name='Barr Trail Parking', tex=floatingLabelTex(name,'\\ud83c\\udd7f');
+        const spr=buildFloatingLabel(name,'\\ud83c\\udd7f',Math.max(7,name.length*0.7),3);
+        // the stub CanvasTexture keeps no image; the canvas width is what the aspect says
+        const w=(tex.userData && tex.userData.aspect) ? Math.round(128/tex.userData.aspect) : null;
+        out.label={texW:w, need:(name.length+3)*30, aspect:+(spr.userData.aspect||0).toFixed(3),
+                   shape:+(spr.scale.y/spr.scale.x).toFixed(3)};
+        updateAreaLabels(spr.position.x+100, 0, 0);   // far enough that the hold rule is off
+      }finally{ document.createElement=orig; }
+    }
+
+    /* Walking up a skirt: find one beside Barr Trail, stand at its foot, hold W up it. */
+    const pl=getTrailPlayer();
+    let cand=null;
+    for(const e of getGraph().edges){ if(e.name!=='Barr Trail' || cand) continue; const pr=e.prof, hw=pathOutlineWidth(e.kind)/2;
+      for(let i=1;i<pr.pts.length-1 && !cand;i++){ const a=pr.pts[i-1], b=pr.pts[i+1], L=Math.hypot(b[0]-a[0],b[1]-a[1]); if(L<1e-6) continue;
+        const nx=-(b[1]-a[1])/L, nz=(b[0]-a[0])/L;
+        for(const sd of [1,-1]){ const x=pr.pts[i][0]+nx*sd*(hw+0.6), z=pr.pts[i][1]+nz*sd*(hw+0.6), sk=skirtAt(x,z);
+          if(!sk) continue; const g=Math.hypot(sk.gx,sk.gz);
+          if(sk.y-standingY(x,z)>1.2 && g>0.45 && g<0.9){
+            let fx=x, fz=z; for(let k=0;k<60;k++){ const s2=skirtAt(fx,fz); if(!s2 || s2.y<standingY(fx,fz)+0.02) break; fx-=sk.gx/g*0.25; fz-=sk.gz/g*0.25; }
+            /* a clean bank: its foot is off every tread, and the top belongs to THIS edge
+               -- near a junction the "foot" can land on the next path over, and the walk
+               then crosses someone else's fill instead of climbing this one */
+            const sx=fx-sk.gx/g, sz=fz-sk.gz/g, nf=nearestTrail(sx,sz), nTop=nearestTrail(x,z);
+            if(nf.d <= nf.hw + 0.5 || nTop.edge !== e || i < 3 || i > pr.pts.length-4) continue;
+            // and a bank long enough to walk: at least 2u of it stands clear of the ground
+            let clearRun=0;
+            for(let k=0;k<60;k++){ const qx=x-sk.gx/g*0.1*k, qz=z-sk.gz/g*0.1*k, s3=skirtAt(qx,qz);
+              if(!s3 || s3.y < standingY(qx,qz)+0.05) break; clearRun+=0.1; }
+            if(clearRun < 2.0) continue;
+            cand={x:sx, z:sz, ux:sk.gx/g, uz:sk.gz/g, tx:x, tz:z, grade:g}; break; } } } }
+    out.walk={found:!!cand};
+    if(cand){
+      // the loop measures dt against the last frame it saw, and earlier checks ran their
+      // clocks up to ~1e6: start well past them or every frame is dt<=0 and nothing moves
+      let clock=5e7; const pump=()=>{ if(globalThis.__raf){ const fn=globalThis.__raf; globalThis.__raf=null; fn(clock+=33); } };
+      const key=(code,down)=>{ const ev=new window.KeyboardEvent(down?'keydown':'keyup',{bubbles:true}); Object.defineProperty(ev,'code',{value:code}); window.dispatchEvent(ev); };
+      const walk=(sx,sz,ux,uz,frames,run,stopOnTread)=>{
+        const yaw=Math.atan2(-uz, ux), cam=Math.atan2(Math.cos(yaw), -Math.sin(yaw));
+        // whatever the suite left open: a pane, a paused trip, a knock or a cling all stop input
+        /* Into play first: an earlier check leaves the game in the lobby, where the loop
+           renders but takes no input. */
+        try{ quitRace(); }catch(e){} try{ closeArrival(); }catch(e){} enterPlay();
+        placeAt(sx, sz, yaw);
+        // placeAt settles a pup near a path onto the path; this walk has to start where it says
+        pl.x=sx; pl.z=sz; pl.y=0; pl.vy=0;
+        pl.speed=0; pl.climbT=0; pl.knockT=0; pl.wall=null; pl.stillT=0; setCamYaw(cam);
+        if(run) key('ShiftLeft',true);
+        key('KeyW',true);
+        let inside=0, on=0, air=0; const sp=[], flat=[], tilt=[];
+        for(let f=0;f<frames;f++){
+          pump(); setCamYaw(cam);
+          const sk=skirtAt(pl.x,pl.z), g=standingY(pl.x,pl.z), nt=nearestTrail(pl.x,pl.z);
+          const feet=playerGroundY(pl.x,pl.z)+pl.y;
+          // the climb ends at the tread: past it the walk would go on down the far bank
+          if(stopOnTread && on > 0 && nt.d <= nt.hw) break;
+          if(sk && sk.y>g+0.05 && !(nt.d<=nt.hw)){
+            on++; inside=Math.max(inside, sk.y-feet); if(pl.y>0.02) air++;
+            if(f>3){ sp.push(pl.speed); tilt.push(dogSlopeTilt()); }
+          }else if(!(nt.d<=nt.hw) && f>12 && f<20) flat.push(pl.speed);
+        }
+        key('KeyW',false); if(run) key('ShiftLeft',false); for(let f=0;f<8;f++) pump();
+        const avg=a=>a.length ? a.reduce((x,y)=>x+y,0)/a.length : null;
+        /* Flat reference: the walking top speed itself, not a sample of the approach -- the
+           approach to a skirt is whatever ground the map happens to put there, and which
+           skirt is found moves whenever the network does. */
+        return {moved:+Math.hypot(pl.x-sx,pl.z-sz).toFixed(2), on, inside:+inside.toFixed(3), air, sp:avg(sp), flat:currentTopSpeed(),
+                tiltMax:tilt.length?Math.max(...tilt):null, tiltMin:tilt.length?Math.min(...tilt):null};
+      };
+      const up=walk(cand.x, cand.z, cand.ux, cand.uz, 70, false, true);
+      /* Down the SAME bank the pup just climbed, from where the climb ended: a start picked
+         a fixed distance past the bank's top can land on a terrace block the bank runs
+         under (it did, after the corner cut), and then no frame is ever on the skirt. */
+      const topX=pl.x, topZ=pl.z;
+      /* RUNNING down: the hop is a per-frame drop outrunning gravity's first frame, so it is
+         speed-dependent, and whichever pup an earlier check left selected may walk too
+         slowly to show it at all. Running makes the check independent of that. */
+      const down=walk(topX, topZ, -cand.ux, -cand.uz, 60, true);
+      out.walk={found:true, grade:+cand.grade.toFixed(2), up, down, want:+Math.atan(cand.grade).toFixed(2)};
+    }
+    /* A trail never has a junction with itself. The 16 m snap used to join the end of a
+       hairpin's leg into the leg below it, turning the hairpin into a small loop the path
+       crossed over itself on (the bottom of Barr Trail). A node where three or more ends
+       all belong to ONE route is that. And the network must still be one piece -- the
+       first, stricter version of the fix cut the cog railway in two at a survey gap. */
+    { const G=getGraph(), inc=G.nodes.map(()=>[]);
+      G.edges.forEach(e=>{ inc[e.a].push(e); if(e.b!==e.a) inc[e.b].push(e); });
+      let self=0; inc.forEach(es=>{ if(es.length>=3 && new Set(es.map(e=>e.route)).size===1) self++; });
+      const par=G.nodes.map((_,i)=>i), f=i=>{ while(par[i]!==i){ par[i]=par[par[i]]; i=par[i]; } return i; };
+      G.edges.forEach(e=>{ const a=f(e.a), b=f(e.b); if(a!==b) par[a]=b; });
+      // two dead ends within the snap distance of each other are a join that was lost:
+      // the rail gap stayed "one piece" only by way of the roads round it
+      const snap=16*getMapScale(), ends=G.nodes.filter(n=>n.deg===1);
+      let split=0; for(let i=0;i<ends.length;i++) for(let j=i+1;j<ends.length;j++)
+        if(Math.hypot(ends[i].p[0]-ends[j].p[0], ends[i].p[1]-ends[j].p[1]) < snap) split++;
+      out.graph={self, comps:new Set(G.nodes.map((_,i)=>f(i))).size, split}; }
+    /* Switchback legs: a trail's tread never overlaps its own tread from further along the
+       route, away from a fork (where a Y's two arms overlap by design). Along-route
+       distance runs over the route's own edges, so a hairpin split across two edges
+       still counts as one path. */
+    out.legs = (()=>{/* same-route tread overlap: two samples of one route whose treads overlap in plan (centres
+   closer than 2hw) but which are far apart ALONG the route. Along-route distance comes from a
+   Dijkstra over the route's own edges between sample positions. */
+const G=getGraph(); const byRoute=new Map();
+G.edges.forEach(e=>{ if(e.kind!=='trail') return; (byRoute.get(e.route)||byRoute.set(e.route,[]).get(e.route)).push(e); });
+let pairs=0, worst=0; const spots=[];
+const forks=G.nodes.filter(n=>n.deg>=3).map(n=>n.p), deg2=G.nodes.filter(n=>n.deg===2).map(n=>n.p);
+const nearFork=(x,z,r)=>forks.some(p=>Math.hypot(p[0]-x,p[1]-z)<r);
+const nearDeg2=(x,z,r)=>deg2.some(p=>Math.hypot(p[0]-x,p[1]-z)<r);
+let atFork=0, atDeg2=0;
+for(const [route, es] of byRoute){
+  const S=[]; // samples: {x,z,e,arc}
+  for(const e of es){ const P=e.prof.pts; let arc=0; for(let i=0;i<P.length-1;i++){ const L=Math.hypot(P[i+1][0]-P[i][0],P[i+1][1]-P[i][1]); for(let s=0;s<L;s+=1.0){ const u=s/L; S.push({x:P[i][0]+(P[i+1][0]-P[i][0])*u, z:P[i][1]+(P[i+1][1]-P[i][1])*u, e, arc:arc+s, len:0}); } arc+=L; } S.push({x:P[P.length-1][0],z:P[P.length-1][1],e,arc}); es.len=0; e.__len=arc; }
+  // node distances within route graph
+  const nodes=new Set(); es.forEach(e=>{nodes.add(e.a);nodes.add(e.b);});
+  const dist=new Map(); for(const s of nodes){ const d=new Map([[s,0]]); const q=[[0,s]]; while(q.length){ q.sort((a,b)=>a[0]-b[0]); const [dd,u]=q.shift(); if(dd>d.get(u)) continue; for(const e of es){ const v=e.a===u?e.b:(e.b===u?e.a:null); if(v==null) continue; const nd=dd+e.__len; if(!d.has(v)||nd<d.get(v)){ d.set(v,nd); q.push([nd,v]); } } } dist.set(s,d); }
+  const along=(p,q)=>{ if(p.e===q.e) return Math.abs(p.arc-q.arc); let best=1e9; for(const [na,da] of [[p.e.a,p.arc],[p.e.b,p.e.__len-p.arc]]) for(const [nb,db] of [[q.e.a,q.arc],[q.e.b,q.e.__len-q.arc]]){ const d=dist.get(na).get(nb); if(d!=null) best=Math.min(best,da+d+db); } return best; };
+  const hw=es[0].prof.halfWidth;
+  for(let i=0;i<S.length;i+=1) for(let j=i+1;j<S.length;j+=1){ const d=Math.hypot(S[i].x-S[j].x,S[i].z-S[j].z); if(d>=2*hw) continue; if(along(S[i],S[j]) < Math.PI*2*hw) continue; if(nearFork(S[i].x,S[i].z,6*hw)){ atFork++; continue; } if(nearDeg2(S[i].x,S[i].z,6*hw)) atDeg2++; pairs++; const o=2*hw-d; if(o>worst) worst=o; if(spots.length<400) spots.push([route,+S[i].x.toFixed(1),+S[i].z.toFixed(1),+d.toFixed(2)]); }
+}
+const where={}; spots.forEach(s=>{ const k=s[0]+'@'+Math.round(s[1]/10)*10+','+Math.round(s[2]/10)*10; where[k]=(where[k]||0)+1; });
+return {atFork, atDeg2, pairs, worst:+worst.toFixed(2), sites:Object.keys(where).length, where:Object.entries(where).slice(0,20)};
+})();
+    out.hairpins = hairpinsRounded();
+    /* ---- running up Barr Trail: no invisible walls ----
+       A pure-pursuit runner at full sprint up two long stretches. The pup used to stop
+       dead at switchbacks (turning circle ~6u against ~1.2u hairpins, then a per-frame
+       step into the tread's edge ramp that exceeded the step-up), and walk through after
+       a stop. Counted: frames standing still ON the tread, and how far up it got. */
+    { const pl=getTrailPlayer(), G=getGraph();
+      let clock=9e7; const pump=()=>{ if(globalThis.__raf){ const fn=globalThis.__raf; globalThis.__raf=null; fn(clock+=33); } };
+      const key=(code,down)=>{ const ev=new window.KeyboardEvent(down?'keydown':'keyup',{bubbles:true}); Object.defineProperty(ev,'code',{value:code}); window.dispatchEvent(ev); };
+      try{ quitRace(); }catch(e){} try{ closeArrival(); }catch(e){} enterPlay();
+      const edges=G.edges.filter(e=>e.name==='Barr Trail').sort((a,b)=>b.prof.pts.length-a.prof.pts.length);
+      const runs=[];
+      for(const e of [edges[1], edges[4]].filter(Boolean)){
+        const P=e.prof.pts, arc=[0]; for(let i=1;i<P.length;i++) arc.push(arc[i-1]+Math.hypot(P[i][0]-P[i-1][0],P[i][1]-P[i-1][1]));
+        const up=e.prof.ys[P.length-1]>e.prof.ys[0], Q=up?P:[...P].reverse(), A=up?arc:arc.map(a=>arc[arc.length-1]-a).reverse();
+        placeAt(Q[0][0],Q[0][1],0); pl.speed=0; pl.knockT=0; pl.wall=null;
+        key('ShiftLeft',true); key('KeyW',true);
+        let sAt=0, stalls=0, run0=0, lx=pl.x, lz=pl.z, f=0;
+        for(; f<2600; f++){
+          let best={d:1e9,s:0};
+          for(let i=0;i+1<Q.length;i++){ const ax=Q[i][0],az=Q[i][1],dx=Q[i+1][0]-ax,dz=Q[i+1][1]-az,L2=dx*dx+dz*dz; let t=L2?((pl.x-ax)*dx+(pl.z-az)*dz)/L2:0; t=Math.max(0,Math.min(1,t)); const d=Math.hypot(pl.x-ax-dx*t,pl.z-az-dz*t); if(d<best.d && A[i]+t*Math.sqrt(L2)>=sAt-3) best={d,s:A[i]+t*Math.sqrt(L2)}; }
+          sAt=Math.max(sAt,best.s); if(best.s>=A[A.length-1]-1.5) break;
+          const sT=best.s+1.0; let ti=0; while(ti<Q.length-2 && A[ti+1]<sT) ti++;
+          const u=Math.min(1,(sT-A[ti])/Math.max(1e-6,A[ti+1]-A[ti])), tx=Q[ti][0]+(Q[ti+1][0]-Q[ti][0])*u, tz=Q[ti][1]+(Q[ti+1][1]-Q[ti][1])*u;
+          const yaw=Math.atan2(-(tz-pl.z),tx-pl.x); setCamYaw(Math.atan2(Math.cos(yaw),-Math.sin(yaw)));
+          pump();
+          const nt=nearestTrail(pl.x,pl.z), mv=Math.hypot(pl.x-lx,pl.z-lz); lx=pl.x; lz=pl.z;
+          // a STOP is several frames standing still on the tread: the old barrier held the
+          // pup for hundreds; a single slow frame at a hairpin's lip is not one
+          if(f>20 && mv<0.02 && nt.d<=nt.hw){ run0++; if(run0>5) stalls++; } else run0=0;
+        }
+        key('KeyW',false); key('ShiftLeft',false); for(let k=0;k<5;k++) pump();
+        runs.push({stalls, prog:+(sAt/A[A.length-1]).toFixed(2), frames:f});
+      }
+      out.sprint=runs;
+
+      /* ---- walking up a skirt to the tread: no pop ----
+         From 4u out on the bank, walk straight in. The corridor edge used to ease from
+         ground to tread across 0.4u whatever the height, hauling the pup up a 2-3u bank
+         in a few frames -- up to 0.55u in one frame at the tread's edge. Counted over 80 climbs:
+         frames rising over 0.4u within 1.5u of the trail. */
+      let walks=0, pops=0, worst=0;
+      for(const e of G.edges){ if(e.name!=='Barr Trail' || walks>=80) continue; const P=e.prof.pts, hw=pathOutlineWidth(e.kind)/2;
+        for(let i=1;i<P.length-1 && walks<80;i+=3){ const a=P[i-1], b=P[i+1], L=Math.hypot(b[0]-a[0],b[1]-a[1]); if(L<1e-6) continue;
+          const nx=-(b[1]-a[1])/L, nz=(b[0]-a[0])/L;
+          for(const sd of [1,-1]){ if(walks>=80) break;
+            const x=P[i][0]+nx*sd*(hw+0.3), z=P[i][1]+nz*sd*(hw+0.3), sk=skirtAt(x,z);
+            if(!sk || sk.y-terrainY(x,z,VS)<=1.0) continue;
+            const ux=-nx*sd, uz=-nz*sd, yaw=Math.atan2(-uz,ux), cam=Math.atan2(Math.cos(yaw),-Math.sin(yaw));
+            placeAt(P[i][0]-ux*4, P[i][1]-uz*4, yaw); pl.speed=0; pl.knockT=0; pl.wall=null; setCamYaw(cam);
+            key('KeyW',true); let prev=playerGroundY(pl.x,pl.z)+pl.y;
+            for(let k=0;k<60;k++){ pump(); setCamYaw(cam); const feet=playerGroundY(pl.x,pl.z)+pl.y, r=feet-prev; prev=feet;
+              // at the tread's edge only: further out a rise like this is an ordinary terrace step
+              if(r>0.4 && nearestTrail(pl.x,pl.z).d<1.5){ pops++; worst=Math.max(worst,r); } }
+            key('KeyW',false); for(let k=0;k<4;k++) pump(); walks++;
+          } } }
+      out.pop={walks, pops, worst:+worst.toFixed(2)};
+
+      /* ---- terrain in the way fades; the camera does not move for it ----
+         Standing at spots up the trail with the camera swung to four headings: wherever
+         terrain stands on the camera->pup sightline the see-through amount must reach
+         full within half a second, wherever the line is open it must stay at zero (no
+         holes cut in terrain that is not in the way), and the terrain material must carry
+         the shader patch that does the cutting. */
+      { let blockedViews=0, blockedFaded=0, openViews=0, openCut=0;
+        const spots=[]; for(const e of G.edges){ if(e.name!=='Barr Trail') continue; for(let i=2;i<e.prof.pts.length;i+=6) spots.push(e.prof.pts[i]); }
+        for(const p of spots.slice(0,40)){
+          placeAt(p[0],p[1],0);
+          for(const yaw of [0, Math.PI/2, Math.PI, 3*Math.PI/2]){
+            setCamYaw(yaw); for(let k=0;k<40;k++) pump();
+            const U=sightUniforms(), C=U.uSightC.value, T=U.uSightT.value;
+            const blocked=sightBlocked(C[0],C[1],C[2],T[0],T[1],T[2],(x,z)=>terrainY(x,z,VS));
+            // settle a further half second in place and read the amount
+            for(let k=0;k<15;k++) pump();
+            if(blocked){ blockedViews++; if(sightCutAmount()>0.95) blockedFaded++; }
+            else { openViews++; if(sightCutAmount()>0.01) openCut++; }
+          } }
+        let patched=false; getWorldGroup().traverse(o=>{ if(o.isMesh && o.material && o.material.userData && o.material.userData.sightCut) patched=true; });
+        out.sight={blockedViews, blockedFaded, openViews, openCut, patched}; }
+
+      /* ---- the cog railway reaches the summit, not a trench below it ---- */
+      let top=null;
+      for(const e of G.edges){ if(e.kind!=='rail') continue; const P=e.prof.pts;
+        for(const i of [0,P.length-1]){ const raw=rawGroundY(P[i][0],P[i][1])*VS; if(!top || raw>top.raw) top={raw, y:e.prof.ys[i]}; } }
+      out.summit=top ? {gap:+(top.raw-top.y).toFixed(2)} : null;
+    }
+    return out;
+  })()`);
+  /* Stopping dead ON the tread is the barrier. Running off the side at a hairpin is not:
+     the pup keeps its running turn everywhere, so at a sprint it takes hairpins wide. */
+  check('Barr Trail 1:4 Coarse: sprinting up the trail never stops dead on the tread',
+    barr.sprint.length === 2 && barr.sprint.every(r => r.stalls === 0),
+    barr.sprint.map(r => `${r.stalls} stalled frames, ${Math.round(r.prog*100)}% of the way up`).join('; '));
+  check('Barr Trail 1:4 Coarse: walking up a bank to the trail climbs it, no pop',
+    barr.pop.walks >= 60 && barr.pop.pops === 0,
+    `${barr.pop.pops} frames rising over 0.4u at the tread's edge in ${barr.pop.walks} walks (worst ${barr.pop.worst}u)`);
+  check('Barr Trail 1:4 Coarse: terrain between the camera and the pup fades, and only then',
+    barr.sight.patched && barr.sight.blockedViews > 0 && barr.sight.blockedFaded === barr.sight.blockedViews && barr.sight.openCut === 0,
+    `terrain ${barr.sight.patched ? '' : 'NOT '}patched; faded in ${barr.sight.blockedFaded} of ${barr.sight.blockedViews} blocked views; cut in ${barr.sight.openCut} of ${barr.sight.openViews} open views`);
+  check('Barr Trail 1:4 Coarse: the cog railway ends at the summit, not in a trench below it',
+    barr.summit && barr.summit.gap < 1.0,
+    barr.summit ? `track ends ${barr.summit.gap}u below the real summit ground` : 'no railway');
+  check('Barr Trail 1:4 Coarse: switchback legs are a tread apart -- no leg overlaps the next',
+    barr.hairpins > 0 && barr.legs.worst < 0.1,
+    `${barr.hairpins} hairpins rounded; ${barr.legs.pairs} overlapping leg samples away from forks, worst overlap ${barr.legs.worst}u`);
+  check('Barr Trail 1:4 Coarse: no trail has a junction with itself, and the network is still one piece',
+    barr.graph.self === 0 && barr.graph.comps === 1 && barr.graph.split === 0,
+    `${barr.graph.self} same-trail junctions, ${barr.graph.comps} connected pieces, ${barr.graph.split} pairs of dead ends within snapping distance`);
+  check('Barr Trail 1:4 Coarse: no terrain block stands through a trail tread', barr.poke.n > 1000 && barr.poke.poke === 0,
+    `${barr.poke.poke} of ${barr.poke.n} tread samples with ground over 0.3u above them, worst ${barr.poke.worst}u (cell ${barr.cell}u)`);
+  check('Barr Trail 1:4 Coarse: nothing stands up through the road or paths at the car-park junction',
+    // 0.15u of slack: where one arm's skirt meets the next arm's tread edge at a junction
+    // the two meet at a crease, not a sliver
+    barr.trim.found && barr.trim.n > 50 && barr.trim.poke === 0,
+    `${barr.trim.poke} of ${barr.trim.n} surface samples with fill or ground above them, worst ${barr.trim.worst}u`);
+  check('Barr Trail 1:4 Coarse: a trail climbing away from a road starts at the road, not in the air',
+    barr.kept.barr && barr.startGap != null && barr.startGap < 0.3,
+    `Barr Trail's road-end trim ${barr.kept.barr ? 'dropped' : 'kept'} (${barr.kept.n} ends map-wide); its ribbon starts ${barr.startGap}u above the surface at the node`);
+  check('Barr Trail 1:4 Coarse: a junction pedestal never stands up inside a path leaving the node',
+    barr.pedInArm && barr.pedInArm.pv > 0 && barr.pedInArm.inArm === 0,
+    barr.pedInArm ? `${barr.pedInArm.inArm} of ${barr.pedInArm.pv} pedestal wall points inside an arm's ribbon` : 'no pedestal');
+  check('Barr Trail 1:4 Coarse: the car-park junction stands on something, not over open air',
+    barr.trim.found && (barr.trim.under < 0.3 || barr.trimPed),
+    `junction ${barr.trim.under}u above the terrain, pedestal ${barr.trimPed ? 'built' : 'missing'}`);
+  check('Barr Trail 1:4 Coarse: a building over a terrace step stands on a foundation',
+    barr.bld.over > 0 && barr.bld.walled === barr.bld.over,
+    `${barr.bld.walled} of ${barr.bld.over} buildings with ground falling away under them have a foundation`);
+  check('a long area name gets a canvas wide enough for it and the sprite keeps that shape',
+    !!barr.label && barr.label.texW >= barr.label.need && Math.abs(barr.label.shape - barr.label.aspect) < 0.002 && barr.label.aspect < 0.25,
+    barr.label ? `canvas ${barr.label.texW}px for ~${barr.label.need}px of text; sprite h/w ${barr.label.shape} vs texture ${barr.label.aspect}` : 'no label');
+  const bw = barr.walk;
+  check('walking up a fill embankment: the pup is on the slope, not inside it',
+    bw.found && bw.up.on >= 10 && bw.up.inside <= 0.02,
+    bw.found ? `moved ${bw.up.moved}u, ${bw.up.on} frames on the skirt, deepest ${bw.up.inside}u under its surface (grade ${bw.grade})` : 'no skirt found');
+  check('climbing a fill embankment is slower than the flat',
+    bw.found && bw.up.sp != null && bw.up.flat != null && bw.up.sp < bw.up.flat*0.75,
+    bw.found ? `on the skirt ${bw.up.sp && bw.up.sp.toFixed(2)} vs flat ${bw.up.flat && bw.up.flat.toFixed(2)} u/s` : 'no skirt found');
+  check('the pup tips nose-up climbing a bank and nose-down descending it',
+    // 0.7 of the slope's angle: the tilt eases in (about 80% in five frames), and a short
+    // bank can be crossed in little more than that
+    bw.found && bw.up.tiltMax != null && bw.down.tiltMin != null && bw.up.tiltMax > bw.want*0.7 && bw.down.tiltMin < -0.1,
+    bw.found ? `peak tilt up ${bw.up.tiltMax && bw.up.tiltMax.toFixed(2)} rad (slope ${bw.want}), down ${bw.down.tiltMin && bw.down.tiltMin.toFixed(2)} rad` : 'no skirt found');
+  check('walking down a fill embankment stays on it rather than hopping',
+    bw.found && bw.down.on >= 5 && bw.down.air === 0,
+    bw.found ? `${bw.down.air} of ${bw.down.on} frames airborne on the way down` : 'no skirt found');
+  /* Steep trail: the tilt follows the tread's grade, from the same function the avatar is
+     driven by -- a synthetic grade is not needed, the tread profile has real ones. */
+  const steep = (0,eval)(`(()=>{
+    let best=null;
+    for(const e of getGraph().edges){ if(e.kind!=='trail') continue; const pr=e.prof;
+      for(let i=1;i<pr.pts.length-1;i++){ const a=pr.pts[i-1], b=pr.pts[i+1], L=Math.hypot(b[0]-a[0],b[1]-a[1]); if(L<1.5) continue;
+        const gr=(pr.ys[i+1]-pr.ys[i-1])/L; if(!best || Math.abs(gr)>Math.abs(best.gr)) best={gr, x:pr.pts[i][0], z:pr.pts[i][1], ux:(b[0]-a[0])/L, uz:(b[1]-a[1])/L}; } }
+    const gs=groundSlope(best.x, best.z, best.ux, best.uz);
+    return {grade:+best.gr.toFixed(3), measured:+gs.slope.toFixed(3), on:gs.on};
+  })()`);
+  check('on a steep trail the slope the pup is tipped by is the tread grade',
+    steep.on === 'tread' && Math.abs(steep.grade) > 0.15 && Math.abs(steep.measured - steep.grade) < Math.abs(steep.grade)*0.35,
+    `steepest trail grade ${steep.grade}, measured ${steep.measured} on ${steep.on}`);
 
   const failed = results.filter(r => !r.ok);
   console.log('\n---------------- smoke test ----------------');

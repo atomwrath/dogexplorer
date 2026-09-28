@@ -15,6 +15,7 @@ let legPhase = 0;
 let crouchAmt = 0;
 let climbAmt = 0;
 let leapAmt = 0;
+let slopeAmt = 0;        // eased body tilt for the ground's slope, radians nose-up
 let dogLegLen = 0.4;     // hip pivot height above ground, WORLD units -- see measureLegLen
 
 /* The shared rig sizes itself directly in world units via g.scale.setScalar(p.size)
@@ -51,7 +52,7 @@ function dogShadowRadius(){ return dogLegLen*1.25; }
 function spawnDog(params){
   setDog(params);
   dog.scale.multiplyScalar(TRAIL_DOG_SCALE);
-  legPhase = 0; crouchAmt = 0; climbAmt = 0; leapAmt = 0;
+  legPhase = 0; crouchAmt = 0; climbAmt = 0; leapAmt = 0; slopeAmt = 0;
   dogLegLen = measureLegLen();
 }
 
@@ -80,7 +81,14 @@ function dogRunMul(){ return STATS.run / STATS.walk; }
 /* Called once per frame with the resolved ground height under the dog's feet (from
    terrain.js) and the current motion state. Everything below only touches `dog`/`R`,
    the live bindings runtime.js exports — never rebuilds geometry. */
-function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise, onWall){
+/* SLOPE TILT. `slope` is how far main.js wants the body tipped for the ground under it
+   (nose up positive: a fill embankment or a steep tread, see main.js groundSlope). The
+   legs are children of bodyG, so tipping the body tips them with it and the paws follow
+   the slope rather than one pair digging in. A body tipped about its hip-height pivot
+   drops its paws by legLen*(1/cos - 1) below the slope, so the body is lifted by exactly
+   that. Eased, so stepping onto a bank leans in over a few frames instead of snapping. */
+function slopeLift(angle, legLen){ const c = Math.cos(angle); return c > 0.2 ? legLen*(1/c - 1) : 0; }
+function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise, onWall, slope){
   if(!dog || !R) return;
   const size = P ? P.size : 1;
   // dog.position is in SCENE space, unlike dog.scale -- shrinking the group above
@@ -104,6 +112,7 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, 
      a swinging leg to be locked to, so continuing to cycle is just the airborne form of
      the paw-slide. Snappier easing than the climb -- a leap is a sudden commitment. */
   leapAmt  = lerp(leapAmt,  clamp(leap||0, 0, 1),  1-Math.pow(0.000002,dt));
+  slopeAmt = lerp(slopeAmt, onWall ? 0 : clamp(slope||0, -1, 1), clamp(1-Math.pow(0.0001,dt), 0, 1));   // clamped: a non-positive dt must not blow the ease up   // ~80% settled in five frames: a bank is often crossed in a fifth of a second
   climbAmt = lerp(climbAmt, clamp(climb||0, 0, 1), 1-Math.pow(0.0001,dt));
   const lp = leapAmt  > 0.002 ? leapPose(leapAmt, rise||0, R.legs.length) : null;
   /* A wall cling and a kerb scramble share the climbT timer but not the pose: one stands
@@ -147,8 +156,10 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, 
        two read as one motion rather than two overlaid wobbles. */
     const bound = g.bound*dogLegLen*(0.42 + 0.5*gal)*Math.max(0, Math.sin(legPhase))*(1-leapAmt);
     const flex  = gal*0.16*Math.sin(legPhase - Math.PI*0.5)*(1-leapAmt);
-    R.bodyG.position.y = R.bodyBaseY + bob*(1-leapAmt) + bound + (cp ? cp.rise*dogLegLen : 0);
-    let pitch = (cp ? cp.pitch : 0) + flex;
+    const tilt = slopeAmt*(1-leapAmt);
+    R.bodyG.position.y = R.bodyBaseY + bob*(1-leapAmt) + bound + (cp ? cp.rise*dogLegLen : 0)
+                       + slopeLift(tilt, dogLegLen);
+    let pitch = (cp ? cp.pitch : 0) + flex + tilt;
     if(lp) pitch = lerp(pitch, lp.pitch, leapAmt);
     R.bodyG.rotation.z = pitch;
     /* Roll into whichever diagonal is reaching. Only the climb sets it, so this is zero on
@@ -170,7 +181,9 @@ function setYaw(v){ setDogYaw(v); }
    passed on the exact screenshot that prompted the fix, since the pose was correct and
    simply never reached the rig. Same reason dogLegLength is exported. */
 function dogBodyPitch(){ return R && R.bodyG ? R.bodyG.rotation.z : null; }
+// test seam: the eased slope tilt on its own, without the gait's flex riding on top
+function dogSlopeTilt(){ return slopeAmt; }
 
 export { spawnDog, updateDog, setYaw, setDogPos, getDogPos, setDogVisible,
-         dogTopSpeed, dogRunMul, dogLegLength, dogShadowRadius, dogBodyPitch,
+         dogTopSpeed, dogRunMul, dogLegLength, dogShadowRadius, dogBodyPitch, dogSlopeTilt,
          TRAIL_DOG_SCALE };

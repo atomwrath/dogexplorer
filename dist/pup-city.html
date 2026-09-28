@@ -1949,6 +1949,7 @@ function updateParticles(dt){
 
 /* ========================================================= COMIC FX */
 const comicCache = {};
+const COMIC_TEXT_MAX = 270;     // widest a word may be drawn on the 320 px burst
 function comicTex(word, fill, ink){
   const key = word + fill;
   if(comicCache[key]) return comicCache[key];
@@ -1969,11 +1970,19 @@ function comicTex(word, fill, ink){
   x.strokeStyle = ink; x.lineWidth = 9; x.lineJoin = 'round';
   x.fill(); x.stroke();
   // word
+  /* Shrunk to fit the burst. A one-word "WOOF!" always fit at 62 px, but Pup Trails
+     pops a landmark's whole name here, and "Pikes Peak Summit Visitor Center" ran off
+     both sides of a 320 px canvas ("Landmar"). Only ever smaller, so every short word
+     renders exactly as it did. */
+  let px = 62;
   x.font = 'bold 62px "Comic Sans MS","Chalkboard SE",sans-serif';
+  const tw = x.measureText ? x.measureText(word).width : 0;
+  if(tw > COMIC_TEXT_MAX) px = Math.max(18, Math.floor(62*COMIC_TEXT_MAX/tw));
+  x.font = 'bold '+px+'px "Comic Sans MS","Chalkboard SE",sans-serif';
   x.textAlign = 'center'; x.textBaseline = 'middle';
   x.save();
   x.translate(cx, cy); x.rotate(-0.09);
-  x.lineWidth = 11; x.strokeStyle = ink;
+  x.lineWidth = Math.max(4, 11*px/62); x.strokeStyle = ink;
   x.strokeText(word, 0, 4);
   x.fillStyle = '#fff9e8';
   x.fillText(word, 0, 4);

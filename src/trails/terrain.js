@@ -429,6 +429,27 @@ function gradeTrailCells(profiles, channels, zones){
        causeway at deck height and the creek runs into a dam. */
     claimAlong(claim, pr.pts, pr.hmGround || pr.hm, pr.halfWidth);
   }
+  /* CUT THE CORNERS. Every claim above is keyed off the CENTRELINE: the cell a station
+     stands in, the cells the segment crosses, and cells whose CENTRE is within reach. On
+     a coarse grid a cell is far wider than the tread -- 9 units at 1:4 on Coarse, against
+     a painted half-width of 0.8 -- so a tread can run across the corner of a cell whose
+     centre is metres away and which no centreline enters. That cell kept its raw terrace
+     and stood through the ribbon: the "trail goes through the corner of a block" report,
+     up to 5 units proud of the tread on Barr Trail's switchbacks.
+
+     So the painted corridor is swept too, testing each cell's RECTANGLE rather than its
+     centre, and any cell it overlaps is CUT down to the tread -- only ever lowered, never
+     raised into a causeway, since a corner that is already below the tread is exactly
+     what a skirt is drawn over. Where another path has claimed the same cell, the lower
+     one wins, which is the rule claimAlong already applies between the two legs of a
+     switchback sharing a cell. */
+  const corners = new Map();
+  for(const pr of profiles) cornerCuts(corners, pr.pts, pr.hmGround || pr.hm, pr.halfWidth);
+  for(const [key, h] of corners){
+    const prev = claim.get(key);
+    if(prev){ if(h < prev.h) prev.h = h; continue; }
+    if(BAND[key] > bandOfM(h)) claim.set(key, {h, d: Infinity});
+  }
   /* CHANNELS SECOND, AND THEY ONLY TAKE WHAT NO PATH HAS -- except under a bridge.
 
      A creek and a road share a canyon floor for kilometres on the seven-bridges map, a
@@ -461,6 +482,12 @@ function gradeTrailCells(profiles, channels, zones){
         const i = key % WORLD.width, j = (key - i)/WORLD.width;
         const c = WORLD.cellCentre(i, j);
         if(!inZone(c.x, c.z) && !(v.d < prev.d)) continue;
+        /* ...and never RAISES a path's cell. A creek running beside a steep line is often
+           higher than the tread at the same spot -- the Manitou and Pike's Peak rack line
+           drops faster than the creek it follows -- and handing it the cell stood the
+           creek's bed up to 1.5 units through the track. The water still gets every cell
+           it is nearer that is not above the path. */
+        if(!inZone(c.x, c.z) && v.h > prev.h) continue;
       }
       claim.set(key, v);
     }
@@ -578,6 +605,36 @@ function claimAlong(claim, pts, hm, halfWidth, pad = 0.5){
     }
   }
 }
+/* Cells the painted corridor overlaps anywhere, not just at their centres, with the lowest
+   tread height that overlaps each -- see gradeTrailCells' corner cut. Sampled along each
+   segment finely enough (a fraction of the half-width) that no cell the ribbon covers is
+   stepped over, with the rectangle test done exactly at each sample. */
+function cornerCuts(out, pts, hm, halfWidth){
+  if(!pts || pts.length < 2 || !hm || !(halfWidth > 0)) return;
+  const half = WORLD.cell/2, hw = halfWidth;
+  const stride = Math.max(0.05, Math.min(hw*0.5, WORLD.cell*0.25));
+  const visit = (x, z, h)=>{
+    const i0 = clamp(WORLD.cellI(x-hw),0,WORLD.width-1), i1 = clamp(WORLD.cellI(x+hw),0,WORLD.width-1),
+          j0 = clamp(WORLD.cellJ(z-hw),0,WORLD.height-1), j1 = clamp(WORLD.cellJ(z+hw),0,WORLD.height-1);
+    for(let j=j0;j<=j1;j++) for(let k=i0;k<=i1;k++){
+      const c = WORLD.cellCentre(k, j);
+      const dx = Math.max(Math.abs(x-c.x)-half, 0), dz = Math.max(Math.abs(z-c.z)-half, 0);
+      if(dx*dx + dz*dz > hw*hw) continue;
+      const key = j*WORLD.width + k, prev = out.get(key);
+      if(prev == null || h < prev) out.set(key, h);
+    }
+  };
+  for(let i=0;i+1<pts.length;i++){
+    const p = pts[i], q = pts[i+1];
+    const L = Math.hypot(q[0]-p[0], q[1]-p[1]);
+    const n = Math.max(1, Math.ceil(L/stride));
+    for(let t=0;t<=n;t++){
+      const u = t/n;
+      visit(p[0]+(q[0]-p[0])*u, p[1]+(q[1]-p[1])*u, hm[i]+(hm[i+1]-hm[i])*u);
+    }
+  }
+}
+
 /* Lowest height wins; `d` separately tracks how close the nearest claiming centreline
    point came to the cell centre, for gradeTrailCells' path-vs-channel split. */
 function claimCell(claim, key, h, ci, cj, x, z){

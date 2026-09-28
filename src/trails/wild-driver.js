@@ -26,7 +26,7 @@ function spawnWild(key, seed){
   group.position.copy(wildPos);
   group.rotation.y = yaw;
   scene.add(group);
-  wildLegPhase = 0; wildClimbAmt = 0; wildLeapAmt = 0;
+  wildLegPhase = 0; wildClimbAmt = 0; wildLeapAmt = 0; wildSlopeAmt = 0;
   wildBodyBaseY = refs.bodyG ? refs.bodyG.position.y : 0;
   wildLegLen = measureWildLegLen();
 }
@@ -57,7 +57,11 @@ function spookRadiusFor(key){
   return clamp(16 - s.brav*1.3, 4, 14) * (s.scale||1);
 }
 
-function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise, onWall){
+/* See dog-driver's updateDog: the same eased slope tilt and the same lift that keeps
+   the paws on the slope when the body is tipped about its hip-height pivot. */
+let wildSlopeAmt = 0;
+function wildSlopeTilt(){ return wildSlopeAmt; }
+function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise, onWall, slope){
   if(!group || !refs) return;
   group.position.set(wildPos.x, groundY + jumpY, wildPos.z);
   group.rotation.y = yaw;
@@ -72,6 +76,7 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap
 
   // see dog-driver: airborne freezes the cycle and holds a spread instead
   wildLeapAmt  = lerp(wildLeapAmt,  clamp(leap||0, 0, 1),  1-Math.pow(0.000002,dt));
+  wildSlopeAmt = lerp(wildSlopeAmt, onWall ? 0 : clamp(slope||0, -1, 1), clamp(1-Math.pow(0.0001,dt), 0, 1));   // clamped: a non-positive dt must not blow the ease up   // ~80% settled in five frames: a bank is often crossed in a fifth of a second
   wildClimbAmt = lerp(wildClimbAmt, clamp(climb||0, 0, 1), 1-Math.pow(0.0001,dt));
   const legs = refs.legs||[];
   const lp = wildLeapAmt  > 0.002 ? leapPose(wildLeapAmt, rise||0, legs.length) : null;
@@ -109,7 +114,9 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap
     refs.bodyG.position.y = wildBodyBaseY
       + Math.abs(Math.sin(wildLegPhase))*clamp(speed*(hop?0.02:0.01),0,hop?0.3:0.12)*(1-wildLeapAmt)
       + bound + (cp ? cp.rise*wildLegLen : 0);
-    let pitch = (cp ? cp.pitch : 0) + flex;
+    const tilt = wildSlopeAmt*(1-wildLeapAmt);
+    { const c = Math.cos(tilt); if(c > 0.2) refs.bodyG.position.y += wildLegLen*(1/c - 1); }
+    let pitch = (cp ? cp.pitch : 0) + flex + tilt;
     if(lp) pitch = lerp(pitch, lp.pitch, wildLeapAmt);
     refs.bodyG.rotation.z = pitch;
     /* Roll into whichever diagonal is reaching. Only the climb sets it, so this is zero on
@@ -126,4 +133,4 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap
 }
 
 export { spawnWild, updateWild, setWildYaw, setWildVisible, topSpeedFor, spookRadiusFor,
-         wildPos, wildLegLength, wildShadowRadius };
+         wildPos, wildLegLength, wildShadowRadius, wildSlopeTilt };

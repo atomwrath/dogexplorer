@@ -405,7 +405,7 @@ function applyCuts(L, cuts, tol){
     const end = to ? to.q.slice() : pts[pts.length-1];
     // a cut AT a vertex (a shared survey node) would otherwise repeat that vertex
     const body = pts.slice(k0, k1).filter(p => d2(p, a0) > 1e-12 && d2(p, end) > 1e-12);
-    return {name:L.name, kind:L.kind, paved:L.paved, ford:L.ford, rackTag:L.rackTag, named:L.named, route:L.route,
+    return {name:L.name, kind:L.kind, paved:L.paved, ford:L.ford, rackTag:L.rackTag, named:L.named, route:L.route, src:L.src,
             pts:[a0].concat(body, [end])};
   };
   const out=[];
@@ -416,6 +416,26 @@ function applyCuts(L, cuts, tol){
 }
 
 const SPLIT_ROUNDS = 12;
+/* A TRAIL DOES NOT MEET ITSELF BY BEING NEAR ITSELF. The snap tolerance is 16 real metres
+   so that separately surveyed ways which obviously meet are joined. But a switchback's
+   two legs are often closer than that, and the rule took no account of whose line was
+   whose: the end of one leg -- or of a piece an earlier round had just cut -- landed
+   within 16 m of the next leg up and was snapped into it. The trail got a junction with
+   itself, the hairpin between became a little loop, and the path you walk crossed over its
+   own tread (the bottom of Barr Trail, where one hairpin became a three-edge triangle).
+
+   Pieces of the SAME source line are never snapped together at all: they are already
+   joined, end to end, at the cuts that made them, so any other contact between them is
+   the line passing near itself. Between different ways of the same named route, an END
+   landing on the other's MIDDLE (a T) only joins when really touching -- SAME_ROUTE_SNAP
+   of the tolerance -- because a trail surveyed in several ways continues end to end, not
+   into its own side. End-to-end joins keep the full tolerance (see buildGraph). */
+const SAME_ROUTE_SNAP = 0.2;
+function selfSnapTol(A, B, tol){
+  if(A.src != null && A.src === B.src) return 0;
+  if(A.route && A.route === B.route) return tol*SAME_ROUTE_SNAP;
+  return tol;
+}
 function splitT(lines,tol){
   const t2=tol*tol;
   for(let round=0; round<SPLIT_ROUNDS; round++){
@@ -428,6 +448,8 @@ function splitT(lines,tol){
     for(const ep of eps){
       for(let j=0;j<lines.length;j++){
         if(j===ep.i) continue;
+        const tolJ = selfSnapTol(lines[ep.i], lines[j], tol);
+        if(!(tolJ > 0)) continue;
         const bb=boxes[j];
         if(ep.p[0]<bb.x0-tol||ep.p[0]>bb.x1+tol||ep.p[1]<bb.z0-tol||ep.p[1]>bb.z1+tol) continue;
         const pts=lines[j].pts;
@@ -436,7 +458,7 @@ function splitT(lines,tol){
         let best=null;
         for(let k=0;k<pts.length-1;k++){
           const r=ptSeg(ep.p,pts[k],pts[k+1]);
-          if(r.d<tol&&(!best||r.d<best.d)) best={k, q:r.q, d:r.d};
+          if(r.d<tolJ&&(!best||r.d<best.d)) best={k, q:r.q, d:r.d};
         }
         if(best) cuts[j].push(best);
       }
@@ -536,6 +558,7 @@ function buildGraph(rawLines,snapTol,simpTol){
      piece a line is cut into inherits the same route. */
   let spur=0;
   lines.forEach((L,i)=>{
+    L.src=i;              // which source line a piece was cut from (see selfSnapTol)
     L.named=!!L.name;
     L.route=L.name||('spur:'+i);
     if(!L.name)L.name=SPUR_NAMES[spur++%SPUR_NAMES.length];
@@ -545,8 +568,17 @@ function buildGraph(rawLines,snapTol,simpTol){
   const eps=[];lines.forEach((L,i)=>{eps.push({p:L.pts[0],i,end:0});eps.push({p:L.pts[L.pts.length-1],i,end:1});});
   const par=eps.map((_,i)=>i);
   const find=i=>{while(par[i]!==i){par[i]=par[par[i]];i=par[i];}return i;};
-  for(let i=0;i<eps.length;i++)for(let j=i+1;j<eps.length;j++)
-    if(d2(eps[i].p,eps[j].p)<snapTol*snapTol){const a=find(i),b=find(j);if(a!==b)par[a]=b;}
+  // the same rule for ends: a piece's end is fused with another end of its own line only
+  // where they coincide (the cut that made them), never merely because a hairpin brought
+  // them within the snap distance
+  for(let i=0;i<eps.length;i++)for(let j=i+1;j<eps.length;j++){
+    const A=lines[eps[i].i], B=lines[eps[j].i];
+    // END to END across different source lines keeps the full tolerance, same route or
+    // not: that is two ways of one trail continuing, and surveys do leave gaps there (the
+    // cog railway has one of 8 m that the tight same-route rule cut the line in two at)
+    const t = (A.src!=null && A.src===B.src) ? snapTol*1e-3 : snapTol;
+    if(d2(eps[i].p,eps[j].p)<t*t){const a=find(i),b=find(j);if(a!==b)par[a]=b;}
+  }
   const clusters=new Map();
   eps.forEach((e,i)=>{const r=find(i);if(!clusters.has(r))clusters.set(r,[]);clusters.get(r).push(e);});
   const nodes=[];const epNode=new Map();
