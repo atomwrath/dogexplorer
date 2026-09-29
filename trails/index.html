@@ -268,6 +268,10 @@
       </div>
       <div id="miniWrap">
         <canvas id="minimap"></canvas>
+        <!-- Auto-walk. Sits directly under the map, above the trail-name chip: the chip comes
+             and goes as you step on and off trails, and a button that shifts when it does is
+             a button you miss. Touch layer only (see trails.css). -->
+        <button type="button" id="autoBtn" aria-pressed="false" title="Auto-walk (E): follow this trail until it ends or forks"><span class="ic">🥾</span><span class="lb">AUTO</span></button>
         <span class="tally" id="hudTrail" title="The trail you are on">—</span>
       </div>
 
@@ -280,6 +284,7 @@
           <button class="tbtn" id="tSneak" title="Sneak (C)"><span class="ic">🤫</span><span class="lb">SNEAK</span></button>
           <button class="tbtn" id="touchBarkBtn" title="Bark (B)"><span class="ic">🐕</span><span class="lb">BARK</span></button>
           <button class="tbtn" id="tJump" title="Jump (Space)"><span class="ic">🦘</span><span class="lb">JUMP</span></button>
+          <button class="tbtn" id="tSprint" title="Sprint (Shift) — hold"><span class="ic">💨</span><span class="lb">SPRINT</span></button>
         </div>
       </div>
       <!-- The 3-2-1. Over the scene rather than in the HUD corner, because it is the one

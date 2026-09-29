@@ -53,6 +53,7 @@ import { addPups, kennelPups, loadKennel, parsePupFile } from '../data/kennel.js
 import { nearestTrail, skirtAt } from './spatial.js';
 import { updateSightCut } from './sight-cut.js';
 import { updateTrain, trainPush } from './train.js';
+import { autoWalkBegin, autoWalkSteer } from './auto-walk.js';
 
 /* fov: Pup City's 38 deg is a tight telephoto, chosen for its small enclosed blocks;
    trails is wide open country, so a wider, more natural-feeling field of view suits it.
@@ -1448,6 +1449,7 @@ function movePlayer(stepX, stepZ){
 /* ---------- input: trail-owned, not core/input.js (that module is wired directly to
    Pup City's player-state/modes/pickups -- creator has its own for the same reason) --- */
 const trailKeys = {};
+const AUTO_CANCEL_KEYS = new Set(['KeyW','KeyA','KeyS','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight']);
 addEventListener('keydown', e=>{
   trailKeys[e.code]=true;
   /* Both panes are reachable by key in BOTH states, so both keys are handled before the
@@ -1468,9 +1470,13 @@ addEventListener('keydown', e=>{
     if(e.code==='Escape'){ if(isRaceCardOpen()) closeRaceCard(); else closeArrival(); }
     return;
   }
+  if(AUTO_CANCEL_KEYS.has(e.code)) stopAutoWalk('steer');
   if(e.code==='Space'){ e.preventDefault(); trailJump(); }
   if(e.code==='KeyC') toggleSneak();
   if(e.code==='KeyB') doBark();
+  /* E toggles auto-walk, the keyboard's answer to the button under the map. Not on a key
+     repeat: holding E would otherwise switch it on and straight off again every ~30 ms. */
+  if(e.code==='KeyE' && !e.repeat) toggleAutoWalk();
   if(e.code==='KeyP') saveHere();
   /* The drawer was already dealt with above; what is left is the rest of the stack.
      Abandoning a walk because you wanted to abandon a race is the same mistake the map
@@ -1498,6 +1504,23 @@ addEventListener('keyup', e=> trailKeys[e.code]=false);
    device with both (a laptop with a touchscreen) gets the right behaviour from each. */
 const stick = {active:false,id:null,dx:0,dy:0,ox:0,oy:0};
 const look  = {active:false,id:null,lastX:0,lastY:0};
+/* SPRINT AND AUTO-WALK are input state like `stick`, and live beside it for the same reason:
+   releaseTouchSlots() below has to be able to reset all of them.
+
+   touchSprint is the SPRINT button, held like Shift is held -- down while a thumb is on it,
+   up the instant it lifts. It is NOT read off the stick any more: pushing the stick to the
+   rim used to sprint, which made a fast walk and a sprint the same gesture and left no way
+   to walk at full speed. See the frame loop, where it joins the Shift key.
+
+   `auto` is the auto-walk: {on, st}, st being auto-walk.js's follower state. `stickIgnored`
+   is the id of a finger that was ALREADY on the stick when auto-walk started (the natural
+   way to start it: thumb walking, other thumb taps the button). That finger is not asking
+   to steer, so the stick ignores it until it lifts -- otherwise it would either cancel
+   auto-walk at once or, once auto-walk ended at a junction, carry the pup straight on past
+   the fork it was supposed to stop at. Any NEW touch on the stick is a real request. */
+let touchSprint = false;
+const auto = {on:false, st:null, why:'', pace:1};
+let stickIgnored = null;
 const YAW_SENS=0.0055, PITCH_SENS=0.0042;
 /* AN OVAL STICK. Travel is wider than it is tall: full deflection is STICK_RX px of thumb
    travel sideways but STICK_RY forward/back. Direction is read from the NORMALISED offset
@@ -1563,7 +1586,6 @@ function paintStick(){
   // only the knob (below) and the state classes move.
   const mag = stick.active ? Math.hypot(stick.dx, stick.dy) : 0;
   stickBase.classList.toggle('on', stick.active);
-  stickBase.classList.toggle('run', mag>0.92 && !player.sneaking);
   stickBase.classList.toggle('sneak', !!player.sneaking);
   if(stickKnob) stickKnob.style.transform = stick.active
     ? `translate(${(stick.dx*STICK_RX).toFixed(1)}px, ${(stick.dy*STICK_RY).toFixed(1)}px)`
@@ -1668,6 +1690,10 @@ renderer.domElement.addEventListener('pointerdown', e=>{
     // fixed pad centre, and a touch that lands away from it reads as an immediate
     // deflection in that direction rather than starting at zero. Touching anywhere on
     // the left half still grabs it; only the pad's own position stopped moving.
+    /* Touching the stick is asking to steer, so it takes over from auto-walk. Only a NEW
+       touch does this -- a thumb already down when auto-walk began is stickIgnored. */
+    stopAutoWalk('steer');
+    stickIgnored = null;
     stick.active=true; stick.id=e.pointerId;
     const home = stickHome();
     stick.ox = home.x; stick.oy = home.y;
@@ -1693,6 +1719,7 @@ addEventListener('pointermove', e=>{
   }
 });
 const endPointer=e=>{
+  if(e.pointerId===stickIgnored) stickIgnored=null;
   if(stick.active&&e.pointerId===stick.id){ stick.active=false; stick.dx=stick.dy=0; paintStick(); }
   if(look.active&&e.pointerId===look.id){ look.active=false; }
 };
@@ -1704,6 +1731,9 @@ addEventListener('lostpointercapture', endPointer);
 function releaseTouchSlots(){
   if(stick.active){ stick.active=false; stick.dx=stick.dy=0; stick.id=null; paintStick(); }
   look.active=false; look.id=null;
+  // a held sprint button loses its pointerup the same way the stick can, and would leave
+  // the pup running; auto-walk does not carry on across a backgrounded page or a new walk
+  stickIgnored=null; touchSprint=false; stopAutoWalk('released'); syncTouchButtons();
 }
 
 
@@ -1739,7 +1769,7 @@ let lastTouchEndT = -1e9;
 function inPlaySurface(node){
   for(let n=node; n; n=n.parentNode){
     if(n===renderer.domElement) return true;
-    if(n.id==='touchCtl') return true;
+    if(n.id==='touchCtl' || n.id==='autoBtn') return true;
   }
   return false;
 }
@@ -1819,6 +1849,13 @@ function syncTouchButtons(){
   const s=$('#tSneak');
   if(s) s.classList.toggle('on', !!player.sneaking);
   if(stickBase) stickBase.classList.toggle('sneak', !!player.sneaking);
+  /* Sneaking beats sprinting (the loop drops `run` while sneaking), so a held sprint button
+     does not light while it is doing nothing. The knob goes orange with it, as it used to
+     at full deflection. */
+  const sprinting = touchSprint && !player.sneaking;
+  const sp=$('#tSprint');
+  if(sp) sp.classList.toggle('on', sprinting);
+  if(stickBase) stickBase.classList.toggle('run', sprinting);
 }
 
 /* pointerdown, not click: a jump that lands 100 ms after the thumb is a jump you missed,
@@ -1830,6 +1867,78 @@ function tapBtn(el, fn){
   let lastTap = -1e9;
   el.addEventListener('pointerdown', e=>{ e.preventDefault(); lastTap = performance.now(); fn(); });
   el.addEventListener('click', ()=>{ if(performance.now() - lastTap > 500) fn(); });
+}
+
+/* A button that is HELD, for the sprint: down on pointerdown, up when that finger lifts.
+   Like Shift, and unlike jump and sneak, which are a tap and a toggle. Pointer capture keeps
+   it held if the thumb slides off the edge of the button mid-sprint -- the thumb is nowhere
+   near precise while the pup is running -- and lostpointercapture is the up that still
+   arrives when the browser takes the touch away. No click fallback: a click is a press and
+   release in one instant, which for a hold is a sprint of no frames. */
+function holdBtn(el, down, up){
+  if(!el) return;
+  let id = null;
+  el.addEventListener('pointerdown', e=>{
+    e.preventDefault(); id = e.pointerId;
+    try{ el.setPointerCapture(e.pointerId); }catch(_){ /* not every engine, and not jsdom */ }
+    down();
+  });
+  const end = e=>{ if(id !== null && e.pointerId === id){ id = null; up(); } };
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', end);
+  el.addEventListener('lostpointercapture', end);
+}
+function setTouchSprint(on){ touchSprint = !!on; syncTouchButtons(); }
+
+/* ---------- auto-walk ----------
+   Walk along the trail you are on until it ends or forks. auto-walk.js does the following;
+   this is the on/off. Which way it walks is the way the pup is FACING when the button is
+   pressed -- walking when you press it, or standing still -- projected onto the trail. Off
+   a trail there is nothing to follow, so the button refuses (and says so, with a shake). */
+function walkHeading(){
+  // steerHeading is the world direction being walked (see the frame loop); a pup standing
+  // still has none, so fall back to where it faces. yaw = atan2(-z, x), so this is its inverse.
+  if(steerHeading != null) return {x:Math.cos(steerHeading), z:Math.sin(steerHeading)};
+  return {x:Math.cos(player.yaw), z:-Math.sin(player.yaw)};
+}
+function syncAutoBtn(){
+  const b=$('#autoBtn');
+  if(!b) return;
+  b.classList.toggle('on', auto.on);
+  b.setAttribute('aria-pressed', auto.on ? 'true' : 'false');
+}
+function refuseAutoBtn(){
+  const b=$('#autoBtn');
+  if(!b) return;
+  b.classList.remove('nope'); void b.offsetWidth;     // restart the animation on a second refusal
+  b.classList.add('nope');
+  setTimeout(()=>b.classList.remove('nope'), 450);
+}
+function startAutoWalk(){
+  const g = getGraph();
+  if(!playing || trip.paused || !g || raceFrozen() || player.wall || player.knockT > 0) return false;
+  const h = walkHeading();
+  const st = autoWalkBegin(g, player.x, player.z, h.x, h.z);
+  /* One trial step before committing: standing at the very end of a trail and facing the
+     way it ends is a start that would finish on the next frame, which is a refusal, not a
+     walk that lasts no time. */
+  const probe = st && autoWalkSteer(st, g, player.x, player.z, 0, 0, false);
+  if(!st || probe.end){ refuseAutoBtn(); return false; }
+  auto.on = true; auto.st = st; auto.why = '';
+  stickIgnored = stick.active ? stick.id : null;
+  syncAutoBtn();
+  return true;
+}
+/* `why` is only ever read by the test harness, which needs to tell a walk that ended at a
+   fork from one that was cancelled or gave up -- 'end', 'junction', 'lost', 'stuck', 'steer',
+   'paused', 'released', or '' for the button. */
+function stopAutoWalk(why){
+  if(!auto.on) return;
+  auto.on = false; auto.st = null; auto.why = why || ''; auto.pace = 1;
+  syncAutoBtn();
+}
+function toggleAutoWalk(){
+  if(auto.on) stopAutoWalk(); else startAutoWalk();
 }
 
 /* Scroll to zoom. camera.js owns the factor and applies it to the boom length in both
@@ -1865,6 +1974,8 @@ function loop(t){
      paused branches still render and their shadows still have to land in the right place. */
   skyFrame(player.x, standingY(player.x, player.z), player.z);
 
+  if(auto.on && (!playing || !getGraph() || trip.paused)) stopAutoWalk('paused');
+
   if(!playing || !getGraph() || trip.paused){
     // idle, or the arrival card is up: no movement, but keep the avatar breathing so
     // neither the lobby nor the summary is a still frame. Pausing deliberately keeps the
@@ -1885,18 +1996,34 @@ function loop(t){
   if(trailKeys.KeyS||trailKeys.ArrowDown) iz+=1;
   if(trailKeys.KeyA||trailKeys.ArrowLeft) ix-=1;
   if(trailKeys.KeyD||trailKeys.ArrowRight) ix+=1;
-  run=(trailKeys.ShiftLeft||trailKeys.ShiftRight) && !player.sneaking;
+  run=(trailKeys.ShiftLeft||trailKeys.ShiftRight||touchSprint) && !player.sneaking;
   let mag=Math.hypot(ix,iz);
   if(mag>0){ix/=mag;iz/=mag;mag=1;}
-  if(stick.active){
+  /* The stick only counts while it is a finger that means it (see stickIgnored). How far it
+     is pushed sets how fast you walk; sprinting is the button's job, not the rim's. */
+  const stickLive = stick.active && stick.id !== stickIgnored;
+  if(stickLive){
     const L=Math.hypot(stick.dx,stick.dy); mag=clamp(L,0,1);
-    if(mag>0.06){ix=stick.dx/L;iz=stick.dy/L;run=mag>0.92&&!player.sneaking;} else {ix=iz=0;mag=0;}
+    if(mag>0.06){ix=stick.dx/L;iz=stick.dy/L;} else {ix=iz=0;mag=0;}
+  }
+  const fS=Math.sin(getCamYaw()), fC=Math.cos(getCamYaw());
+  /* AUTO-WALK is an input source, not a movement mode: it produces the same camera-relative
+     (ix,iz) the stick and the keys do, and everything downstream -- the limited-rate
+     steering, the camera swinging in behind, speed, sneaking, sprinting, the noise ring,
+     the recorder -- runs exactly as if a thumb were doing it. That is why jump, sneak,
+     sprint and bark all still work while it is on, and why nothing else had to learn about
+     it. auto-walk.js hands back a WORLD direction; the camera rotation below is the inverse
+     of the one that turns (ix,iz) into (wx,wz) further down. */
+  if(auto.on){
+    const free = !(player.knockT > 0 || player.wall || player.climbT > 0 || raceFrozen());
+    const step = autoWalkSteer(auto.st, getGraph(), player.x, player.z, player.speed, dt, free, steerHeading);
+    if(step.end){ stopAutoWalk(step.end); }
+    else{ ix = -fC*step.dx + fS*step.dz; iz = -fS*step.dx - fC*step.dz; mag = 1; auto.pace = step.pace; }
   }
   /* THE 3-2-1. Input is dropped, not the frame: the camera still follows, the animals
      still move and the countdown still draws, because a countdown over a frozen still
      frame reads as the game having hung rather than as a start line. */
   if(raceFrozen()){ ix=0; iz=0; mag=0; run=false; }
-  const fS=Math.sin(getCamYaw()), fC=Math.cos(getCamYaw());
   let wx=-fC*ix-fS*iz, wz=fS*ix-fC*iz;
   /* Stick or keys, walk along a heading that turns toward the input at a limited rate
      (steerStep above) instead of snapping to it. wx/wz stay the input's for the camera
@@ -2009,7 +2136,7 @@ function loop(t){
   // carrySlow() is 1 with an empty back, so this costs nothing until it costs something
   // a fill embankment is a slope, and a slope costs speed -- see skirtDrag
   const bankDrag = moving ? skirtDrag(player.x, player.z, wx, wz) : 1;
-  const top = currentTopSpeed()*(player.sneaking?0.5:(run?currentRunMul():1))*surf*climbDrag*bankDrag*carrySlow()*(stick.active?mag:1);
+  const top = currentTopSpeed()*(player.sneaking?0.5:(run?currentRunMul():1))*surf*climbDrag*bankDrag*carrySlow()*(stickLive?mag:1)*(auto.on?auto.pace:1);
   player.speed = lerp(player.speed, moving?top:0, 1-Math.pow(0.0009,dt));
   /* Settling. Measured off SPEED rather than off the input, so being knocked over or
      sliding to a halt counts as movement until you have actually stopped -- an animal
@@ -2053,7 +2180,7 @@ function loop(t){
        answer anyway. Hold the view still and let the pup walk toward you. */
     const dc = Math.atan2(-ix, -iz);      // input direction, relative to the camera
     if(performance.now()-lastLookT>900 && Math.abs(dc) < BACKPEDAL_ARC){
-      addCamYaw(camFollowStep(dc, mag, stick.active, runFrac(player.speed), dt));
+      addCamYaw(camFollowStep(dc, mag, stickLive, runFrac(player.speed), dt));
     }
   }
   const bb=getBBox(), F=55;
@@ -3506,6 +3633,8 @@ if(mapSectToggle && mapSectBody){
 tapBtn($('#touchBarkBtn'), doBark);
 tapBtn($('#tJump'), trailJump);
 tapBtn($('#tSneak'), toggleSneak);
+holdBtn($('#tSprint'), ()=>setTouchSprint(true), ()=>setTouchSprint(false));
+tapBtn($('#autoBtn'), toggleAutoWalk);
 /* Bark and save-spot have no HUD buttons any more -- B and P, plus "Save where I am" on
    the map sheet. The optional-chaining is what makes removing them from the HTML a
    one-file change rather than a two-file one. */
@@ -3642,6 +3771,9 @@ function getTrailPlayer(){ return player; }
 function getTripState(){ return trip; }
 
 function getOnTrail(){ return onTrail; }
+/* Auto-walk and sprint, for the same reason: `auto` and `touchSprint` are top-level bindings. */
+function getAutoWalk(){ return auto; }
+function getTouchSprint(){ return touchSprint; }
 
 /* The course machinery gets the same treatment for the same reason: `rec`, `race` and
    `previewCourse` are top-level bindings that vanish into the bundle's one scope, so the
@@ -3652,7 +3784,7 @@ function getPendingRecording(){ return recPending; }
 function getPreviewCourse(){ return previewCourse; }
 
 export { boot, enterPlay, exitPlay, placeAtHead, placeAt, placeAtSpot, saveHere, doBark,
-         trailIsPlaying, getTrailPlayer, getTripState, getOnTrail,
+         trailIsPlaying, getTrailPlayer, getTripState, getOnTrail, getAutoWalk, getTouchSprint,
          startRecording, stopRecording, saveRecording, discardRecording, startRace,
          quitRace, finishRace, renderCourseUI, renderCourseList,
          avatarName, raceFrozen, isRaceCardOpen, closeRaceCard, syncCourseOverlay,

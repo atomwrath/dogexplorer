@@ -6308,6 +6308,373 @@ async function assertAll(window, errors, stats) {
     tc.ctxCanvas === true && tc.selCanvas === true && tc.ctxInput === false,
     `canvas contextmenu cancelled=${tc.ctxCanvas}, selectstart cancelled=${tc.selCanvas}, text field cancelled=${tc.ctxInput}`);
 
+  {   // scoped: the names below (tab, R, H, LP, f2) are local to this block
+  /* ---------- the tablet's SPRINT button and AUTO-WALK ----------------------------------
+     Two changes to the touch layer. Sprint used to be "push the stick to the rim", which
+     made a fast walk and a sprint the same gesture and left no way to walk at full speed;
+     it is now a button held like Shift, under JUMP. And a toggle under the minimap walks the
+     trail you are on until it ends or forks.
+
+     Driven through the real frame loop and real pointer events, on whatever map the suite
+     has loaded: edges are picked from the live graph and never named, so none of this
+     depends on which trail happens to be where. The frame clock starts at 2e6 -- above every
+     earlier test's and below the next ones' -- because the loop's dt is the difference
+     between successive timestamps and a clock running backwards is a negative dt. */
+  const tab = await (async () => {
+    const G = getGraph(), pl = getTrailPlayer(), A = getAutoWalk();
+    if (!trailIsPlaying()) enterPlay();
+    /* No wildlife, as insurance rather than as a fix for anything seen: enterPlay seeds the
+       population from the clock, so in principle an animal can spook, charge or knock the pup
+       mid-test -- and a knock is a legitimate reason for auto-walk to refuse to start. Eight
+       runs without this line all passed; it is here so a ninth cannot fail for a reason
+       that has nothing to do with the controls under test. */
+    resetCritters();
+    const cv = d.querySelector('#c'), miniWrap = d.querySelector('#miniWrap');
+    const autoBtn = d.querySelector('#autoBtn'), sprintBtn = d.querySelector('#tSprint');
+    const jumpBtn = d.querySelector('#tJump'), sneakBtn = d.querySelector('#tSneak'), stickB = d.querySelector('#stickBase');
+    let clock = 2e6;
+    const pump = (n = 1) => { for (let i = 0; i < n; i++) if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(clock += 33); } };
+    const pev = (type, id, x, y) => { const e = new window.MouseEvent(type, { bubbles: true, clientX: x, clientY: y, buttons: 1 });
+      e.pointerId = id; Object.defineProperty(e, 'pointerType', { value: 'touch' }); return e; };
+    const press = (el, id) => el.dispatchEvent(pev('pointerdown', id, 0, 0));
+    const lift = (el, id, type = 'pointerup') => el.dispatchEvent(pev(type, id, 0, 0));
+    const T = stickTravel(), home = STICK_HOME;
+    const stickDown = (id, fx, fy) => cv.dispatchEvent(pev('pointerdown', id, home.x + fx*T.rx, home.y + fy*T.ry));
+    const stickUp = id => window.dispatchEvent(pev('pointerup', id, 0, 0));
+    const key = (code, down) => { const ev = new window.KeyboardEvent(down ? 'keydown' : 'keyup', { bubbles: true }); Object.defineProperty(ev, 'code', { value: code }); window.dispatchEvent(ev); };
+    const nearHead = (x, z) => getTrailheads().some(h => Math.hypot(h.x - x, h.z - z) < 14);
+    const arms = ni => G.edges.filter(e => !e.buried && (e.a === ni || e.b === ni));
+    const nodeNear = (x, z) => { let bn = -1, bd = 1e9; G.nodes.forEach((n, ni) => { const dd = Math.hypot(n.p[0] - x, n.p[1] - z); if (dd < bd) { bd = dd; bn = ni; } }); return { n: bn, d: bd }; };
+    const settle = () => {
+      stopAutoWalk(); setTouchSprint(false); pl.sneaking = false;
+      d.body.removeAttribute('data-pane'); d.body.classList.remove('arrived', 'racedone'); d.body.classList.add('touch');
+      getTripState().paused = false;
+      Object.assign(pl, { y: 0, vy: 0, speed: 0, wall: null, climbT: 0, knockT: 0, barkT: 0 });
+      pump(2);
+    };
+    const place = (x, z, hx, hz) => { settle(); pl.x = x; pl.z = z; pl.yaw = Math.atan2(-hz, hx); setCamYaw(Math.atan2(Math.cos(pl.yaw), -Math.sin(pl.yaw))); pump(2); };
+    const onEdge = (e, frac, dir) => { const pts = e.prof.pts; const k = Math.max(1, Math.min(pts.length - 2, Math.floor(pts.length * frac)));
+      const p = pts[k], q = pts[k + dir]; return { x: p[0], z: p[1], hx: q[0] - p[0], hz: q[1] - p[1] }; };
+    // how an arm leaves its node, read `reach` units along it by interpolation -- the game reads
+    // 1.5 (auto-walk.js autoWalkBegin), and two arms that share a stub that long are one choice
+    const armNear = (e, ni, reach = 1.5) => { const n = G.nodes[ni].p, pts = (e.a === ni ? e.prof.pts : e.prof.pts.slice().reverse()); let acc = 0, k = 1, p = pts[pts.length - 1];
+      for (; k < pts.length; k++) { const sl = Math.hypot(pts[k][0] - pts[k-1][0], pts[k][1] - pts[k-1][1]);
+        if (acc + sl >= reach) { const t = (reach - acc) / (sl || 1); p = [pts[k-1][0] + (pts[k][0] - pts[k-1][0])*t, pts[k-1][1] + (pts[k][1] - pts[k-1][1])*t]; break; } acc += sl; }
+      const vx = p[0] - n[0], vz = p[1] - n[1], L = Math.hypot(vx, vz) || 1; return { x: vx / L, z: vz / L }; };
+    // where an arm heads off from its node, as a unit vector, read a few points in
+    const armDir = (e, ni) => { const n = G.nodes[ni].p, pts = e.prof.pts, o = e.a === ni ? pts[Math.min(pts.length - 1, 6)] : pts[Math.max(0, pts.length - 7)];
+      const vx = o[0] - n[0], vz = o[1] - n[1], L = Math.hypot(vx, vz) || 1; return { x: vx / L, z: vz / L, p: o }; };
+    const good = G.edges.filter(e => !e.buried && e.prof && e.prof.pts.length > 12 && e.lenM > 20 &&
+      !nearHead(e.prof.pts[0][0], e.prof.pts[0][1]) && !nearHead(e.prof.pts[e.prof.pts.length - 1][0], e.prof.pts[e.prof.pts.length - 1][1])).sort((a, b) => b.lenM - a.lenM);
+    const out = { goodEdges: good.length };
+    if (!good.length) return out;
+    const long = good[0];
+    const peak = (frames, get) => { let m = 0; for (let i = 0; i < frames; i++) { pump(); m = Math.max(m, get()); } return m; };
+
+    /* ---- sprint: held like Shift, and no longer the rim of the stick ---- */
+    { const s = onEdge(long, 0.15, 1); place(s.x, s.z, s.hx, s.hz);
+      stickDown(301, 0, -1); out.walkPeak = peak(70, () => pl.speed); out.stickRun = stickB.classList.contains('run');
+      out.top = currentTopSpeed(); out.runMul = currentRunMul();
+      press(sprintBtn, 302); out.sprintHeld = getTouchSprint(); out.sprintPeak = peak(70, () => pl.speed);
+      out.sprintLit = sprintBtn.classList.contains('on'); out.knobRun = stickB.classList.contains('run');
+      lift(sprintBtn, 302); out.releasedFlag = getTouchSprint(); out.litAfter = sprintBtn.classList.contains('on'); out.knobAfter = stickB.classList.contains('run');
+      let after = 0; pump(70); after = pl.speed; out.afterRelease = after;
+      // every way a finger can go without saying so
+      for (const [id, how] of [[303, 'pointercancel'], [304, 'lostpointercapture']]) { press(sprintBtn, id); lift(sprintBtn, id, how); out['rel_' + how] = getTouchSprint(); }
+      press(sprintBtn, 306); lift(sprintBtn, 999); out.otherFinger = getTouchSprint(); lift(sprintBtn, 306);
+      // sneaking beats it, and the button does not claim otherwise
+      stickDown(307, 0, -1); pump(20); press(sprintBtn, 308); pump(30); const sp = pl.speed; pl.sneaking = true; pump(70);
+      out.sneakSpeed = pl.speed; out.sprintSpeedBefore = sp; out.sneakSprintLit = sprintBtn.classList.contains('on'); pl.sneaking = false; lift(sprintBtn, 308); stickUp(307);
+      press(sprintBtn, 309); window.dispatchEvent(new window.Event('blur')); out.blur = getTouchSprint(); pump(3); }
+
+    /* ---- where the buttons are ---- */
+    { const css = [...d.querySelectorAll('style')].map(s => s.textContent).join('\n');
+      const cell = id => { const m = new RegExp('#' + id + '\\{[^}]*grid-column:(\\d)[^}]*grid-row:(\\d)').exec(css); return m ? { col: +m[1], row: +m[2] } : null; };
+      out.jumpCell = cell('tJump'); out.sprintCell = cell('tSprint');
+      out.miniOrder = [...miniWrap.children].map(c => c.id).join(',');
+      const disp = () => d.defaultView.getComputedStyle(autoBtn).getPropertyValue('display');
+      settle(); out.autoShown = disp();
+      d.body.classList.remove('touch'); out.autoNoTouch = disp(); d.body.classList.add('touch');
+      d.body.setAttribute('data-pane', 'settings'); out.autoInPane = disp(); d.body.removeAttribute('data-pane');
+      d.body.classList.add('arrived'); out.autoArrived = disp(); d.body.classList.remove('arrived');
+      d.body.classList.add('racedone'); out.autoRaceDone = disp(); d.body.classList.remove('racedone'); }
+
+    /* ---- following, and stopping where the trail does, both ways along ---- */
+    { const runs = [];
+      for (const e of good.slice(0, 4)) for (const dir of [1, -1]) {
+        const s = onEdge(e, 0.3, dir); place(s.x, s.z, s.hx, s.hz);
+        press(autoBtn, 400); const started = A.on, litOn = autoBtn.classList.contains('on');
+        let worst = 0, f = 0, dist = 0, lx = pl.x, lz = pl.z;
+        while (A.on && f < 4000) { pump(); f++; const nt = nearestTrail(pl.x, pl.z); worst = Math.max(worst, nt.d - nt.hw); dist += Math.hypot(pl.x - lx, pl.z - lz); lx = pl.x; lz = pl.z; }
+        const why = A.why; pump(30);
+        const nn = nodeNear(pl.x, pl.z);
+        runs.push({ started, litOn, litOff: !autoBtn.classList.contains('on'), ended: !A.on, why, worst, dist, endArms: arms(nn.n).length, endDist: nn.d, speedAfter: pl.speed, frames: f }); }
+      out.runs = runs; }
+
+    /* ---- carries straight on through a node that is not a fork ---- */
+    { const pass = []; const dbg = { scale: getMapScale(), nodes: G.nodes.length, edges: G.edges.length, two: 0, twoAway: 0, twoLong: 0 };
+      const plen = e => { const q = e.prof.pts; let L = 0; for (let i = 1; i < q.length; i++) L += Math.hypot(q[i][0] - q[i-1][0], q[i][1] - q[i-1][1]); return L; };
+      G.nodes.forEach((n, ni) => { const ea = arms(ni); if (ea.length !== 2 || ea[0] === ea[1]) return; dbg.two++;
+        if (nearHead(n.p[0], n.p[1])) return; dbg.twoAway++;
+        // lengths in WORLD units (what the walk covers), not lenM: the map scale changes one and not the other
+        if (plen(ea[0]) > 6 && plen(ea[1]) > 14) { dbg.twoLong++; pass.push({ ni, ea }); } });
+      out.hopDbg = dbg;
+      const hops = [];
+      for (const { ni, ea } of pass.slice(0, 4)) {
+        const n = G.nodes[ni], e = ea[0], pts = e.prof.pts, atEnd = e.b === ni;
+        let acc = 0, j = atEnd ? pts.length - 1 : 0; while (acc < 5 && j !== (atEnd ? 0 : pts.length - 1)) { const nj = atEnd ? j - 1 : j + 1; acc += Math.hypot(pts[nj][0] - pts[j][0], pts[nj][1] - pts[j][1]); j = nj; }
+        place(pts[j][0], pts[j][1], n.p[0] - pts[j][0], n.p[1] - pts[j][1]); press(autoBtn, 410);
+        /* NET distance from the node, not distance travelled: a follower that has stopped
+           advancing (still tracking the stretch behind it) leaves its steering target pinned
+           near the node, and the pup dithers around that target while still adding up path
+           length. Only getting away from the node along the next stretch counts as carrying on.
+           The bar is 8 units: a pup pinned to a stale target dithers within ~4 of the node
+           (measured), and a stretch of 14+ units leaves room to clear 8. It is in world units,
+           so it holds at 1:5 and at the 1:12 the suite happens to be on by this point. */
+        let f = 0, passed = false, onOther = false, away = 0;
+        while (A.on && f < 900) { pump(); f++;
+          const dn = Math.hypot(pl.x - n.p[0], pl.z - n.p[1]);
+          if (dn < 2.0) passed = true;
+          if (passed) { away = Math.max(away, dn); const nt = nearestTrail(pl.x, pl.z); if (nt.edge === ea[1]) onOther = true; if (away > 8) break; } }
+        hops.push({ passed, onOther, away, still: A.on, why: A.why }); }
+      out.hops = hops; }
+
+    /* ---- hairpins: the sharpest corners on the map, where cutting the inside leaves the tread ----
+       A hairpin is a pass-through node whose two stretches leave it the same way, so walking in
+       along one and out along the other is a turn of nearly 180 degrees. Aiming straight at a
+       point past it crosses the ground between the legs -- measured at 2.2 units below the tread
+       against a 0.63 step-up limit, which is stuck for good. So what is measured is how far
+       BELOW the tread the pup ever gets, and how far it gets away once round.
+
+       That drop only bites where the ground falls away beside the tread, which it did at the
+       suite's 1:12 and did not at 1:5, so it cannot be the only measure: the pup's SWING off
+       the centreline is geometry and shows at any scale. Measured on this map's one hairpin
+       (159 deg, corridor half-width 1.30): 0.82-0.84 as built; 0.97-1.00 with the corner cut
+       not pulled back, 1.04-1.06 with no easing into the bend, 1.3-1.7 with no waiting to face
+       the way it is going, ~2.0 with no pace control at all. The bar is 70% of the half-width
+       (0.91): under it as built, over it for every one of those. */
+    { const plen = e => { const q = e.prof.pts; let L = 0; for (let i = 1; i < q.length; i++) L += Math.hypot(q[i][0] - q[i-1][0], q[i][1] - q[i-1][1]); return L; };
+      const corners = [];
+      G.nodes.forEach((n, ni) => { const ea = arms(ni); if (ea.length !== 2 || ea[0] === ea[1] || nearHead(n.p[0], n.p[1])) return;
+        if (plen(ea[0]) < 6 || plen(ea[1]) < 10) return;
+        const a = armNear(ea[0], ni), b = armNear(ea[1], ni);
+        const turn = Math.acos(Math.max(-1, Math.min(1, -(a.x*b.x + a.z*b.z)))) * 180 / Math.PI;
+        if (turn > 120) corners.push({ ni, ea, turn }); });
+      corners.sort((p, q) => q.turn - p.turn);
+      const hp = [];
+      for (const { ni, ea, turn } of corners.slice(0, 3)) {
+        const n = G.nodes[ni], e = ea[0], pts = e.prof.pts, atEnd = e.b === ni;
+        let acc = 0, j = atEnd ? pts.length - 1 : 0; while (acc < 5 && j !== (atEnd ? 0 : pts.length - 1)) { const nj = atEnd ? j - 1 : j + 1; acc += Math.hypot(pts[nj][0] - pts[j][0], pts[nj][1] - pts[j][1]); j = nj; }
+        place(pts[j][0], pts[j][1], n.p[0] - pts[j][0], n.p[1] - pts[j][1]); press(autoBtn, 415);
+        let f = 0, passed = false, away = 0, drop = 0, swing = 0, hw = 1;
+        while (A.on && f < 900) { pump(); f++;
+          const nt = nearestTrail(pl.x, pl.z); if (nt.y != null && nt.d < 3) drop = Math.max(drop, nt.y - standingY(pl.x, pl.z));
+          const dn = Math.hypot(pl.x - n.p[0], pl.z - n.p[1]); if (dn < 2.0) passed = true;
+          if (dn < 6) { swing = Math.max(swing, nt.d); hw = nt.hw || hw; }
+          if (passed) { away = Math.max(away, dn); if (away > 8) break; } }
+        hp.push({ turn, passed, away, drop, swing, hw, still: A.on, why: A.why }); }
+      out.hairpins = { found: corners.length, limit: stepUpLimit(), walks: hp }; }
+
+    /* ---- the loop the player lives in: walk, stop at the fork, turn, walk again ---- */
+    { const loops = [];
+      const forks = []; G.nodes.forEach((n, ni) => { if (arms(ni).length >= 3 && !nearHead(n.p[0], n.p[1])) forks.push(ni); });
+      for (const ni of forks) { if (loops.length >= 5) break;
+        const n = G.nodes[ni], ar = arms(ni);
+        const e = ar.find(x => x.lenM > 25);
+        // an arm nothing else leaves along: two arms a degree apart are one choice to a player
+        const other = ar.find(x => { if (x === e || x.lenM < 10) return false; const a = armNear(x, ni); return ar.every(y => y === x || (armNear(y, ni).x*a.x + armNear(y, ni).z*a.z) < 0.95); });
+        if (!e || !other) continue;
+        const pts = e.prof.pts, atEnd = e.b === ni; let acc = 0, j = atEnd ? pts.length - 1 : 0;
+        while (acc < 12 && j !== (atEnd ? 0 : pts.length - 1)) { const nj = atEnd ? j - 1 : j + 1; acc += Math.hypot(pts[nj][0] - pts[j][0], pts[nj][1] - pts[j][1]); j = nj; }
+        if (nearHead(pts[j][0], pts[j][1])) continue;
+        place(pts[j][0], pts[j][1], n.p[0] - pts[j][0], n.p[1] - pts[j][1]); press(autoBtn, 420);
+        let f = 0; while (A.on && f < 1500) { pump(); f++; } const why = A.why; pump(30);
+        const stoppedAt = Math.hypot(pl.x - n.p[0], pl.z - n.p[1]), speed = pl.speed;
+        const o = armDir(other, ni).p;
+        pl.yaw = Math.atan2(-(o[1] - n.p[1]), o[0] - n.p[0]);
+        press(autoBtn, 421); const again = A.on; const at = [pl.x, pl.z]; pump(50);
+        const towards = Math.hypot(at[0] - o[0], at[1] - o[1]) - Math.hypot(pl.x - o[0], pl.z - o[1]);
+        loops.push({ why, stoppedAt, speed, again, towards }); }
+      out.loops = loops; }
+
+    /* ---- dead ends: facing the end there is nothing to walk; facing back there is ---- */
+    { const dead = []; G.nodes.forEach((n, ni) => { if (arms(ni).length === 1 && !nearHead(n.p[0], n.p[1]) && arms(ni)[0].lenM > 6) dead.push(ni); });
+      let refused = 0, walked = 0, tested = 0;
+      for (const ni of dead.slice(0, 6)) { const n = G.nodes[ni], a = armDir(arms(ni)[0], ni); tested++;
+        place(n.p[0], n.p[1], -a.x, -a.z); if (!startAutoWalk()) refused++;
+        place(n.p[0], n.p[1], a.x, a.z); if (startAutoWalk()) walked++; }
+      out.dead = { tested, refused, walked }; }
+
+    /* ---- a start that would end on the very next frame is refused, not begun and dropped ----
+       Standing where the trail ahead is shorter than the pup takes to stop -- a stub between two
+       forks, say -- the follower would accept the start and end it on the next frame: the button
+       would light and go out with no shake, which reads as a press that did nothing. It is
+       looked for on the loaded map (163 such starts at 1:12, none at 1:5) rather than built,
+       and the check says so if the map has none. */
+    { let found = null;
+      for (let ni = 0; ni < G.nodes.length && !found; ni++) { const n = G.nodes[ni]; if (nearHead(n.p[0], n.p[1])) continue;
+        for (let a = 0; a < 16; a++) { const h = a * Math.PI / 8, hx = Math.cos(h), hz = Math.sin(h);
+          const st = autoWalkBegin(G, n.p[0], n.p[1], hx, hz); if (!st) continue;
+          if (autoWalkSteer(st, G, n.p[0], n.p[1], 0, 0, false).end) { found = { ni, hx, hz }; break; } } }
+      if (found) { const n = G.nodes[found.ni]; place(n.p[0], n.p[1], found.hx, found.hz); press(autoBtn, 490);
+        out.probeStart = { found: true, on: A.on, nope: autoBtn.classList.contains('nope') }; }
+      else out.probeStart = { found: false }; }
+
+    /* ---- refusing, and what cancels it ---- */
+    { const bb = getBBox(); let far = null;
+      for (let i = 0; i < 40 && !far; i++) for (let k = 0; k < 40 && !far; k++) { const x = bb.minx + (bb.maxx - bb.minx)*i/39, z = bb.minz + (bb.maxz - bb.minz)*k/39; if (nearestTrail(x, z).d > 25 && !nearHead(x, z)) far = [x, z]; }
+      if (far) { place(far[0], far[1], 1, 0); const dd = nearestTrail(pl.x, pl.z).d; press(autoBtn, 430); out.refuse = { dd, on: A.on, nope: autoBtn.classList.contains('nope') }; }
+      const s2 = onEdge(long, 0.2, 1); const again = () => { place(s2.x, s2.z, s2.hx, s2.hz); press(autoBtn, 431); pump(15); };
+      again(); out.lookKeeps = (() => { cv.dispatchEvent(pev('pointerdown', 432, 1000, 400)); window.dispatchEvent(pev('pointermove', 432, 940, 440)); const on = A.on; window.dispatchEvent(pev('pointerup', 432, 0, 0)); return on; })();
+      stickDown(433, 0, 0); out.touchCancels = !A.on; out.stickTakesOver = stickB.classList.contains('on'); stickUp(433);
+      again(); press(autoBtn, 435); out.buttonToggles = !A.on && !autoBtn.classList.contains('on');
+      again(); key('KeyW', true); key('KeyW', false); out.keyCancels = !A.on;
+      again(); getTripState().paused = true; pump(2); out.pauseCancels = !A.on; getTripState().paused = false;
+      out.cancelWhy = (() => { again(); stickDown(438, 0, 0); const w = A.why; stickUp(438); return w; })(); }
+
+    /* ---- E is the keyboard's auto-walk button ---- */
+    { const s = onEdge(long, 0.2, 1); place(s.x, s.z, s.hx, s.hz);
+      key('KeyE', true); key('KeyE', false); const on1 = A.on, lit = autoBtn.classList.contains('on'); pump(30); const moved = pl.speed;
+      // a key held down auto-repeats keydown: that must not flick it off again
+      const rep = new window.KeyboardEvent('keydown', { bubbles: true, repeat: true }); Object.defineProperty(rep, 'code', { value: 'KeyE' }); window.dispatchEvent(rep);      // ONE repeat: an even number would toggle it off and on again and hide the bug
+      const stillOn = A.on;
+      key('KeyE', true); key('KeyE', false); const off = !A.on && !autoBtn.classList.contains('on');
+      const nearNode = nodeNear(pl.x, pl.z).d;
+      // off any trail it refuses, exactly as the button does
+      const bb = getBBox(); let far = null;
+      for (let i = 0; i < 40 && !far; i++) for (let k = 0; k < 40 && !far; k++) { const x = bb.minx + (bb.maxx - bb.minx)*i/39, z = bb.minz + (bb.maxz - bb.minz)*k/39; if (nearestTrail(x, z).d > 25 && !nearHead(x, z)) far = [x, z]; }
+      let refused = null; if (far) { place(far[0], far[1], 1, 0); key('KeyE', true); key('KeyE', false); refused = !A.on && autoBtn.classList.contains('nope'); }
+      out.eKey = { on1, lit, moved, stillOn, off, refused }; }
+
+    /* ---- a thumb already on the stick when auto-walk starts is not asking to steer ---- */
+    { const s = onEdge(long, 0.1, 1); place(s.x, s.z, s.hx, s.hz);
+      stickDown(440, 0, -1); pump(20); press(autoBtn, 441); pump(20);
+      const kept = A.on;
+      window.dispatchEvent(pev('pointermove', 440, home.x + 40, home.y - 20)); pump(10); const kept2 = A.on;
+      let f = 0; while (A.on && f < 3000) { pump(); f++; }
+      pump(50);
+      const nn = nodeNear(pl.x, pl.z), idle = pl.speed, why = A.why;
+      stickUp(440); pump(5); stickDown(443, 0, -1); const live = peak(60, () => pl.speed); stickUp(443);
+      out.held = { kept, kept2, ended: !A.on, why, idle, atNode: nn.d, live }; }
+
+    /* ---- the other verbs, while it walks ---- */
+    { const s = onEdge(long, 0.05, 1); place(s.x, s.z, s.hx, s.hz); press(autoBtn, 450);
+      const w1 = peak(60, () => pl.speed); let alive = A.on;
+      pl.y = 0; pl.vy = 0; jumpBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); const jumped = pl.vy > 0; pump(45); alive = alive && A.on;
+      press(sprintBtn, 451); const w2 = peak(50, () => pl.speed); alive = alive && A.on; lift(sprintBtn, 451); pump(40);
+      sneakBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); pump(60); const w3 = pl.speed; alive = alive && A.on; sneakBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+      doBark(); const barked = pl.barkT > 0;
+      out.verbs = { w1, w2, w3, jumped, barked, alive }; }
+
+    /* ---- being knocked about is not being stuck: the loop tells the follower it is not free ---- */
+    { const s = onEdge(long, 0.1, 1); place(s.x, s.z, s.hx, s.hz); press(autoBtn, 480); pump(30);
+      for (let i = 0; i < 100; i++) { pl.knockT = 1; pump(); }
+      out.knocked3s = { on: A.on, why: A.why }; pl.knockT = 0; }
+
+    /* ---- standing still, and which way it faces ---- */
+    { const s = onEdge(long, 0.4, 1); place(s.x, s.z, s.hx, s.hz); const p0 = [pl.x, pl.z]; out.startedStill = pl.speed < 0.05; press(autoBtn, 460); pump(40);
+      const fwd = [pl.x - p0[0], pl.z - p0[1]]; const tan = [s.hx, s.hz]; stopAutoWalk();
+      place(s.x, s.z, -s.hx, -s.hz); press(autoBtn, 461); pump(40);
+      const back = [pl.x - s.x, pl.z - s.z]; stopAutoWalk();
+      const cosv = (v, w) => (v[0]*w[0] + v[1]*w[1]) / ((Math.hypot(...v) * Math.hypot(...w)) || 1);
+      out.facing = { moved: Math.hypot(...fwd), dotFwd: cosv(fwd, tan), dotBack: cosv(back, tan) }; }
+
+    /* ---- the follower on its own: stuck, knocked, lost ---- */
+    { const s = onEdge(long, 0.3, 1); place(s.x, s.z, s.hx, s.hz);
+      const fresh = () => autoWalkBegin(G, s.x, s.z, s.hx, s.hz);
+      let st = fresh(), r = null; for (let t = 0; t < 3; t += 0.05) { r = autoWalkSteer(st, G, s.x, s.z, 0, 0.05, true); if (r.end) break; } out.stuck = r;
+      st = fresh(); r = null; for (let t = 0; t < 4; t += 0.05) { r = autoWalkSteer(st, G, s.x, s.z, 0, 0.05, false); if (r.end) break; } out.knocked = r;
+      st = fresh(); out.lost = autoWalkSteer(st, G, s.x + 40, s.z + 40, 0, 0.05, true); }
+
+    /* ---- it does not outlive the walk ---- */
+    { const s = onEdge(long, 0.2, 1); place(s.x, s.z, s.hx, s.hz); press(autoBtn, 470); pump(5);
+      window.dispatchEvent(new window.Event('blur')); out.blurStops = !A.on;
+      place(s.x, s.z, s.hx, s.hz); press(autoBtn, 471); pump(5); exitPlay(); out.exitStops = !A.on; enterPlay(); resetCritters(); pump(3); out.reenterOff = !A.on; }
+    settle();
+    return out;
+  })();
+
+  const R = tab.runs || [], H = tab.hops || [], LP = tab.loops || [];
+  const f2 = v => (typeof v === 'number' ? v.toFixed(2) : String(v));
+  check('the tablet test found trails to walk', tab.goodEdges >= 3, `${tab.goodEdges} usable edges`);
+  check('full stick deflection walks: it is no longer a sprint', tab.stickRun === false && tab.walkPeak <= tab.top * 1.05 + 0.05,
+    `peak ${f2(tab.walkPeak)} u/s at full deflection vs walking top ${f2(tab.top)}, knob run-lit ${tab.stickRun}`);
+  check('holding SPRINT runs faster than walking, and lights the button and the knob',
+    tab.sprintHeld === true && tab.sprintLit === true && tab.knobRun === true && tab.sprintPeak > tab.walkPeak * 1.4,
+    `walking peak ${f2(tab.walkPeak)} -> sprint peak ${f2(tab.sprintPeak)} u/s (run multiplier ${f2(tab.runMul)})`);
+  check('letting go of SPRINT drops back to a walk and unlights both',
+    tab.releasedFlag === false && tab.litAfter === false && tab.knobAfter === false && tab.afterRelease < tab.sprintPeak * 0.75,
+    `${f2(tab.sprintPeak)} -> ${f2(tab.afterRelease)} u/s`);
+  check('a sprint finger that never says it lifted (cancel, lost capture, blur) cannot leave the pup running',
+    tab.rel_pointercancel === false && tab.rel_lostpointercapture === false && tab.blur === false,
+    `cancel ${tab.rel_pointercancel}, lostpointercapture ${tab.rel_lostpointercapture}, blur ${tab.blur}`);
+  check('another finger lifting does not release SPRINT', tab.otherFinger === true);
+  check('sneaking beats sprinting, and the button does not light while it is doing nothing',
+    tab.sneakSpeed < tab.sprintSpeedBefore * 0.5 && tab.sneakSprintLit === false,
+    `sprinting ${f2(tab.sprintSpeedBefore)} -> sneaking with SPRINT held ${f2(tab.sneakSpeed)} u/s, lit ${tab.sneakSprintLit}`);
+  check('SPRINT sits directly under JUMP',
+    tab.jumpCell && tab.sprintCell && tab.jumpCell.col === tab.sprintCell.col && tab.sprintCell.row === tab.jumpCell.row + 1,
+    `jump ${JSON.stringify(tab.jumpCell)}, sprint ${JSON.stringify(tab.sprintCell)}`);
+  check('the auto-walk button is under the map and above the trail name', tab.miniOrder === 'minimap,autoBtn,hudTrail', tab.miniOrder);
+  check('the auto-walk button shows on touch during a walk, and nowhere else',
+    tab.autoShown !== 'none' && tab.autoNoTouch === 'none' && tab.autoInPane === 'none' && tab.autoArrived === 'none' && tab.autoRaceDone === 'none',
+    `walking ${tab.autoShown}; no touch ${tab.autoNoTouch}; drawer open ${tab.autoInPane}; arrival card ${tab.autoArrived}; race card ${tab.autoRaceDone}`);
+
+  check('auto-walk follows a trail and stops where it ends or forks, either way along it',
+    R.length >= 6 && R.every(r => r.started && r.ended && (r.why === 'junction' || r.why === 'end') && r.endDist < 2.0 && r.endArms !== 2 && r.speedAfter < 0.3),
+    R.map(r => `${r.why}@${f2(r.endDist)}u/${r.endArms}arms/${f2(r.dist)}u`).join(' '));
+  check('while it walks it stays on the tread', R.length >= 6 && R.every(r => r.worst <= 0.05),
+    `worst overshoot past the corridor edge ${f2(Math.max(0, ...R.map(r => r.worst)))}u over ${R.length} walks`);
+  check('the button is lit while it walks and unlit when it stops', R.length >= 6 && R.every(r => r.litOn && r.litOff));
+  check('a node that is not a fork does not stop it: it carries on onto the next stretch',
+    H.length >= 1 && H.every(h => h.passed && h.onOther && h.away > 8 && h.still),
+    H.length ? H.map(h => `passed ${h.passed}, onto next ${h.onOther}, ${f2(h.away)}u from the node, ${h.still ? 'still walking' : 'ended: ' + h.why}`).join(' | ')
+             : 'no pass-through node to test: ' + JSON.stringify(tab.hopDbg));
+  { const HP = tab.hairpins || { found: 0, walks: [] };
+    check('a hairpin does not throw the pup off the tread: it rounds the corner and carries on',
+      HP.found >= 1 && HP.walks.length >= 1 && HP.walks.every(w => w.passed && w.still && w.away > 8 && w.drop < HP.limit * 0.9 && w.swing <= w.hw * 0.7),
+      HP.found ? HP.walks.map(w => `${Math.round(w.turn)} deg turn: got ${f2(w.away)}u round it, worst drop below the tread ${f2(w.drop)}u (step-up limit ${f2(HP.limit)}), swung ${f2(w.swing)}u off the centreline (corridor half-width ${f2(w.hw)})${w.still ? '' : ', ended: ' + w.why}`).join(' | ')
+               : 'no hairpin (a turn of over 120 deg) on this map to test'); }
+  check('at a fork it stops, and turning to another branch and pressing again walks that branch',
+    LP.length >= 3 && LP.every(l => l.why === 'junction' && l.stoppedAt < 2.0 && l.speed < 0.3 && l.again && l.towards > 1.5),
+    LP.map(l => `${l.why} ${f2(l.stoppedAt)}u short, again ${l.again}, ${f2(l.towards)}u toward the branch`).join(' | '));
+  check('at a dead end it will not walk off the end of the trail, but will walk back along it',
+    tab.dead && tab.dead.tested >= 2 && tab.dead.refused === tab.dead.tested && tab.dead.walked === tab.dead.tested,
+    JSON.stringify(tab.dead));
+  check('off any trail the button refuses, and says so',
+    tab.refuse && tab.refuse.dd > 20 && tab.refuse.on === false && tab.refuse.nope === true, JSON.stringify(tab.refuse));
+  check('a start that would end on the very next frame is refused with a shake, not begun and dropped',
+    tab.probeStart && tab.probeStart.found && tab.probeStart.on === false && tab.probeStart.nope === true,
+    tab.probeStart && tab.probeStart.found ? JSON.stringify(tab.probeStart) : 'no such start on this map (it needs a stub shorter than the pup stops in; found at 1:12)');
+  check('pressing the button again turns it off', tab.buttonToggles === true);
+  check('E starts auto-walk, lights the button, and pressing E again stops it',
+    tab.eKey && tab.eKey.on1 && tab.eKey.lit && tab.eKey.moved > 1 && tab.eKey.off, JSON.stringify(tab.eKey));
+  check('holding E does not flick auto-walk back off (key repeat is ignored)', tab.eKey && tab.eKey.stillOn === true);
+  check('E off any trail refuses and shakes the button, like the button does', tab.eKey && tab.eKey.refused === true, JSON.stringify(tab.eKey));
+  check('touching the stick cancels it and takes over', tab.touchCancels === true && tab.stickTakesOver === true && tab.cancelWhy === 'steer',
+    `cancelled ${tab.touchCancels}, stick live ${tab.stickTakesOver}, reason ${tab.cancelWhy}`);
+  check('a look drag on the right half does not cancel it', tab.lookKeeps === true);
+  check('a movement key cancels it', tab.keyCancels === true);
+  check('a summary card pausing the walk cancels it', tab.pauseCancels === true);
+  check('a thumb already on the stick when it starts does not cancel it, and cannot carry the pup past the fork',
+    tab.held && tab.held.kept && tab.held.kept2 && tab.held.ended && tab.held.why === 'junction' && tab.held.idle < 0.3 && tab.held.atNode < 2.0,
+    JSON.stringify(tab.held));
+  check('...but a new touch on the stick afterwards steers normally', tab.held && tab.held.live > 1, `${f2(tab.held && tab.held.live)} u/s`);
+  check('jump, sprint, sneak and bark all still work while it walks, and it keeps walking',
+    tab.verbs && tab.verbs.alive && tab.verbs.jumped && tab.verbs.barked && tab.verbs.w2 > tab.verbs.w1 * 1.4 && tab.verbs.w3 < tab.verbs.w1 * 0.75,
+    tab.verbs && `walk ${f2(tab.verbs.w1)}, sprint ${f2(tab.verbs.w2)}, sneak ${f2(tab.verbs.w3)} u/s; jumped ${tab.verbs.jumped}, barked ${tab.verbs.barked}, kept walking ${tab.verbs.alive}`);
+  check('being knocked about for three seconds does not end it as "stuck"', tab.knocked3s && tab.knocked3s.on === true, JSON.stringify(tab.knocked3s));
+  check('it starts from standing still, and walks the way the pup is facing',
+    tab.startedStill && tab.facing.moved > 2 && tab.facing.dotFwd > 0.9 && tab.facing.dotBack < -0.9,
+    `moved ${f2(tab.facing.moved)}u; along ${f2(tab.facing.dotFwd)}, turned round ${f2(tab.facing.dotBack)}`);
+  check('the follower gives up when it makes no progress, but not while the pup is being knocked about',
+    tab.stuck && tab.stuck.end === 'stuck' && !(tab.knocked && tab.knocked.end), `standing ${JSON.stringify(tab.stuck)}; knocked ${JSON.stringify(tab.knocked)}`);
+  check('the follower gives up when the pup is carried off the trail', tab.lost && tab.lost.end === 'lost', JSON.stringify(tab.lost));
+  check('auto-walk does not survive the page losing focus, leaving the walk, or a new one',
+    tab.blurStops === true && tab.exitStops === true && tab.reenterOff === true,
+    `blur ${tab.blurStops}, exit ${tab.exitStops}, re-enter ${tab.reenterOff}`);
+  }
+
   /* ---------- Barr Trail at 1:4 on Coarse ----------
      The reported screenshot: the bottom of Barr Trail by its car park, world scale 1:4,
      detail Coarse. A cell there is 9 units against a 0.8-unit painted half-width, which

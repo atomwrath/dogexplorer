@@ -269,6 +269,24 @@ body[data-pane="map"] #miniWrap{display:none;}
 #hudTrail{display:none;max-width:172px;text-align:center;font-size:12px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 #hudTrail.on{display:block;}
+/* Auto-walk toggle, under the map. Hidden until the touch layer is up and a walk is on, and
+   hidden again wherever the joystick is (a drawer, the arrival card, the race card): it is
+   part of the same set of controls. `.on` is the mode being active; `.nope` is the button
+   being pressed where there is no trail to follow. */
+#autoBtn{display:none;-webkit-appearance:none;appearance:none;font-family:inherit;font-weight:bold;
+  font-size:12px;letter-spacing:.5px;color:var(--ink);align-items:center;justify-content:center;gap:6px;
+  min-height:40px;padding:4px 16px;border:3px solid var(--ink);border-radius:20px;
+  background:rgba(255,255,255,.94);box-shadow:0 3px 0 rgba(61,42,32,.28);cursor:pointer;
+  touch-action:none;transition:transform .07s,background .12s,box-shadow .07s;}
+/* One rule with the hiding built into the selector, rather than a show rule and a hide rule
+   to be ordered: `body.touch.play #autoBtn` outweighs `body[data-pane] #autoBtn` however the
+   two are ordered, so a separate hide rule would lose and leave the button over the drawer. */
+body.touch.play:not([data-pane]):not(.arrived):not(.racedone) #autoBtn{display:flex;}
+#autoBtn .ic{font-size:16px;line-height:1;}
+#autoBtn:active{transform:translateY(2px);box-shadow:0 1px 0 rgba(61,42,32,.28);}
+#autoBtn.on{background:var(--green);}
+#autoBtn.nope{animation:autoNope .4s;}
+@keyframes autoNope{20%,60%{transform:translateX(-4px);}40%,80%{transform:translateX(4px);}}
 
 /* --- the map pane --- */
 /* No scrim any more: the drawer IS the surface, so what used to be a dark wash over the
@@ -550,9 +568,13 @@ body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
   display:grid;grid-template-columns:auto auto;gap:10px;
   align-items:end;justify-items:center;pointer-events:auto;touch-action:none;
 }
+/* Sprint sits under jump: the two right-thumb verbs stacked, sneak and bark stacked beside
+   them. Sprint is at the bottom corner because it is HELD -- the thumb rests on it -- while
+   jump is a tap that the thumb can reach from there. */
 #tSneak{grid-column:1;grid-row:1;}
+#tJump{grid-column:2;grid-row:1;}
 #touchBarkBtn{grid-column:1;grid-row:2;}
-#tJump{grid-column:2;grid-row:2;}
+#tSprint{grid-column:2;grid-row:2;}
 .tbtn{
   -webkit-appearance:none;appearance:none;font-family:inherit;font-weight:bold;
   color:var(--ink);border:4px solid var(--ink);border-radius:50%;
@@ -567,6 +589,7 @@ body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
 #tJump{width:92px;height:92px;}
 #tJump .ic{font-size:30px;}
 #tSneak.on{background:var(--blue);color:#fff;}
+#tSprint.on{background:var(--orange);color:#fff;}
 
 /* Tablets have room for controls a whole thumb can find; short landscape phones do not.
    Both KEEP THE OVAL (#stickBase's base rule, above) at the same width:height ratio
