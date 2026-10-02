@@ -18,7 +18,7 @@ import { updateNoiseRing, setNoiseRingVisible, noiseRingRadius, updateCatchRing,
 import { getWorld, rawGroundY, terrainY } from './terrain.js';
 
 import { addCamPitch, addCamYaw, addCamZoom, getCamPitch, getCamYaw, getCamZoom, setCamYaw, snapChaseCam, updateChaseCam } from './camera.js';
-import { getCritterStats, spawnCritters, resetCritters, updateCritters, WATCH_SECONDS, playerNoise, typicalSpookRadius, takeImpacts,
+import { getCritterStats, spawnCritters, resetCritters, setWildlife, wildlifeEnabled, updateCritters, WATCH_SECONDS, playerNoise, typicalSpookRadius, takeImpacts,
          catchNear, releaseCarried, getCarried, carrySlow, setCarryAnchor, nearestCatchable, catchRadius } from './critters.js';
 import { initMinimap, updateMinimap, setHighlightRoute, setPickedPoint,
          setCourseShown, getCourseShown, setRaceFrac } from './minimap.js';
@@ -38,7 +38,7 @@ import { barkSound, cheerBlip, initAudio, thudSound,
          stepSound, landSound, jumpSound, scrabbleSound,
          countPip, goTone, offCourseSound, rejoinSound } from '../core/audio.js';
 
-import { applyThemeLighting, getMapLatLon, setTerrainQuadBudget, getDemStride, addLayers, clearLayers, compass, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapId, getMapScale, getPathMix, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, inWaterway, loadWorld, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY, setWadeLegLength, getWorldRevision, areaBlocked, areaSolidTop, nearestSolidFace, solidEmbed, distToSolid } from './world.js';
+import { applyThemeLighting, getMapLatLon, setTerrainQuadBudget, getDemStride, addLayers, clearLayers, compass, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapId, getMapScale, getPathMix, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, inWaterway, loadWorld, renameTrail, getEditCount, getMapBundleJSON, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY, setWadeLegLength, getWorldRevision, areaBlocked, areaSolidTop, nearestSolidFace, solidEmbed, distToSolid } from './world.js';
 
 import { THEME, THEMES } from './themes.js';
 import { setSkyMode, getSkyMode, setSkyClock, getSkyClock, skyFrame, skyReadout, skyState, nowClock } from './sky.js';
@@ -54,6 +54,10 @@ import { nearestTrail, skirtAt } from './spatial.js';
 import { updateSightCut } from './sight-cut.js';
 import { updateTrain, trainPush } from './train.js';
 import { autoWalkBegin, autoWalkSteer } from './auto-walk.js';
+import { edgeLabel } from './map-edits.js';
+import { requestIcon } from './pup-icons.js';
+import { dogIconSpec, wildIconSpec } from './pup-icon-specs.js';
+import { wildSeed } from '../core/profile-icon.js';
 
 /* fov: Pup City's 38 deg is a tight telephoto, chosen for its small enclosed blocks;
    trails is wide open country, so a wider, more natural-feeling field of view suits it.
@@ -213,8 +217,15 @@ let avatarKey='';           // identity of whatever is currently built, for ensu
    so that stepping OFF a trail does not immediately blank both -- the map you are reading
    at a fork should still show the trail you just left, right up until you are properly
    away from it. */
-const onTrail = {route:null, name:'', color:'', d:Infinity};
+const onTrail = {route:null, name:'', color:'', d:Infinity, edge:null, kind:''};
 const TRAIL_FORGET_U = 25;   // world units off-trail before the highlight is dropped
+/* In-game map editing. `mapEditing` is the Settings switch, OFF at the start of every
+   session on purpose: it makes a tap on the HUD change the map's data, which is not
+   something to arrive already armed. `trailEdit` is the name field while it is open;
+   `edge` is captured when it opens, because the pup can be somewhere else by the time it is
+   confirmed and the name must go to the trail that was tapped, not the one underfoot. */
+let mapEditing = false;
+const trailEdit = {on:false, edge:null};
 
 /* Recompute the trail underfoot from wherever the player currently is, and push the
    answer to the map. Called after every teleport (trailhead, saved spot, world rebuild)
@@ -225,8 +236,10 @@ function refreshOnTrail(known){
   if(nt.edge && nt.d <= Math.max(nt.hw, 2.5)){
     onTrail.route = nt.edge.route; onTrail.name = nt.edge.name;
     onTrail.color = nt.edge.color; onTrail.d = nt.d;
+    onTrail.edge = nt.edge; onTrail.kind = nt.edge.kind;
   }else if(!nt.edge || nt.d > TRAIL_FORGET_U){
     onTrail.route = null; onTrail.name = ''; onTrail.color = ''; onTrail.d = Infinity;
+    onTrail.edge = null; onTrail.kind = '';
   }else{
     onTrail.d = nt.d;
   }
@@ -273,9 +286,9 @@ function ensureAvatar(){
     spawnDog(dogParams());
     setWadeLegLength(dogLegLength());      // wading depth follows this pup's legs (world.js)
   }else{
-    // stable seed per species: the same fox should look the same every time you pick it
-    let h=0; for(let i=0;i<wildKey.length;i++) h=(h*31+wildKey.charCodeAt(i))|0;
-    spawnWild(wildKey, Math.abs(h)||1);
+    // stable seed per species: the same fox should look the same every time you pick it,
+    // and its picker icon is drawn from the same seed (core/profile-icon.js)
+    spawnWild(wildKey, wildSeed(wildKey));
     setWadeLegLength(wildLegLength());
   }
   setDogVisible(mode==='dog');
@@ -1902,6 +1915,10 @@ function walkHeading(){
   return {x:Math.cos(player.yaw), z:-Math.sin(player.yaw)};
 }
 function syncAutoBtn(){
+  // the trail-name chip pulses green for as long as the walk is on, so the mode is legible
+  // on the keyboard route (E) too, where there is no button to show it
+  const chip=$('#hudTrail');
+  if(chip) chip.classList.toggle('auto', !!auto.on);
   const b=$('#autoBtn');
   if(!b) return;
   b.classList.toggle('on', auto.on);
@@ -2250,7 +2267,7 @@ function loop(t){
      actually being judged by rather than a second guess at it. */
   updateNoiseRing(dt, player.x, player.z,
                   playerNoise(player.speed, noiseReference(), player.sneaking, player.barkT>0, settled),
-                  typicalSpookRadius(), standingY, true);
+                  typicalSpookRadius(), standingY, wildlifeEnabled());   // no animals, nothing to disturb
   /* The reach ring, drawn around the ANIMAL rather than around the pup.
 
      It used to be a circle centred on the player, which put the burden the wrong way
@@ -2545,10 +2562,18 @@ function updateTrailHud(){
   const dist = $('#hudDist');
   if(dist) dist.textContent = '\ud83d\udc63 ' + formatTravelled(realMetres(player.dist));
   const trail = $('#hudTrail');
-  if(trail){
-    trail.classList.toggle('on', !!onTrail.name);
-    if(onTrail.name){
-      trail.textContent = onTrail.name;
+  /* Left alone while the name is being typed: this runs every frame, and rewriting the
+     chip would take the field out from under the keyboard. */
+  if(trail && !trailEdit.on){
+    /* Keyed on being ON a trail, not on the trail having a name. An unnamed one used to
+       get an invented name, so "has a name" and "is on a trail" were the same test; now
+       the unnamed one is precisely the chip a player wants to tap. */
+    const onIt = onTrail.route != null;
+    trail.classList.toggle('on', onIt);
+    if(onIt){
+      trail.textContent = edgeLabel({name:onTrail.name, kind:onTrail.kind});
+      trail.classList.toggle('unknown', !onTrail.name);
+      trail.classList.toggle('editable', mapEditing && !!(onTrail.edge && onTrail.edge.feat));
       // same ink as the highlight stroked on the disc above it, so the chip names the
       // bright line rather than sitting beside it as a separate fact
       trail.style.borderColor = onTrail.color || '';
@@ -2627,13 +2652,30 @@ function wildBarStats(key){
   return { speedPct: pct(topSpeedFor(key), r.sLo, r.sHi), spookPct: pct(spookRadiusFor(key), r.pLo, r.pHi) };
 }
 
-function pupCard(grid, key, icon, name, sub, bars, onClick){
+/* `icon` is the emoji a card shows until, or instead of, a side profile; `spec` says what to
+   draw one from (pup-icon-specs.js). A shipped or already-drawn profile is in the card before
+   it is ever on screen; anything else is drawn on a later tick and swapped in. The name and
+   sub-line go in as text, never as markup: an imported pup's name is whatever its file says. */
+function pupCard(grid, key, icon, name, sub, bars, onClick, spec){
   const b = document.createElement('button');
   b.className = 'pupcard' + (key===rosterKey() ? ' sel' : '');
-  b.innerHTML = `<span class="pc-top"><span class="pc-ic">${icon}</span><span class="pc-nm">${name}</span></span>` +
-    (sub ? `<span class="pc-sub">${sub}</span>` : '') +
+  b.innerHTML = '<span class="pc-top"><span class="pc-ic"></span><span class="pc-txt"><span class="pc-nm"></span>' +
+    (sub ? '<span class="pc-sub"></span>' : '') + '</span></span>' +
     `<span class="pc-bar speed"><i style="width:${bars.speedPct}%"></i></span>` +
     `<span class="pc-bar spook"><i style="width:${bars.spookPct}%"></i></span>`;
+  const ic = b.querySelector('.pc-ic');
+  ic.textContent = icon;
+  b.querySelector('.pc-nm').textContent = name;
+  if(sub) b.querySelector('.pc-sub').textContent = sub;
+  if(spec){
+    requestIcon(spec, src=>{
+      const im = document.createElement('img');
+      im.src = src; im.alt = ''; im.draggable = false;
+      ic.textContent = '';
+      ic.appendChild(im);
+      ic.classList.add('profile');
+    });
+  }
   // swapping who you are mid-walk should not also swap WHERE you are
   b.addEventListener('click', ()=>{ onClick(); renderRoster(); afterWorldChange(1); });
   grid.appendChild(b);
@@ -2647,12 +2689,12 @@ function renderRoster(){
     kennelPups.forEach(k=>{
       pupCard(dogs, 'dog:saved:'+k.name, '⭐', k.name, 'Saved pup', dogBarStats(k.params.size ?? 1), ()=>{
         mode='dog'; dogChoice={label:'saved:'+k.name, params:k.params};
-      });
+      }, dogIconSpec(k.params));
     });
     PRESETS.forEach(p=>{
       pupCard(dogs, 'dog:'+p.label, '🐕', p.label, p.sub||'', dogBarStats(p.o.size ?? 1), ()=>{
         mode='dog'; dogChoice={label:p.label, params:p.o};
-      });
+      }, dogIconSpec(p.o));
     });
   }
   if(wild){
@@ -2660,16 +2702,43 @@ function renderRoster(){
     // every species in the shared roster, theme-appropriate ones first so the list reads
     // as "what you'd meet out here" before "everything that exists"
     const local=(THEME.wildlife||[]);
-    const trailKeys=[...local, ...Object.keys(SPECIES).filter(k=>!local.includes(k))];
+    /* a Set: THEME.wildlife repeats a species to weight how often it is MET (critters.js deals
+       from that list), and without this the picker showed Rabbit and Deer twice -- two cards
+       for one animal, both highlighted when either was chosen */
+    const trailKeys=[...new Set([...local, ...Object.keys(SPECIES)])];
     for(const key of trailKeys){
       if(!SPECIES[key]) continue;
-      pupCard(wild, 'wild:'+key, '🦊', SPECIES[key].nm, '', wildBarStats(key), ()=>{ mode='wild'; wildKey=key; });
+      pupCard(wild, 'wild:'+key, '🦊', SPECIES[key].nm, '', wildBarStats(key), ()=>{ mode='wild'; wildKey=key; }, wildIconSpec(key));
     }
   }
-  const note=$('#pupNote');
-  if(note) note.textContent = kennelPups.length
-    ? `${kennelPups.length} saved pup${kennelPups.length>1?'s':''} from the creator, plus the ${PRESETS.length} starters.`
-    : `${PRESETS.length} starter pups. Make your own in Backyard Pups — they show up here automatically — or import a backyard-pups.json below.`;
+  renderPupBadge();
+}
+
+/* Who you are, in the "Who's exploring" header, for when that section is folded away: the
+   cards that show it are hidden then, and a collapsed picker that does not say who is
+   selected hides the one fact it exists to show. CSS shows it only while the section is
+   folded. Drawn by the same path as a card's icon -- a shipped profile at once, a freshly
+   drawn one when it arrives, the emoji if neither. Every call rebuilds the badge's nodes, so a
+   picture that arrives late for a pup you have since replaced lands in nodes that are gone and
+   cannot overwrite the new one -- which is why the callback below keeps the node it was
+   given rather than looking the badge up again when it fires. */
+function renderPupBadge(){
+  const el = $('#pupBadge');
+  if(!el) return;
+  const wild = mode==='wild';
+  const name = wild ? ((SPECIES[wildKey] || {}).nm || wildKey) : String(dogChoice.label).replace(/^saved:/, '');
+  const emoji = wild ? '🦊' : (String(dogChoice.label).startsWith('saved:') ? '⭐' : '🐕');
+  el.title = name;
+  el.innerHTML = '<span class="pb-ic"></span><span class="pb-nm"></span>';
+  const ic = el.querySelector('.pb-ic');
+  ic.textContent = emoji;
+  el.querySelector('.pb-nm').textContent = name;
+  requestIcon(wild ? wildIconSpec(wildKey) : dogIconSpec(dogChoice.params), src=>{
+    const im = document.createElement('img');
+    im.src = src; im.alt = ''; im.draggable = false;
+    ic.textContent = '';
+    ic.appendChild(im);
+  });
 }
 
 /* Dogs/Wildlife toggle: purely which grid is visible, independent of `mode` (see
@@ -2756,6 +2825,40 @@ document.querySelectorAll('#soundToggle .toggle').forEach(b=>{
   });
 });
 applySound(soundOn);
+
+/* ---------- wildlife ----------
+   Whether the trails have animals on them at all. Remembered per browser like sound, because
+   a player who finds the animals in the way is telling you how they like the game. Switching
+   it off mid-walk takes them away but keeps this trip's tallies; switching it on adds a fresh
+   population (see setWildlife in critters.js). */
+const WILDLIFE_KEY = 'pupWildlife';
+function renderWildlifeToggle(){
+  const on = wildlifeEnabled();
+  document.querySelectorAll('#wildlifeToggle .toggle').forEach(b=>{
+    b.classList.toggle('sel', (b.dataset.wildlife==='on') === on);
+  });
+}
+function applyWildlife(on, remember){
+  if(!on){
+    // put a passenger down first: removing the population disposes the carried rig with it
+    releaseCarried(player.x, player.z, player.yaw);
+    setCatchRingVisible(false);
+  }
+  setWildlife(on, Date.now());
+  // the disturbance ring is how far you are heard BY the animals, so it goes with them -- at
+  // once, not on the next frame, in case the walk is paused behind the settings sheet
+  if(!on) setNoiseRingVisible(false);
+  if(remember){ try{ localStorage.setItem(WILDLIFE_KEY, on ? 'on' : 'off'); }catch(err){} }
+  renderWildlifeToggle();
+}
+document.querySelectorAll('#wildlifeToggle .toggle').forEach(b=>{
+  b.addEventListener('click', ()=> applyWildlife(b.dataset.wildlife==='on', true));
+});
+{
+  let stored = 'on';
+  try{ stored = localStorage.getItem(WILDLIFE_KEY) || 'on'; }catch(err){}
+  applyWildlife(stored !== 'off', false);
+}
 
 /* ---------- time of day ----------
 
@@ -3164,7 +3267,7 @@ function showHerePoint(pt){
   if(!pt || !isFinite(pt.x) || !isFinite(pt.z)){ showHereIdle(); return; }
   const e = pt.edge || null;
   const p = {x:pt.x, z:pt.z, yaw:pt.yaw || 0,
-             name: e ? e.name : 'the trail', route: e ? e.route : null,
+             name: e ? edgeLabel(e) : 'the trail', route: e ? e.route : null,
              kind: e ? e.kind : 'trail', named: !!(e && e.named)};
   hereSubject = {kind:'point', pt:p};
   if(previewCourse){ previewCourse = null; renderCourseList(); syncCourseOverlay(); }
@@ -3182,7 +3285,7 @@ function showHerePoint(pt){
   if(ft != null) hereRow(stats, 'Elevation', Math.round(ft).toLocaleString() + ' ft');
   const k = Math.max(1e-6, getMapScale());
   hereRow(stats, 'From you', fmtCourseLen(Math.hypot(p.x - player.x, p.z - player.z)/k) + ' as the crow flies');
-  if(!p.named) hereNote(stats, 'An unnamed connector \u2014 the sign name is a nickname.');
+  if(!p.named) hereNote(stats, 'The map file gives this one no name.');
   stats.classList.add('on');
 
   hereBtn(actions, '\u{1F6A9} Start here', true, ()=>{
@@ -3350,9 +3453,10 @@ function renderMapStats(){
   if(!box) return;
   if(!g || !g.edges.length){ box.innerHTML=''; if(list) list.innerHTML=''; return; }
   /* Counted by ROUTE, not by name and not by edge. An edge is a fragment between two of
-     splitT's cuts, so "316 segments" tells a walker nothing; a name can be an invented
-     SPUR_NAMES label shared by a dozen unrelated paths, so counting names both overstates
-     the unnamed ones and understates them at the same time. A route is one path. */
+     splitT's cuts, so "316 segments" tells a walker nothing; a name can be shared by a dozen
+     unrelated paths (and in Neon Pups an invented nickname still is), so counting names
+     both overstates the unnamed ones and understates them at the same time. A route is
+     one path. */
   const routes=new Map();
   g.edges.forEach(e=>{ if(!routes.has(e.route)) routes.set(e.route, e); });
   const named=[...routes.values()].filter(e=>e.named);
@@ -3417,6 +3521,8 @@ function renderMapStats(){
    per map (see spots.js), so loading a different bundle has to re-read them before any of
    the three renderers below draws a stale list. */
 function refreshMapUI(){
+  endTrailEdit(false);        // a half-typed name belongs to the map it was typed on
+  updateEditUI();
   setSpotMap(getMapId());
   setCourseMap(getMapId());
   /* A course traced somewhere else is not raceable here, so anything pointing at one from
@@ -3464,19 +3570,117 @@ function renderFileChips(){
   });
 }
 
-$('#saveCombinedBtn')?.addEventListener('click', ()=>{
+function downloadText(filename, text, type){
+  const blob=new Blob([text], {type});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url; a.download=filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+function saveCombinedLayers(){
   if(!loadedFiles.length){ console.warn('no loaded GeoJSON layers to save'); return; }
   const combined = loadedFiles.length===1 ? loadedFiles[0].layer : {
     type:'FeatureCollection',
     features: loadedFiles.flatMap(f=>f.layer.features||[]),
   };
-  const blob=new Blob([JSON.stringify(combined)], {type:'application/geo+json'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
-  a.href=url; a.download='combined.geojson';
-  document.body.appendChild(a); a.click(); a.remove();
-  URL.revokeObjectURL(url);
+  downloadText('combined.geojson', JSON.stringify(combined), 'application/geo+json');
+}
+$('#saveCombinedBtn')?.addEventListener('click', saveCombinedLayers);
+
+/* ---------- map editing ----------
+   The map is a static file the game cannot write to, so "save" is a download: the loaded
+   map file again, under its own name, with every edit in it, to drop back over the copy in
+   data/. Edits are also kept in this browser (see map-edits.js) so a closed tab does not
+   lose them before that happens. A map that is only dropped GeoJSON layers has no single
+   file to hand back, so it falls through to the same combined download as always. */
+function updateEditUI(){
+  const row=$('#mapEditRow');
+  if(row) row.hidden = !mapEditing;
+  const note=$('#mapEditNote');
+  if(note){
+    const n=getEditCount();
+    note.textContent = n
+      ? n + ' trail name' + (n===1?'':'s') + ' changed here. Save map downloads the file.'
+      : 'Nothing changed yet.';
+  }
+}
+function setMapEditing(on){
+  mapEditing = !!on;
+  document.querySelectorAll('#mapEditToggle .toggle').forEach(b=>{
+    b.classList.toggle('sel', (b.dataset.edit==='on') === mapEditing);
+  });
+  if(!mapEditing){
+    endTrailEdit(false);
+    const chip=$('#hudTrail');
+    if(chip) chip.classList.remove('editable');
+  }
+  updateEditUI();
+}
+function saveMapFile(){
+  const json=getMapBundleJSON();
+  if(json) downloadText((lastMapUrl || 'map.json').split('?')[0].split('/').pop() || 'map.json', json, 'application/json');
+  else saveCombinedLayers();
+}
+/* The name field replaces the chip's text while it is open. Enter or the tick keeps it, Esc
+   or the cross drops it; losing focus does neither, because a name half-typed on a tablet
+   is easily lost to a stray tap and a name silently kept is worse. */
+function beginTrailEdit(){
+  const chip=$('#hudTrail');
+  if(!mapEditing || trailEdit.on || !chip || !onTrail.edge || !onTrail.edge.feat) return false;
+  trailEdit.on = true; trailEdit.edge = onTrail.edge;
+  stopAutoWalk('edit');      // it would walk the pup off the trail being named
+  chip.classList.add('editing');
+  chip.textContent = '';
+  const inp=document.createElement('input');
+  inp.type='text'; inp.maxLength=80; inp.value=onTrail.name || '';
+  inp.placeholder='Trail name'; inp.autocomplete='off';
+  inp.setAttribute('aria-label','Trail name');
+  const ok=document.createElement('button');
+  ok.type='button'; ok.className='te-btn'; ok.textContent='\u2713'; ok.title='Save name';
+  const no=document.createElement('button');
+  no.type='button'; no.className='te-btn'; no.textContent='\u2715'; no.title='Cancel';
+  // same reason as #recName: the walk's key table is fed by every keydown on the window, so
+  // a letter typed here would otherwise be W/A/S/D to the pup, and Esc would quit the walk
+  inp.addEventListener('keydown', e=>{
+    e.stopPropagation();
+    if(e.key==='Enter'){ e.preventDefault(); endTrailEdit(true); }
+    else if(e.key==='Escape'){ e.preventDefault(); endTrailEdit(false); }
+  });
+  inp.addEventListener('keyup', e=> e.stopPropagation());
+  /* stopPropagation matters: the box itself listens for clicks to OPEN the editor, so a click
+     that closed it and then bubbled up would find it closed and open it straight back. */
+  ok.addEventListener('click', e=>{ e.stopPropagation(); endTrailEdit(true); });
+  no.addEventListener('click', e=>{ e.stopPropagation(); endTrailEdit(false); });
+  chip.appendChild(inp); chip.appendChild(ok); chip.appendChild(no);
+  inp.focus(); inp.select();
+  return true;
+}
+function endTrailEdit(commit){
+  if(!trailEdit.on) return;
+  const chip=$('#hudTrail');
+  const inp=chip && chip.querySelector('input');
+  const edge=trailEdit.edge, value=inp ? inp.value : null;
+  trailEdit.on = false; trailEdit.edge = null;
+  if(chip){ chip.classList.remove('editing'); chip.textContent=''; }
+  if(commit && value!=null && renameTrail(edge, value)){
+    /* onTrail holds its own copy of the name, refreshed once a frame. Without this the box
+       would put the old name back for the one frame between the edit and that refresh. */
+    if(onTrail.edge === edge) onTrail.name = edge.name;
+    renderMapStats(); updateEditUI();
+  }
+  updateTrailHud();
+}
+$('#hudTrail')?.addEventListener('click', e=>{
+  // a click inside the open editor (the field, the tick, the cross) belongs to the editor
+  if(trailEdit.on || (e.target && e.target.closest && e.target.closest('input,.te-btn'))) return;
+  beginTrailEdit();
 });
+document.querySelectorAll('#mapEditToggle .toggle').forEach(b=>{
+  b.addEventListener('click', ()=> setMapEditing(b.dataset.edit==='on'));
+});
+$('#saveMapBtn')?.addEventListener('click', saveMapFile);
+updateEditUI();
 
 async function boot(bundleUrl){
   loadKennel();
@@ -3608,28 +3812,35 @@ $('#mapList')?.addEventListener('change', async e=>{
   if(await loadMap(url, url === DEFAULT_WORLD)){ refreshMapUI(); placeAtHead(pickDefaultHead()); }
 });
 
-/* Collapse/expand for the Trail map section. #mapListRow (the map picker) sits outside
-   #mapSectBody in the markup for exactly this reason -- collapsing hides the drop zone,
-   sliders and stats, but switching maps has to keep working regardless, or collapsing
-   becomes a trap. State is remembered per browser the same way sound/detail/sky are. */
-const MAP_SECT_KEY = 'pupMapSectOpen';
-const mapSectToggle = $('#mapSectToggle');
-const mapSectBody = $('#mapSectBody');
-function setMapSectOpen(open, remember){
-  if(!mapSectBody || !mapSectToggle) return;
-  mapSectBody.hidden = !open;
-  mapSectToggle.textContent = open ? '▾' : '▸';
-  mapSectToggle.title = open ? 'Collapse' : 'Expand';
-  mapSectToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-  mapSectToggle.setAttribute('aria-label', (open ? 'Collapse' : 'Expand') + ' trail map settings');
-  if(remember){ try{ localStorage.setItem(MAP_SECT_KEY, open ? '1' : '0'); }catch(err){} }
+/* Collapse/expand for every settings section (.sect[data-fold]). The row with the heading is
+   the click target; the caret is its keyboard-reachable stand-in. In the Trail map section the
+   map picker (#mapListRow) sits outside .sect-body in the markup for exactly this reason --
+   collapsing hides the drop zone, sliders and stats, but switching maps has to keep working
+   regardless, or collapsing becomes a trap. State is remembered per browser the same way
+   sound/detail/sky are; the map keeps the key it has always used. */
+const foldKey = name => name === 'map' ? 'pupMapSectOpen' : 'pupFold_' + name;
+function setFoldOpen(sect, open, remember){
+  const body = sect.querySelector('.sect-body'), btn = sect.querySelector('.sect-toggle');
+  if(!body || !btn) return;
+  body.hidden = !open;
+  sect.classList.toggle('folded', !open);
+  btn.textContent = open ? '▾' : '▸';
+  btn.title = open ? 'Collapse' : 'Expand';
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  const what = ((sect.querySelector('h2') || {}).textContent || 'section').replace(/^\W+/, '').trim();
+  btn.setAttribute('aria-label', (open ? 'Collapse ' : 'Expand ') + what);
+  if(remember){ try{ localStorage.setItem(foldKey(sect.dataset.fold), open ? '1' : '0'); }catch(err){} }
 }
-if(mapSectToggle && mapSectBody){
-  let startOpen = true;
-  try{ startOpen = localStorage.getItem(MAP_SECT_KEY) !== '0'; }catch(err){}
-  setMapSectOpen(startOpen, false);
-  mapSectToggle.addEventListener('click', ()=> setMapSectOpen(mapSectBody.hidden, true));
-}
+document.querySelectorAll('.sect[data-fold]').forEach(sect=>{
+  let open = true;
+  try{ open = localStorage.getItem(foldKey(sect.dataset.fold)) !== '0'; }catch(err){}
+  setFoldOpen(sect, open, false);
+  const head = sect.querySelector('.sect-head');
+  if(head) head.addEventListener('click', ()=>{
+    const body = sect.querySelector('.sect-body');
+    if(body) setFoldOpen(sect, body.hidden, true);
+  });
+});
 tapBtn($('#touchBarkBtn'), doBark);
 tapBtn($('#tJump'), trailJump);
 tapBtn($('#tSneak'), toggleSneak);

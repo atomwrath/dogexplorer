@@ -45,10 +45,9 @@ main{flex:1;display:flex;min-height:0;position:relative;}
    width in the lobby and another during a walk -- and every transition between them cost
    a renderer reallocation and a visible hitch. The drawer overlays in both states, so the
    stage is laid out once and never resized by a pane opening. */
-#panel{position:absolute;inset:0;overflow-y:auto;padding:14px;background:var(--card);
+#panel{position:absolute;inset:0;overflow-y:auto;padding:10px;background:var(--card);
   display:none;}
 body[data-pane="settings"] #panel{display:block;}
-.panel-lede{margin:0 0 12px;line-height:1.5;}
 #stage{flex:1;position:relative;}
 /* touch-action:none or the browser claims a drag as a pan/zoom gesture partway through
    and fires pointercancel -- which reads as the stick sticking, or letting go on its own,
@@ -98,18 +97,36 @@ body[data-pane="map"] #paneDrawer{width:100%;border-right-color:transparent;box-
 #paneClose{flex:none;width:40px;height:40px;padding:0;font-size:15px;
   display:flex;align-items:center;justify-content:center;}
 #paneBody{flex:1;position:relative;min-height:0;}
-.sect{border:3px solid var(--ink);border-radius:16px;background:#fff;padding:12px;margin-bottom:14px;}
-.sect h2{margin:0 0 8px;font-size:15px;}
-/* Collapsible section header (currently just Trail map). The toggle sits beside the
-   heading rather than replacing it as the click target, so the map dropdown right below
-   -- which stays visible collapsed or not -- is never mistaken for part of the toggle. */
-.sect-head{display:flex;align-items:center;justify-content:space-between;margin:0 0 8px;}
+.sect{border:3px solid var(--ink);border-radius:16px;background:#fff;padding:8px 10px;margin-bottom:9px;}
+.sect h2{margin:0;font-size:14px;}
+/* Collapsible section header. The whole row is the target (main.js wires the click), with
+   the caret as its visible, keyboard-reachable stand-in. The map dropdown below the Trail
+   map header is a sibling of the row, not inside it, so it is never part of the target. */
+.sect-head{display:flex;align-items:center;justify-content:space-between;cursor:pointer;
+  user-select:none;-webkit-user-select:none;min-height:30px;}
 .sect-head h2{margin:0;}
-.sect-toggle{flex:none;width:32px;height:32px;padding:0;font-size:14px;line-height:1;
+.sect-body{margin-top:8px;}
+/* Who you are, shown beside the heading only while the section is folded (main.js renderPupBadge) */
+.sect-badge{display:none;align-items:center;gap:6px;margin-left:auto;margin-right:8px;min-width:0;}
+.sect.folded .sect-badge{display:flex;}
+.sect-badge .pb-ic{flex:none;width:40px;height:30px;display:flex;align-items:center;justify-content:center;font-size:18px;}
+.sect-badge .pb-ic img{display:block;width:100%;height:100%;object-fit:contain;pointer-events:none;
+  -webkit-user-drag:none;user-select:none;}
+.sect-badge .pb-nm{font-size:11.5px;font-weight:bold;max-width:92px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+/* a row whose label sits beside its On/Off, for a switch that needs no heading of its own */
+.switch-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:7px;}
+.switch-row:first-child{margin-top:0;}
+.switch-label{font-size:12.5px;font-weight:bold;}
+.switch-row .toggle-row{flex:none;margin:0;}
+.switch-row .toggle{flex:none;min-width:48px;padding:5px 10px;}
+/* the small captions that stand in for a heading inside a merged section */
+.sub{font-size:11.5px;font-weight:bold;opacity:.7;margin:10px 0 4px;}
+.sub:first-child{margin-top:0;}
+.sect-toggle{flex:none;width:28px;height:28px;padding:0;font-size:13px;line-height:1;
   border:3px solid var(--ink);border-radius:10px;background:#fff;cursor:pointer;
   display:flex;align-items:center;justify-content:center;}
 .sect-toggle:hover{background:var(--cream);}
-#mapListRow{margin-top:0;}
+#mapListRow{margin-top:8px;}
 .hint{font-size:11.5px;opacity:.65;}
 /* left:58px, not 10px -- #paneTabs owns the left edge from the top down.
    touch-action:none for the same reason as #paneTabs and #miniWrap -- this readout sits
@@ -134,16 +151,15 @@ body.play #playHud{display:block;}
 .io-row select{flex:1 1 100%;min-width:0;font:inherit;font-size:11.5px;font-weight:bold;
   border:2px solid var(--ink);border-radius:10px;padding:6px 8px;background:var(--cream);}
 #mapNote{margin:8px 0 0;}
-.ctl{margin-top:10px;}
+.ctl{margin-top:8px;}
 .ctl label{display:flex;justify-content:space-between;font-size:12.5px;font-weight:bold;margin-bottom:4px;}
 .ctl label .val{opacity:.6;font-weight:normal;}
 .ctl input[type=range]{width:100%;accent-color:var(--orange);}
 /* --- drop zone (Trail map) --- */
 .dropzone{display:block;text-align:center;border:3px dashed var(--ink);border-radius:14px;
-  padding:16px 10px;cursor:pointer;background:var(--cream);opacity:.85;}
+  padding:10px;cursor:pointer;background:var(--cream);opacity:.85;margin-top:8px;}
 .dropzone:hover,.dropzone.hover{opacity:1;background:#fff;border-color:var(--orange);}
 .dz-main{display:block;font-weight:bold;font-size:12.5px;line-height:1.5;}
-.dz-sub{display:block;font-size:10.5px;opacity:.6;margin-top:4px;}
 
 /* --- loaded-file chips --- */
 .file-chips{display:flex;flex-direction:column;gap:5px;margin-top:8px;}
@@ -158,7 +174,8 @@ body.play #playHud{display:block;}
 
 /* --- stats summary + trail list (Trail map) --- */
 .statbox{background:#fff3de;border:3px solid var(--orange);border-radius:12px;padding:9px 11px;
-  margin-top:10px;font-size:12px;font-weight:bold;color:#a5601a;line-height:1.55;}
+  margin-top:8px;font-size:12px;font-weight:bold;color:#a5601a;line-height:1.55;}
+.statbox:empty{display:none;}
 .statbox .flat{opacity:.65;font-weight:normal;display:block;margin-top:2px;}
 .trail-list{max-height:130px;overflow-y:auto;margin-top:8px;border-top:2px dashed #e2d5bd;padding-top:6px;}
 .trail-list .tl-row{display:flex;align-items:center;gap:7px;font-size:12px;padding:3px 2px;}
@@ -187,8 +204,8 @@ body.play #playHud{display:block;}
 .headcard.sel .hc-sub{opacity:.9;}
 
 /* --- toggle pills (Dogs / Wildlife) --- */
-.toggle-row{display:flex;gap:6px;margin-bottom:8px;}
-.toggle{flex:1;font-family:inherit;font-weight:bold;font-size:12.5px;padding:8px 4px;
+.toggle-row{display:flex;gap:6px;margin-bottom:6px;}
+.toggle{flex:1;font-family:inherit;font-weight:bold;font-size:12.5px;padding:6px 4px;
   border:3px solid var(--ink);border-radius:10px;background:#fff;cursor:pointer;}
 .toggle.sel{background:var(--ink);color:#fff;}
 
@@ -210,10 +227,15 @@ body.play #playHud{display:block;}
   border:3px solid var(--ink);border-radius:12px;background:#fff;padding:8px 9px;cursor:pointer;}
 .pupcard.sel{outline:3px solid var(--orange);outline-offset:2px;}
 .pupcard .pc-top{display:flex;align-items:center;gap:6px;min-width:0;}
-.pupcard .pc-ic{font-size:17px;flex:none;}
-.pupcard .pc-nm{font-weight:bold;font-size:12px;overflow:hidden;text-overflow:ellipsis;
-  white-space:nowrap;min-width:0;flex:1 1 auto;}
-.pupcard .pc-sub{font-size:10px;opacity:.6;margin-left:23px;
+.pupcard .pc-ic{flex:none;width:52px;height:39px;display:flex;align-items:center;justify-content:center;
+  font-size:20px;}
+/* the profile is 4:3, drawn at about 2.3x this size so it stays sharp on a high-density screen */
+.pupcard .pc-ic img{display:block;width:100%;height:100%;object-fit:contain;
+  -webkit-user-drag:none;user-select:none;pointer-events:none;}
+.pupcard .pc-txt{display:flex;flex-direction:column;min-width:0;flex:1 1 auto;gap:1px;}
+.pupcard .pc-nm{font-weight:bold;font-size:12px;line-height:1.15;min-width:0;overflow:hidden;
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow-wrap:anywhere;}
+.pupcard .pc-sub{font-size:10px;opacity:.6;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .pupcard .pc-bar{height:4px;border-radius:2px;background:#eee2cc;overflow:hidden;margin-top:1px;}
 .pupcard .pc-bar i{display:block;height:100%;border-radius:2px;}
@@ -269,6 +291,32 @@ body[data-pane="map"] #miniWrap{display:none;}
 #hudTrail{display:none;max-width:172px;text-align:center;font-size:12px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 #hudTrail.on{display:block;}
+/* A trail the map file gives no name: said plainly, and quieter than a real one. */
+#hudTrail.unknown{opacity:.62;font-style:italic;}
+/* Map editing is on and this is a trail whose name can be changed: the pencil says tap me. */
+#hudTrail.editable{cursor:pointer;}
+#hudTrail.editable::after{content:' \270E';opacity:.55;font-style:normal;}
+/* While the name is being typed the chip is the editor. 16px on the field is not a style
+   choice: iOS zooms the whole page in on any focused field set smaller than that. */
+#hudTrail.on.editing{display:flex;align-items:center;gap:4px;max-width:236px;padding:3px 4px;
+  overflow:visible;cursor:auto;opacity:1;font-style:normal;}
+#hudTrail.editing::after{content:none;}
+#hudTrail input{flex:1;min-width:0;width:112px;font-family:inherit;font-size:16px;font-weight:bold;
+  color:var(--ink);background:#fff;border:2px solid var(--ink);border-radius:8px;padding:2px 6px;}
+#hudTrail .te-btn{flex:none;-webkit-appearance:none;appearance:none;font-family:inherit;font-weight:bold;
+  font-size:15px;line-height:1;width:30px;height:30px;padding:0;color:var(--ink);background:#fff;
+  border:2px solid var(--ink);border-radius:8px;cursor:pointer;touch-action:none;}
+#hudTrail .te-btn:first-of-type{background:var(--green);}
+/* Auto-walking: a pulsing green glow. A box-shadow, not the border, because the border
+   colour is set inline to match the trail's own ink on the map. */
+#hudTrail.auto{animation:trailGlow 1.5s ease-in-out infinite;}
+@keyframes trailGlow{
+  0%,100%{box-shadow:0 0 4px 1px rgba(124,200,96,.45);}
+  50%{box-shadow:0 0 15px 6px rgba(124,200,96,.95);}
+}
+@media (prefers-reduced-motion:reduce){
+  #hudTrail.auto{animation:none;box-shadow:0 0 11px 4px rgba(124,200,96,.85);}
+}
 /* Auto-walk toggle, under the map. Hidden until the touch layer is up and a walk is on, and
    hidden again wherever the joystick is (a drawer, the arrival card, the race card): it is
    part of the same set of controls. `.on` is the mode being active; `.nope` is the button

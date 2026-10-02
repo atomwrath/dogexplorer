@@ -315,13 +315,32 @@ function getCritterStats(){
 /* Cleared in place. Other modules (minimap.js) hold this same array reference, and
    reassigning it here would leave them reading a detached copy forever -- the repo's
    one load-bearing mutation rule, and it applies to new arrays as much as old ones. */
-function resetCritters(){
+function removeCritters(){
   while(CRITTERS.length){
     const c = CRITTERS.pop();
     scene.remove(c.g); disposeGroup(c.g);
   }
-  sightings = 0; spooked = 0; caught = 0; watchBest = null; SIGHTED.clear();
   carried = null; CARRY.live = false;
+}
+function resetCritters(){
+  removeCritters();
+  sightings = 0; spooked = 0; caught = 0; watchBest = null; SIGHTED.clear();
+}
+
+/* The in-game wildlife switch. Off means no animals are generated at all: none on entering
+   play, none left from before. It is deliberately NOT a reset -- switching it off mid-walk
+   takes the animals away but leaves this trip's tallies (watched, spooked, caught) alone,
+   and switching it back on adds a fresh population without zeroing them. The caller puts
+   down anything being carried first, as exitPlay does: removeCritters disposes the carried
+   rig along with the rest. */
+let wildlifeOn = true;
+function wildlifeEnabled(){ return wildlifeOn; }
+function setWildlife(on, seed){
+  on = !!on;
+  if(on === wildlifeOn) return;
+  wildlifeOn = on;
+  if(!on) removeCritters();
+  else populate(seed);
 }
 
 /* Somewhere plausible for an animal to be: near enough to a trail that you'll actually
@@ -392,13 +411,16 @@ function placeCritter(key, rnd){
 
 /* Roster comes from the theme, so a red-rock map gets bighorn and a forest gets bears --
    the same list that already drives the scenery, rather than a second parallel one. */
-function spawnCritters(seed){
-  resetCritters();
+function populate(seed){
   const G = getGraph();
   if(!G || !G.edges.length) return;
   const rnd = mulberry32((seed|0) || 20260821);
   const roster = (THEME.wildlife && THEME.wildlife.length) ? THEME.wildlife : ['rabbit','squirrel','deer'];
   for(let i = 0; i < POPULATION; i++) placeCritter(roster[i % roster.length], rnd);
+}
+function spawnCritters(seed){
+  resetCritters();
+  if(wildlifeOn) populate(seed);
 }
 
 /* Move one critter toward a point; returns remaining distance. No obstacle map out here
@@ -786,7 +808,7 @@ function updateCritters(dt, t, px, pz, speed, topSpeed, sneaking, barking, still
   }
 }
 
-export { CRITTERS, getCritters, getCritterStats, spawnCritters, resetCritters,
+export { CRITTERS, getCritters, getCritterStats, spawnCritters, resetCritters, setWildlife, wildlifeEnabled,
          updateCritters, WATCH_SECONDS, playerNoise, typicalSpookRadius,
          takeImpacts, isDefender, defenderKeys, speciesStats, reachOf, DEFEND_BRAV, BRISTLE_MUL, CHARGE_MUL,
          catchNear, releaseCarried, getCarried, caughtCount, carrySlow, setCarryAnchor,

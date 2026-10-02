@@ -49,31 +49,79 @@
         </div>
         <div id="paneBody">
           <aside id="panel">
-            <p class="hint panel-lede">Change anything while you walk — you stay where you
-              are standing. Switch to 🗺 Map to move somewhere else.</p>
-            <div class="sect" id="mapSect">
+            <!-- Four folds, each collapsible (see the .sect[data-fold] wiring in main.js; the
+                 open/closed state is remembered per browser). Who you play as comes first
+                 because it is the choice made most often. Explanations live in title="" rather
+                 than in paragraphs: the panel is for changing things, not for reading. -->
+            <section class="sect" data-fold="pup">
+              <div class="sect-head">
+                <h2>🐾 Who's exploring</h2>
+                <span class="sect-badge" id="pupBadge"></span>
+                <button class="sect-toggle" type="button" aria-expanded="true" aria-controls="foldPup"></button>
+              </div>
+              <div class="sect-body" id="foldPup">
+                <div class="toggle-row" id="pupModeToggle">
+                  <button class="toggle sel" data-mode="dog" title="Play as a dog">🐕 Dogs</button>
+                  <button class="toggle" data-mode="wild" title="Play as a wild animal">🦊 Animals</button>
+                </div>
+                <div id="dogGrid" class="pup-grid" title="Blue bar: speed. Pink bar: how far off you spook the locals."></div>
+                <div id="animalGrid" class="pup-grid" title="Blue bar: speed. Pink bar: how far off you spook the locals." hidden></div>
+                <div class="io-row">
+                  <button class="btn small" id="randomPupBtn" title="Pick a random pup">🎲 Random pup</button>
+                  <label class="btn small" for="pupFile" title="Import a backyard-pups.json. Pups saved in Backyard Pups show up here on their own.">📥 Import</label>
+                </div>
+                <input type="file" id="pupFile" accept=".json,application/json" multiple hidden>
+              </div>
+            </section>
+
+            <section class="sect" id="mapSect" data-fold="map">
               <div class="sect-head">
                 <h2>🗺️ Trail map</h2>
-                <button class="sect-toggle" id="mapSectToggle" type="button"
-                        aria-expanded="true" aria-controls="mapSectBody"
-                        title="Collapse" aria-label="Collapse trail map settings">▾</button>
+                <button class="sect-toggle" id="mapSectToggle" type="button" aria-expanded="true" aria-controls="mapSectBody"></button>
               </div>
-              <!-- Lives outside #mapSectBody on purpose: collapsing the section hides the
-                   file drop zone, sliders and stats, but switching maps has to keep working
-                   with it collapsed, or collapsing becomes a trap for anyone who only wanted
-                   the clutter gone. THE OPTIONS COME FROM data/maps.json (see loadMapList in
-                   main.js); the three below are the offline/file:// fallback only. -->
+              <!-- Outside .sect-body on purpose: collapsing hides the drop zone, sliders and
+                   stats, but switching maps has to keep working with it collapsed, or collapsing
+                   becomes a trap for anyone who only wanted the clutter gone. THE OPTIONS COME
+                   FROM data/maps.json (see loadMapList in main.js); the three below are the
+                   offline/file:// fallback only. -->
               <div class="io-row" id="mapListRow">
-                <select id="mapList" aria-label="Choose a map">
+                <select id="mapList" aria-label="Choose a map" title="Choose a map. More can be listed in data/maps.json.">
                   <option value="../data/world.json">Garden of the Gods</option>
                   <option value="../data/rrworld.json">Red Rocks</option>
                   <option value="../data/pikesworld.json">Pikes Peak</option>
                 </select>
               </div>
-              <div id="mapSectBody">
-                <label class="dropzone" id="dropzone" for="worldFile">
-                  <span class="dz-main">Drop your <code>.geojson</code> layers here<br>or tap to browse</span>
-                  <span class="dz-sub">trails, points &amp; areas &mdash; <code>.txt</code> is fine too</span>
+              <div class="sect-body" id="mapSectBody">
+                <!-- Off at the start of every session (see mapEditing in main.js). Trail and
+                     road names only so far; the switch is the map's, not the name's, so the
+                     next thing worth editing in-game goes under it rather than getting its own. -->
+                <div class="switch-row" title="Tap the trail name under the mini-map to correct it, or to name a trail the map leaves blank. Trail and road names only for now.">
+                  <span class="switch-label">✏️ Edit names</span>
+                  <div class="toggle-row" id="mapEditToggle">
+                    <button class="toggle sel" data-edit="off">Off</button>
+                    <button class="toggle" data-edit="on">On</button>
+                  </div>
+                </div>
+                <div id="mapEditRow" hidden>
+                  <div class="io-row">
+                    <button class="btn small" id="saveMapBtn" title="Download the map file with your edits, to put back in the repo">↓ Save map</button>
+                  </div>
+                  <p class="hint" id="mapEditNote"></p>
+                </div>
+                <div class="ctl" title="1:1 is true size. A bigger N packs the map into a shorter walk, and hill exaggeration follows so slopes stay true.">
+                  <label>World scale <span class="val" id="worldScaleVal">1 : 1</span></label>
+                  <input type="range" id="worldScale" min="0" max="1000" step="1" value="0">
+                </div>
+                <div class="ctl" title="Follows world scale automatically. Nudge it for flatter or wilder slopes.">
+                  <label>Hill exaggeration <span class="val" id="vertScaleVal">1.00×</span></label>
+                  <input type="range" id="vertScale" min="0" max="1000" step="1" value="707">
+                </div>
+                <div class="ctl" title="Metres of real elevation per terrace">
+                  <label>Contour step <span class="val" id="contourVal">3.0 m</span></label>
+                  <input type="range" id="contourStep" min="0.5" max="12" step="0.5" value="3">
+                </div>
+                <label class="dropzone" id="dropzone" for="worldFile" title="Trails, points and areas. A .txt file works too. Or open one directly with ?world=… in the URL.">
+                  <span class="dz-main">Drop <code>.geojson</code> layers or tap to browse</span>
                 </label>
                 <!-- .txt and text/plain are here for iPadOS, which appends .txt to anything it
                      downloads and gives you no way to take it off again. The picker filters by
@@ -82,102 +130,78 @@
                 <input type="file" id="worldFile" accept=".geojson,.json,.txt,application/geo+json,application/json,text/plain" multiple hidden>
                 <div id="fileChips" class="file-chips"></div>
                 <div class="io-row">
-                  <button class="btn small" id="saveCombinedBtn">↓ Save combined</button>
-                  <button class="btn small" id="clearLayersBtn">Clear map</button>
+                  <button class="btn small" id="saveCombinedBtn" title="Download the dropped layers as one file">↓ Save combined</button>
+                  <button class="btn small" id="clearLayersBtn" title="Remove the dropped layers">Clear map</button>
                 </div>
-                <div class="ctl">
-                  <label>World scale <span class="val" id="worldScaleVal">1 : 1</span></label>
-                  <input type="range" id="worldScale" min="0" max="1000" step="1" value="0">
-                </div>
-                <div class="ctl">
-                  <label>Hill exaggeration <span class="val" id="vertScaleVal">1.00×</span></label>
-                  <input type="range" id="vertScale" min="0" max="1000" step="1" value="707">
-                </div>
-                <div class="ctl">
-                  <label>Contour step <span class="val" id="contourVal">3.0 m</span></label>
-                  <input type="range" id="contourStep" min="0.5" max="12" step="0.5" value="3">
-                </div>
-                <p class="hint">1:1 is true size; a bigger N packs the map into a shorter walk.
-                  Hill exaggeration follows it automatically so slopes stay true — nudge it
-                  yourself afterwards if you want them flatter or wilder. Contour step is metres
-                  of real elevation per terrace.</p>
                 <div class="statbox" id="mapStats"></div>
                 <div id="trailList" class="trail-list"></div>
                 <p class="hint" id="mapNote">Loading map…</p>
-                <p class="hint">Pick a map above, or drop your own <code>.geojson</code> layers on
-                  top of it. Pass <code>?world=…</code> in the URL to open one directly. Maps
-                  listed in <code>data/maps.json</code> show up in the dropdown on every device.</p>
               </div>
-            </div>
-            <div class="sect">
-              <h2>🏞️ Landscape</h2>
-              <div id="envGrid" class="env-grid"></div>
-              <p class="hint">Same trails, different country.</p>
-              <div class="ctl">
-                <label>Fog <span class="val" id="fogAmtVal">1.00×</span></label>
-                <input type="range" id="fogAmt" min="0.15" max="5" step="0.05" value="1">
+            </section>
+
+            <!-- Landscape, time of day and terrain detail are one fold: they are all "how does
+                 this place look". The date and clock only appear once day/night is on -- they
+                 do nothing under default lighting, and a live control that does nothing is
+                 worse than an absent one. -->
+            <section class="sect" data-fold="scenery">
+              <div class="sect-head">
+                <h2>🏞️ Scenery</h2>
+                <button class="sect-toggle" type="button" aria-expanded="true" aria-controls="foldScenery"></button>
               </div>
-            </div>
-            <!-- Time of day sits directly under Landscape because it is the same
-                 question asked twice: that one picks WHERE you are walking, this one
-                 picks WHEN. The date and clock only appear once day/night is on -- they
-                 do nothing under default lighting, and a live control that does nothing
-                 is worse than an absent one. -->
-            <div class="sect">
-              <h2>🕐 Time of day</h2>
-              <div class="toggle-row" id="skyToggle">
-                <button class="toggle sel" data-sky="default">☀️ Default</button>
-                <button class="toggle" data-sky="daynight">🌗 Day &amp; night</button>
-              </div>
-              <div id="skyControls" hidden>
-                <div class="io-row">
-                  <input type="date" id="skyDate" class="url-in" aria-label="Date at the map">
-                  <button class="btn small" id="skyNowBtn">🕐 Now</button>
+              <div class="sect-body" id="foldScenery">
+                <div class="sub" title="Same trails, different country">Landscape</div>
+                <div id="envGrid" class="env-grid"></div>
+                <div class="ctl" title="Fog density">
+                  <label>Fog <span class="val" id="fogAmtVal">1.00×</span></label>
+                  <input type="range" id="fogAmt" min="0.15" max="5" step="0.05" value="1">
                 </div>
-                <div class="ctl">
-                  <label>Time <span class="val" id="skyTimeVal">12:00</span></label>
-                  <input type="range" id="skyTime" min="0" max="1439" step="1" value="720">
+                <div class="sub" title="The sun and moon go where they really are at this map's latitude and longitude. Shadows follow whichever is up; after dark that is the moon, and its phase sets how much light you get.">Time of day</div>
+                <div class="toggle-row" id="skyToggle">
+                  <button class="toggle sel" data-sky="default" title="Fixed daytime lighting">☀️ Default</button>
+                  <button class="toggle" data-sky="daynight" title="A real sky for the date and time you pick">🌗 Day &amp; night</button>
+                </div>
+                <div id="skyControls" hidden>
+                  <div class="io-row">
+                    <input type="date" id="skyDate" class="url-in" aria-label="Date at the map" title="Date at the map">
+                    <button class="btn small" id="skyNowBtn" title="Jump to the current date and time">🕐 Now</button>
+                  </div>
+                  <div class="ctl">
+                    <label>Time <span class="val" id="skyTimeVal">12:00</span></label>
+                    <input type="range" id="skyTime" min="0" max="1439" step="1" value="720" title="Time of day at the map">
+                  </div>
+                </div>
+                <div class="statbox" id="skyNote"></div>
+                <div class="sub" title="Auto keeps big maps light on phones and tablets and fine everywhere else. Choose Coarse if a large map won't load, or Fine for crisper ground on a fast machine.">Terrain detail</div>
+                <div class="toggle-row" id="detailToggle">
+                  <button class="toggle sel" data-detail="auto" title="Match the device">⚖️ Auto</button>
+                  <button class="toggle" data-detail="high" title="Crisper ground">🗻 Fine</button>
+                  <button class="toggle" data-detail="low" title="Lighter on memory">🪶 Coarse</button>
                 </div>
               </div>
-              <div class="statbox" id="skyNote"></div>
-              <p class="hint">The sun and moon go where they really are for this map's own
-                latitude and longitude, so sunrise lands where the terrain says it should.
-                Shadows follow whichever one is lighting the sky; after dark that is the
-                moon, and how much light you get depends on its phase.</p>
-            </div>
-            <div class="sect">
-              <h2>⛰️ Terrain detail</h2>
-              <div class="toggle-row" id="detailToggle">
-                <button class="toggle sel" data-detail="auto">⚖️ Auto</button>
-                <button class="toggle" data-detail="high">🗻 Fine</button>
-                <button class="toggle" data-detail="low">🪶 Coarse</button>
+            </section>
+
+            <section class="sect" data-fold="game">
+              <div class="sect-head">
+                <h2>🎮 Game</h2>
+                <button class="sect-toggle" type="button" aria-expanded="true" aria-controls="foldGame"></button>
               </div>
-              <p class="hint" id="detailNote">Auto keeps big maps light on phones and tablets and fine everywhere else. Drop to Coarse if a large map won't load; raise to Fine for crisper ground on a fast machine.</p>
-            </div>
-            <div class="sect">
-              <h2>🔊 Sound</h2>
-              <div class="toggle-row" id="soundToggle">
-                <button class="toggle sel" data-sound="on">🔊 On</button>
-                <button class="toggle" data-sound="off">🔇 Off</button>
+              <div class="sect-body" id="foldGame">
+                <div class="switch-row" title="Footfalls, barks and the wildlife. Remembered on this device.">
+                  <span class="switch-label">🔊 Sound</span>
+                  <div class="toggle-row" id="soundToggle">
+                    <button class="toggle sel" data-sound="on">On</button>
+                    <button class="toggle" data-sound="off">Off</button>
+                  </div>
+                </div>
+                <div class="switch-row" title="The animals that live on the trails, which you can watch, spook or catch. Off removes them and keeps your tally. Remembered on this device.">
+                  <span class="switch-label">🦌 Wildlife</span>
+                  <div class="toggle-row" id="wildlifeToggle">
+                    <button class="toggle sel" data-wildlife="on">On</button>
+                    <button class="toggle" data-wildlife="off">Off</button>
+                  </div>
+                </div>
               </div>
-              <p class="hint">Footfalls, barks and the wildlife. Your choice is remembered.</p>
-            </div>
-            <div class="sect">
-              <h2>🐾 Who's exploring</h2>
-              <div class="toggle-row" id="pupModeToggle">
-                <button class="toggle sel" data-mode="dog">🐕 Dogs</button>
-                <button class="toggle" data-mode="wild">🦊 Wildlife</button>
-              </div>
-              <div id="dogGrid" class="pup-grid"></div>
-              <div id="animalGrid" class="pup-grid" hidden></div>
-              <div class="io-row">
-                <button class="btn small" id="randomPupBtn">🎲 Random pup</button>
-                <label class="btn small" for="pupFile">📥 Import</label>
-              </div>
-              <input type="file" id="pupFile" accept=".json,application/json" multiple hidden>
-              <p class="hint" id="pupNote"></p>
-              <p class="hint">Blue bar is speed, pink is how far off you spook the locals.</p>
-            </div>
+            </section>
           </aside>
           <div id="bigmapWrap">
             <canvas id="bigmap"></canvas>

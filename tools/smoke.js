@@ -3553,6 +3553,448 @@ async function assertAll(window, errors, stats) {
     return getHighlightRoute() === null;
   })());
 
+  /* ---- blank names, and fixing them from the HUD ------------------------------------
+     An unnamed way used to be handed one of twelve invented names, which then read on the
+     signs and in the HUD as if the map file had said it. Pup Trails now leaves them blank
+     and shows "Unknown trail"; a player with map editing switched on can tap the name box
+     to give it a real name, which lands on the GeoJSON feature the way came from. */
+  {
+    const G = getGraph();
+    const NICK = ['Coyote Cutoff','Lizard Spur','Juniper Link','Sandy Wash','Magpie Loop','Yucca Way',
+                  'Raven Ridge','Prairie Dog Run','Cactus Corner','Mule Deer Path','Kestrel Climb','Bobcat Bend'];
+    const unnamed = G.edges.filter(e => !e.named);
+    check('a way the map file gives no name stays blank instead of getting a made-up one',
+      unnamed.length > 10 && unnamed.every(e => e.name === '') && !G.edges.some(e => NICK.includes(e.name)),
+      `${unnamed.length} unnamed edges; names seen: ${[...new Set(unnamed.map(e => e.name))].join('|') || '(none)'}`);
+    check('every edge keeps a link back to the GeoJSON feature it was cut from',
+      G.edges.length > 10 && G.edges.every(e => e.feat && e.feat.properties), `${G.edges.filter(e => !e.feat).length} edges without one`);
+    /* The link is made by where an edge lies, so the claim worth testing is that it is the
+       RIGHT feature: the one whose own name is the edge's name, blank for a blank. */
+    const wrong = G.edges.filter(e => e.feat && featureName(e.feat) !== e.name);
+    check('the feature an edge is linked to is the one that carries its name',
+      wrong.length === 0, `${wrong.length} of ${G.edges.length} edges linked to a feature with a different name` +
+      (wrong[0] ? ` (e.g. edge "${wrong[0].name}" -> feature "${featureName(wrong[0].feat)}")` : ''));
+    /* geo.js is shared with Neon Pups and is not touched: its default still hands out the
+       nicknames, which is what Neon's own course names are built on. */
+    const raw = [{ name: '', kind: 'trail', pts: [[0, 0], [100, 0]] }];
+    check('the shared graph builder is untouched: it still hands out nicknames, as Neon Pups relies on',
+      NICK.includes(buildGraph(raw, 16, 6).edges[0].name));
+    check('a blank name is shown as Unknown trail or Unknown road, a real one as itself',
+      edgeLabel({ name: '', kind: 'trail' }) === 'Unknown trail' && edgeLabel({ name: '', kind: 'dirtroad' }) === 'Unknown road'
+      && edgeLabel({ name: 'Palmer Trail', kind: 'trail' }) === 'Palmer Trail');
+
+    const E0 = unnamed.find(e => e.kind === 'trail' && e.pts.length > 2 && !e.buried);
+    const mid = E0.pts[Math.floor(E0.pts.length / 2)];
+    placeAt(mid[0], mid[1], 0);
+    updateTrailHud();
+    const chip = d.querySelector('#hudTrail');
+    const E = getOnTrail().edge;
+    check('standing on an unnamed trail the name box is still shown, dimmed, reading Unknown trail',
+      !!E && !E.named && chip.classList.contains('on') && chip.classList.contains('unknown') && chip.textContent === 'Unknown trail',
+      `edge ${E ? JSON.stringify(E.name) : 'none'}, chip "${chip.textContent}" ${chip.className}`);
+
+    const click = el => el && el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    const key = (el, k) => el && el.dispatchEvent(new window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+    const tog = v => click(d.querySelector(`#mapEditToggle [data-edit="${v}"]`));
+    const storedEdits = () => { const out = []; for (let i = 0; i < window.localStorage.length; i++) { const k = window.localStorage.key(i); if (k.startsWith('pupMapEdits:')) out.push(window.localStorage.getItem(k)); } return out; };
+    const clearStored = () => { for (const k of Object.keys(window.localStorage)) if (k.startsWith('pupMapEdits:')) window.localStorage.removeItem(k); };
+    clearStored();
+
+    check('map editing starts OFF: no pencil, no save row, and tapping the name box opens nothing', (() => {
+      const wasOff = d.querySelector('#mapEditToggle .toggle.sel').dataset.edit === 'off'
+        && !chip.classList.contains('editable') && d.querySelector('#mapEditRow').hidden;
+      click(chip);
+      return wasOff && !chip.querySelector('input') && !chip.classList.contains('editing');
+    })());
+
+    tog('on'); updateTrailHud();
+    check('switching map editing on shows a pencil on the name box and the Save map row',
+      chip.classList.contains('editable') && !d.querySelector('#mapEditRow').hidden
+      && d.querySelector('#mapEditToggle .toggle.sel').dataset.edit === 'on');
+
+    click(chip);
+    const inp = chip.querySelector('input');
+    check('tapping the name box turns it into a text field (empty for an unnamed trail) with a tick and a cross',
+      !!inp && inp.value === '' && chip.classList.contains('editing') && chip.querySelectorAll('button').length === 2);
+    updateTrailHud();
+    check('the every-frame HUD refresh leaves the field alone while it is being typed in', !!inp && chip.contains(inp) && chip.querySelector('input') === inp && chip.classList.contains('editing'));
+
+    let leaked = 0; const spy = () => { leaked++; };
+    window.addEventListener('keydown', spy);
+    key(inp, 'KeyW'); key(inp, 'e');
+    window.removeEventListener('keydown', spy);
+    check('keys typed in the field never reach the walk (W would steer, Esc would quit)', !!inp && chip.contains(inp) && leaked === 0, `${leaked} keydowns reached the window`);
+
+    if (inp) inp.value = 'Typed And Dropped'; key(inp, 'Escape');
+    check('Esc drops what was typed and leaves the trail as it was',
+      !chip.querySelector('input') && !chip.classList.contains('editing') && E.name === '' && storedEdits().length === 0 && getEditCount() === 0);
+
+    const statsBefore = /(\d+) named trail/.exec(d.querySelector('#mapStats').textContent);
+    click(chip);
+    const inp2 = chip.querySelector('input');
+    if (inp2) inp2.value = '  Test   Trail  Name '; key(inp2, 'Enter');
+    const same = getGraph().edges.filter(x => x.feat === E.feat);
+    check('Enter renames the whole way: every piece of it, with spaces tidied, and the box shows it',
+      same.length >= 1 && same.every(x => x.name === 'Test Trail Name' && x.named)
+      && chip.textContent === 'Test Trail Name' && !chip.classList.contains('unknown') && !chip.querySelector('input'),
+      `${same.length} pieces: ${same.map(x => JSON.stringify(x.name)).join(',')}; chip "${chip.textContent}"`);
+    const statsAfter = /(\d+) named trail/.exec(d.querySelector('#mapStats').textContent);
+    check('the trail list counts the newly named trail', statsBefore && statsAfter && +statsAfter[1] === +statsBefore[1] + 1,
+      `${statsBefore && statsBefore[1]} -> ${statsAfter && statsAfter[1]}`);
+
+    const exported = JSON.parse(getMapBundleJSON());
+    const feats = Object.values(exported.layers || {}).flatMap(l => l.features || []);
+    const hit = feats.find(f => f.properties && f.properties.full_id && f.properties.full_id === E.feat.properties.full_id);
+    check('Save map exports the whole map file with the new name in the right feature, and only there',
+      exported.format === 'pup-world/1' && !!exported.heightfield && !!exported.projection && !!hit && hit.properties.name === 'Test Trail Name'
+      && feats.filter(f => f.properties && f.properties.name === 'Test Trail Name').length === 1,
+      hit ? `feature ${hit.properties.full_id} is now "${hit.properties.name}"` : 'feature not found in the export');
+    check('the edit is also kept in this browser, and counted in the Save map note',
+      storedEdits().length === 1 && storedEdits()[0].includes('Test Trail Name') && getEditCount() === 1
+      && /1 trail name changed/.test(d.querySelector('#mapEditNote').textContent), d.querySelector('#mapEditNote').textContent);
+
+    /* The buttons. Every check above opens the editor by clicking the box and closes it from
+       the keyboard, so nothing had ever clicked the cross or the tick -- and a click on either
+       bubbles up to the box, whose own handler opens the editor. Closing it and then
+       re-opening it in the same click looked, from the player's side, like a cross that does
+       nothing. Done on a trail the MAP FILE already names, which is the case it was seen on. */
+    const nativeE = getGraph().edges.find(e => e.named && e.kind === 'trail' && e.feat && e.pts.length > 2 && !e.buried && e.feat !== E.feat);
+    const nm = nativeE.pts[Math.floor(nativeE.pts.length / 2)];
+    placeAt(nm[0], nm[1], 0); updateTrailHud();
+    const onN = getOnTrail().edge, nameN = onN && onN.name;
+    const btn = i => chip.querySelectorAll('button')[i];
+    const editsBefore = getEditCount();
+    click(chip);
+    const nOpen = !!chip.querySelector('input') && chip.querySelector('input').value === nameN;
+    click(btn(1));
+    check('the cross closes the editor on a trail that already has a name, and it stays closed',
+      !!onN && !!nameN && nOpen && !chip.querySelector('input') && !chip.classList.contains('editing') && onN.name === nameN,
+      `${nameN}: opened ${nOpen}, field still there ${!!chip.querySelector('input')}`);
+    click(chip); const nOpen2 = !!chip.querySelector('input');
+    click(btn(0));
+    check('the tick on an unchanged name closes the editor too, and records no edit',
+      nOpen2 && !chip.querySelector('input') && !chip.classList.contains('editing') && onN.name === nameN
+      && getEditCount() === editsBefore && storedEdits().length === 1, `edits ${editsBefore} -> ${getEditCount()}`);
+    click(chip); { const f = chip.querySelector('input'); if (f) f.value = 'Typed Then Crossed'; }
+    click(btn(1));
+    check('the cross throws away what was typed', !chip.querySelector('input') && onN.name === nameN && getEditCount() === editsBefore);
+    placeAt(mid[0], mid[1], 0); updateTrailHud();
+    click(chip); { const f = chip.querySelector('input'); if (f) f.value = 'Test Trail Renamed'; }
+    click(btn(0));
+    check('the tick keeps what was typed, and the editor stays closed',
+      !chip.querySelector('input') && !chip.classList.contains('editing') && E.name === 'Test Trail Renamed' && chip.textContent === 'Test Trail Renamed',
+      `${E.name}; chip "${chip.textContent}"`);
+    renameTrail(E, 'Test Trail Name'); updateTrailHud();
+
+    // switching editing off while a name is half typed closes it without keeping it
+    click(chip); const inp3 = chip.querySelector('input'); if (inp3) inp3.value = 'Half Typed'; tog('off');
+    check('switching map editing off closes an open field without keeping what was typed, and puts the pencil away',
+      !chip.querySelector('input') && !chip.classList.contains('editable') && E.name === 'Test Trail Name' && d.querySelector('#mapEditRow').hidden);
+
+    /* the data layer on its own: reapplying a stored edit to a freshly loaded file */
+    const mk = (id, name) => ({ type: 'Feature', properties: { full_id: id, osm_id: id.slice(1), osm_type: 'way', name }, geometry: { type: 'LineString', coordinates: [[0, 0], [1, 1]] } });
+    const L = [{ type: 'FeatureCollection', features: [mk('w1', ''), mk('w2', 'Old Name'), mk('w3', 'Same')] }];
+    const r1 = applyEdits(L, { w1: { name: 'New One' }, w2: { name: 'Fixed Two' }, w3: { name: 'Same' }, w9: { name: 'Gone' } });
+    check('a stored edit is reapplied to a freshly loaded file', r1.applied === 2
+      && L[0].features[0].properties.name === 'New One' && L[0].features[1].properties.name === 'Fixed Two',
+      L[0].features.map(f => f.properties.name).join('|'));
+    check('an edit the file already contains is dropped from storage; one for a way that is gone is kept',
+      (() => { const r2 = applyEdits(L, r1.edits); return r2.applied === 0 && Object.keys(r2.edits).join() === 'w9'; })()
+      && !('w3' in r1.edits));
+    check('a rename lands on the name key the game actually reads, and clearing removes every one', (() => {
+      const f = { properties: { NAME: 'Old' }, geometry: { type: 'LineString', coordinates: [[0, 0], [1, 1]] } };
+      patchFeature(f, { name: 'New' });
+      const wrote = f.properties.NAME === 'New' && !('name' in f.properties);
+      patchFeature(f, { name: '' });
+      return wrote && featureName(f) === '';
+    })());
+    check('a feature with no OSM id is still keyed, by its end points',
+      /^c:/.test(featureKey({ properties: {}, geometry: { type: 'LineString', coordinates: [[1, 2], [3, 4], [5, 6]] } })));
+
+    // leave the loaded map exactly as found for the tests that follow
+    renameTrail(E, ''); clearStored();
+    check('renaming back to blank restores the unnamed trail', E.name === '' && !E.named && getGraph().edges.filter(x => x.feat === E.feat).every(x => x.name === ''));
+  }
+
+  /* ---- the settings panel: four folds, tooltips instead of paragraphs, a wildlife switch ---- */
+  {
+    const panel = d.querySelector('#panel');
+    const secs = [...panel.querySelectorAll('.sect[data-fold]')];
+    const fold = n => secs.find(x => x.dataset.fold === n);
+    const click = el => el && el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    const ls = window.localStorage;
+
+    check('settings is four collapsible sections, in order: who, map, scenery, game',
+      secs.map(x => x.dataset.fold).join() === 'pup,map,scenery,game' && secs.every(x => x.querySelector('.sect-toggle') && x.querySelector('.sect-body')),
+      secs.map(x => x.dataset.fold).join());
+    check('the player animal selector is the first thing in settings',
+      panel.querySelector('.sect') === fold('pup') && ['#pupModeToggle', '#dogGrid', '#animalGrid', '#randomPupBtn'].every(sel => fold('pup').querySelector(sel)));
+    check('map editing lives inside the Trail map section',
+      !!d.querySelector('#mapSectBody #mapEditToggle') && !!d.querySelector('#mapSectBody #saveMapBtn') && !d.querySelector('#mapEditSect'));
+    check('landscape, time of day and terrain detail share one section',
+      ['#envGrid', '#fogAmt', '#skyToggle', '#skyControls', '#detailToggle'].every(sel => fold('scenery').querySelector(sel)));
+    check('sound and wildlife share one section', !!fold('game').querySelector('#soundToggle') && !!fold('game').querySelector('#wildlifeToggle'));
+
+    const sc = fold('scenery'), scBody = sc.querySelector('.sect-body'), scBtn = sc.querySelector('.sect-toggle');
+    ls.removeItem('pupFold_scenery');
+    check('sections start open', secs.every(x => !x.querySelector('.sect-body').hidden && x.querySelector('.sect-toggle').getAttribute('aria-expanded') === 'true'));
+    click(sc.querySelector('.sect-head h2'));
+    check('clicking a section heading collapses it, and says so', scBody.hidden === true && scBtn.getAttribute('aria-expanded') === 'false'
+      && /^Expand /.test(scBtn.getAttribute('aria-label')) && scBtn.textContent === '▸');
+    check('a collapsed section is remembered in this browser', ls.getItem('pupFold_scenery') === '0');
+    click(scBtn);
+    check('the caret expands it again and remembers that too', scBody.hidden === false && scBtn.getAttribute('aria-expanded') === 'true' && ls.getItem('pupFold_scenery') === '1');
+    check('one click toggles once (the caret sits inside the clickable row)', (() => { click(scBtn); const a = scBody.hidden; click(scBtn); return a === true && scBody.hidden === false; })());
+
+    const mp = fold('map'), mpBody = d.querySelector('#mapSectBody');
+    click(mp.querySelector('.sect-toggle'));
+    check('collapsing Trail map hides its body but the map picker stays usable',
+      mpBody.hidden === true && !mpBody.contains(d.querySelector('#mapListRow')) && ls.getItem('pupMapSectOpen') === '0');
+    click(mp.querySelector('.sect-head'));
+    check('the map section keeps the storage key it always had', mpBody.hidden === false && ls.getItem('pupMapSectOpen') === '1');
+    ls.removeItem('pupFold_scenery'); ls.removeItem('pupMapSectOpen');
+
+    const bare = [...panel.querySelectorAll('p.hint')].filter(p => !p.id);
+    check('no static description paragraphs are left in settings', bare.length === 0, bare.map(p => p.textContent.trim().slice(0, 40)).join(' | '));
+    const untipped = [...panel.querySelectorAll('.toggle, input[type=range], input[type=date], .btn, select, .dropzone')].filter(el => !el.closest('[title]'));
+    check('every control in settings has a tooltip', untipped.length === 0, untipped.map(el => el.id || el.textContent.trim().slice(0, 14)).join(', '));
+
+    /* wildlife */
+    const wl = v => click(d.querySelector(`#wildlifeToggle [data-wildlife="${v}"]`));
+    const wsel = () => d.querySelector('#wildlifeToggle .toggle.sel').dataset.wildlife;
+    ls.removeItem('pupWildlife');
+    resetCritters(); spawnCritters(7);
+    const pop = getCritters().length;
+    check('wildlife starts ON, and a walk is populated', wsel() === 'on' && wildlifeEnabled() && pop > 0, `${pop} animals`);
+
+    // earn a tally, so "keeps your tally" is not 0 === 0
+    let spookedNow = 0;
+    for (const c of getCritters().filter(x => !x.defends)) {
+      for (let i = 0; i < 25 && getCritterStats().spooked === 0; i++) updateCritters(0.05, 1 + i * 0.05, c.x + 1.5, c.z, 9, 9, false, true, 0);
+      if (getCritterStats().spooked > 0) break;
+    }
+    spookedNow = getCritterStats().spooked;
+    // pick one up, so "puts the passenger down first" is exercised
+    for (const c of getCritters()) { catchNear(c.x, c.z); if (getCarried()) break; }
+    const carriedBefore = !!getCarried();
+
+    wl('off');
+    check('switching wildlife off removes every animal at once', getCritters().length === 0 && !wildlifeEnabled() && wsel() === 'off', `${getCritters().length} left`);
+    check('and puts down anything being carried', carriedBefore && getCarried() === null, `carried before: ${carriedBefore}`);
+    check('and keeps this trip\'s tally', spookedNow > 0 && getCritterStats().spooked === spookedNow, `spooked ${spookedNow} -> ${getCritterStats().spooked}`);
+    check('the choice is remembered', ls.getItem('pupWildlife') === 'off');
+    resetCritters(); spawnCritters(9);
+    check('with wildlife off, starting a walk generates no animals', getCritters().length === 0);
+    wl('on');
+    check('switching wildlife back on brings the animals back mid-walk, tally intact',
+      getCritters().length === pop && wildlifeEnabled() && wsel() === 'on' && ls.getItem('pupWildlife') === 'on', `${getCritters().length} of ${pop}`);
+    resetCritters(); spawnCritters(7); ls.removeItem('pupWildlife');
+  }
+
+  /* ---- side-profile icons in the pup picker ----
+     The icons that ship are checked here against the code that would draw them; the drawing
+     itself (real WebGL) cannot run in this harness, so what is tested is everything around it:
+     that shipped icons are found, that a pup with none is queued, drawn later and swapped in,
+     that a failure leaves the card alone, and the pure maths. The renderer is checked
+     separately, on real WebGL, by tools/make-profile-icons.mjs. */
+  {
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    setKennelPups([]); renderRoster();
+    const cards = g => [...d.querySelectorAll(`#${g} .pupcard`)];
+    /* start from a SHIPPED selection. The header badge asks for the selected pup's picture
+       too, so a selection left on a pup with none (an earlier test's random pup) would add a
+       draw of its own to every count below. */
+    cards('dogGrid').find(c => c.querySelector('.pc-nm').textContent === 'Puppy').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    /* and let anything an EARLIER test left waiting on the icon timer finish on the real
+       backend, before a fake one is swapped in and counts it as this test's draw */
+    for (let i = 0; i < 40 && iconQueueLength(); i++) await sleep(25);
+    const profileSrc = c => { const i = c.querySelector('.pc-ic img'); return i ? i.getAttribute('src') : null; };
+    const isProfile = c => /^data:image\/png;base64,.{200,}/.test(profileSrc(c) || '') && c.querySelector('.pc-ic').classList.contains('profile');
+    const dogs = cards('dogGrid'), wild = cards('animalGrid');
+
+    check('every dog preset card shows a shipped side profile from the first frame',
+      dogs.length >= 6 && dogs.every(isProfile), `${dogs.filter(isProfile).length} of ${dogs.length} (a retuned preset has no matching icon until tools/make-profile-icons.mjs is re-run)`);
+    check('every wild animal card shows a shipped side profile',
+      wild.length >= 14 && wild.every(isProfile), `${wild.filter(isProfile).length} of ${wild.length}`);
+    const all = [...dogs, ...wild].map(profileSrc);
+    check('each one is its own picture', new Set(all).size === all.length, `${new Set(all).size} distinct of ${all.length}`);
+    const wildNames = wild.map(c => c.querySelector('.pc-nm').textContent);
+    const speciesCount = [...fs.readFileSync(path.join(ROOT, 'src/data/species.js'), 'utf8').matchAll(/^\s{2}(\w+):\s*\{nm:/gm)].length;
+    check('each animal is in the picker once (the theme lists some twice to weight how often they are met)',
+      new Set(wildNames).size === wildNames.length && wild.length === speciesCount, `${wild.length} cards, ${new Set(wildNames).size} distinct names, ${speciesCount} species`);
+    check('the name and the speed and spook bars are still on the card',
+      dogs.concat(wild).every(c => c.querySelector('.pc-nm').textContent.length > 0 && c.querySelector('.pc-bar.speed i') && c.querySelector('.pc-bar.spook i')));
+
+    /* a pup the game has never seen */
+    const drawn = [];
+    setIconBackend(spec => { drawn.push(spec.hash); return 'data:image/png;base64,DRAWN' + drawn.length; });
+    const find = name => cards('dogGrid').find(c => c.querySelector('.pc-nm').textContent === name);
+    addPups([{ name: 'Blue Test', furColor: '#3b6fb6', size: 1.2, legLength: 1.3 }]);
+    renderRoster();
+    check('a new pup starts on its emoji and is not drawn inline',
+      !!find('Blue Test') && !find('Blue Test').querySelector('.pc-ic img') && find('Blue Test').querySelector('.pc-ic').textContent === '⭐' && drawn.length === 0);
+    await sleep(80);
+    check('then a profile is drawn for it and swapped into its card',
+      !!find('Blue Test').querySelector('.pc-ic img') && profileSrc(find('Blue Test')) === 'data:image/png;base64,DRAWN1' && drawn.length === 1, `${drawn.length} drawn`);
+    renderRoster();
+    check('and kept for the session: the next render has it at once, with no second draw',
+      profileSrc(find('Blue Test')) === 'data:image/png;base64,DRAWN1' && drawn.length === 1);
+
+    addPups([{ name: 'Blue Twin', furColor: '#3b6fb6', size: 1.2, legLength: 1.3 }]);
+    renderRoster(); await sleep(60);
+    check('a pup built the same under another name shares the icon instead of drawing another',
+      profileSrc(find('Blue Twin')) === 'data:image/png;base64,DRAWN1' && drawn.length === 1);
+
+    check('renaming costs nothing: the hash ignores the name',
+      dogIconSpec({ furColor: '#3b6fb6', name: 'A' }).hash === dogIconSpec({ furColor: '#3b6fb6', name: 'B' }).hash
+      && dogIconSpec({ furColor: '#3b6fb6' }).hash !== dogIconSpec({ furColor: '#3b6fb7' }).hash);
+
+    /* several new pups at once are drawn one at a time, not all in one go */
+    drawn.length = 0;
+    const when = [];
+    setIconBackend(spec => { when.push(Date.now()); drawn.push(spec.hash); return 'data:image/png;base64,DRAWN' + drawn.length; });
+    addPups([1, 2, 3].map(i => ({ name: 'Queue ' + i, furColor: '#aa00' + i + i, size: 1 + i / 10 })));
+    renderRoster();
+    check('several new pups are queued and drawn one per tick, never all at once',
+      drawn.length === 0 && iconQueueLength() === 3, `${drawn.length} drawn, ${iconQueueLength()} waiting`);
+    await sleep(160);
+    check('and all of them arrive', drawn.length === 3 && ['Queue 1', 'Queue 2', 'Queue 3'].every(n => !!find(n).querySelector('.pc-ic img')), `${drawn.length} drawn`);
+    check('with a pause between each, so the game never waits on a row of pups',
+      when.length === 3 && when[1] - when[0] >= 10 && when[2] - when[1] >= 10, `gaps ${when[1] - when[0]}ms, ${when[2] - when[1]}ms`);
+
+    /* a browser that cannot draw */
+    drawn.length = 0;
+    setIconBackend(() => { drawn.push('x'); return null; });
+    addPups([{ name: 'Undrawable', furColor: '#102030' }]);
+    renderRoster(); await sleep(60);
+    check('when drawing fails the card keeps its emoji, and the picker still works',
+      !find('Undrawable').querySelector('.pc-ic img') && find('Undrawable').querySelector('.pc-ic').textContent === '⭐');
+    renderRoster(); await sleep(60);
+    check('and a failure is not retried on every render', drawn.length === 1, `${drawn.length} attempts`);
+    find('Undrawable').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    check('an undrawable pup can still be chosen', find('Undrawable').classList.contains('sel'));
+
+    /* a pup's name is whatever its file says */
+    setIconBackend(spec => 'data:image/png;base64,Z');
+    addPups([{ name: '<img src=x onerror=1>', furColor: '#445566' }]);
+    renderRoster();
+    const evil = cards('dogGrid').find(c => c.querySelector('.pc-nm').textContent === '<img src=x onerror=1>');
+    check('a pup name is shown as text, never as markup', !!evil && evil.querySelector('.pc-nm').children.length === 0 && d.querySelectorAll('#dogGrid .pc-nm img').length === 0);
+
+    /* put everything back, selection included: the pup chosen above is about to stop existing */
+    setIconBackend(null); setKennelPups([]); renderRoster();
+    cards('dogGrid').find(c => c.querySelector('.pc-nm').textContent === 'Puppy').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    check('clearing the kennel puts the picker back to its shipped cards', cards('dogGrid').every(isProfile) && cards('dogGrid').length === dogs.length);
+  }
+
+  /* the pure parts of the icon renderer */
+  {
+    const near = (a, b) => Math.abs(a - b) < 1e-9;
+    const wide = fitFrame({ minX: 0, maxX: 4, minY: 0, maxY: 1 }, 4 / 3, 0.1);
+    check('a wide animal is framed by its width, centred, with a margin and the icon\'s aspect',
+      near(wide.cx, 2) && near(wide.cy, 0.5) && near(wide.hw, 2.2) && near(wide.hw / wide.hh, 4 / 3), JSON.stringify(wide));
+    const tall = fitFrame({ minX: 0, maxX: 1, minY: 0, maxY: 3 }, 4 / 3, 0.1);
+    check('a tall one by its height', near(tall.hh, 1.65) && near(tall.hw / tall.hh, 4 / 3), JSON.stringify(tall));
+
+    // GL hands rows back bottom-up: bottom-left red, bottom-right clear, top-left green, top-right blue
+    const px = new Uint8Array([255, 0, 0, 255, 0, 0, 0, 0, 0, 255, 0, 255, 0, 0, 255, 255]);
+    const flat = downsample(px, 2, 2, 1);
+    check('downsampling turns GL\'s bottom-up rows the right way up',
+      flat.data[0] === 0 && flat.data[1] === 255 && flat.data[4 + 2] === 255 && flat.data[8] === 255 && flat.data[8 + 3] === 255, Array.from(flat.data).join(','));
+    const one = downsample(px, 2, 2, 2);
+    check('and averages a block weighted by alpha, so a clear pixel does not darken the colour',
+      one.w === 1 && one.data[0] === 85 && one.data[1] === 85 && one.data[2] === 85 && one.data[3] === 191, Array.from(one.data).join(','));
+
+    const dot = new Uint8ClampedArray(5 * 5 * 4); const mid = (2 * 5 + 2) * 4;
+    dot[mid] = 200; dot[mid + 1] = 100; dot[mid + 2] = 50; dot[mid + 3] = 255;
+    const ringed = addOutline({ w: 5, h: 5, data: dot }, 1, [61, 42, 32]);
+    let solid = 0; for (let i = 3; i < ringed.data.length; i += 4) if (ringed.data[i] === 255) solid++;
+    check('an outline grows the silhouette by its radius, in ink, and leaves the animal\'s own pixels alone',
+      solid === 5 && ringed.data[mid] === 200 && ringed.data[mid + 1] === 100 && ringed.data[((2 * 5 + 3) * 4)] === 61 && ringed.data[3] === 0, `${solid} solid`);
+
+    check('the hash is the same whatever order the params come in, and changes with any value',
+      specHash({ a: 1, b: { c: 2, d: 3 } }) === specHash({ b: { d: 3, c: 2 }, a: 1 }) && specHash({ a: 1 }) !== specHash({ a: 2 }));
+    let h = 0; for (const ch of 'fox') h = (h * 31 + ch.charCodeAt(0)) | 0;
+    check('a wild animal\'s icon is seeded exactly as the avatar is', wildSeed('fox') === (Math.abs(h) || 1));
+    check('a renderer with no WebGL is declined cleanly, not thrown at', renderProfile({}, {}) === null && canRender(null) === false);
+  }
+
+  /* ---- the player's picture in a collapsed picker, and the ring that goes with the animals ---- */
+  {
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    const click = el => el && el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    const ls = window.localStorage;
+    const pup = d.querySelector('.sect[data-fold="pup"]');
+    const badge = d.querySelector('#pupBadge');
+    const shown = () => window.getComputedStyle(badge).display;
+    const badgeSrc = () => { const i = badge.querySelector('img'); return i ? i.getAttribute('src') : null; };
+    const badgeName = () => { const n = badge.querySelector('.pb-nm'); return n ? n.textContent : null; };
+    const card = (grid, name) => [...d.querySelectorAll(`#${grid} .pupcard`)].find(c => c.querySelector('.pc-nm').textContent === name);
+    const cardSrc = c => { const i = c && c.querySelector('.pc-ic img'); return i ? i.getAttribute('src') : null; };
+    setKennelPups([]); renderRoster(); ls.removeItem('pupFold_pup');
+    click(card('dogGrid', 'Puppy'));           // a known, shipped selection to start from
+    if (pup.classList.contains('folded')) click(pup.querySelector('.sect-head'));
+
+    check('the player badge sits in the picker header', !!badge && pup.querySelector('.sect-head').contains(badge));
+    check('it is hidden while the picker is open', shown() === 'none', shown());
+    click(pup.querySelector('.sect-head h2'));
+    check('and appears when the picker is collapsed', shown() === 'flex', shown());
+    const sel = d.querySelector('#dogGrid .pupcard.sel');
+    check('it shows the selected pup\'s own side profile and name',
+      !!sel && !!badgeSrc() && badgeSrc() === cardSrc(sel) && badgeName() === sel.querySelector('.pc-nm').textContent,
+      `${badgeName()} vs ${sel && sel.querySelector('.pc-nm').textContent}`);
+    click(card('dogGrid', 'Scout'));
+    check('choosing another pup changes it', badgeName() === 'Scout' && badgeSrc() === cardSrc(card('dogGrid', 'Scout')) && badgeSrc() !== cardSrc(card('dogGrid', 'Puppy')), badgeName());
+    click(card('animalGrid', 'Red fox'));
+    check('and choosing a wild animal shows that animal', badgeName() === 'Red fox' && badgeSrc() === cardSrc(card('animalGrid', 'Red fox')), badgeName());
+
+    for (let i = 0; i < 40 && iconQueueLength(); i++) await sleep(25);    // see the icon block: let strays finish first
+    const drawn = [];
+    setIconBackend(spec => { drawn.push(spec.hash); return 'data:image/png;base64,BADGE' + drawn.length; });
+    addPups([{ name: 'Badge Pup', furColor: '#2255aa', size: 1.1 }]);
+    renderRoster(); click(card('dogGrid', 'Badge Pup'));
+    check('a pup the player made shows its emoji until its picture has been drawn',
+      badgeName() === 'Badge Pup' && !badgeSrc() && badge.querySelector('.pb-ic').textContent === '⭐');
+    await sleep(100);
+    check('and then its picture', badgeSrc() === 'data:image/png;base64,BADGE1' && drawn.length === 1, `${badgeSrc()}; ${drawn.length} drawn`);
+
+    addPups([{ name: 'Slow One', furColor: '#117744', size: 0.9 }]);
+    renderRoster(); click(card('dogGrid', 'Slow One')); click(card('dogGrid', 'Puppy'));
+    await sleep(100);
+    check('a picture that arrives after you chose someone else does not replace theirs',
+      drawn.length === 2 && badgeName() === 'Puppy' && badgeSrc() === cardSrc(card('dogGrid', 'Puppy')) && badgeSrc() !== 'data:image/png;base64,BADGE2',
+      `${drawn.length} drawn; badge ${badgeName()}`);
+
+    setIconBackend(null); setKennelPups([]); renderRoster();
+    click(pup.querySelector('.sect-head')); ls.removeItem('pupFold_pup');
+    check('opening the picker again hides the badge', shown() === 'none');
+
+    /* the disturbance ring is how far the animals hear you, so it goes when they do */
+    let clock = 2e6;
+    const pump = n => { let ran = 0; for (let i = 0; i < n; i++) if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(clock += 40); ran++; } return ran; };
+    const wl = v => click(d.querySelector(`#wildlifeToggle [data-wildlife="${v}"]`));
+    const ringR = () => groundRingUniforms().uRing0.value[2];
+    ls.removeItem('pupWildlife'); wl('on');
+    /* a walk has to be on for the ring to be drawn at all. If one already is, leave it exactly
+       where it is -- starting another repositions the pup and respawns the animals, and the
+       tests after this one (the camera ones on the Barr map) are sensitive to where they were
+       left. If not, start one and end it again. */
+    const wasPlaying = d.body.classList.contains('play');
+    if (!wasPlaying) enterPlay();
+    const ran1 = pump(3);
+    check('with wildlife on, the disturbance ring is drawn round the player', ran1 > 0 && getNoiseRing().visible === true && ringR() > 0, `${ran1} frames; radius ${ringR()}`);
+    wl('off');
+    check('switching wildlife off takes the ring away at once, before the next frame', getNoiseRing().visible === false && ringR() === 0);
+    const ran2 = pump(3);
+    check('and it stays away frame after frame', ran2 > 0 && getNoiseRing().visible === false && ringR() === 0, `${ran2} frames; radius ${ringR()}`);
+    check('with no animals there is no reach ring either', getCatchRing().visible === false);
+    wl('on');
+    const ran3 = pump(3);
+    check('switching wildlife back on brings the ring back', ran3 > 0 && getNoiseRing().visible === true && ringR() > 0, `${ran3} frames; radius ${ringR()}`);
+    ls.removeItem('pupWildlife');
+    if (!wasPlaying) exitPlay();
+  }
+
   /* ---- settings that can be changed mid-walk ---------------------------------
      The panel is a live drawer now. Every control on it rebuilds the world, and the old
      handlers all finished by teleporting the player back to the trailhead -- fine in a
@@ -6403,12 +6845,12 @@ async function assertAll(window, errors, stats) {
     { const runs = [];
       for (const e of good.slice(0, 4)) for (const dir of [1, -1]) {
         const s = onEdge(e, 0.3, dir); place(s.x, s.z, s.hx, s.hz);
-        press(autoBtn, 400); const started = A.on, litOn = autoBtn.classList.contains('on');
+        press(autoBtn, 400); const started = A.on, litOn = autoBtn.classList.contains('on'), glowOn = d.querySelector('#hudTrail').classList.contains('auto');
         let worst = 0, f = 0, dist = 0, lx = pl.x, lz = pl.z;
         while (A.on && f < 4000) { pump(); f++; const nt = nearestTrail(pl.x, pl.z); worst = Math.max(worst, nt.d - nt.hw); dist += Math.hypot(pl.x - lx, pl.z - lz); lx = pl.x; lz = pl.z; }
         const why = A.why; pump(30);
         const nn = nodeNear(pl.x, pl.z);
-        runs.push({ started, litOn, litOff: !autoBtn.classList.contains('on'), ended: !A.on, why, worst, dist, endArms: arms(nn.n).length, endDist: nn.d, speedAfter: pl.speed, frames: f }); }
+        runs.push({ started, litOn, litOff: !autoBtn.classList.contains('on'), glowOn, glowOff: !d.querySelector('#hudTrail').classList.contains('auto'), ended: !A.on, why, worst, dist, endArms: arms(nn.n).length, endDist: nn.d, speedAfter: pl.speed, frames: f }); }
       out.runs = runs; }
 
     /* ---- carries straight on through a node that is not a fork ---- */
@@ -6626,6 +7068,16 @@ async function assertAll(window, errors, stats) {
   check('while it walks it stays on the tread', R.length >= 6 && R.every(r => r.worst <= 0.05),
     `worst overshoot past the corridor edge ${f2(Math.max(0, ...R.map(r => r.worst)))}u over ${R.length} walks`);
   check('the button is lit while it walks and unlit when it stops', R.length >= 6 && R.every(r => r.litOn && r.litOff));
+  check('the trail-name chip glows while auto-walk runs and stops when it ends', R.length >= 6 && R.every(r => r.glowOn && r.glowOff),
+    `${R.filter(r => r.glowOn).length} of ${R.length} walks glowed, ${R.filter(r => r.glowOff).length} cleared`);
+  check('the glow is a pulsing green box-shadow, held still for reduced motion', (() => {
+    const css = fs.readFileSync(path.join(ROOT, 'styles/trails.css'), 'utf8');
+    const rule = /#hudTrail\.auto\{([^}]*)\}/.exec(css);
+    const frames = /@keyframes trailGlow\{([\s\S]*?)\n\}/.exec(css);
+    const rm = /prefers-reduced-motion:reduce\)\{[^@]*#hudTrail\.auto\{([^}]*)\}/.exec(css);
+    return !!rule && /animation:trailGlow[^;]*infinite/.test(rule[1]) && !!frames && /124,\s*200,\s*96/.test(frames[1])
+      && (frames[1].match(/box-shadow/g) || []).length >= 2 && !!rm && /animation:none/.test(rm[1]) && /box-shadow/.test(rm[1]);
+  })());
   check('a node that is not a fork does not stop it: it carries on onto the next stretch',
     H.length >= 1 && H.every(h => h.passed && h.onOther && h.away > 8 && h.still),
     H.length ? H.map(h => `passed ${h.passed}, onto next ${h.onOther}, ${f2(h.away)}u from the node, ${h.still ? 'still walking' : 'ended: ' + h.why}`).join(' | ')

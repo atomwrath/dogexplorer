@@ -20,6 +20,7 @@ import { scene, camera, disposeGroup, sun, hemi } from '../core/render.js';
 import { toon, toonTex } from '../core/materials.js';
 import { loadWorldBundle, fetchWorldBundle } from '../data/world_bundle.js';
 import { parseFeatures, buildGraph, ptSeg, segCross, inRect, clipLineToRect, clipRingToRect } from './geo.js';
+import { featureKey, patchFeature, loadEdits, saveEdits, applyEdits, edgeLabel, lineKey, indexLineFeatures, linkEdgesToFeatures } from './map-edits.js';
 import { pointInArea, areaBBox } from './geom2d.js';
 import { resetSpatialHash, hashSeg, nearestTrail, hashSkirt, skirtAt } from './spatial.js';
 import { THEME, THEMES, setTheme } from './themes.js';
@@ -815,7 +816,7 @@ function buildTrailheads(){
       const pts=e.a===ni?e.pts:[...e.pts].reverse();
       yaw=Math.atan2(-(pts[1][1]-pts[0][1]),pts[1][0]-pts[0][0]);
     }
-    return {node:ni,x:n.p[0],z:n.p[1],yaw,name:e?e.name:'Trail',
+    return {node:ni,x:n.p[0],z:n.p[1],yaw,name:e?edgeLabel(e):'Trail',edge:e||null,
             color:e?e.color:'#b58347',lenM:e?e.lenM:0,where:compass(n.p[0],n.p[1])};
   };
   const ends=[];
@@ -892,11 +893,56 @@ async function loadWorld(urlOrBundleObj, extraLayers, stepMetres){
     ? await fetchWorldBundle(urlOrBundleObj, opts)
     : loadWorldBundle(urlOrBundleObj, opts);
   BUNDLE.setMapScale(MAP_SCALE);
+  /* Edits made in an earlier session go onto the freshly loaded data before anything is
+     built from it. Right here and not in rebuildWorld: this is the only moment the
+     features are straight off the network, which is what applyEdits needs to tell an edit
+     the file already contains from one it does not. */
+  const stored = loadEdits(bundleMapId());
+  if(Object.keys(stored).length) saveEdits(bundleMapId(), applyEdits(BUNDLE.layers, stored).edits);
   if(extraLayers) EXTRA = extraLayers.slice();
   if(stepMetres) STEP_M = stepMetres;
   rebuildWorld();
   return BUNDLE;
 }
+
+function bundleMapId(){
+  return 'dem:'+(+BUNDLE.originLon).toFixed(4)+','+(+BUNDLE.originLat).toFixed(4);
+}
+
+/* ---------- renaming a trail from inside the game ----------
+   `edge.feat` is the GeoJSON feature the edge was cut from, so a rename lands on the source
+   data -- which is what the next rebuild, the stored edit and the downloaded file all read.
+   A feature is one OSM way, so renaming "this trail" renames the whole way and every
+   fragment splitT cut it into, which is the thing a walker means by it. Two things are
+   updated in place rather than by rebuilding the world: the graph's edges (so the HUD, the
+   trail list and the details card are right at once) and the trailheads. What stays as it
+   was until the next rebuild is whatever was BAKED from the old name: the lettering on
+   signposts, and `route`, which is an identity and must not change under a held highlight.
+   A rebuild happens on any change of World scale or contour step, or on reload. */
+function renameTrail(edge, rawName){
+  const feat = edge && edge.feat;
+  if(!feat) return false;
+  const name = String(rawName == null ? '' : rawName).replace(/\s+/g, ' ').trim().slice(0, 80);
+  // the same name is not an edit: nothing to change, and nothing to keep or save
+  if(name === (edge.name || '')) return false;
+  patchFeature(feat, {name});
+  if(GRAPH) GRAPH.edges.forEach(e=>{ if(e.feat===feat){ e.name=name; e.named=!!name; } });
+  TRAILHEADS.forEach(h=>{ if(h.edge && h.edge.feat===feat) h.name=edgeLabel(h.edge); });
+  // only the bundle's own features are remembered across sessions: a dropped file has no
+  // stable identity to file an edit under, and its edits travel with "Save combined"
+  const key = featureKey(feat);
+  if(key && BUNDLE && BUNDLE.layers.some(l=>(l.features||[]).includes(feat))){
+    const edits = loadEdits(bundleMapId());
+    edits[key] = Object.assign({}, edits[key], {name});
+    saveEdits(bundleMapId(), edits);
+  }
+  return true;
+}
+/* How many features carry an edit the repo's copy of the map does not have yet. */
+function getEditCount(){ return BUNDLE ? Object.keys(loadEdits(bundleMapId())).length : 0; }
+/* The loaded bundle as a file, edits included -- the features inside it are the very
+   objects that were patched. null when no bundle is loaded (dropped layers only). */
+function getMapBundleJSON(){ return BUNDLE ? JSON.stringify(BUNDLE.bundle) : null; }
 
 /* Add plain GeoJSON layers (a trails file, an areas-of-interest file, ...) without a DEM
    bundle, or on top of one. Each call rebuilds so the map appears immediately. */
@@ -2264,7 +2310,9 @@ function steepestGrade(pr){
 function planRails(edges){
   const rails=edges.filter(e=>e.kind==='rail' && e.prof);
   const byLine=new Map();
-  for(const e of rails){ const k=e.name||'#'+e.a+'-'+e.b; if(!byLine.has(k)) byLine.set(k,[]); byLine.get(k).push(e); }
+  /* an unnamed way groups by its ROUTE: its own fragments stay together, and it is not lumped
+     in with unrelated ways the way a shared nickname used to */
+  for(const e of rails){ const k=e.name||e.route||'#'+e.a+'-'+e.b; if(!byLine.has(k)) byLine.set(k,[]); byLine.get(k).push(e); }
   const rack=new Set();
   for(const [name, list] of byLine){
     const tagged=list.some(e=>e.rackTag) || /\bcog\b/i.test(name);
@@ -2761,9 +2809,7 @@ function rebuildWorld(){
   resetSpatialHash();
 
   const layers=[...(BUNDLE ? (BUNDLE.layers||[]) : []), ...EXTRA];
-  MAP_ID = BUNDLE
-    ? 'dem:'+(+BUNDLE.originLon).toFixed(4)+','+(+BUNDLE.originLat).toFixed(4)
-    : (layers.length ? 'geojson:'+layers.length : 'none');
+  MAP_ID = BUNDLE ? bundleMapId() : (layers.length ? 'geojson:'+layers.length : 'none');
   if(!layers.length){ MAP_LATLON=null; setSkyPlace(null, null, true); applyThemeLighting(); return; }
   // A bundle's own projection is authoritative whenever one is loaded; the fallback only
   // covers the no-DEM case, where there's no heightfield to stay aligned with anyway.
@@ -2776,6 +2822,9 @@ function rebuildWorld(){
   const rawLines=[], rawPoints=[], rawAreas=[], rawWaters=[];
   for(const layer of layers){
     const F=parseFeatures(layer);
+    // each line remembers the GeoJSON feature it was read from (see map-edits.js)
+    const featOf=indexLineFeatures(layer);
+    for(const L of F.lines) L.feat=featOf.get(lineKey(L.pts))||null;
     rawLines.push(...F.lines); rawPoints.push(...F.points); rawAreas.push(...F.areas);
     rawWaters.push(...(F.waters||[]));
   }
@@ -2793,7 +2842,7 @@ function rebuildWorld(){
     const pts=PROJ.projectCoords(L.pts);
     const runs=R ? clipLineToRect(pts,R) : [pts];
     if(R && pts.some(c=>!inRect(c[0],c[1],R))) CROP.lines++;
-    for(const run of runs) lines.push({name:L.name,kind:L.kind,paved:L.paved,ford:L.ford,rackTag:!!L.rackTag,bridge:!!L.bridge,pts:run});
+    for(const run of runs) lines.push({name:L.name,kind:L.kind,paved:L.paved,ford:L.ford,rackTag:!!L.rackTag,bridge:!!L.bridge,feat:L.feat,pts:run});
   }
   // the source's own bridge ways, kept aside: buildGraph snaps most of them out of
   // existence (see planBridges), so they survive only as hints for where spans go
@@ -2839,6 +2888,15 @@ function rebuildWorld(){
   // Scaling both keeps the topology (what merges into what) a function of real distance,
   // not of how compacted the display happens to be.
   GRAPH=buildGraph(lines,16*MAP_SCALE,6*MAP_SCALE);
+  /* Two things done to the graph from out here, because geo.js is shared with Neon Pups and
+     is left exactly as it is. First, every edge is tied back to the GeoJSON feature it was
+     cut from, so an in-game rename can reach the source data. Second, an unnamed way gets
+     its name BLANK: buildGraph hands each one a nickname from a short list, which read on
+     signs and in the HUD as the trail's real name. `named` is untouched and `route` is
+     already the identity, so nothing that groups by either moves. The HUD shows a blank as
+     "Unknown trail", and a player can name it. */
+  linkEdgesToFeatures(GRAPH.edges, lines, 16*MAP_SCALE);
+  GRAPH.edges.forEach(e=>{ if(!e.named) e.name=''; });
   PATH_MIX_HAIRPINS = roundHairpins(GRAPH);
   /* Adjacency, built once and used by everything below -- the crossing planner, the
      junction pads, the sign arms and the destination walk all need "what meets here".
@@ -3456,7 +3514,7 @@ function rebuildWorld(){
       const reach=armReach(ni,o.e,adj);
       // tx/tz: the point the arm is aimed AT, kept so the angle can be re-measured from
       // wherever the post finally stands rather than from the node it was set back from
-      return{label:o.e.name, route:o.e.route, kind:o.e.kind, named:!!o.e.named,
+      return{label:o.e.name||'Unmarked path', route:o.e.route, kind:o.e.kind, named:!!o.e.named,
              distU:reach.dist, dist:distLabel(reach.dist), angle:Math.atan2(az,ax),
              tx:n.p[0]+ax, tz:n.p[1]+az, buried:!!o.e.buried};
     };
@@ -3731,7 +3789,7 @@ function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a
 
 function getBackdrop(){ return backdropG; }
 
-export { loadWorld, rebuildWorld, addLayers, clearLayers, hasBundle, setContourStep,
+export { loadWorld, rebuildWorld, addLayers, clearLayers, hasBundle, setContourStep, renameTrail, getEditCount, getMapBundleJSON,
          standingY, getWorldRevision, pathWidth, getContourStep, getSignCount, getPathMix, getMapId, getMapLatLon, getCrossings,
          pathRank, kindLift, pathOutlineWidth, getWaterways, getBridges, inWaterway, waterSurfaceAt, waterSurfaceInfo, wadeSurfaceAt, setWadeLegLength, wadeDepth, wadeReach, styleKey,
          getAreaLabels, updateAreaLabels, getAreaSolids, areaBlocked, areaSolidTop, lineOfSight, nearestSolidFace, solidEmbed, distToSolid,
