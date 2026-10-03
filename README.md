@@ -38,6 +38,7 @@ Both games share the same dog builder, so a pup you design in the creator is the
 Visit the GitHub Pages URL. On a phone or tablet, use **Share → Add to Home Screen** for fullscreen play with no browser chrome; the game is cached, so it works offline afterwards.
 
 Controls: WASD/arrows to move, Shift to run, C to sneak, Space to jump, B to bark, E to chomp, Esc to quit.
+In Pup Trails B is also "use": with an animal in its catch ring it picks it up, with the hoverboard in reach it slings it on your back, and with either on your back it puts it down (one slot, so one at a time). On the hoverboard, jump onto it to ride; hold Shift and the pup hops down behind it and pushes (as fast as it can sprint on a trail), let go and it hops back on; C crouches (less drag, tighter turns; Shift stands you up to push), S brakes.
 In Pup Trails, E is auto-walk instead: get moving along a trail (or face a branch at a junction), press E, and the pup follows it until it ends or forks; steer, or press E again, to take over.
 On touch devices a floating analog stick appears wherever your left thumb lands — push a little to pad along, push far to sprint.
 

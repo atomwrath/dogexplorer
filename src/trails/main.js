@@ -10,9 +10,9 @@
    camera follows the player, which on a 2.6 km map means it is simply never on screen.
    That was the "map loads, no dog" bug. */
 import { clamp, lerp } from '../core/math.js';
-import { setWildVisible, setWildYaw, spawnWild, spookRadiusFor, topSpeedFor, updateWild, wildPos, wildShadowRadius, wildLegLength } from './wild-driver.js';
+import { setWildVisible, setWildYaw, spawnWild, spookRadiusFor, topSpeedFor, updateWild, wildPos, wildShadowRadius, wildLegLength, wildBodySize, wildBodyColor } from './wild-driver.js';
 
-import { dogRunMul, dogTopSpeed, setDogPos, setDogVisible, setYaw, spawnDog, updateDog, dogShadowRadius, dogLegLength } from './dog-driver.js';
+import { dogRunMul, dogTopSpeed, setDogPos, setDogVisible, setYaw, spawnDog, updateDog, dogShadowRadius, dogLegLength, dogBodySize, dogBodyColor } from './dog-driver.js';
 import { updateShadow, setShadowVisible } from './shadow.js';
 import { updateNoiseRing, setNoiseRingVisible, noiseRingRadius, updateCatchRing, setCatchRingVisible } from './noise-ring.js';
 import { getWorld, rawGroundY, terrainY } from './terrain.js';
@@ -21,7 +21,7 @@ import { addCamPitch, addCamYaw, addCamZoom, getCamPitch, getCamYaw, getCamZoom,
 import { getCritterStats, spawnCritters, resetCritters, setWildlife, wildlifeEnabled, updateCritters, WATCH_SECONDS, playerNoise, typicalSpookRadius, takeImpacts,
          catchNear, releaseCarried, getCarried, carrySlow, setCarryAnchor, nearestCatchable, catchRadius } from './critters.js';
 import { initMinimap, updateMinimap, setHighlightRoute, setPickedPoint,
-         setCourseShown, getCourseShown, setRaceFrac } from './minimap.js';
+         setCourseShown, getCourseShown, setRaceFrac, setBoardMarker } from './minimap.js';
 import { initPanes, getPane, showPane, togglePane } from './panes.js';
 import { setCourseLine, refreshCourseLine, clearCourseLine } from './course-line.js';
 import { addSpot, getSpots, removeSpot, setSpotMap, spotNear, spotWorld } from './spots.js';
@@ -34,11 +34,11 @@ import { addCourse, courseBestFor, courseBestOverall, courseFinished, courseLeng
 import { setGhostAvatar, placeGhost, hideGhost, disposeGhost, getGhostGroup } from './ghost.js';
 import { comicBurst, updateFX } from '../core/fx.js';
 import { shakeT, setShake, decayShake } from '../core/shake.js';
-import { barkSound, cheerBlip, initAudio, thudSound,
-         stepSound, landSound, jumpSound, scrabbleSound,
+import { barkSound, cheerBlip, initAudio, thudSound, splashSound,
+         stepSound, landSound, jumpSound, scrabbleSound, catchSound,
          countPip, goTone, offCourseSound, rejoinSound } from '../core/audio.js';
 
-import { applyThemeLighting, getMapLatLon, setTerrainQuadBudget, getDemStride, addLayers, clearLayers, compass, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapId, getMapScale, getPathMix, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, inWaterway, loadWorld, renameTrail, getEditCount, getMapBundleJSON, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY, setWadeLegLength, getWorldRevision, areaBlocked, areaSolidTop, nearestSolidFace, solidEmbed, distToSolid } from './world.js';
+import { waterSurfaceAt, applyThemeLighting, getMapLatLon, setTerrainQuadBudget, getDemStride, addLayers, clearLayers, compass, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapId, getMapScale, getPathMix, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, inWaterway, loadWorld, renameTrail, getEditCount, getMapBundleJSON, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY, setWadeLegLength, getWorldRevision, areaBlocked, areaSolidTop, nearestSolidFace, solidEmbed, distToSolid } from './world.js';
 
 import { THEME, THEMES } from './themes.js';
 import { setSkyMode, getSkyMode, setSkyClock, getSkyClock, skyFrame, skyReadout, skyState, nowClock } from './sky.js';
@@ -53,6 +53,10 @@ import { addPups, kennelPups, loadKennel, parsePupFile } from '../data/kennel.js
 import { nearestTrail, skirtAt } from './spatial.js';
 import { updateSightCut } from './sight-cut.js';
 import { updateTrain, trainPush } from './train.js';
+import { pushPose } from './gait.js';
+import { setHover } from './hover-sound.js';
+import { HB, hbs, hbKickTop, hbStepSpeed, hbTurnRate, hbOverBoard, hbExitPlan, hbPlace, hbRescale,
+         hbMount, hbDismount, hbFreeStep, hbUpdateVisual, hbSetLook, hbStepBlend, hbPushBack } from './hoverboard.js';
 import { autoWalkBegin, autoWalkSteer } from './auto-walk.js';
 import { edgeLabel } from './map-edits.js';
 import { requestIcon } from './pup-icons.js';
@@ -112,7 +116,11 @@ const player = { x:0, z:0, y:0, vy:0, yaw:0, speed:0, dist:0, sneaking:false, ba
                     a fifth of a second. Time is the honest measure of settling: it keeps
                     paying out for as long as you hold, which is what makes standing still
                     a move rather than an absence of one. */
-                 stillT:0, wall:null, regrabT:0 };
+                 stillT:0, wall:null, regrabT:0,
+                 /* Crouched on the hoverboard: the sneak button's meaning while riding. A separate
+                    flag from `sneaking` because sneaking is what the animals hear -- a pup tucked
+                    on a board doing 15 m/s is not being quiet. */
+                 crouch:false };
 /* Seconds of holding position to be fully settled, and seconds of moving to undo it.
    ASYMMETRIC ON PURPOSE, and this is what makes the catch reachable at all. Settling has
    to be slow enough to be a decision; losing it has to be slow enough that the two or
@@ -255,10 +263,31 @@ function barkerSize(){
   if(mode==='dog') return dogParams().size ?? 1;
   return (SPECIES[wildKey] && SPECIES[wildKey].scale) || 1;
 }
+/* THE BARK BUTTON IS THE "USE" BUTTON. What a press does, in order:
+     something on your back (the board or an animal)  -> put it down;
+     else an animal within its catch ring, or the board within reach, whichever is nearer
+                                                      -> pick it up;
+     else                                             -> bark.
+   The first two are INSTEAD of a bark, not as well: a bark is a noise spike the animals hear,
+   and picking an animal up with a shout would scare off the thing you were creeping up on.
+   One slot on the back, so a board and a passenger can never both ride there -- put one down
+   to take the other. Not while riding (a board under your feet is not something to pick up),
+   not clinging to a rock, not while being thrown about. */
 function doBark(){
   if(!playing || trip.paused) return;
+  if(barkUse()) return;
   player.barkT=1;
   barkSound(barkerSize());
+}
+function barkUse(){
+  if(hbs.riding || player.wall || player.knockT > 0) return false;
+  if(hbs.carried){ dropBoard(); return true; }
+  if(getCarried()){ releaseCarried(player.x, player.z, player.yaw); return true; }
+  const animal = nearestCatchable(player.x, player.z);
+  const bd = boardReachDist();
+  if(animal && animal.d <= bd){ catchNear(player.x, player.z); return true; }
+  if(bd < Infinity){ pickUpBoard(); return true; }
+  return false;
 }
 
 function currentTopSpeed(){ return mode==='dog' ? dogTopSpeed() : topSpeedFor(wildKey); }
@@ -293,6 +322,7 @@ function ensureAvatar(){
   }
   setDogVisible(mode==='dog');
   setWildVisible(mode==='wild');
+  refreshBoardLook();            // the board is fitted to whoever is wearing it
 }
 
 /* Turn the drivers' footfall reports into sound. Everything that varies is a fact the
@@ -337,27 +367,49 @@ function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
      drivers lerped the leap pose right over the wall pose, leaving the body pitched 32
      degrees instead of 76. That is the reported screenshot: a pup lying horizontally,
      sticking out of the stone nose-first. A cling is the opposite of airborne. */
-  const leap = (!player.wall && jumpY > 0.02) ? 1 : 0;
+  /* A RIDER stands on the deck, a hand's breadth above the ground, which is not a leap. Only
+     height above the deck is -- and the hop down behind the board, and back up, which is an
+     arc over the ground and reads as the leap it is.
+
+     WHERE THE AVATAR IS, while pushing: not on the board but running right behind it. The
+     board's position is the player's (everything -- camera, physics, the odometer -- runs off
+     one point), so the pup is DRAWN at an offset along the board's own heading, on the ground
+     there, scaled by the push blend. `groundY` stays the ground under the board: it is what
+     the camera is handed back. */
+  const lift = hbs.riding ? Math.max(0, hbs.alt - groundY) : 0;
+  const pe = hbs.riding ? pushVisual() : 0;
+  let avX = player.x, avZ = player.z, avGround = groundY, avY = jumpY, arc = 0;
+  if(pe > 0){
+    const back = pushBackNow()*pe;
+    avX = player.x - Math.cos(player.yaw)*back; avZ = player.z + Math.sin(player.yaw)*back;
+    avGround = playerGroundY(avX, avZ);
+    arc = Math.sin(Math.PI*pe)*Math.max(0.1, hbs.legLen*0.9);
+    avY = (1 - pe)*(groundY + jumpY - avGround) + arc;
+  }
+  const leap = (!player.wall && (pe > 0 ? (jumpY - lift)*(1 - pe) + arc : jumpY - lift) > 0.02) ? 1 : 0;
   const rise = clamp(player.vy/7, -1, 1);
   let radius = 0.5;
   let steps = null;
   if(mode==='dog'){
-    setDogPos(player.x, player.z);
+    setDogPos(avX, avZ);
     setYaw(player.yaw);
     /* Tipped with the ground under it: nose up climbing a bank or a steep trail, down on
        the way back. Eased in the driver, so crossing onto a slope leans in rather than
        snapping. */
     const tilt = facingSlopePitch();
-    steps = updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise, !!player.wall, tilt);
+    steps = updateDog(dt, t, avGround, avY, speed, sneaking, barking, run, climb, leap, rise, !!player.wall, tilt, boardArg());
     radius = dogShadowRadius();
   }else{
-    wildPos.set(player.x, 0, player.z);
+    wildPos.set(avX, 0, avZ);
     setWildYaw(player.yaw);
-    steps = updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise, !!player.wall, facingSlopePitch());
+    steps = updateWild(dt, t, avGround, avY, speed, sneaking, barking, climb, leap, rise, !!player.wall, facingSlopePitch(), boardArg());
     radius = wildShadowRadius();
   }
-  playFootfalls(steps, speed, sneaking);
-  updateShadow(player.x, player.z, groundY, jumpY, radius, true);
+  /* Paws on a deck make no footfalls; pushing, the HIND paws on the ground do (the front ones are
+     on the board, and the gait would report them as steps too). */
+  if(!hbs.riding) playFootfalls(steps, speed, sneaking);
+  else if(pe > 0.6 && steps) playFootfalls(steps.filter(s => !s.front), speed, false);
+  updateShadow(avX, avZ, avGround, avY, radius, true);
   /* Where a passenger rides, measured off the LIVE rig rather than guessed. `radius` is
      the shadow radius, which both drivers derive from their own measured leg length in
      world units -- so it already accounts for TRAIL_DOG_SCALE, for whichever pup size the
@@ -369,12 +421,42 @@ function syncAvatar(dt, t, jumpY, speed, sneaking, barking, run){
      here, so passing the radius straight through renders the passenger at the same
      reduction the avatar itself is carrying -- see critters.js's catchNear for why an
      unscaled one is unusable. */
-  setCarryAnchor(player.x - Math.cos(player.yaw)*radius*0.7,
-                 groundY + jumpY + radius*2.2,
-                 player.z + Math.sin(player.yaw)*radius*0.7,
+  setCarryAnchor(avX - Math.cos(player.yaw)*radius*0.7,
+                 avGround + avY + radius*2.2,
+                 avZ + Math.sin(player.yaw)*radius*0.7,
                  player.yaw, radius);
+  /* The board slung on the back rides over the middle of it, a little further forward than a
+     passenger animal sits, and shares its height: the top of the back. */
+  backAnchor.x = avX - Math.cos(player.yaw)*radius*0.2;
+  backAnchor.z = avZ + Math.sin(player.yaw)*radius*0.2;
+  backAnchor.y = avGround + avY + radius*2.2;
+  backAnchor.yaw = player.yaw;
+  avatarRadius = radius;
   return groundY;
 }
+const backAnchor = {x:0, y:0, z:0, yaw:0};
+let avatarRadius = 0.5;
+/* What the rig is told about the kick: while riding, whether the sprint is held and where in
+   the stroke it is; null when not riding. Any non-null value means "standing on a board", so the
+   rig holds its legs at neutral instead of the walk cycle's frozen phase. */
+function boardArg(){
+  return hbs.riding ? {blend: pushVisual(), deck: hbs.deckY, lean: hbs.bank} : null;
+}
+/* the push blend, eased: 0 on the deck .. 1 running behind it */
+function smoothBlend(b){ return b*b*(3 - 2*b); }
+function pushVisual(){ return smoothBlend(hbs.blend); }
+/* how far behind the board's centre the running pup's body is (see hoverboard.js hbPushBack) */
+function pushBackNow(){ return hbPushBack(pushPose(hbs.legLen, hbs.deckY, 4).reach); }
+/* Measure the live avatar and fit the board to it: its size from the torso, its colours
+   opposite the fur. Called whenever the avatar is (re)built. */
+function boardLook(){
+  const dog = mode==='dog', bs = dog ? dogBodySize() : wildBodySize();
+  return { torso: bs ? bs.len : null, width: bs ? bs.wide : null,
+           leg: dog ? dogLegLength() : wildLegLength(),
+           radius: dog ? dogShadowRadius() : wildShadowRadius(),
+           color: dog ? dogBodyColor() : wildBodyColor() };
+}
+function refreshBoardLook(){ hbSetLook(boardLook()); }
 
 /* Drop the player at trailhead `i`. Falls back to the middle of the map when a set of
    layers has no degree-1 node to make a trailhead out of -- an avatar standing in the
@@ -398,6 +480,7 @@ function placeAtHead(i){
   // across a kilometre of map to catch up reads as a cutscene nobody asked for
   snapChaseCam(player.x, player.z, groundY, getVertScale(), 13);
   refreshOnTrail();
+  hbDismount(); seedBoard();         // a walk starts here: the board is left up the trail
   renderStartPicker();
 }
 
@@ -417,6 +500,7 @@ function placeAt(x, z, yaw){
   snapChaseCam(player.x, player.z, groundY, getVertScale(), 13);
   refreshOnTrail();
   trip.parked = -1;
+  if(hbs.riding){ hbDismount(); hbs.v = 0; }       // travel, not a start: the board stays behind
 }
 
 function placeAtSpot(spot){
@@ -440,6 +524,7 @@ function placeAtPoint(pt){
   if(!pt) return;
   placeAt(pt.x, pt.z, pt.yaw);
   player.dist = 0;
+  seedBoard();                       // a walk starts here
   startPoint = {x:pt.x, z:pt.z, yaw:pt.yaw, name:pt.name, route:pt.route, rev:getWorldRevision()};
   renderStartPicker();
 }
@@ -1105,6 +1190,8 @@ function afterWorldChange(ratio){
   snapChaseCam(player.x, player.z, groundY, getVertScale(), 13);
   refreshOnTrail();
   trip.parked = -1;
+  hbRescale(k); hbs.v = 0;           // the board is compacted with the map, and nobody rides through it
+  if(hbs.riding) hbDismount();
   /* The ribbon was draped onto ground that no longer exists, and world scale has moved the
      course points as well. Everything else on the map is derived per frame; this is the one
      overlay with baked geometry, so it is the one that has to be told. */
@@ -1364,7 +1451,9 @@ function skirtDrag(x, z, dx, dz){
    (the rig's forward is +x, and yaw maps a world direction through atan2(-dz, dx), so
    facing is (cos yaw, -sin yaw)). */
 function facingSlopePitch(){
-  if(player.wall || player.y > 0.02) return 0;
+  // a rider's feet are on the deck, which is a little above the ground: still grounded
+  const floorY = hbs.riding ? Math.max(0, hbs.alt - playerGroundY(player.x, player.z)) : 0;
+  if(player.wall || player.y > floorY + 0.02) return 0;
   const gs = groundSlope(player.x, player.z, Math.cos(player.yaw), -Math.sin(player.yaw));
   return clamp(Math.atan(gs.slope), -SLOPE_MAX_PITCH, SLOPE_MAX_PITCH);
 }
@@ -1457,6 +1546,352 @@ function movePlayer(stepX, stepZ){
   }
   moveOffTrail(stepX, stepZ);
   return 'physical';
+}
+
+/* ============================ THE HOVERBOARD ============================
+
+   hoverboard.js owns the board (mesh, state, speed rules). This is the half that needs the
+   WORLD: what the ground does under it, and what that means for whoever is on it.
+
+   WHILE RIDING, the rider's x/z/yaw ARE the board's -- boardFrame copies them across every
+   frame -- so there is still exactly one place the pup can be. The walk code is not run for a
+   rider at all; rideFrame replaces it (heading, speed, movement), and everything downstream
+   of movement (gravity, the embed check, the avatar, the camera, the critters) runs
+   unchanged. That is why the pup's feet stand on the DECK: `player.y` is still height above
+   the ground, just with a floor at the deck's height instead of at zero (see the gravity
+   block in loop).
+
+   THE RULES, in the order a rider meets them:
+
+     on the tread     the board glides, as a walking pup does -- no step-up rule, the graded
+                      bench is continuous by construction -- and gravity works on it through
+                      the tread's own slope (groundSlope), corrected to the TRUE grade.
+     off the tread    drag, and `off` eases in so crossing the edge is a ramp, not a jerk.
+                      ANY step up stops it dead (a quarter of a terrace riser is the
+                      tolerance, not one riser as for walking: a board has no legs to climb
+                      with). A drop bigger than a riser throws the rider.
+     in a hop         none of that applies. The board floats along under the pup over
+                      whatever is below it; only a wall taller than the pup's feet stops it.
+     stopped          jump gets you OFF, to the side. Moving, jump is a hop.
+
+   THE GRADE. groundSlope is rise/run in WORLD units, where heights carry the exaggeration
+   slider and distances carry the map-scale compaction. The true slope of the hill is that
+   times mapScale/vertScale; a world unit is a metre for DYNAMICS (the pup is sized in them),
+   so that true grade is what gravity is fed. */
+const BOARD_AHEAD_U = 7;       // how far up the trail from the start the board is left
+const BOARD_PITCH_MAX = 0.8;   // rad, the same bound the pup's own slope tilt uses
+
+function boardEnv(){ return { groundY: playerGroundY, stepTol: stepUpLimit()*HB.stepTol, waterY: waterSurfaceAt }; }
+/* Is (x,z) water a rider would go into? Open water in a channel -- but not a path laid across it
+   (a bridge deck, a ford): the tread is what you are on there, the same rule standingY and the
+   footstep voice use. */
+function wetAt(x, z){
+  if(!inWaterway(x, z)) return false;
+  const nt = nearestTrail(x, z);
+  return !(nt.y != null && nt.d <= nt.hw);
+}
+
+/* Lay the board down a little way along the trail the walk starts on, at the edge of the
+   tread so it is on the path but not in the middle of it, facing along it the way the pup
+   is. Called wherever a WALK STARTS (a trailhead or a tapped point), never for travel
+   within one -- see placeAt. */
+function seedBoard(){
+  if(!getGraph()) return;
+  const fx = Math.cos(player.yaw), fz = -Math.sin(player.yaw);
+  let x = player.x + fx*BOARD_AHEAD_U, z = player.z + fz*BOARD_AHEAD_U, yaw = player.yaw;
+  const nt = nearestTrail(x, z);
+  if(nt.px != null && nt.d < 6){
+    const dot = nt.tx*fx + nt.tz*fz, sgn = dot >= 0 ? 1 : -1;
+    const dx = nt.tx*sgn, dz = nt.tz*sgn;
+    // sideways to the trail, by at most half its half-width, so it stays on the tread
+    const off = Math.min(Math.max(nt.hw*0.5, 0), 1.0);
+    x = nt.px + dz*off; z = nt.pz - dx*off;     // (dz, -dx) is the trail's left-hand side
+    yaw = Math.atan2(-dz, dx);
+  }
+  refreshBoardLook();
+  hbPlace(x, z, yaw, playerGroundY(x, z));
+}
+
+/* One step of a RIDDEN board, `hop` being whether it is mid-air. Returns 'ok', 'blocked'
+   (stopped dead) or 'cliff' (the ground drops away; the rider goes with it). Moves the
+   player, which is the board. */
+function rideMove(dx, dz, hop){
+  const nx = player.x + dx, nz = player.z + dz;
+  const gHere = playerGroundY(player.x, player.z), gThere = playerGroundY(nx, nz);
+  const rise = gThere - gHere, lim = stepUpLimit();
+  if(!hop && wetAt(nx, nz)){ player.x = nx; player.z = nz; return 'water'; }     // in it, and the rider with it
+  if(hop){
+    // floating: the ground below is not a rule, only a wall taller than the pup's own feet
+    if(gHere + player.y < gThere - 0.05) return 'blocked';
+    player.x = nx; player.z = nz;
+    return 'ok';
+  }
+  const nt = nearestTrail(player.x, player.z);
+  if(nt.d <= nt.hw && Math.abs(rise) <= lim){ player.x = nx; player.z = nz; return 'ok'; }
+  if(rise > lim*HB.stepTol) return 'blocked';
+  if(rise < -lim) return 'cliff';
+  player.x = nx; player.z = nz;
+  // a small step DOWN: keep the pup's absolute height, so it drops onto the deck as the
+  // board follows the ground instead of the deck snapping down under its feet
+  if(rise < 0) player.y += -rise;
+  return 'ok';
+}
+
+/* Where the deck is this frame, and so the floor a rider's feet rest on (relative to the
+   ground, like player.y). Grounded, the board hugs the ground; in a hop it chases it and is
+   never above the pup's feet -- it follows BELOW, so there is always something to land on. */
+function rideFloor(dt){
+  const g = playerGroundY(player.x, player.z), target = g + hbs.deckY;
+  if(!hbs.hop) hbs.alt = target;
+  else{
+    hbs.alt += (target - hbs.alt)*(1 - Math.exp(-HB.followRate*dt));
+    hbs.alt = Math.min(hbs.alt, g + player.y);
+  }
+  return Math.max(0, hbs.alt - g);
+}
+
+/* The frame of a rider. Input is the raw camera-relative direction (inWx, inWz) and its
+   strength; `kickHeld` is the sprint button, which on a board is the kick. */
+function rideFrame(dt, inWx, inWz, mag, kickHeld){
+  const b = hbs, hop = b.hop;
+  let crouch = !!player.crouch;
+  const g0 = playerGroundY(player.x, player.z);
+  const grounded = !hop && player.y <= (b.alt - g0) + 0.05;
+  const hx = Math.cos(b.yaw), hz = -Math.sin(b.yaw);
+  b.braking = false;
+  let turnT = 0;           // how hard the board is being carved this frame, -1..1 (+ left), for the wind
+  b.restT = b.v < 0.3 ? b.restT + dt : 0;
+  if(!hop && mag > 0.03){
+    const L = Math.hypot(inWx, inWz) || 1, ux = inWx/L, uz = inWz/L;
+    const back = ux*hx + uz*hz < -0.5;
+    if(back && b.v > 0.3) b.braking = true;        // pull back: drag a foot
+    else if(back && b.restT < 0.4){ /* just stopped, still holding back: hold, do not spin round to face the camera */ }
+    else{
+      let d = Math.atan2(-uz, ux) - b.yaw;
+      while(d > Math.PI) d -= Math.PI*2; while(d < -Math.PI) d += Math.PI*2;
+      const lim = hbTurnRate(b.v, crouch)*dt;
+      b.yaw += clamp(d, -lim, lim);
+      turnT = lim > 0 ? clamp(d/lim, -1, 1) : 0;
+    }
+  }
+  b.turn += (turnT - b.turn)*(1 - Math.exp(-9*dt));
+  const nt = nearestTrail(player.x, player.z);
+  const onTread = nt.y != null && nt.d <= nt.hw;
+  // a hop is floating, which is not being off the trail
+  b.off += (((hop || onTread) ? 0 : 1) - b.off)*(1 - Math.exp(-HB.offEase*dt));
+  let grade = 0;
+  if(!hop){
+    const gs = groundSlope(player.x, player.z, hx, hz);
+    grade = gs.slope*getMapScale()/Math.max(0.05, getVertScale());
+  }
+  /* PUSHING. Sprint held (and on the ground, not braking, not tucked): the pup hops down behind
+     the board and runs, front paws on its tail, shoving it. The shove only counts once it is all
+     the way down there (pushReady). Sprint let go, or any reason it cannot push: it hops back up
+     and rides. */
+  /* Going for the push STANDS YOU UP: sprint while crouched is not refused, it ends the crouch
+     and starts the push. */
+  if(kickHeld && crouch && grounded && !b.braking){ player.crouch = false; crouch = false; }
+  if(!kickHeld) b.pushRefused = false;
+  let wantPush = !!kickHeld && grounded && !b.braking && !crouch && !b.pushRefused;
+  /* WHERE THE PUP GOES TO PUSH. Normally it hops down BEHIND the board. But backed up against a
+     slope (a bank, a rock, a riser taller than half a step, off the path) the spot behind the
+     board is up the slope, and the pup used to be put on top of it while the board stayed below.
+     Then it is the BOARD that moves: slid forward ahead of the pup, which stays exactly where it
+     stands. Decided once, as the push begins; if there is no room in front either, the push is
+     refused (for as long as sprint is held) rather than putting either of them in the ground. */
+  if(wantPush && b.blend <= 0){
+    const back = pushBackNow(), bx = player.x - hx*back, bz = player.z - hz*back;
+    const nb = nearestTrail(bx, bz);
+    b.pushFwd = !(nb.y != null && nb.d <= nb.hw) && playerGroundY(bx, bz) - playerGroundY(player.x, player.z) > stepUpLimit()*0.5;
+    b.shifted = 0;
+  }
+  b.blend = hbStepBlend(b.blend, dt, wantPush);
+  if(b.blend <= 0){ b.pushFwd = false; b.shifted = 0; }
+  if(wantPush && b.pushFwd){
+    const want = pushBackNow()*smoothBlend(b.blend), need = want - b.shifted;
+    if(need > 1e-4){
+      const tx = player.x + hx*need, tz = player.z + hz*need;
+      if(!wetAt(tx, tz) && playerGroundY(tx, tz) - playerGroundY(player.x, player.z) <= stepUpLimit()*HB.stepTol){
+        player.x = tx; player.z = tz; b.shifted = want;
+      }else{ b.pushRefused = true; wantPush = false; }
+    }
+  }
+  const kicking = wantPush && b.blend >= HB.pushReady;
+  b.kicking = kicking;
+  b.v = hbStepSpeed(b.v, dt, { grade, kicking, kickTop: hbKickTop(noiseReference()), off: b.off, brake: b.braking, crouch });
+  const before = { x: player.x, z: player.z };
+  const step = b.v*dt;
+  if(step > 0){
+    const n = Math.max(1, Math.ceil(step/MOVE_SUBSTEP));
+    for(let k = 0; k < n; k++){
+      const r = rideMove(hx*step/n, hz*step/n, hop);
+      if(r === 'blocked'){
+        /* STOPPED BY THE GROUND. Slowly, it is just a stop. Fast, it is a crash: the board hits
+           the bank and stops, and the rider does not. */
+        const vHit = b.v; b.v = 0;
+        if(vHit >= HB.crashV){ crashOffBoard(hx, hz, vHit); return; }
+        break;
+      }
+      if(r === 'cliff'){ fallOffBoard(hx, hz); return; }
+      if(r === 'water'){ splashOffBoard(hx, hz); return; }
+    }
+  }
+  player.dist += Math.hypot(player.x - before.x, player.z - before.z);
+  player.yaw = b.yaw; player.speed = b.v;
+}
+
+/* Over the edge without jumping. The rider tumbles forward (the knock system's own
+   tumble, input suspended for a moment); the board carries on with its speed and goes over
+   the edge as well -- hbFreeStep lets it fall. */
+function fallOffBoard(hx, hz){
+  const sp = Math.min(hbs.v, 12)*0.5;
+  hbDismount();
+  player.knockT = 0.55; player.kvx = hx*sp; player.kvz = hz*sp;
+  player.vy = Math.max(player.vy, 1.5);
+  player.spin = Math.random() < 0.5 ? 1 : -1; player.spinT = KNOCK_DUR*1.2;
+  player.speed = 0;
+  setShake(0.3); thudSound();
+  comicBurst('WHOA!', player.x, standingY(player.x, player.z) + 1.6, player.z, '#e8743a');
+}
+
+/* Hit the terrain at speed. The board stops dead against whatever it hit and stays there; the
+   rider goes on over the top of it -- thrown forward at a good share of the board's speed (it
+   is the speed that decides how far), with a pop upward and a tumble, the knock system's own. */
+function crashOffBoard(hx, hz, vHit){
+  const sp = Math.min(vHit, 14)*0.6;
+  hbDismount(); hbs.v = 0;
+  player.knockT = 0.7; player.kvx = hx*sp; player.kvz = hz*sp;
+  player.vy = Math.max(player.vy, 2.5 + Math.min(vHit, 14)*0.18);
+  player.spin = Math.random() < 0.5 ? 1 : -1; player.spinT = KNOCK_DUR*1.5;
+  player.speed = 0; player.crouch = false;
+  setShake(0.4 + Math.min(vHit, 14)*0.025); thudSound();
+  comicBurst('WIPEOUT!', player.x, standingY(player.x, player.z) + 1.6, player.z, '#e8743a');
+}
+/* Into water. The rider goes in -- wading, where a pup stands in a creek -- and the board
+   stays on top of it (hbFreeStep floats it) and drifts on with a little of its speed. */
+function splashOffBoard(hx, hz){
+  const sp = Math.min(hbs.v, 12)*0.3;
+  hbs.v *= 0.7;
+  hbDismount();
+  player.knockT = 0.45; player.kvx = hx*sp; player.kvz = hz*sp;
+  player.vy = Math.max(player.vy, 1.2);
+  player.spin = Math.random() < 0.5 ? 1 : -1; player.spinT = KNOCK_DUR;
+  player.speed = 0; player.crouch = false;
+  setShake(0.2); splashSound();
+  comicBurst('SPLASH!', player.x, standingY(player.x, player.z) + 1.6, player.z, '#4f8fd6');
+}
+
+/* Stopped, and jump: hop off to the side and land next to it. The board stays put. */
+function exitBoard(){
+  const gHere = playerGroundY(player.x, player.z), lim = stepUpLimit();
+  const plan = hbExitPlan((x, z) => Math.abs(playerGroundY(x, z) - gHere) <= lim);
+  hbDismount(); hbs.v = 0;
+  if(plan){ hbs.exitT = HB.exitS; hbs.exitVx = plan.vx; hbs.exitVz = plan.vz; }
+  player.vy = HB.exitVy; player.speed = 0;
+  jumpSound('paved');
+}
+
+/* Jump, on a board. Moving: a hop, in the direction already being travelled -- there is no
+   steering in the air. Stopped: off. */
+function rideJump(){
+  hbs.blend = 0;       // jumping while pushing vaults the pup up onto the deck at once, then it hops
+  const g = playerGroundY(player.x, player.z);
+  if(hbs.hop || player.y > (hbs.alt - g) + 0.08) return;     // already in the air
+  if(hbs.v < HB.stopV){ exitBoard(); return; }
+  hbs.hop = true; player.vy = HB.hopVy;
+  jumpSound('paved');
+}
+
+/* ---- carrying the board ----
+   One slot on the back, and the bark button works it (barkUse). The board is NOT reparented
+   into the avatar -- rigs are rebuilt whenever the player changes animal, and a board parented
+   into one would be destroyed with it -- it simply stops existing in the world (hbs.carried) and
+   is drawn at the back anchor instead, the same arrangement a carried animal has. */
+
+/* How far the nearest edge of the board is from the pup, or Infinity when it is not within
+   reach: not there to be had (riding, already on the back, a different storey of the map). The
+   reach scales with the animal, as everything about the board does. */
+function boardReachDist(){
+  if(!hbs.placed || hbs.riding || hbs.carried) return Infinity;
+  const l = hbOverBoardLocal();
+  const d = Math.hypot(Math.max(0, Math.abs(l.along) - hbs.len/2), Math.max(0, Math.abs(l.side) - hbs.wide/2));
+  const reach = 1.0 + avatarRadius*1.8;
+  const feet = playerGroundY(player.x, player.z) + player.y;
+  if(Math.abs(feet - hbs.alt) > 0.8 + avatarRadius) return Infinity;
+  return d <= reach ? d : Infinity;
+}
+function hbOverBoardLocal(){
+  const dx = player.x - hbs.x, dz = player.z - hbs.z;
+  return { along: dx*Math.cos(hbs.yaw) + dz*(-Math.sin(hbs.yaw)), side: dx*Math.sin(hbs.yaw) + dz*Math.cos(hbs.yaw) };
+}
+function pickUpBoard(){
+  hbs.carried = true; hbs.v = 0; hbs.vy = 0; hbs.kicking = false; hbs.hop = false;
+  comicBurst('\ud83d\udef9 Got the board!', player.x, standingY(player.x, player.z) + 1.6, player.z, '#35c9b6');
+  catchSound();
+}
+/* Put it down in front of the pup, on the nearest level ground: ahead first, then behind and
+   to either side, so a board is never set down on a ledge it would then have to fall off.
+   It starts at the height of the back and falls to its hover height. */
+function dropBoard(){
+  const g0 = playerGroundY(player.x, player.z), lim = stepUpLimit();
+  const d = hbs.len/2 + 0.5 + avatarRadius*0.6;
+  const fx = Math.cos(player.yaw), fz = -Math.sin(player.yaw);
+  let spot = null;
+  for(const [ax, az] of [[fx, fz], [-fx, -fz], [fz, -fx], [-fz, fx]]){
+    const x = player.x + ax*d, z = player.z + az*d;
+    if(Math.abs(playerGroundY(x, z) - g0) <= lim){ spot = {x, z}; break; }
+  }
+  if(!spot) spot = {x: player.x + fx*0.2, z: player.z + fz*0.2};
+  hbs.carried = false;
+  hbs.x = spot.x; hbs.z = spot.z; hbs.yaw = player.yaw; hbs.v = 0; hbs.vy = 0;
+  hbs.alt = Math.max(backAnchor.y, playerGroundY(spot.x, spot.z) + hbs.deckY);
+  hbs.mountBlockT = HB.mountBlockS;
+  thudSound();
+}
+
+/* Did the pup come down onto the deck this frame? Swept: the feet were above the deck
+   before the move and are at or below it after, over the footprint. */
+function boardLanding(yOld, yNew){
+  if(hbs.riding || hbs.carried || !hbs.placed || race.on || hbs.mountBlockT > 0 || hbs.afloat) return false;
+  if(player.knockT > 0 || player.wall || player.vy >= 0) return false;
+  if(!hbOverBoard(player.x, player.z)) return false;
+  const g = playerGroundY(player.x, player.z);
+  return g + yOld >= hbs.alt - 0.02 && g + yNew <= hbs.alt + 0.01;
+}
+function mountBoard(){
+  stopAutoWalk('board');
+  player.sneaking = false; player.crouch = false; player.climbT = 0; player.wall = null;
+  hbMount(player.x, player.z, player.yaw, player.speed, noiseReference());
+  hbs.alt = playerGroundY(player.x, player.z) + hbs.deckY;
+  player.vy = 0; player.speed = hbs.v;
+  if(!hbs.told){
+    hbs.told = true;
+    comicBurst('\ud83d\udef9 SPRINT to kick!', player.x, hbs.alt + 1.5, player.z, '#35c9b6');
+  }
+  cheerBlip();
+}
+
+/* Every frame, ridden or not: carry the board with its rider (or let it coast and settle by
+   itself), draw it, and tell a pup walking up to it what it is. */
+function boardFrame(dt, t){
+  if(!hbs.placed) return;
+  if(hbs.riding){ hbs.x = player.x; hbs.z = player.z; hbs.yaw = player.yaw; }
+  else if(hbs.carried){ hbs.x = player.x; hbs.z = player.z; hbs.yaw = player.yaw; }
+  else hbFreeStep(dt, boardEnv());
+  const g = playerGroundY(hbs.x, hbs.z);
+  let pitch = 0;
+  if(!hbs.hop){
+    const gs = groundSlope(hbs.x, hbs.z, Math.cos(hbs.yaw), -Math.sin(hbs.yaw));
+    pitch = clamp(Math.atan(gs.slope), -BOARD_PITCH_MAX, BOARD_PITCH_MAX);
+  }
+  hbUpdateVisual(dt, t, g, pitch, hbs.carried ? backAnchor : null);
+  setHover(hbs.riding && playing && !trip.paused, hbs.v, hbs.turn, dt);
+  setBoardMarker(hbs.riding || hbs.carried ? null : { x: hbs.x, z: hbs.z, yaw: hbs.yaw });
+  if(playing && !trip.paused && !hbs.riding && !hbs.carried && !hbs.seen && Math.hypot(hbs.x - player.x, hbs.z - player.z) < 9){
+    hbs.seen = true;
+    comicBurst('\ud83d\udef9 Hoverboard! Jump on, or BARK to carry', hbs.x, hbs.alt + 1.5, hbs.z, '#35c9b6');
+    cheerBlip();
+  }
 }
 
 /* ---------- input: trail-owned, not core/input.js (that module is wired directly to
@@ -1834,15 +2269,10 @@ function trailJump(){
      metres up a boulder is not picking anything up, and the wall jump is the whole
      mechanic -- it must never be shadowed by another meaning of the same button. */
   if(player.wall){ wallJump(); return; }
-  const carrying = getCarried();
-  if(carrying){
-    releaseCarried(player.x, player.z, player.yaw);
-  }else{
-    catchNear(player.x, player.z);
-  }
-  /* Only when the hop actually happens. `trailJump` is also the catch and release button,
-     so firing this unconditionally would scuff every time you picked something up
-     without moving. */
+  if(hbs.riding){ rideJump(); return; }      // hop, or hop OFF when stopped
+  /* Jump is only a jump now. Catching an animal, putting it down, and picking up or dropping
+     the hoverboard are all the BARK button's (barkUse) -- one button for "use", and jump free
+     to be jumped. */
   if(player.y === 0){ player.vy = 9.5; jumpSound(player.surface); }
   /* A jump AT a rock catches it. Checked after the hop is launched so the pup is already
      rising when it takes hold, which is what makes the first catch of a chain land partway
@@ -1851,6 +2281,10 @@ function trailJump(){
 }
 function toggleSneak(){
   if(!playing || trip.paused) return;
+  /* On a board the sneak button CROUCHES: tucked in, less air in your face and a little more bite
+     in the turns (hoverboard.js crouchDrag / crouchTurn), at the price of not being able to kick
+     -- a push needs a leg on the ground, and a tucked pup has none to spare. */
+  if(hbs.riding){ player.crouch = !player.crouch; syncTouchButtons(); return; }
   player.sneaking = !player.sneaking;
   syncTouchButtons();
 }
@@ -1860,8 +2294,9 @@ function toggleSneak(){
    flag can change. */
 function syncTouchButtons(){
   const s=$('#tSneak');
-  if(s) s.classList.toggle('on', !!player.sneaking);
-  if(stickBase) stickBase.classList.toggle('sneak', !!player.sneaking);
+  const lowered = !!(player.sneaking || (hbs.riding && player.crouch));
+  if(s) s.classList.toggle('on', lowered);
+  if(stickBase) stickBase.classList.toggle('sneak', lowered);
   /* Sneaking beats sprinting (the loop drops `run` while sneaking), so a held sprint button
      does not light while it is doing nothing. The knob goes orange with it, as it used to
      at full deflection. */
@@ -1934,6 +2369,7 @@ function refuseAutoBtn(){
 function startAutoWalk(){
   const g = getGraph();
   if(!playing || trip.paused || !g || raceFrozen() || player.wall || player.knockT > 0) return false;
+  if(hbs.riding){ refuseAutoBtn(); return false; }      // a board is steered by hand
   const h = walkHeading();
   const st = autoWalkBegin(g, player.x, player.z, h.x, h.z);
   /* One trial step before committing: standing at the very end of a trail and facing the
@@ -1992,6 +2428,10 @@ function loop(t){
   skyFrame(player.x, standingY(player.x, player.z), player.z);
 
   if(auto.on && (!playing || !getGraph() || trip.paused)) stopAutoWalk('paused');
+  if(auto.on && hbs.riding) stopAutoWalk('board');
+  if(!hbs.riding) player.crouch = false;       // there is nothing to crouch on
+  /* A race is timed against what a pup can run: no board in one. */
+  if(race.on && hbs.riding){ hbDismount(); hbs.v = 0; }
 
   if(!playing || !getGraph() || trip.paused){
     // idle, or the arrival card is up: no movement, but keep the avatar breathing so
@@ -2000,6 +2440,7 @@ function loop(t){
     // and cutting to a blank panel would throw that away. The minimap keeps drawing here
     // too, now that it's part of the startup/selection screen and not just the play HUD.
     if(avatarKey) syncAvatar(dt, t, 0, 0, player.sneaking, false, false);
+    boardFrame(dt, t);                 // it bobs in the lobby too
     setNoiseRingVisible(false);        // nothing to sneak up on until the walk starts
     setCatchRingVisible(false);
     updateAreaLabels(camera.position.x, camera.position.y, camera.position.z);
@@ -2042,6 +2483,7 @@ function loop(t){
      frame reads as the game having hung rather than as a start line. */
   if(raceFrozen()){ ix=0; iz=0; mag=0; run=false; }
   let wx=-fC*ix-fS*iz, wz=fS*ix-fC*iz;
+  const inWx = wx, inWz = wz;      // the raw input direction, before the walk's own steering smooths it
   /* Stick or keys, walk along a heading that turns toward the input at a limited rate
      (steerStep above) instead of snapping to it. wx/wz stay the input's for the camera
      code below; only the direction actually walked is smoothed. */
@@ -2084,13 +2526,15 @@ function loop(t){
   if(player.wall){
     onWall = updateWall(dt);
     if(onWall) player.speed = 0;
-  }else if(!knocked){
-    // in the air and steering at a face: catch it. This is the chain -- push off, arc,
+  }else if(!knocked && !hbs.riding){
+    // in the air and steering at a face: catch it. (A board cannot climb.) This is the chain -- push off, arc,
     // re-aim, catch higher.
     tryWallCatch(wx, wz);
     onWall = !!player.wall;
   }
 
+  if(hbs.riding && knocked){ hbDismount(); }          // knocked off: the board stays
+  const rideNow = hbs.riding && !knocked && !onWall;
   const moving=!onWall && !knocked && mag>0.03&&(wx||wz);
 
   const nt = nearestTrail(player.x,player.z);
@@ -2154,14 +2598,19 @@ function loop(t){
   // a fill embankment is a slope, and a slope costs speed -- see skirtDrag
   const bankDrag = moving ? skirtDrag(player.x, player.z, wx, wz) : 1;
   const top = currentTopSpeed()*(player.sneaking?0.5:(run?currentRunMul():1))*surf*climbDrag*bankDrag*carrySlow()*(stickLive?mag:1)*(auto.on?auto.pace:1);
-  player.speed = lerp(player.speed, moving?top:0, 1-Math.pow(0.0009,dt));
+  if(rideNow){
+    // the sprint button is the KICK; the board's own physics sets the speed and the move
+    rideFrame(dt, inWx, inWz, mag, trailKeys.ShiftLeft || trailKeys.ShiftRight || touchSprint);
+  }else{
+    player.speed = lerp(player.speed, moving?top:0, 1-Math.pow(0.0009,dt));
+  }
   /* Settling. Measured off SPEED rather than off the input, so being knocked over or
      sliding to a halt counts as movement until you have actually stopped -- an animal
      does not care whether your hands are on the controls. */
   player.stillT = player.speed < STILL_SPEED
     ? player.stillT + dt
     : Math.max(0, player.stillT - dt*(SETTLE_SECONDS/UNSETTLE_SECONDS));
-  if(moving){
+  if(moving && !rideNow){
     const L=Math.hypot(wx,wz);
     const stepX=wx/L*player.speed*dt, stepZ=wz/L*player.speed*dt;
     const before={x:player.x, z:player.z};
@@ -2200,6 +2649,24 @@ function loop(t){
       addCamYaw(camFollowStep(dc, mag, stickLive, runFrac(player.speed), dt));
     }
   }
+  /* THE CAMERA STAYS BEHIND THE BOARD. Walking steers the camera toward the INPUT (see the
+     long note above) -- right for a pup that turns on the spot, wrong for a board, whose
+     heading is not the input but a thing the input swings toward at a limited rate. The camera
+     chased the stick while the board was still turning, so in a carve it swung out to the side
+     and the board looked like it was sliding sideways across the screen, and braking (which
+     holds the heading) left it wherever the last steer put it.
+
+     So while riding the target is the board's own heading, however it got there: carving, braking,
+     hopping or kicking. It tightens with speed (a fast board turns its view faster, so it never
+     trails a corner) and it only runs while the board is actually travelling -- a board turning
+     on the spot at a standstill is not a reason to whip the view round -- and never while a hand
+     is on the camera, the same 0.9 s grace the walking follow has. */
+  if(rideNow && player.speed > 0.4 && performance.now()-lastLookT > 900){
+    const want = Math.atan2(Math.cos(player.yaw), -Math.sin(player.yaw));
+    let dc = want - getCamYaw();
+    while(dc > Math.PI) dc -= Math.PI*2; while(dc < -Math.PI) dc += Math.PI*2;
+    addCamYaw(dc*(1 - Math.exp(-(4 + Math.min(player.speed, 14)*0.6)*dt)));
+  }
   const bb=getBBox(), F=55;
   player.x=clamp(player.x,bb.minx-F,bb.maxx+F); player.z=clamp(player.z,bb.minz-F,bb.maxz+F);
   /* Gravity is suspended on a face: updateClimb owns player.y while a climb is live, and
@@ -2208,11 +2675,27 @@ function loop(t){
   /* Gravity is suspended on a wall: updateWall owns player.y while a cling is live (it
      applies its own slide), and letting the fall integrator write it too would drop the
      pup off the rock as fast as it caught it. */
+  /* A rider's floor is the deck, not the ground: the same integrator, with the floor lifted.
+     Landing back on the board after a hop is landing on THAT floor, and a pup coming down
+     over the deck of a riderless board is caught by it (boardLanding) and becomes its rider. */
+  let floorY = 0;
+  if(hbs.riding && !onWall) floorY = rideFloor(dt);
+  /* Hopping off a stopped board carries the pup sideways a little, through the same collision
+     rules as walking, so it comes down beside the board and not back on it. */
+  if(hbs.exitT > 0 && !onWall){
+    hbs.exitT = Math.max(0, hbs.exitT - dt);
+    movePlayer(hbs.exitVx*dt, hbs.exitVz*dt);
+  }
   if(!onWall){
-    const wasAir = player.y > 0;
+    const wasAir = player.y > floorY + 1e-6;
     const fell = player.vy;                 // impact speed, before the clamp discards it
-    player.vy-=26*dt; player.y=Math.max(0,player.y+player.vy*dt);
-    if(player.y===0){
+    const yOld = player.y;
+    player.vy-=26*dt;
+    let yNew = player.y+player.vy*dt;
+    if(!hbs.riding && boardLanding(yOld, yNew)){ mountBoard(); floorY = rideFloor(0); yNew = floorY; }
+    player.y=Math.max(floorY,yNew);
+    if(player.y===floorY){
+      if(hbs.riding && hbs.hop && fell <= 0) hbs.hop = false;      // back on the deck
       /* The one frame where a landing is knowable. The clamp below is about to throw the
          downward velocity away, so the impact has to be read here or not at all -- and
          `wasAir` is what stops a pup standing still on the ground from re-landing every
@@ -2234,7 +2717,12 @@ function loop(t){
   }
   player.barkT=Math.max(0,player.barkT-dt*2);
 
-  const groundY = syncAvatar(dt,t,player.y,player.speed,player.sneaking,player.barkT>0,run);
+  /* A rider is not running: speed 0 to the gait keeps the legs standing on the deck, the kick
+     pose (kickArg) does the pushing, and the crouch is the rig's own sneak crouch. */
+  const groundY = hbs.riding
+    ? syncAvatar(dt,t,player.y,hbs.v*pushVisual(),!!player.crouch,player.barkT>0,false)
+    : syncAvatar(dt,t,player.y,player.speed,player.sneaking,player.barkT>0,run);
+  boardFrame(dt, t);
 
   /* Boom length. Pulled in from 11 to 8.5: the pup is only about a metre nose to tail at
      TRAIL_DOG_SCALE, and from 11 m back it was a small shape in a large landscape. */
@@ -3978,6 +4466,11 @@ async function loadFiles(files){
    three exist so the harness can drive and inspect a walk without main.js having to
    promote its state to globals. */
 function trailIsPlaying(){ return playing; }
+/* test seams: the avatar is chosen through the roster UI in play, and the camera's hands-off
+   timer is a module-level let the harness cannot reach */
+function setAvatarForTest(m, key){ mode = m; if(key) wildKey = key; ensureAvatar(); }
+function clearLookForTest(){ lastLookT = -Infinity; }
+function lookNowForTest(){ lastLookT = performance.now(); }
 function getTrailPlayer(){ return player; }
 function getTripState(){ return trip; }
 

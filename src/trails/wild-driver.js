@@ -9,7 +9,7 @@ import { clamp, lerp, mulberry32 } from '../core/math.js';
 import { scene, disposeGroup } from '../core/render.js';
 import { makeAnimalModel } from '../city/animal-models.js';
 import { SPECIES } from '../data/species.js';
-import { gaitStep, climbPose, wallPose, leapPose, legSwingValue, gallopAmount, footfalls } from './gait.js';
+import { gaitStep, climbPose, wallPose, leapPose, pushPose, legSwingValue, gallopAmount, footfalls } from './gait.js';
 
 let group = null, refs = null, speciesKey = null, S = null;
 let wildLegPhase = 0, wildBodyBaseY = 0, wildClimbAmt = 0, wildLeapAmt = 0;
@@ -40,6 +40,25 @@ function measureWildLegLen(){
 }
 function wildLegLength(){ return wildLegLen; }
 function wildShadowRadius(){ return wildLegLen*1.25; }
+/* The torso in WORLD units, as dog-driver's dogBodySize. */
+function wildBodySize(){
+  if(!group) return null;
+  const k = group.scale ? group.scale.x : 1;
+  if(refs && refs.bodyG && refs.bodyG.children && refs.bodyG.children[0]){
+    const m = refs.bodyG.children[0];
+    return { len: 2*m.scale.x*k, wide: 2*m.scale.z*k };
+  }
+  // a hopper: one lump with no body group -- its torso is the first mesh, a scaled sphere
+  const m = group.children && group.children[0], r = m && m.geometry && m.geometry.parameters && m.geometry.parameters.radius;
+  return r ? { len: 2*r*m.scale.x*k, wide: 2*r*m.scale.z*k } : null;
+}
+/* The colour of the body, for the board to be chosen against. A quadruped's first body mesh is
+   its torso; a hopper's rig is a bare group whose first child is. */
+function wildBodyColor(){
+  const m = refs && refs.bodyG && refs.bodyG.children && refs.bodyG.children[0]
+         ? refs.bodyG.children[0] : (group && group.children ? group.children[0] : null);
+  return m && m.material && m.material.color && m.material.color.getHex ? m.material.color.getHex() : null;
+}
 
 function setWildYaw(v){ yaw = v; if(group) group.rotation.y = yaw; }
 function setWildVisible(v){ if(group) group.visible = !!v; }
@@ -61,10 +80,13 @@ function spookRadiusFor(key){
    the paws on the slope when the body is tipped about its hip-height pivot. */
 let wildSlopeAmt = 0;
 function wildSlopeTilt(){ return wildSlopeAmt; }
-function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise, onWall, slope){
+function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap, rise, onWall, slope, board){
   if(!group || !refs) return;
   group.position.set(wildPos.x, groundY + jumpY, wildPos.z);
   group.rotation.y = yaw;
+  // leaning into a carve on a hoverboard: see dog-driver
+  group.rotation.order = 'YXZ';
+  group.rotation.x = board && board.lean ? board.lean : 0;
   const hop = !!S?.hopper;
   /* Foot-locked, exactly as the dog is -- see gait.js. A hopper is the one honest
      exception: both hind legs move together and the animal is airborne for much of the
@@ -85,6 +107,10 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap
   const cp = onWall ? wallPose(t, legs.length)
            : (wildClimbAmt > 0.002 ? climbPose(wildClimbAmt, t, legs.length) : null);
 
+  // on a hoverboard: see dog-driver. A hopper has no leg list, so it has nothing to put on the tail
+  const bl = board ? clamp(board.blend, 0, 1) : 0;
+  const bp = (board && legs.length && !hop) ? pushPose(wildLegLen, board.deck, legs.length) : null;
+
   const prevPhase = wildLegPhase;
   wildLegPhase += g.dPhase*(1 - (lp ? lp.freeze : 0));
 
@@ -98,6 +124,7 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap
     }else{
       z = legSwingValue(i, wildLegPhase, gal)*swing;
     }
+    if(bp && i < 2) z = lerp(0, bp.legs[i], bl);        // front paws: still, or up on the tail
     if(cp) z = lerp(z, cp.legs[i], wildClimbAmt);
     if(lp) z = lerp(z, lp.legs[i], wildLeapAmt);
     leg.rotation.z = z;
@@ -116,7 +143,7 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap
       + bound + (cp ? cp.rise*wildLegLen : 0);
     const tilt = wildSlopeAmt*(1-wildLeapAmt);
     { const c = Math.cos(tilt); if(c > 0.2) refs.bodyG.position.y += wildLegLen*(1/c - 1); }
-    let pitch = (cp ? cp.pitch : 0) + flex + tilt;
+    let pitch = (cp ? cp.pitch : 0) + flex + tilt + (bp ? bp.pitch*bl : 0);
     if(lp) pitch = lerp(pitch, lp.pitch, wildLeapAmt);
     refs.bodyG.rotation.z = pitch;
     /* Roll into whichever diagonal is reaching. Only the climb sets it, so this is zero on
@@ -133,4 +160,4 @@ function updateWild(dt, t, groundY, jumpY, speed, sneaking, barking, climb, leap
 }
 
 export { spawnWild, updateWild, setWildYaw, setWildVisible, topSpeedFor, spookRadiusFor,
-         wildPos, wildLegLength, wildShadowRadius, wildSlopeTilt };
+         wildPos, wildLegLength, wildShadowRadius, wildSlopeTilt, wildBodySize, wildBodyColor };

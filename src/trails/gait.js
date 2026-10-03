@@ -274,5 +274,24 @@ function leapPose(amt, rise, legCount){
   };
 }
 
-export { gaitStep, climbPose, wallPose, leapPose, legSwingValue, gallopAmount, footfalls,
+/* PUSHING A BOARD FROM BEHIND: the pup runs on its hind legs' stride while its FRONT paws rest
+   on the board's tail. The front legs reach forward and up until the paw is at deck height (the
+   leg's rise is legLen*(1 - cos(angle)), so the angle that gets a paw up onto a deck `deckY`
+   above the ground is acos(1 - deckY/legLen), plus a hair so it rests ON the deck and not in
+   it); the hind legs keep the ordinary gait, which the caller drives at the board's speed so the
+   paws are foot-locked to the ground like any run. The body tips nose-up a little to follow.
+
+   `reach` is how far ahead of the hip that planted front paw is -- what the caller needs to put
+   the pup the right distance behind the board. Same convention as every pose here: +x is the
+   nose, a positive Z rotation swings a paw forward. Hind legs are left at 0 in `legs`: they are
+   the gait's, not the pose's. */
+function pushPose(legLen, deckY, legCount){
+  const L = Math.max(1e-4, legLen);
+  const ang = clamp(Math.acos(clamp(1 - (deckY + 0.02)/L, -1, 1)), 0.4, 1.3);
+  const legs = [];
+  for(let i=0;i<legCount;i++) legs.push(i < 2 ? ang : 0);
+  return { legs, front: ang, reach: L*Math.sin(ang), rise: L*(1 - Math.cos(ang)), pitch: 0.1 };
+}
+
+export { gaitStep, climbPose, wallPose, leapPose, pushPose, legSwingValue, gallopAmount, footfalls,
          STRIDE_MIN_RATIO, STRIDE_MAX_RATIO, TARGET_CADENCE };

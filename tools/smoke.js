@@ -248,7 +248,7 @@ window.fetch = global.fetch;
    destination builds a flawless-looking graph -- right voices, right frequencies, no
    error -- and emits nothing at all, because no path terminates at the speakers. Asking
    "was something scheduled" cannot see that; only "can a voice REACH destination" can. */
-const AUDIO = { osc: [], filt: [], starts: [], scheduledWhileSuspended: 0, nodes: 0, live: null, edges: [], dest: null };
+const AUDIO = { osc: [], filt: [], starts: [], scheduledWhileSuspended: 0, nodes: 0, live: null, edges: [], paramEdges: [], dest: null };
 /* Is there any path from a voice (oscillator / buffer source) to AC.destination? */
 AUDIO.voiceReachesDestination = function(){
   if(!AUDIO.dest) return false;
@@ -293,6 +293,9 @@ class FakeNode {
      null out(), and record the edge so reachability is testable. */
   connect(d){
     if(d == null) throw new TypeError('connect(): destination node is null');
+    /* A voice patched into an AudioParam ADDS to whatever that param is scheduled at -- it plays
+       even when the gain is "off". Recorded apart, so a check can prove nothing is wired that way. */
+    if(d instanceof FakeParam) AUDIO.paramEdges.push([this.kind, d.kind + '.' + d.name]);
     AUDIO.edges.push([this.kind, d.kind]);
     return d;
   }
@@ -5202,7 +5205,7 @@ async function assertAll(window, errors, stats) {
       return hiddenIdle && shown && onAnimal && notOnPlayer && approaching;
     })(), () => __ringNote);
 
-    check('jumping beside a small animal picks it up, and jumping again puts it down', (() => {
+    check('in reach of a small animal, catching picks it up, and letting go puts it down', (() => {
       resetCritters();
       spawnCritters(4242);
       const pl = getTrailPlayer();
@@ -7125,6 +7128,617 @@ async function assertAll(window, errors, stats) {
   check('auto-walk does not survive the page losing focus, leaving the walk, or a new one',
     tab.blurStops === true && tab.exitStops === true && tab.reenterOff === true,
     `blur ${tab.blurStops}, exit ${tab.exitStops}, re-enter ${tab.reenterOff}`);
+  }
+
+  /* ---------- THE HOVERBOARD ----------
+     Driven through the real frame loop, on whatever map the suite has loaded: every place a
+     scenario needs (a flat straight tread, a descent, an open flat field, a ledge, a drop) is
+     FOUND on the live map by what it is, never named. The frame clock starts at 1e7 -- above
+     every earlier test's and below the Barr tests' (5e7) -- because the loop's dt is the
+     difference between successive timestamps and a clock running backwards is a negative dt.
+
+     What is asserted is the BEHAVIOUR that was asked for, one line each: propelled only by
+     kicking with sprint; gravity acting on it at the real rate; slower under its own power
+     than Neon's board but faster than the pup's legs on a grade; a hop that cannot steer and
+     is not "off the trail"; off the tread it slows, any step up stops it and a drop throws the
+     rider; jump gets you off when stopped and on by landing on it; one board, left near the
+     start of the walk. */
+  const hbT = await (async () => {
+    const G = getGraph(), pl = getTrailPlayer(), B = hbState(), H = hbTuning();
+    if (!trailIsPlaying()) enterPlay();
+    resetCritters();
+    let clock = 1e7;
+    const pump = (n = 1) => { for (let i = 0; i < n; i++) if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(clock += 33); } };
+    const key = (code, down) => { const ev = new window.KeyboardEvent(down ? 'keydown' : 'keyup', { bubbles: true }); Object.defineProperty(ev, 'code', { value: code }); window.dispatchEvent(ev); };
+    const camOf = yaw => Math.atan2(Math.cos(yaw), -Math.sin(yaw));
+    const releaseKeys = () => ['ShiftLeft', 'KeyW', 'KeyA', 'KeyS', 'KeyD'].forEach(k => key(k, false));
+    const settle = () => {
+      releaseKeys(); try { stopAutoWalk(); } catch (e) {} setTouchSprint(false);
+      try { quitRace(); } catch (e) {} try { closeArrival(); } catch (e) {}
+      getTripState().paused = false;
+      Object.assign(pl, { y: 0, vy: 0, speed: 0, wall: null, climbT: 0, knockT: 0, barkT: 0, sneaking: false, dist: 0, spinT: 0 });
+      B.exitT = 0; if (B.riding) hbDismount();
+    };
+    const MS = () => getMapScale(), VS = () => Math.max(0.05, getVertScale());
+    const trueGrade = (x, z, hx, hz) => groundSlope(x, z, hx, hz).slope * MS() / VS();
+
+    /* A straight stretch of tread, either way along an edge, whose TRUE grade (uphill +) lies
+       in [lo, hi] for `minLen` units without turning more than 10 degrees from where it began. */
+    const findRun = (lo, hi, minLen) => {
+      for (const e of G.edges) {
+        if (e.buried || !e.prof || e.kind === 'rail' || e.prof.pts.length < 4) continue;
+        const P = e.prof.pts;
+        for (const dir of [1, -1]) {
+          const idx = [...P.keys()]; if (dir < 0) idx.reverse();
+          let start = -1, len = 0, H0 = null, gs = 0, n = 0;
+          for (let k = 0; k + 1 < idx.length; k++) {
+            const a = P[idx[k]], b = P[idx[k + 1]], dx = b[0] - a[0], dz = b[1] - a[1], L = Math.hypot(dx, dz);
+            if (L < 1e-6) continue;
+            const hx = dx / L, hz = dz / L, g = trueGrade(a[0], a[1], hx, hz);
+            const turn = H0 ? Math.acos(Math.max(-1, Math.min(1, hx * H0[0] + hz * H0[1]))) * 180 / Math.PI : 0;
+            if (g >= lo && g <= hi && turn <= 10) {
+              if (start < 0) { start = k; H0 = [hx, hz]; len = 0; gs = 0; n = 0; }
+              len += L; gs += g; n++;
+              if (len >= minLen) { const s = P[idx[start]]; return { x: s[0], z: s[1], hx: H0[0], hz: H0[1], yaw: Math.atan2(-H0[1], H0[0]), grade: gs / n, len }; }
+            } else { start = -1; H0 = null; len = 0; }
+          }
+        }
+      }
+      return null;
+    };
+    const flatRun = findRun(-0.012, 0.012, 40) || findRun(-0.02, 0.02, 28);
+    const downRun = findRun(-0.2, -0.09, 14) || findRun(-0.2, -0.06, 14);
+    const upRun = (() => { const r = downRun; return r && { x: r.x + r.hx * r.len * 0.9, z: r.z + r.hz * r.len * 0.9, hx: -r.hx, hz: -r.hz, yaw: Math.atan2(r.hz, -r.hx), grade: -r.grade, len: r.len * 0.9 }; })();
+
+    /* Open ground that is flat, with no trail near, heading `yaw`: for the off-trail runs. */
+    const bb = getBBox(), lim = stepUpLimit(), tol = lim * H.stepTol;
+    const gY = (x, z) => playerGroundY(x, z);
+    const farFromTrail = (x, z) => nearestTrail(x, z).d > 3.5;
+    const scanOpen = (test) => {
+      for (let i = 0; i < 6000; i++) {
+        const x = bb.minx + (bb.maxx - bb.minx) * (i * 0.7317 % 1), z = bb.minz + (bb.maxz - bb.minz) * (i * 0.3179 % 1);
+        if (!farFromTrail(x, z)) continue;
+        for (const [hx, hz] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) { const r = test(x, z, hx, hz); if (r) return r; }
+      }
+      return null;
+    };
+    const flatBehind = (x, z, hx, hz, back) => { const g0 = gY(x, z); for (let s = 0.25; s <= back; s += 0.25) { const qx = x - hx * s, qz = z - hz * s; if (!farFromTrail(qx, qz) || Math.abs(gY(qx, qz) - g0) > 0.02) return false; } return true; };
+    const openField = scanOpen((x, z, hx, hz) => {
+      const g0 = gY(x, z);
+      for (let s = 0.5; s <= 14; s += 0.5) { const qx = x + hx * s, qz = z + hz * s; if (!farFromTrail(qx, qz) || Math.abs(gY(qx, qz) - g0) > 0.02) return null; }
+      return flatBehind(x, z, hx, hz, 3) ? { x, z, hx, hz, yaw: Math.atan2(-hz, hx) } : null;
+    });
+    /* A ledge ahead (a rise a board must not climb, but a hop clears) and a drop ahead (a
+       fall the board must throw its rider over), each with level ground behind to build up on. */
+    const ledge = scanOpen((x, z, hx, hz) => {
+      const g0 = gY(x, z); let at = null;
+      for (let s = 0.25; s <= 1.2; s += 0.05) { const r = gY(x + hx * s, z + hz * s) - g0; if (Math.abs(r) > 0.02) { at = { s, r }; break; } }
+      return at && at.r > tol * 1.5 && at.r < 1.2 && at.s > 0.5 && flatBehind(x, z, hx, hz, 1.5) ? { x, z, hx, hz, yaw: Math.atan2(-hz, hx), rise: at.r, at: at.s } : null;
+    });
+    const drop = scanOpen((x, z, hx, hz) => {
+      const g0 = gY(x, z); let at = null;
+      for (let s = 0.25; s <= 1.2; s += 0.05) { const r = gY(x + hx * s, z + hz * s) - g0; if (Math.abs(r) > 0.02) { at = { s, r }; break; } }
+      return at && at.r < -lim * 1.3 && at.s > 0.5 && flatBehind(x, z, hx, hz, 1.5) ? { x, z, hx, hz, yaw: Math.atan2(-hz, hx), rise: at.r, at: at.s } : null;
+    });
+
+    /* Put the board at (x,z) facing yaw and drop the pup onto it from above, the way a real
+       player boards it. Returns whether the pup ended up riding. */
+    const boardAt = (x, z, yaw) => {
+      settle(); hbPlace(x, z, yaw, gY(x, z));
+      pl.x = x; pl.z = z; pl.yaw = yaw; pl.y = 1.0; pl.vy = -1; pl.speed = 0; pl.dist = 0;
+      setCamYaw(camOf(yaw)); pump(10);
+      return B.riding;
+    };
+    const run = (frames, yaw, onFrame) => { for (let f = 0; f < frames; f++) { setCamYaw(camOf(yaw)); pump(); if (onFrame) onFrame(f); } };
+    const out = { have: { flat: !!flatRun, down: !!downRun, field: !!openField, ledge: !!ledge, drop: !!drop } };
+    const sprintKey = d => key('ShiftLeft', d);
+
+    /* -- one board, left a little way along the walk's first trail -- */
+    settle(); const g1 = B.group;
+    exitPlay(); enterPlay(); resetCritters(); pump(3);
+    const head = getTrailheads()[getStartHead()];
+    const ntSeed = nearestTrail(B.x, B.z);
+    out.seed = { placed: B.placed, dHead: Math.hypot(B.x - head.x, B.z - head.z), onTread: ntSeed.d <= ntSeed.hw + 0.01, riding: B.riding,
+                 sameMesh: B.group === g1 && !!B.group, still: B.v === 0 };
+    // a new walk puts it back, wherever the last one left it
+    B.x += 80; B.z += 80; exitPlay(); enterPlay(); resetCritters();
+    out.reseed = { dHead: Math.hypot(B.x - head.x, B.z - head.z), sameMesh: B.group === g1 };
+
+    /* -- getting on: by landing on it; walking into it does nothing -- */
+    if (flatRun) {
+      settle(); hbPlace(flatRun.x + flatRun.hx * 6, flatRun.z + flatRun.hz * 6, flatRun.yaw, gY(flatRun.x + flatRun.hx * 6, flatRun.z + flatRun.hz * 6));
+      pl.x = flatRun.x; pl.z = flatRun.z; pl.yaw = flatRun.yaw; pl.y = 0; pl.vy = 0; setCamYaw(camOf(flatRun.yaw));
+      key('KeyW', true); run(110, flatRun.yaw); key('KeyW', false);
+      out.walkThrough = { riding: B.riding, moved: Math.hypot(pl.x - flatRun.x, pl.z - flatRun.z) };
+      out.board = { riding: boardAt(flatRun.x, flatRun.z, flatRun.yaw), lift: pl.y, deck: B.deckY, v: B.v };
+
+      /* -- stopped: jump hops OFF, to the side, and the board stays -- */
+      const bx = B.x, bz = B.z; let reRode = false;
+      trailJump(); run(14, flatRun.yaw, () => { if (B.riding) reRode = true; });
+      run(40, flatRun.yaw);
+      out.exit = { riding: B.riding, reRode, over: hbOverBoard(pl.x, pl.z, 0), d: Math.hypot(pl.x - B.x, pl.z - B.z), boardMoved: Math.hypot(B.x - bx, B.z - bz), y: pl.y };
+      // and landing on it again gets you back on (the cooldown is long over)
+      pl.x = B.x; pl.z = B.z; pl.y = 1.0; pl.vy = -1; run(10, flatRun.yaw);
+      out.reboard = B.riding;
+
+      /* -- propulsion: only a kick, and a kick stops at the legs' own speed -- */
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw);
+      key('KeyW', true); run(90, flatRun.yaw);
+      out.noKick = { v: B.v, moved: Math.hypot(pl.x - flatRun.x, pl.z - flatRun.z) };
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw);
+      const top = hbKickTop(noiseReference()); let vmax = 0; const vs = [];
+      key('KeyW', true); sprintKey(true);
+      run(105, flatRun.yaw, f => { vmax = Math.max(vmax, B.v); if (f % 21 === 20) vs.push(+B.v.toFixed(2)); });
+      const vKicked = B.v;
+      sprintKey(false); run(30, flatRun.yaw);
+      out.kick = { top, vmax, vKicked, vs, coast: B.v, kicking: B.kicking };
+
+      /* -- the brake: pull back -- */
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw); B.v = 10;
+      run(30, flatRun.yaw); const vFree = B.v;
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw); B.v = 10;
+      key('KeyS', true); run(30, flatRun.yaw); key('KeyS', false);
+      out.brake = { vFree, vBraked: B.v };
+
+      /* -- a hop keeps its heading: no steering in the air; on the ground the same input turns it -- */
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw); B.v = 5;
+      const y0 = B.yaw; key('KeyA', true); run(8, flatRun.yaw); key('KeyA', false);
+      const grounded = Math.abs(B.yaw - y0);
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw); B.v = 5; const y1 = B.yaw;
+      trailJump(); let below = true, airFrames = 0; const hopV0 = B.v;
+      key('KeyA', true);
+      run(14, flatRun.yaw, () => { if (B.hop) airFrames++; if (B.alt > gY(pl.x, pl.z) + pl.y + 1e-6) below = false; });
+      key('KeyA', false); const hopYaw = Math.abs(B.yaw - y1), hopV = B.v;
+      run(50, flatRun.yaw);
+      out.hop = { grounded, hopYaw, below, airFrames, hopV0, hopV, landed: !B.hop && B.riding, onDeck: Math.abs(pl.y - (B.alt - gY(pl.x, pl.z))) < 0.02 };
+      // riding, auto-walk is refused
+      out.autoRefused = startAutoWalk() === false && getAutoWalk().on === false;
+      settle();
+    }
+
+    /* -- gravity, at the real rate, on a descent; and against you on a climb -- */
+    if (downRun) {
+      boardAt(downRun.x, downRun.z, downRun.yaw);
+      const g = downRun.grade; B.v = 0;
+      const gOne = trueGrade(downRun.x, downRun.z, downRun.hx, downRun.hz);
+      run(16, downRun.yaw);                     // half a second, no keys
+      const aMeas = B.v / (16 * 0.033);
+      const aWant = 9.81 * Math.abs(gOne) / Math.sqrt(1 + gOne * gOne) - H.roll;
+      run(60, downRun.yaw);
+      out.down = { grade: g, gOne, aMeas, aWant, vLater: B.v, kickTop: hbKickTop(noiseReference()) };
+    }
+    if (upRun) {
+      boardAt(upRun.x, upRun.z, upRun.yaw); B.v = 6;
+      run(30, upRun.yaw);
+      const vUp = B.v;
+      out.up = { vUp, grade: upRun.grade };
+    }
+
+    /* -- off the tread: it slows; floating over the same ground does not -- */
+    if (openField && flatRun) {
+      const f = openField;
+      boardAt(f.x, f.z, f.yaw); B.v = 10; run(30, f.yaw);
+      const vOff = B.v, offAmt = B.off;
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw); B.v = 10; run(30, flatRun.yaw);
+      const vOn = B.v;
+      boardAt(f.x, f.z, f.yaw); B.v = 8; B.off = 1; run(20, f.yaw); const vGround = B.v;
+      boardAt(f.x, f.z, f.yaw); B.v = 8; B.off = 1; trailJump(); run(20, f.yaw);
+      out.off = { vOff, offAmt, vOn, vGround, vHop: B.v, offDuringHop: B.off, hopping: B.hop };
+    }
+
+    /* -- any step up stops it; a hop clears it; a drop throws the rider -- */
+    if (ledge) {
+      boardAt(ledge.x, ledge.z, ledge.yaw); B.v = 3;
+      run(40, ledge.yaw);
+      out.stopped = { v: B.v, riding: B.riding, progress: (pl.x - ledge.x) * ledge.hx + (pl.z - ledge.z) * ledge.hz,
+                      climbed: gY(pl.x, pl.z) - gY(ledge.x, ledge.z), rise: ledge.rise, at: ledge.at, tol };
+      /* the same step, taken fast: a crash. The board stops dead against it; the rider is thrown on over. */
+      boardAt(ledge.x, ledge.z, ledge.yaw); B.v = 8; let tumbled = false, rideFrames = 0;
+      run(30, ledge.yaw, () => { if (pl.knockT > 0) tumbled = true; if (B.riding) rideFrames++; });
+      out.crashed = { riding: B.riding, tumbled, boardV: B.v, boardProg: (B.x - ledge.x) * ledge.hx + (B.z - ledge.z) * ledge.hz,
+                      riderProg: (pl.x - ledge.x) * ledge.hx + (pl.z - ledge.z) * ledge.hz, at: ledge.at, rideFrames };
+      /* Read at the moment of landing: carry on at 6 u/s over open country for another second and
+         there is more terrain to meet, which is now a crash -- not what this is asking. */
+      boardAt(ledge.x, ledge.z, ledge.yaw); B.v = 6; trailJump(); let wasHop = false, land = null;
+      run(45, ledge.yaw, () => { if (B.hop) wasHop = true; else if (wasHop && !land) land = { progress: (pl.x - ledge.x) * ledge.hx + (pl.z - ledge.z) * ledge.hz, riding: B.riding, hop: B.hop }; });
+      out.cleared = Object.assign({ progress: -1, riding: false, hop: true }, land || {}, { rise: ledge.rise, at: ledge.at });
+    }
+    if (drop) {
+      boardAt(drop.x, drop.z, drop.yaw); B.v = 6; const alt0 = B.alt;
+      let knocked = false, offAt = -1;
+      run(30, drop.yaw, f => { if (pl.knockT > 0) knocked = true; if (!B.riding && offAt < 0) offAt = f; });
+      run(30, drop.yaw);
+      out.fell = { riding: B.riding, knocked, offAt, boardDropped: alt0 - B.alt, drop: -drop.rise, lim };
+    }
+
+    /* -- no board in a race -- */
+    if (flatRun) {
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw); hbDismount(); B.mountBlockT = 0;
+      pl.x = B.x; pl.z = B.z; pl.vy = -3; pl.knockT = 0; pl.wall = null;
+      const R = getRaceState(), was = R.on;
+      R.on = true; const inRace = boardLanding(0.6, 0.0); R.on = was;
+      const free = boardLanding(0.6, 0.0);
+      out.race = { inRace, free };
+      settle();
+    }
+
+    /* =========== ROUND TWO: camera, fit, crouch, kick pose, carrying =========== */
+    const camWant = () => Math.atan2(Math.cos(B.yaw), -Math.sin(B.yaw));
+    const camErr = () => { let d = camWant() - getCamYaw(); while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI; return Math.abs(d); };
+    const freeRun = frames => { for (let f = 0; f < frames; f++) pump(); };
+
+    /* -- the camera stays behind the BOARD: carving, and braking after a carve -- */
+    if (flatRun) {
+      clearLookForTest();
+      /* Short steers, on purpose: a long hard carve at speed leaves the tread and goes over the
+         edge, which ends the ride -- and a camera test that is measuring a pup on foot is
+         measuring nothing. `riding` is asserted at every point it is read. */
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw); B.v = 8;
+      let y0 = B.yaw, worst = 0, ridingAll = true;
+      key('KeyA', true);
+      for (let f = 0; f < 10; f++) { pump(); if (!B.riding) ridingAll = false; if (f > 2) worst = Math.max(worst, camErr()); }
+      key('KeyA', false);
+      for (let f = 0; f < 12; f++) { pump(); if (!B.riding) ridingAll = false; worst = Math.max(worst, camErr()); }
+      const carved = Math.abs(B.yaw - y0), errCarve = camErr();
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw); B.v = 9; y0 = B.yaw;
+      key('KeyD', true); freeRun(6); key('KeyD', false);
+      const turned = Math.abs(B.yaw - y0), errAfterSteer = camErr(), ridingSteer = B.riding;
+      key('KeyS', true);
+      const errs = []; for (let f = 0; f < 40; f++) { pump(); errs.push(camErr()); }
+      key('KeyS', false);
+      out.cam = { carved, worst, errCarve, ridingAll, turned, errAfterSteer, ridingSteer, errBraked: errs[errs.length - 1], errBrakeWorst: Math.max(...errs.slice(8)), ridingEnd: B.riding, vEnd: B.v };
+      // a hand on the camera is left alone: no yanking it back for 0.9 s after a look drag
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw); B.v = 8;
+      setCamYaw(camOf(flatRun.yaw) + 1.0); pl.speed = 8;
+      lookNowForTest(); freeRun(6);
+      out.cam.heldOff = camErr() > 0.8;
+      settle();
+    }
+
+    /* -- the board is fitted to the animal: size from the torso, colours opposite the fur -- */
+    {
+      const rec = () => ({ len: B.len, wide: B.wide, hz: B.hz, deckY: B.deckY, sx: B.tilt.scale.x, sy: B.tilt.scale.y, sz: B.tilt.scale.z,
+                           leg: B.legLen, comp: B.pal && B.pal.comp, trim: B.pal && B.pal.trim, deck: B.pal && B.pal.deck,
+                           trimHex: B.trim.material.color.getHex(), deckHex: B.deckMesh.material.color.getHex() });
+      out.fit = {};
+      setAvatarForTest('dog'); out.fit.dog = Object.assign(rec(), { body: dogBodySize(), color: dogBodyColor() });
+      for (const k of ['cat', 'fox', 'deer', 'moose']) {
+        setAvatarForTest('wild', k);
+        out.fit[k] = Object.assign(rec(), { body: wildBodySize(), color: wildBodyColor() });
+      }
+      setAvatarForTest('dog');
+      out.fitBack = rec().len;
+      out.palGrey = hbPalette(0x808080).comp; out.palTan = hbToHsl(0xc98d4f).h; out.palTanComp = hbPalette(0xc98d4f).comp;
+    }
+
+    /* -- crouching on the board -- */
+    if (flatRun) {
+      let vS = 15, vC = 15;
+      for (let i = 0; i < 180; i++) { vS = hbStepSpeed(vS, 1 / 60, { grade: 0, off: 0 }); vC = hbStepSpeed(vC, 1 / 60, { grade: 0, off: 0, crouch: true }); }
+      out.crouchPure = { vS, vC, turnS: hbTurnRate(10, false), turnC: hbTurnRate(10, true) };
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw); B.v = 12;
+      key('KeyC', true); pump(2); const crouched = pl.crouch, sneakFlag = pl.sneaking;
+      freeRun(60); const liveC = B.v;
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw); B.v = 12; freeRun(60); const liveS = B.v;
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw); key('KeyC', true); pump(2); const wasTucked = pl.crouch;
+      key('KeyW', true); sprintKey(true); pump(2); const standing = !pl.crouch;
+      run(75, flatRun.yaw); const vTucked = B.v, stillUp = !pl.crouch; sprintKey(false); key('KeyW', false);
+      const vKick = vTucked;
+      key('KeyC', true); pump(2); B.v = 0; trailJump(); run(20, flatRun.yaw);
+      out.crouch = { crouched, sneakFlag, liveC, liveS, vTucked, standing, vKick, wasTucked, stillUp, offBoardClears: pl.crouch === false && !B.riding };
+      settle();
+    }
+
+    /* -- the push: the pup runs right behind the board with its front paws on the tail, then hops up when sprint is let go -- */
+    {
+      out.pushPure = ['dog', 'cat', 'fox', 'deer', 'moose'].map(k => {
+        const f = out.fit[k], q = pushPose(f.leg, f.deckY, 4);
+        return { k, leg: f.leg, deck: f.deckY, rise: q.rise, reach: q.reach, front: q.front, hind: [q.legs[2], q.legs[3]], fronts: [q.legs[0], q.legs[1]], pitch: q.pitch };
+      });
+    }
+    if (flatRun) {
+      setAvatarForTest('dog');
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw);
+      const rel = () => { const dx = getDogPos().x - B.x, dz = getDogPos().z - B.z, fx = Math.cos(B.yaw), fz = -Math.sin(B.yaw); return { along: dx * fx + dz * fz, side: Math.abs(dx * fz * -1 + dz * fx) }; };
+      const standing = rel();
+      key('KeyW', true); sprintKey(true); run(40, flatRun.yaw);
+      const h2 = [], h3 = [], pushing = rel(), f0 = dogLegSwing(0), f1 = dogLegSwing(1), vPush = B.v, blendPush = B.blend, kickingPush = B.kicking;
+      run(30, flatRun.yaw, () => { h2.push(dogLegSwing(2)); h3.push(dogLegSwing(3)); });
+      const vAfter = B.v;
+      sprintKey(false); key('KeyW', false);
+      const rec = []; run(40, flatRun.yaw, f => { if (f % 4 === 0) rec.push(+rel().along.toFixed(2)); });
+      const rng = a => Math.max(...a) - Math.min(...a);
+      const back = rel();
+      out.pushLive = { standing, pushing, f0, f1, hindRange: Math.max(rng(h2), rng(h3)), vPush, vAfter, blendPush, kickingPush, rec, back, riding: B.riding, blendEnd: B.blend,
+                       restFront: Math.abs(dogLegSwing(0)), expectBack: hbPushBack(pushPose(B.legLen, B.deckY, 4).reach) };
+      // a tap on sprint is a hop down and straight back up, not a committed push
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw); B.v = 4;
+      key('KeyW', true); sprintKey(true); run(3, flatRun.yaw); sprintKey(false); const midBlend = B.blend; run(25, flatRun.yaw); key('KeyW', false);
+      out.pushTap = { midBlend, endBlend: B.blend, riding: B.riding, v: B.v };
+      // jumping while pushing vaults up and hops
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw); B.v = 5; key('KeyW', true); sprintKey(true); run(20, flatRun.yaw);
+      const pushedBlend = B.blend; trailJump(); pump(2); const vault = { pushedBlend, blendAfter: B.blend, hop: B.hop };
+      sprintKey(false); key('KeyW', false); run(40, flatRun.yaw);
+      out.vault = Object.assign(vault, { landed: B.riding && !B.hop });
+      settle();
+    }
+
+    /* -- leaning into a turn: the board and the rider both roll toward it -- */
+    if (flatRun) {
+      setAvatarForTest('dog');
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw); B.v = 10;
+      const L = {}; pump(3); L.straight = { bank: B.bank, tilt: B.tilt.rotation.x, rider: dogLean() };
+      key('KeyA', true); pump(8); L.left = { bank: B.bank, tilt: B.tilt.rotation.x, rider: dogLean(), riding: B.riding }; key('KeyA', false);
+      pump(30); settle();
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw); B.v = 10;
+      key('KeyD', true); pump(8); L.right = { bank: B.bank, tilt: B.tilt.rotation.x, rider: dogLean(), riding: B.riding }; key('KeyD', false);
+      boardAt(flatRun.x, flatRun.z, flatRun.yaw); B.v = 2; key('KeyA', true); pump(8); L.slow = { bank: B.bank }; key('KeyA', false);
+      pump(20); L.after = { rider: dogLean() };
+      out.lean = L; settle();
+    }
+
+    /* -- backed up against a slope: the BOARD moves ahead of the pup, the pup does not climb the slope -- */
+    if (ledge) {
+      setAvatarForTest('dog');
+      const back = hbPushBack(pushPose(B.legLen, B.deckY, 4).reach), atB = Math.min(back * 0.5, ledge.at - 0.3);
+      const cx = ledge.x + ledge.hx * (ledge.at - atB), cz = ledge.z + ledge.hz * (ledge.at - atB);   // the riser is atB BEHIND the board
+      const fx = -ledge.hx, fz = -ledge.hz, yaw = Math.atan2(ledge.hz, -ledge.hx);
+      boardAt(cx, cz, yaw);
+      const p0 = { x: pl.x, z: pl.z }, riseBehind = gY(pl.x - fx * back, pl.z - fz * back) - gY(pl.x, pl.z);
+      key('KeyW', true); sprintKey(true); const trace = [];
+      run(14, yaw, () => { const d = getDogPos(); trace.push(+(gY(d.x, d.z) - gY(pl.x, pl.z)).toFixed(2)); });
+      const d = getDogPos(), fwd = (pl.x - p0.x) * fx + (pl.z - p0.z) * fz;
+      out.slope = { back, atB, riseBehind, onTop: Math.max(...trace), fwd, pushing: B.kicking || B.blend > 0.9, blend: B.blend, riding: B.riding,
+                    pupBehind: (d.x - pl.x) * -fx + (d.z - pl.z) * -fz, lim };
+      sprintKey(false); key('KeyW', false); settle();
+      // and with open ground behind, nothing moves the board: it stays and the pup drops back
+      boardAt(flatRun ? flatRun.x : cx, flatRun ? flatRun.z : cz, flatRun ? flatRun.yaw : yaw);
+      const q0 = { x: pl.x, z: pl.z }; B.v = 0; key('KeyW', true); sprintKey(true); run(10, flatRun ? flatRun.yaw : yaw); sprintKey(false); key('KeyW', false);
+      out.openBehind = { moved: Math.hypot(pl.x - q0.x, pl.z - q0.z) }; settle();
+    }
+
+    /* -- the board's voice -- */
+    if (flatRun) {
+      initAudio(); await new Promise(r => setTimeout(r, 0));
+      const S = hoverSoundState(), AU = global.__AUDIO;
+      const snap = () => ({ env: S.env, jet: S.jet, sub: S.sub, wind: S.wind, pan: S.pan, bandHz: S.bandHz, lowHz: S.lowHz, subHz: S.subHz, windHz: S.windHz, windQ: S.windQ, riding: S.riding });
+      const V = {};
+      settle(); pump(40); V.off = snap();
+      /* GETTING ON: sample the envelope frame by frame from the moment the pup lands. */
+      hbPlace(flatRun.x, flatRun.z, flatRun.yaw, gY(flatRun.x, flatRun.z)); B.mountBlockT = 0;
+      pl.x = flatRun.x; pl.z = flatRun.z; pl.yaw = flatRun.yaw; pl.y = 1.0; pl.vy = -1; pl.speed = 0; setCamYaw(camOf(flatRun.yaw));
+      V.ramp = []; for (let f = 0; f < 40; f++) { pump(); V.ramp.push({ riding: B.riding, env: S.env, jet: S.jet, sub: S.sub, wind: S.wind }); }
+      V.idle = snap();
+      /* Neon's motor: the band, the lowpass and the thrust pitch all ride speed */
+      B.v = 3; pump(6); V.slow = snap(); B.v = 10; pump(6); V.fast = snap(); B.v = 13; pump(6); V.top = snap();
+      B.v = 10; key('KeyA', true); pump(6); V.left = snap(); key('KeyA', false); pump(10);
+      key('KeyD', true); pump(6); V.right = snap(); key('KeyD', false); pump(10);
+      /* GETTING OFF: run the envelope down frame by frame */
+      B.v = 8; pump(2); V.before = snap();
+      hbDismount(); V.fall = []; for (let f = 0; f < 30; f++) { pump(); V.fall.push({ riding: B.riding, env: S.env, jet: S.jet, sub: S.sub, wind: S.wind }); }
+      V.after = snap();
+      settle(); boardAt(flatRun.x, flatRun.z, flatRun.yaw); B.v = 10; trailJump(); pump(2); V.hopping = snap(); settle(); pump(40);
+      V.built = S.built; V.reaches = AU.voiceReachesDestination(); V.loops = AU.selfLoops().length; V.paramEdges = AU.paramEdges.length;
+      V.pure = { w0: hoverWindLevel(0, 0), w4: hoverWindLevel(4, 0), w10: hoverWindLevel(10, 0), w10t: hoverWindLevel(10, 1), w13: hoverWindLevel(13, 0), w20: hoverWindLevel(20, 0),
+                 offJet: hoverJetLevels(10, hoverEnvGain(0)), env: [0, 0.25, 0.5, 0.75, 1].map(e => hoverEnvStep(0, e * 0.8, true)), down: hoverEnvStep(1, 0.4, false) };
+      out.voice = V;
+    }
+
+    /* -- the numbers, without the world -- */
+    const top2 = hbKickTop(noiseReference());
+    let vFlat = 0, ph = 0; for (let i = 0; i < 60 * 40; i++) { ph = (ph + (1 / 60) / H.kickPeriod) % 1; vFlat = hbStepSpeed(vFlat, 1 / 60, { grade: 0, kicking: true, kickPhase: ph, kickTop: top2, off: 0 }); }
+    let vPark = 0, vParkPeak = 0; for (let i = 0; i < 600; i++) { vPark = hbStepSpeed(vPark, 1 / 60, { grade: -0.02, kicking: false, off: 0 }); vParkPeak = Math.max(vParkPeak, vPark); }
+    let vRoll = 0; for (let i = 0; i < 600; i++) vRoll = hbStepSpeed(vRoll, 1 / 60, { grade: -0.08, kicking: false, off: 0 });
+    let vCrawl = 0; ph = 0; for (let i = 0; i < 60 * 30; i++) { ph = (ph + (1 / 60) / H.kickPeriod) % 1; vCrawl = hbStepSpeed(vCrawl, 1 / 60, { grade: 0, kicking: true, kickPhase: ph, kickTop: top2, off: 1 }); }
+    const steady = g => { let v = 0; for (let i = 0; i < 60 * 40; i++) v = hbStepSpeed(v, 1 / 60, { grade: g, kicking: true, kickTop: top2, off: 0 }); return v; };
+    out.pushGrades = { top: top2, up10: steady(0.10), up20: steady(0.20), dn10: steady(-0.10), dn20: steady(-0.20), flat: steady(0) };
+    out.pure = { top: top2, vFlat, t10: hbTerminalSpeed(-0.10, 0), t20: hbTerminalSpeed(-0.20, 0), vPark, vParkPeak, vRoll, vCrawl,
+                 turnSlow: hbTurnRate(1), turnFast: hbTurnRate(20) };
+    settle(); enterPlay();
+    return out;
+  })();
+  const f2h = n => (n == null ? 'n/a' : (+n).toFixed(2));
+  check('there is exactly one hoverboard, left a little way up the trail the walk starts on, still, and on the tread',
+    hbT.seed.placed && hbT.seed.dHead > 2 && hbT.seed.dHead < 14 && hbT.seed.onTread && !hbT.seed.riding && hbT.seed.still && hbT.seed.sameMesh,
+    JSON.stringify(hbT.seed));
+  check('a new walk puts it back near the start, wherever the last one left it, and it is still the one board',
+    hbT.reseed.dHead < 14 && hbT.reseed.sameMesh, JSON.stringify(hbT.reseed));
+  if (hbT.have.flat) {
+    check('landing on it from a jump puts the pup on the deck; walking into it does not',
+      hbT.board.riding && Math.abs(hbT.board.lift - hbT.board.deck) < 0.06 && !hbT.walkThrough.riding && hbT.walkThrough.moved > 4,
+      `landed: riding ${hbT.board.riding}, feet ${f2h(hbT.board.lift)}u up (deck ${f2h(hbT.board.deck)}u); walked through it: riding ${hbT.walkThrough.riding}, moved ${f2h(hbT.walkThrough.moved)}u`);
+    check('stopped, jump hops off to the side: not back onto the board, and the board stays where it was',
+      !hbT.exit.riding && !hbT.exit.reRode && !hbT.exit.over && hbT.exit.d > 0.45 && hbT.exit.d < 3 && hbT.exit.boardMoved < 0.3 && hbT.exit.y < 0.05,
+      `riding ${hbT.exit.riding}, got back on mid-hop ${hbT.exit.reRode}, over the deck ${hbT.exit.over}, ${f2h(hbT.exit.d)}u from it, board moved ${f2h(hbT.exit.boardMoved)}u`);
+    check('...and landing on it again gets you back on', hbT.reboard === true);
+    check('with no kick the board does not go anywhere, however you steer',
+      hbT.noKick.v < 0.2 && hbT.noKick.moved < 1.0, `speed ${f2h(hbT.noKick.v)} u/s, moved ${f2h(hbT.noKick.moved)}u in 3 s of holding forward`);
+    check('pushing on a trail gets the board up to the animal\'s own sprint speed, and no faster under its own power',
+      hbT.kick.vKicked > hbT.kick.top * 0.85 && hbT.kick.vmax <= hbT.kick.top * 1.02 && hbT.kick.kicking === false,
+      `speeds every 0.7 s: ${hbT.kick.vs.join(', ')} u/s; the animal sprints at ${f2h(hbT.kick.top)}, the board peaked at ${f2h(hbT.kick.vmax)}`);
+    check('let go of sprint and it glides, losing little speed', hbT.kick.coast > hbT.kick.vKicked * 0.75 && hbT.kick.coast < hbT.kick.vKicked,
+      `${f2h(hbT.kick.vKicked)} -> ${f2h(hbT.kick.coast)} u/s over 1 s with no push`);
+    check('pulling back drags a foot: it brakes far harder than a free glide',
+      hbT.brake.vFree > 9 && hbT.brake.vBraked < 6, `from 10 u/s after 1 s: gliding ${f2h(hbT.brake.vFree)}, braking ${f2h(hbT.brake.vBraked)}`);
+    check('a hop keeps its heading and speed: no steering in the air, though the same input turns it on the ground',
+      hbT.hop.grounded > 0.15 && hbT.hop.hopYaw < 1e-6 && hbT.hop.airFrames >= 12 && hbT.hop.hopV > hbT.hop.hopV0 * 0.9,
+      `turned ${f2h(hbT.hop.grounded)} rad on the ground, ${hbT.hop.hopYaw.toExponential(1)} in ${hbT.hop.airFrames} airborne frames; speed ${f2h(hbT.hop.hopV0)} -> ${f2h(hbT.hop.hopV)}`);
+    check('the board follows below the pup through the hop, and the pup lands back on it',
+      hbT.hop.below && hbT.hop.landed && hbT.hop.onDeck, `below the whole way ${hbT.hop.below}; landed on it ${hbT.hop.landed}, on the deck ${hbT.hop.onDeck}`);
+    check('riding, auto-walk is refused', hbT.autoRefused === true);
+    check('no board in a race', hbT.race && hbT.race.inRace === false && hbT.race.free === true, JSON.stringify(hbT.race));
+  } else check('a straight, flat stretch of tread to ride on exists on this map', false, 'none found');
+  if (hbT.have.down) {
+    check('gravity pulls it down a descent at the real rate (g sin(grade), less rolling loss), and keeps pulling',
+      hbT.down.aMeas > 0.85 * hbT.down.aWant && hbT.down.aMeas < 1.15 * hbT.down.aWant && hbT.down.vLater > hbT.down.aWant * 2.0,
+      `true grade ${f2h(hbT.down.gOne)}: accelerating ${f2h(hbT.down.aMeas)} u/s^2 against ${f2h(hbT.down.aWant)} expected; ${f2h(hbT.down.vLater)} u/s two seconds later`);
+    check('and the same hill taxes a climb: coasting uphill it loses speed far faster than on the flat',
+      hbT.up && hbT.up.vUp < 6 - 0.8, hbT.up ? `6 -> ${f2h(hbT.up.vUp)} u/s in 1 s on a ${f2h(hbT.up.grade)} grade` : 'no climb');
+  } else check('a descent of 6-20% to roll down exists on this map', false, 'none found');
+  { const G = hbT.pushGrades;
+    check('on a trail the board can be pushed as fast as the animal can sprint, uphill and downhill: it only runs out of push at the pup\'s own speed',
+      G.flat > G.top * 0.9 && G.up10 > G.top * 0.85 && G.up20 > G.top * 0.8 && G.dn10 >= G.top * 0.98 && G.dn20 >= G.top * 0.98 && G.flat <= G.top * 1.001,
+      `sprint ${f2h(G.top)} u/s; pushed steadily: flat ${f2h(G.flat)}, up 10% ${f2h(G.up10)}, up 20% ${f2h(G.up20)}, down 10% ${f2h(G.dn10)}, down 20% ${f2h(G.dn20)}`); }
+  check('under its own power it is far slower than Neon\'s board, but a grade carries it past what the legs can do',
+    hbT.pure.vFlat <= hbT.pure.top * 1.001 && hbT.pure.vFlat > hbT.pure.top * 0.6 && hbT.pure.vFlat < 26.8 / 2
+      && hbT.pure.t10 > hbT.pure.top && hbT.pure.t20 > hbT.pure.t10 && hbT.pure.t20 < 26.8,
+    `kicked on the flat ${f2h(hbT.pure.vFlat)} u/s (legs' ceiling ${f2h(hbT.pure.top)}; Neon's flat top is 26.8); coasting down 10% ${f2h(hbT.pure.t10)}, 20% ${f2h(hbT.pure.t20)}`);
+  check('a board at rest on a gentle slope stays put; on a real one it rolls; it steers tighter slow than fast',
+    hbT.pure.vPark === 0 && hbT.pure.vParkPeak === 0 && hbT.pure.vRoll > 3 && hbT.pure.turnSlow > hbT.pure.turnFast * 2,
+    `2% slope: ${f2h(hbT.pure.vPark)} u/s; 8%: ${f2h(hbT.pure.vRoll)} u/s after 10 s; turn rate ${f2h(hbT.pure.turnSlow)} rad/s slow, ${f2h(hbT.pure.turnFast)} fast`);
+  if (hbT.have.field && hbT.have.flat) {
+    check('off the tread it slows to a crawl, which the same board on the tread does not',
+      hbT.off.vOn > 9 && hbT.off.vOff < hbT.off.vOn - 2.0 && hbT.off.offAmt > 0.9, `from 10 u/s after 1 s: on the tread ${f2h(hbT.off.vOn)}, off it ${f2h(hbT.off.vOff)} (off-trail amount ${f2h(hbT.off.offAmt)})`);
+    check('...but a hop over the same ground is floating, not off the trail: it keeps its speed',
+      hbT.off.hopping && hbT.off.vHop > hbT.off.vGround + 1.0 && hbT.off.offDuringHop < 0.5,
+      `from 8 u/s after 0.66 s: rolling ${f2h(hbT.off.vGround)}, hopping ${f2h(hbT.off.vHop)}; off-trail amount in the hop ${f2h(hbT.off.offDuringHop)}`);
+  } else check('open flat ground off the trail to test on exists on this map', false, 'none found');
+  if (hbT.have.ledge) {
+    check('any step up stops it dead at a gentle speed; it does not climb',
+      hbT.stopped.v === 0 && hbT.stopped.riding && hbT.stopped.progress < hbT.stopped.at + 0.3 && hbT.stopped.climbed < hbT.stopped.tol + 0.02,
+      `rise ${f2h(hbT.stopped.rise)}u (a board's tolerance is ${f2h(hbT.stopped.tol)}u) ${f2h(hbT.stopped.at)}u ahead: speed ${f2h(hbT.stopped.v)}, got ${f2h(hbT.stopped.progress)}u, climbed ${f2h(hbT.stopped.climbed)}u`);
+    check('a hop clears the same step, and the pup lands on the board on the far side',
+      hbT.cleared.progress > hbT.cleared.at + 0.8 && hbT.cleared.riding && !hbT.cleared.hop,
+      `progress ${f2h(hbT.cleared.progress)}u past a step ${f2h(hbT.cleared.at)}u ahead; riding ${hbT.cleared.riding}`);
+  } else check('a step up off the trail to test on exists on this map', false, 'none found');
+  if (hbT.have.drop) {
+    check('going over a drop without jumping throws the rider; the board goes over too',
+      !hbT.fell.riding && hbT.fell.knocked && hbT.fell.boardDropped > hbT.fell.lim * 0.8,
+      `riding ${hbT.fell.riding}, tumbled ${hbT.fell.knocked}; the board fell ${f2h(hbT.fell.boardDropped)}u of a ${f2h(hbT.fell.drop)}u drop (a step is ${f2h(hbT.fell.lim)}u)`);
+  } else check('a drop off the trail to test on exists on this map', false, 'none found');
+  if (hbT.have.ledge && hbT.crashed) {
+    const K = hbT.crashed;
+    check('stopped by terrain at speed, the rider is thrown: the board stops dead against it and the pup tumbles on over',
+      !K.riding && K.tumbled && K.boardV === 0 && K.boardProg < K.at + 0.3 && K.riderProg > K.boardProg + 0.2,
+      `hit a step ${f2h(K.at)}u ahead at 8 u/s: riding ${K.riding}, tumbled ${K.tumbled}; board ${f2h(K.boardProg)}u along and still, rider ${f2h(K.riderProg)}u`);
+  }
+  if (hbT.have.water) {
+    const W = hbT.water;
+    check('running into water throws the rider in, and the board stays on top: it floats at the surface, not on the bed',
+      W.splashed && !W.riding && W.afloat && Math.abs(W.board - (W.surface + W.deckY)) < 0.06 && W.board > W.ground + W.deckY + 0.02,
+      `into a channel ${f2h(W.dist)}u ahead: rider off ${W.splashed}; board at ${f2h(W.board)} against surface ${f2h(W.surface)} + deck ${f2h(W.deckY)}, bed ${f2h(W.ground)}; afloat ${W.afloat}`);
+    check('...and a floating board cannot be climbed onto; but hopping over the same water is not a dunking',
+      W.rode === false && hbT.hopWater.stillRiding && !hbT.hopWater.hopWet, `landed on the afloat board and rode it: ${W.rode}; hop over: still riding ${hbT.hopWater.stillRiding}`);
+  } else check('a channel to run into, with level dry ground before it, exists on this map', false, 'none found: ' + JSON.stringify(hbT.waterWhy));
+  if (hbT.voice) {
+    const V = hbT.voice, P = V.pure;
+    const firstOn = V.ramp.findIndex(r => r.riding), mono = (a, k) => a.every((r, n) => n === 0 || r[k] >= a[n - 1][k] - 1e-9), monoDown = (a, k) => a.every((r, n) => n === 0 || r[k] <= a[n - 1][k] + 1e-9);
+    check('nothing is heard off the board: every voice is scheduled at exactly zero before riding, and nothing leaks while hopping off',
+      V.off.env === 0 && V.off.jet === 0 && V.off.sub === 0 && V.off.wind === 0 && V.ramp[0].riding === false && V.ramp[0].env === 0 && V.ramp[0].jet === 0, `off the board: env ${V.off.env}, jet ${V.off.jet}, thrust ${V.off.sub}, wind ${V.off.wind}`);
+    check('getting on RAMPS the sound up: silent before the pup lands, then it spools up over most of a second, never jumping in',
+      firstOn > 0 && V.ramp.slice(0, firstOn).every(r => r.env === 0 && r.jet === 0) && V.ramp[firstOn].env < 0.15 && V.ramp[firstOn].jet < V.idle.jet * 0.25
+        && mono(V.ramp, 'jet') && V.ramp[V.ramp.length - 1].env === 1 && V.ramp[firstOn + 8].env > 0.15 && V.ramp[firstOn + 8].env < 0.7,
+      `first frame on the board (frame ${firstOn}): envelope ${f2h(V.ramp[firstOn] && V.ramp[firstOn].env)}, jet ${f2h(V.ramp[firstOn] && V.ramp[firstOn].jet)} of ${f2h(V.idle.jet)}; 8 frames later ${f2h(V.ramp[firstOn + 8] && V.ramp[firstOn + 8].env)}; fully up by the end: ${V.ramp[V.ramp.length - 1].env}`);
+    check('GETTING OFF takes all of it to exactly zero (jet, thrust and wind), winding down over a fraction of a second and not cutting off',
+      V.before.jet > 0.01 && V.fall.every((r, n) => r.riding === false) && V.fall[0].jet > 0 && V.fall[0].jet < V.before.jet && monoDown(V.fall, 'jet') && monoDown(V.fall, 'env')
+        && V.after.env === 0 && V.after.jet === 0 && V.after.sub === 0 && V.after.wind === 0 && V.fall.findIndex(r => r.jet === 0) > 4 && V.fall.findIndex(r => r.jet === 0) < 24,
+      `riding ${f2h(V.before.jet)} -> first frame off ${f2h(V.fall[0].jet)} -> silent after ${V.fall.findIndex(r => r.jet === 0)} frames; at the end jet ${V.after.jet}, thrust ${V.after.sub}, wind ${V.after.wind}`);
+    check('nothing is patched into a parameter, so no voice can play through a gain that is switched off (the swell that left the hum audible after getting off)',
+      V.paramEdges === 0, `${V.paramEdges} voices patched into a gain, filter or oscillator parameter`);
+    check('it is Neon\'s hover running sound: the motor band, the lowpass and the thrust pitch all rise with speed, and it is audibly louder at speed than idling',
+      V.fast.bandHz > V.slow.bandHz + 100 && V.top.bandHz > V.fast.bandHz && V.fast.lowHz > V.slow.lowHz && V.fast.subHz > V.slow.subHz + 2 && V.fast.jet > V.idle.jet * 1.3 && V.idle.jet > 0.015,
+      `band ${Math.round(V.slow.bandHz)} / ${Math.round(V.fast.bandHz)} / ${Math.round(V.top.bandHz)} Hz and thrust ${f2h(V.slow.subHz)} -> ${f2h(V.top.subHz)} Hz at 3 / 10 / 13 u/s; jet ${f2h(V.idle.jet)} idling -> ${f2h(V.fast.jet)} at 10 u/s`);
+    check('light wind comes up with speed: none standing, a breath at a jog, fuller flat out',
+      P.w0 === 0 && P.w4 > 0 && P.w10 > P.w4 && P.w20 >= P.w10 && P.w13 >= 0.02 && V.fast.wind > 0.015,
+      `wind at 0/4/10/13/20 u/s: ${[P.w0, P.w4, P.w10, P.w13, P.w20].map(f2h).join(' / ')}`);
+    check('turning does not make the wind louder: it modulates it, sweeping the band, narrowing it and panning toward the turn, either way',
+      P.w10t === P.w10 && Math.abs(V.left.wind - V.fast.wind) < 0.002 && Math.abs(V.right.wind - V.fast.wind) < 0.002
+        && V.left.windHz > V.fast.windHz + 100 && V.left.windQ > V.fast.windQ && V.left.pan * V.right.pan < 0 && Math.abs(V.left.pan) > 0.1,
+      `at 10 u/s straight: level ${f2h(V.fast.wind)} @ ${Math.round(V.fast.windHz)} Hz, Q ${f2h(V.fast.windQ)}; left: level ${f2h(V.left.wind)} @ ${Math.round(V.left.windHz)} Hz, Q ${f2h(V.left.windQ)}, pan ${f2h(V.left.pan)}; right pan ${f2h(V.right.pan)}`);
+    check('the voices are really built, and every one of them reaches the speakers',
+      V.built === true && V.reaches === true && V.loops === 0, `built ${V.built}, a path from every voice to destination ${V.reaches}, self-loops ${V.loops}`);
+  }
+
+  /* ---- round two ---- */
+  if (hbT.cam) {
+    check('the camera stays behind the board through a carve (never swinging out to the side), and ends straight behind it',
+      hbT.cam.ridingAll && hbT.cam.carved > 0.4 && hbT.cam.worst < 0.35 && hbT.cam.errCarve < 0.2,
+      `board turned ${f2h(hbT.cam.carved)} rad, still riding ${hbT.cam.ridingAll}; the camera was never more than ${f2h(hbT.cam.worst)} rad off its heading and ended ${f2h(hbT.cam.errCarve)} off`);
+    check('...and through a steer and a hard brake to a stop it stays straight behind the board',
+      hbT.cam.ridingSteer && hbT.cam.ridingEnd && hbT.cam.turned > 0.15 && hbT.cam.errBrakeWorst < 0.35 && hbT.cam.errBraked < 0.12,
+      `a ${f2h(hbT.cam.turned)} rad steer left the view ${f2h(hbT.cam.errAfterSteer)} rad off; through the brake it was never more than ${f2h(hbT.cam.errBrakeWorst)} off and ended ${f2h(hbT.cam.errBraked)} off (${f2h(hbT.cam.vEnd)} u/s left, still riding ${hbT.cam.ridingEnd})`);
+    check('a hand on the camera is left alone: it is not dragged back behind the board mid-look', hbT.cam.heldOff === true);
+  }
+  { const F = hbT.fit, quads = ['dog', 'cat', 'fox', 'deer', 'moose'];
+    const fits = quads.every(k => F[k].body && F[k].len >= F[k].body.len * 1.4 && F[k].len <= F[k].body.len * 2.6 && F[k].wide >= F[k].body.wide * 1.1);
+    check('the board is sized to the animal: a little longer than its torso and wider than it stands, for every body',
+      fits, quads.map(k => `${k} torso ${f2h(F[k].body && F[k].body.len)} x ${f2h(F[k].body && F[k].body.wide)} -> board ${f2h(F[k].len)} x ${f2h(F[k].wide)}`).join('; '));
+    check('a bigger animal gets a bigger board, and the mesh is that size (scaled, not rebuilt)',
+      F.moose.len > F.dog.len * 2 && F.moose.deckY > F.dog.deckY * 1.5
+        && quads.every(k => Math.abs(F[k].sx - F[k].len / 1.7) < 1e-6 && Math.abs(F[k].sz - F[k].wide / 0.62) < 1e-6 && Math.abs(F[k].sy - F[k].hz) < 1e-6)
+        && Math.abs(hbT.fitBack - F.dog.len) < 1e-9,
+      `dog ${f2h(F.dog.len)}u at ${f2h(F.dog.deckY)} off the ground, moose ${f2h(F.moose.len)}u at ${f2h(F.moose.deckY)}; back to the dog: ${f2h(hbT.fitBack)}u`);
+    const hueGap = (a, b) => { const d = Math.abs(a - b) % 360; return Math.min(d, 360 - d); };
+    const opposed = quads.every(k => { const c = hbToHsl(F[k].color), want = c.s < 0.14 ? 210 : (c.h + 180) % 360;
+      return hueGap(F[k].comp, want) < 1 && hueGap(hbToHsl(F[k].trim).h, F[k].comp) < 12 && hueGap(hbToHsl(F[k].deck).h, F[k].comp) < 12; });
+    check('the board\'s colours are the complement of the animal\'s: deck and stripe sit on the opposite side of the wheel',
+      opposed, quads.map(k => `${k} fur hue ${Math.round(hbToHsl(F[k].color).h)} -> board hue ${Math.round(F[k].comp)}`).join('; '));
+    check('...and they are what is actually painted on the mesh; a colourless animal gets the original teal-blue',
+      quads.every(k => F[k].trimHex === F[k].trim && F[k].deckHex === F[k].deck) && hueGap(hbT.palGrey, 210) < 1 && hueGap(hbT.palTanComp, (hbT.palTan + 180) % 360) < 1,
+      `grey -> hue ${Math.round(hbT.palGrey)}; tan (hue ${Math.round(hbT.palTan)}) -> ${Math.round(hbT.palTanComp)}`);
+  }
+  if (hbT.crouch) {
+    const C = hbT.crouch, P = hbT.crouchPure;
+    check('crouching tucks the rider in: less drag on a glide, and a tighter carve',
+      P.vC > P.vS + 0.5 && P.turnC > P.turnS * 1.1 && C.liveC > C.liveS + 0.2,
+      `3 s glide from 15 u/s: standing ${f2h(P.vS)}, crouched ${f2h(P.vC)}; on the board from 12 u/s for 2 s: standing ${f2h(C.liveS)}, crouched ${f2h(C.liveC)}; turn rate at 10 u/s ${f2h(P.turnS)} -> ${f2h(P.turnC)} rad/s`);
+    check('the sneak button crouches on a board, without making the pup "sneaking" (which the animals hear)',
+      C.crouched === true && C.sneakFlag === false && C.standing === true, `crouched ${C.crouched}, sneaking flag ${C.sneakFlag}, second press stands ${C.standing}`);
+    check('sprint while crouched stands you up and starts the push; getting off clears the crouch',
+      C.wasTucked === true && C.standing === true && C.stillUp === true && C.vTucked > 3 && C.offBoardClears === true,
+      `crouched ${C.wasTucked}, two frames after pressing sprint it is standing ${C.standing}, and pushing: ${f2h(C.vTucked)} u/s after 2.5 s, still upright ${C.stillUp}; crouch cleared on exit ${C.offBoardClears}`);
+  }
+  { const rows = hbT.pushPure;
+    check('the push pose puts the front paws on the deck for every animal, and leaves the hind legs to run',
+      rows.every(r => r.rise >= r.deck - 0.005 && r.rise <= r.deck + 0.08 && r.reach > 0 && r.fronts.every(a => a === r.front) && r.hind.every(a => a === 0) && r.pitch > 0),
+      rows.map(r => `${r.k}: deck ${f2h(r.deck)}u, front paw rises ${f2h(r.rise)}u at ${f2h(r.front)} rad`).join('; ')); }
+  if (hbT.pushLive) {
+    const P = hbT.pushLive;
+    check('holding sprint, the pup runs right behind the board, in line with it: front paws up on the tail, hind legs running',
+      P.kickingPush && P.blendPush > 0.97 && P.pushing.along < -0.4 && Math.abs(P.pushing.along + P.expectBack) < 0.12 && P.pushing.side < 0.08
+        && P.f0 > 0.8 && P.f1 > 0.8 && P.hindRange > 0.3 && P.vAfter > P.vPush,
+      `standing it is ${f2h(P.standing.along)}u along the board; pushing ${f2h(P.pushing.along)}u (wanted -${f2h(P.expectBack)}), ${f2h(P.pushing.side)}u off line; front legs ${f2h(P.f0)}/${f2h(P.f1)} rad, hind legs swing ${f2h(P.hindRange)} rad; board ${f2h(P.vPush)} -> ${f2h(P.vAfter)} u/s`);
+    check('letting go of sprint, it hops back up onto the board and rides: back over the deck, legs standing',
+      P.riding && P.blendEnd === 0 && Math.abs(P.back.along) < 0.1 && P.restFront < 0.1 && P.rec[0] < -0.4 && P.rec[P.rec.length - 1] > -0.1,
+      `${P.rec.join(' -> ')}u along the board over the hop; ended ${f2h(P.back.along)}u, front leg ${f2h(P.restFront)} rad, riding ${P.riding}`);
+    check('a tap on sprint is a little hop and straight back, not a committed push; jump while pushing vaults up and hops',
+      hbT.pushTap.midBlend > 0 && hbT.pushTap.midBlend < 0.9 && hbT.pushTap.endBlend === 0 && hbT.pushTap.riding
+        && hbT.vault.pushedBlend > 0.9 && hbT.vault.blendAfter === 0 && hbT.vault.hop && hbT.vault.landed,
+      `a 3-frame tap reached ${f2h(hbT.pushTap.midBlend)} of the way down and ended at ${f2h(hbT.pushTap.endBlend)}; vault: pushing ${f2h(hbT.vault.pushedBlend)} -> ${f2h(hbT.vault.blendAfter)}, hopped ${hbT.vault.hop}, landed ${hbT.vault.landed}`);
+  }
+  if (hbT.lean) {
+    const L = hbT.lean;
+    check('the board and the rider lean into a turn: left one way, right the other, more at speed than slow, upright when straight',
+      Math.abs(L.straight.bank) < 0.03 && L.left.riding && L.right.riding && L.left.bank * L.right.bank < 0 && Math.abs(L.left.bank) > 0.25 && Math.abs(L.right.bank) > 0.25
+        && Math.abs(L.slow.bank) < Math.abs(L.left.bank) * 0.8 && Math.abs(L.left.tilt - L.left.bank) < 0.01 && Math.abs(L.left.rider - L.left.bank) < 0.1 && Math.abs(L.after.rider) < 0.1,
+      `straight ${f2h(L.straight.bank)} rad; left ${f2h(L.left.bank)} (board ${f2h(L.left.tilt)}, rider ${f2h(L.left.rider)}); right ${f2h(L.right.bank)}; slow left ${f2h(L.slow.bank)}; rider after ${f2h(L.after.rider)}`);
+  }
+  if (hbT.slope) {
+    const S = hbT.slope;
+    check('backed up against a slope, pushing slides the BOARD forward ahead of the pup: the pup does not end up on top of the slope',
+      S.riseBehind > S.lim * 0.5 && S.pushing && S.riding && S.onTop < S.lim * 0.3 && S.fwd > S.back * 0.8 && Math.abs(S.pupBehind - S.back) < 0.15,
+      `the ground ${f2h(S.back)}u behind the board is ${f2h(S.riseBehind)}u up (a step is ${f2h(S.lim)}); pushing, the highest the pup stood above the board's ground was ${f2h(S.onTop)}u; the board moved ${f2h(S.fwd)}u ahead; the pup ${f2h(S.pupBehind)}u behind it`);
+    check('...and with open ground behind, the board stays put and the pup drops back',
+      hbT.openBehind.moved < 0.3, `the board moved ${f2h(hbT.openBehind.moved)}u in the first 10 frames of a push from standing`);
+  } else check('a riser to back up against, with level ground in front, exists on this map', false, 'none found');
+  if (hbT.carry) {
+    const C = hbT.carry;
+    check('bark out of reach is just a bark; bark beside the board slings it on your back INSTEAD of barking',
+      C.far.carried === false && C.far.barked === true && C.pick.carried === true && C.pick.barked === false, `far: carried ${C.far.carried}, barked ${C.far.barked}; beside it: carried ${C.pick.carried}, barked ${C.pick.barked}`);
+    check('a carried board rides on the back, is not in the world, and cannot be landed on',
+      C.rides.d < 0.8 && C.rides.above && C.rides.marker === false && C.noBoard === true, `${f2h(C.rides.d)}u from the pup, above the ground ${C.rides.above}, own shadow hidden ${C.rides.marker === false}; landing on the carrier boards it: ${!C.noBoard}`);
+    check('bark again puts it down in front of you, level, and it falls to its hover height',
+      C.drop.carried === false && C.drop.barked === false && C.drop.ahead > 0.3 && C.drop.side < 0.3 && C.fell.settled < 0.03 && C.fell.still && C.fell.visible,
+      `${f2h(C.drop.ahead)}u ahead; settled ${f2h(C.fell.settled)}u from its hover height`);
+    check('jump does not pick it up, and bark while riding is a plain bark',
+      C.jumpNoPick === true && C.rideBark.riding === true && C.rideBark.carried === false && C.rideBark.barked === true, JSON.stringify({ jump: C.jumpNoPick, rideBark: C.rideBark }));
+    if (C.slotDrop) {
+      check('one slot on the back: with the board on it, bark puts the board down and does not catch the animal beside you',
+        C.slotDrop.board === false && C.slotDrop.animal === false, JSON.stringify(C.slotDrop));
+      check('with the board and an animal both in reach, bark takes the nearer; with the board out of reach, the animal; and an animal blocks the board',
+        C.nearer.board === true && C.nearer.animal === false && C.animalOnly.animal === true && C.animalOnly.board === false && C.animalBlocks.animal === false && C.animalBlocks.board === false,
+        JSON.stringify({ nearer: C.nearer, animalOnly: C.animalOnly, animalBlocks: C.animalBlocks }));
+    } else check('a catchable animal to test the shared slot on exists', false, 'none spawned');
   }
 
   /* ---------- Barr Trail at 1:4 on Coarse ----------

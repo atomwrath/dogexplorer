@@ -393,3 +393,14 @@ data/.DS_Store
 src/.DS_Store
 data/blodgettPeak.json
 data/blodgett/Blodgett_Peak.geojson
+.cache/dem-tiles/15/6829/12523.png
+.cache/dem-tiles/15/6829/12524.png
+.cache/dem-tiles/15/6829/12525.png
+.cache/dem-tiles/15/6829/12526.png
+.cache/dem-tiles/15/6830/12523.png
+.cache/dem-tiles/15/6830/12524.png
+.cache/dem-tiles/15/6830/12525.png
+.cache/dem-tiles/15/6830/12526.png
+data/rampartWorld.json
+data/rampartRange/Rampart_Reservoir_Trail.geojson
+data/.DS_Store

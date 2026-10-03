@@ -9,7 +9,7 @@
    be the wrong direction for the dependency arrow to point. */
 import { clamp, lerp } from '../core/math.js';
 import { P, dog, R, dogPos, dogYaw, STATS, setDog, setDogYaw } from '../dog/runtime.js';
-import { gaitStep, climbPose, wallPose, leapPose, legSwingValue, gallopAmount, footfalls } from './gait.js';
+import { gaitStep, climbPose, wallPose, leapPose, pushPose, legSwingValue, gallopAmount, footfalls } from './gait.js';
 
 let legPhase = 0;
 let crouchAmt = 0;
@@ -46,6 +46,15 @@ function measureLegLen(){
   return Math.max(0.05, local*(dog.scale ? dog.scale.x : 1));
 }
 function dogLegLength(){ return dogLegLen; }
+/* The torso, measured off the live rig in WORLD units (length nose-end to tail-end of the body
+   ellipsoid, and its width) -- what the hoverboard is sized from. Not the whole animal: head
+   and tail hang off the ends of a board, and sizing to them would make every pup ride a plank. */
+function dogBodySize(){
+  if(!dog || !R || !R.bodyG || !R.bodyG.children || !R.bodyG.children[0]) return null;
+  const m = R.bodyG.children[0], k = dog.scale ? dog.scale.x : 1;
+  return { len: 2*m.scale.x*k, wide: 2*m.scale.z*k };
+}
+function dogBodyColor(){ return P && P.furColor ? P.furColor : null; }
 // half-width of the contact patch the blob shadow should cover
 function dogShadowRadius(){ return dogLegLen*1.25; }
 
@@ -88,7 +97,7 @@ function dogRunMul(){ return STATS.run / STATS.walk; }
    drops its paws by legLen*(1/cos - 1) below the slope, so the body is lifted by exactly
    that. Eased, so stepping onto a bank leans in over a few frames instead of snapping. */
 function slopeLift(angle, legLen){ const c = Math.cos(angle); return c > 0.2 ? legLen*(1/c - 1) : 0; }
-function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise, onWall, slope){
+function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, leap, rise, onWall, slope, board){
   if(!dog || !R) return;
   const size = P ? P.size : 1;
   // dog.position is in SCENE space, unlike dog.scale -- shrinking the group above
@@ -98,6 +107,10 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, 
   crouchAmt = lerp(crouchAmt, sneaking ? 0.22*size*TRAIL_DOG_SCALE : 0, 1-Math.pow(0.0005,dt));
   dog.position.set(dogPos.x, groundY + jumpY - crouchAmt, dogPos.z);
   dog.rotation.y = dogYaw;
+  /* Leaning into a carve on a hoverboard: a roll about the animal's own forward axis, from its
+     feet (the group's origin is at the paws). Order YXZ so the roll is taken AFTER the yaw. */
+  dog.rotation.order = 'YXZ';
+  dog.rotation.x = board && board.lean ? board.lean : 0;
 
   /* Foot-locked gait. Amplitude AND phase rate both come out of one stride length, so
      the planted paw is stationary against the ground at any speed -- see gait.js for why
@@ -120,6 +133,13 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, 
   const cp = onWall ? wallPose(t, R.legs.length)
            : (climbAmt > 0.002 ? climbPose(climbAmt, t, R.legs.length) : null);
 
+  /* On a hoverboard (`board` = {blend, deck}, null otherwise): blend 0 is standing on the deck
+     -- legs still -- and 1 is running behind it with the front paws on its tail. The front legs
+     go to the push pose by the blend; the hind legs keep the gait, which main.js drives at the
+     board's speed (times the blend), so they run exactly as fast as the board moves. */
+  const bl = board ? clamp(board.blend, 0, 1) : 0;
+  const bp = board ? pushPose(dogLegLen, board.deck, R.legs.length) : null;
+
   const prevPhase = legPhase;
   legPhase += g.dPhase*(1 - (lp ? lp.freeze : 0));
 
@@ -129,6 +149,7 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, 
   const gal = gallopAmount(speed, dogTopSpeed(), dogTopSpeed()*dogRunMul());
   R.legs.forEach((leg,i)=>{
     let z = legSwingValue(i, legPhase, gal)*swing;
+    if(bp && i < 2) z = lerp(0, bp.legs[i], bl);        // front paws: still, or up on the tail
     if(cp) z = lerp(z, cp.legs[i], climbAmt);
     if(lp) z = lerp(z, lp.legs[i], leapAmt);
     leg.rotation.z = z;
@@ -159,7 +180,7 @@ function updateDog(dt, t, groundY, jumpY, speed, sneaking, barking, run, climb, 
     const tilt = slopeAmt*(1-leapAmt);
     R.bodyG.position.y = R.bodyBaseY + bob*(1-leapAmt) + bound + (cp ? cp.rise*dogLegLen : 0)
                        + slopeLift(tilt, dogLegLen);
-    let pitch = (cp ? cp.pitch : 0) + flex + tilt;
+    let pitch = (cp ? cp.pitch : 0) + flex + tilt + (bp ? bp.pitch*bl : 0);
     if(lp) pitch = lerp(pitch, lp.pitch, leapAmt);
     R.bodyG.rotation.z = pitch;
     /* Roll into whichever diagonal is reaching. Only the climb sets it, so this is zero on
@@ -181,9 +202,13 @@ function setYaw(v){ setDogYaw(v); }
    passed on the exact screenshot that prompted the fix, since the pose was correct and
    simply never reached the rig. Same reason dogLegLength is exported. */
 function dogBodyPitch(){ return R && R.bodyG ? R.bodyG.rotation.z : null; }
+// test seam: each leg's swing, so the push can be asserted through the whole path
+function dogLean(){ return dog ? dog.rotation.x : null; }   // test seam: the roll the rig was actually given
+function dogLegSwing(i){ return R && R.legs && R.legs[i] ? R.legs[i].rotation.z : null; }
 // test seam: the eased slope tilt on its own, without the gait's flex riding on top
 function dogSlopeTilt(){ return slopeAmt; }
 
 export { spawnDog, updateDog, setYaw, setDogPos, getDogPos, setDogVisible,
          dogTopSpeed, dogRunMul, dogLegLength, dogShadowRadius, dogBodyPitch, dogSlopeTilt,
+         dogBodySize, dogBodyColor, dogLegSwing, dogLean,
          TRAIL_DOG_SCALE };

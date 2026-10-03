@@ -68,6 +68,10 @@ let onTrailheadPick = null;    // main.js's placeAtHead, wired through initMinim
 let onSpotPick = null;         // main.js's placeAtSpot, same arrangement
 let onTrailPointPick = null;   // main.js's "load any point on a trail into the start card"
 let pickedPoint = null;        // {x,z} the sheet marks as a chosen start point, or null
+/* The hoverboard, while nobody is riding it: {x,z,yaw}, pushed in every frame by main.js.
+   Live, like the pup's own arrow, because the board MOVES (a rider leaves it wherever they
+   stopped) and a marker baked into the atlas would be left behind. It is how you find it. */
+let boardMarker = null;
 let bigWired = false;          // guards against double-binding listeners if init runs twice
 
 /* The route the walker is currently on, and the edges that belong to it.
@@ -532,6 +536,27 @@ function ensureAtlas(){
 
 /* ---------- live markers ---------- */
 
+function setBoardMarker(p){
+  boardMarker = (p && isFinite(p.x) && isFinite(p.z)) ? {x: p.x, z: p.z, yaw: p.yaw || 0} : null;
+}
+/* A little teal board lying the way the real one lies. Not a pin, not a disc and not an
+   arrow, so it cannot be mistaken for a trailhead, a spot or the pup. */
+function drawBoardMarker(g, X, Z, scale){
+  if(!boardMarker) return;
+  g.save();
+  g.translate(X(boardMarker.x), Z(boardMarker.z));
+  g.rotate(-boardMarker.yaw);              // screen angle is -yaw with y down, as for the pup
+  const L = 9*scale, W = 4.2*scale;
+  g.beginPath();
+  g.moveTo(-L, -W*0.6); g.lineTo(-L*0.55, -W); g.lineTo(L*0.55, -W); g.lineTo(L, -W*0.6);
+  g.lineTo(L, W*0.6); g.lineTo(L*0.55, W); g.lineTo(-L*0.55, W); g.lineTo(-L, W*0.6);
+  g.closePath();
+  g.fillStyle = '#35e0c8'; g.fill();
+  g.lineWidth = 2.2*scale; g.strokeStyle = '#fff8e6'; g.stroke();
+  g.lineWidth = 1.1*scale; g.strokeStyle = INK_MAP; g.stroke();
+  g.restore();
+}
+
 function drawPup(g, cx, cy, yaw, scale){
   // world yaw: 0 faces +x, and +z is south, so screen angle is -yaw with y down
   g.save();
@@ -760,6 +785,7 @@ function updateMinimap(px, pz, yaw, selectedHead){
     drawCourse(g, X, Z, dpr*0.85, true);
     drawSighted(g, X, Z, dpr);
     drawSpots(g, X, Z, dpr*1.05, false);
+    drawBoardMarker(g, X, Z, dpr*0.95);
     drawPup(g, W/2, H/2, yaw, dpr*1.15);
     g.restore();
   }
@@ -791,6 +817,7 @@ function updateMinimap(px, pz, yaw, selectedHead){
       drawPickedPoint(g, X, Z, dpr*1.3);
       drawSighted(g, X, Z, dpr*1.6);
       drawSpots(g, X, Z, dpr*1.9, true);
+      drawBoardMarker(g, X, Z, dpr*1.6);
       drawPup(g, X(px), Z(pz), yaw, dpr*2.2);
     } else {
       bigView = null;
@@ -808,6 +835,6 @@ function updateMinimap(px, pz, yaw, selectedHead){
 }
 
 export { initMinimap, updateMinimap, setBigMapOpen, getBigView, getSelectedHead,
-         setPickedPoint, getPickedPoint, nearestPathPoint,
+         setPickedPoint, getPickedPoint, nearestPathPoint, setBoardMarker,
          setHighlightRoute, getHighlightRoute, highlightEdges, pickSpotAt, pickOnSheet,
          setCourseShown, getCourseShown, setRaceFrac, getRaceFrac };
