@@ -1431,6 +1431,85 @@ async function assertAll(window, errors, stats) {
     return getSelectedHead() === subj.i && getSelectedHead() !== getStartHead();
   })());
 
+  /* START WHERE I AM (GPS). The projection is the part that can silently put a walker in the
+     wrong place, so it is tested at two world scales; the geolocation API itself is stubbed. */
+  const priorSubject = getHereSubject();   // these checks load other cards; put the sheet back after
+  const withGeo = (impl, fn) => {
+    const nav = navigator;   // whichever object the bundle reads (Node 22 ships its own global navigator)
+    const had = Object.getOwnPropertyDescriptor(nav, 'geolocation');
+    const sec = Object.getOwnPropertyDescriptor(window, 'isSecureContext');
+    Object.defineProperty(nav, 'geolocation', { configurable:true, value:impl });
+    Object.defineProperty(window, 'isSecureContext', { configurable:true, value:true });
+    try { return fn(); }
+    finally {
+      if (had) Object.defineProperty(nav, 'geolocation', had); else delete nav.geolocation;
+      if (sec) Object.defineProperty(window, 'isSecureContext', sec); else delete window.isSecureContext;
+    }
+  };
+  // lon/lat of a world point, derived from the map centre and projectLonLat itself
+  const lonLatOf = (x, z) => {
+    const c = getMapLatLon(), o = projectLonLat(c.lon, c.lat), dl = 1e-4;
+    const mLon = (projectLonLat(c.lon + dl, c.lat).x - o.x) / dl;
+    const mLat = (o.z - projectLonLat(c.lon, c.lat + dl).z) / dl;
+    return { lon: c.lon + (x - o.x) / mLon, lat: c.lat - (z - o.z) / mLat };
+  };
+
+  check('the location button exists on the map sheet', !!d.querySelector('#bigmapZoom #mapLocate'));
+
+  check('pressing the location button with a fix on a trail loads the start card there and moves nobody', (() => {
+    const heads = getTrailheads(); if (!heads.length || !getMapLatLon()) return false;
+    const h = heads[0], ll = lonLatOf(h.x, h.z), back = projectLonLat(ll.lon, ll.lat);
+    if (!back || Math.hypot(back.x - h.x, back.z - h.z) > 0.01) return false;   // the test's own maths
+    const was = probe().dogWorld;
+    withGeo({ watchPosition(ok) { ok({ coords:{ latitude:ll.lat, longitude:ll.lon, accuracy:5 } }); return 3; },
+              clearWatch() {} }, () => locateMe());
+    const subj = getHereSubject();
+    return !!subj && subj.kind === 'point' && Math.hypot(subj.pt.x - h.x, subj.pt.z - h.z) < 0.5 &&
+      dist(probe().dogWorld, was) < 0.01;
+  })());
+
+  check('a fix outside the map is refused and loads nothing', (() => {
+    const c = getMapLatLon(), before = getHereSubject();
+    const r = useLocationFix({ coords:{ latitude:c.lat + 5, longitude:c.lon, accuracy:5 } });
+    return r === null && getHereSubject() === before;
+  })());
+
+  check('a point far from every path is not snapped onto one', (() => {
+    const heads = getTrailheads(); if (!heads.length) return false;
+    const h = heads[0], k = getMapScale(), before = getHereSubject();
+    const r = pickTrailPointNear(h.x + 5000*k, h.z + 5000*k, 25*k);
+    return !r.ok && r.d > 25*k && getHereSubject() === before;
+  })());
+
+  check('a denied location permission puts the button back and loads nothing', (() => {
+    const btn = d.querySelector('#mapLocate'); if (!btn) return false;
+    const before = getHereSubject(); let cleared = 0;
+    withGeo({ watchPosition(ok, fail) { fail({ code:1 }); return 7; }, clearWatch() { cleared++; } }, () => locateMe());
+    return !btn.disabled && !btn.classList.contains('busy') && cleared === 1 && getHereSubject() === before;
+  })());
+
+  /* Measured in REAL metres, against the equirectangular constants, and deliberately NOT
+     through lonLatOf above: that helper is built from projectLonLat itself, so a scale error
+     cancels out of it. Nor at the map centre alone -- the projection origin is the centre of
+     the network, where x = z = 0 and a stray multiply by the scale changes nothing. So walk
+     1 km east and 1 km south of the centre and ask how many world units that came to. */
+  check('1 km on the ground projects to 1 km x world scale, at every world scale', (() => {
+    const keep = getMapScale(); let ok = true;
+    for (const s of [1, 0.2]) {
+      setMapScale(s);
+      const c = getMapLatLon(), o = projectLonLat(c.lon, c.lat);
+      const mLon = 111320 * Math.cos(c.lat * Math.PI / 180), mLat = 110950;
+      const q = projectLonLat(c.lon + 1000 / mLon, c.lat - 1000 / mLat);
+      ok = ok && !!o && !!q &&
+        Math.abs((q.x - o.x) / s - 1000) < 20 && Math.abs((q.z - o.z) / s - 1000) < 20 &&   // +z is south
+        inMapArea(o.x, o.z) && !inMapArea(o.x + 1e6, o.z);
+    }
+    setMapScale(keep);
+    return ok;
+  })());
+  if (priorSubject && priorSubject.kind === 'head') showHereHead(priorSubject.i);
+
+
   check('the loaded trailhead card carries the button that does move you', (() => {
     const heads = getTrailheads();
     const subj = getHereSubject();

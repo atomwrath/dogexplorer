@@ -399,6 +399,7 @@ body[data-pane="map"] #bigmapWrap{display:block;}
   cursor:pointer;opacity:.5;font-size:13px;line-height:1;padding:0 2px;}
 .spot-row .sp-x:hover{opacity:1;}
 #bigmapZoom{position:absolute;bottom:24px;right:24px;display:flex;flex-direction:row;gap:8px;}
+#bigmapZoom .btn.busy{opacity:.5;}
 #bigmapZoom .btn{width:44px;height:44px;padding:0;font-size:20px;line-height:1;
   display:flex;align-items:center;justify-content:center;}
 .bigmap-hint{position:absolute;left:24px;bottom:24px;max-width:230px;margin:0;
@@ -889,6 +890,7 @@ body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
             <div id="bigmapZoom">
               <button class="btn small" id="bigZoomIn" title="Zoom in">➕</button>
               <button class="btn small" id="bigZoomOut" title="Zoom out">➖</button>
+              <button class="btn small" id="mapLocate" title="Start where I am (uses this device's location)">📍</button>
             </div>
             <div id="bigmapSide">
               <div class="bm-card" id="hereCard">
@@ -10132,6 +10134,24 @@ function getMapId(){ return MAP_ID; }
 let MAP_LATLON=null;
 function getMapLatLon(){ return MAP_LATLON; }
 
+/* Real-world lon/lat -> current WORLD units, through whichever projector built the map
+   (the bundle's own, or the fallback one). Already scaled by MAP_SCALE and already in
+   the +z-south convention, so callers must not multiply by the scale again. */
+let PROJECTOR=null;
+function projectLonLat(lon, lat){
+  if(!PROJECTOR || !Number.isFinite(lon) || !Number.isFinite(lat)) return null;
+  const p = PROJECTOR.project(lon, lat);
+  return (p && Number.isFinite(p.x) && Number.isFinite(p.z)) ? {x:p.x, z:p.z} : null;
+}
+/* Is a world point inside the map: the DEM rectangle when a bundle is loaded (that is where
+   real terrain exists), the network's bounding box otherwise. */
+function inMapArea(x, z){
+  const r = BUNDLE ? demRect(BUNDLE)
+                   : {x0:bboxW.minx, z0:bboxW.minz, x1:bboxW.maxx, z1:bboxW.maxz};
+  return x >= r.x0 && x <= r.x1 && z >= r.z0 && z <= r.z1;
+}
+
+
 /* Two independent knobs, one derived value.
 
    EXAG is the hill-exaggeration slider the file header describes: pure taste, safe to
@@ -12560,11 +12580,12 @@ function rebuildWorld(){
 
   const layers=[...(BUNDLE ? (BUNDLE.layers||[]) : []), ...EXTRA];
   MAP_ID = BUNDLE ? bundleMapId() : (layers.length ? 'geojson:'+layers.length : 'none');
-  if(!layers.length){ MAP_LATLON=null; setSkyPlace(null, null, true); applyThemeLighting(); return; }
+  if(!layers.length){ PROJECTOR=null; MAP_LATLON=null; setSkyPlace(null, null, true); applyThemeLighting(); return; }
   // A bundle's own projection is authoritative whenever one is loaded; the fallback only
   // covers the no-DEM case, where there's no heightfield to stay aligned with anyway.
   const PROJ = BUNDLE || fallbackProjector(layers);
-  if(!PROJ) return;
+  if(!PROJ){ PROJECTOR=null; return; }
+  PROJECTOR = PROJ;
 
   // merge the bundle's own layers with anything dropped in-session, classify each
   // feature, then project every coordinate through the bundle's own projection so
@@ -15259,6 +15280,22 @@ function pickTrailPointAt(px, py){
    lettered trailhead, then anywhere along a path. */
 function pickOnSheet(px, py){
   return pickSpotAt(px, py) || pickTrailheadAt(px, py) || pickTrailPointAt(px, py);
+}
+
+/* Start from a real-world position rather than a tapped pixel. Same contract as a tap on
+   the sheet: it LOADS the start card through onTrailPointPick and moves nobody. `maxD` is
+   in world units. Returns {ok, d}; d is the world-unit distance to the nearest path, so the
+   caller can say how far away it was when nothing was close enough. */
+function pickTrailPointNear(x, z, maxD){
+  const hit = nearestPathPoint(x, z, null);          // no cap here, so d is always reportable
+  if(!hit) return {ok:false, d:Infinity};
+  if(hit.d > maxD || !onTrailPointPick) return {ok:false, d:hit.d};
+  onTrailPointPick(hit);
+  if(bigView){                                       // show the flag: zoom in and centre on it
+    setBigZoom(Math.max(bigZoom, 3));
+    bigFocus = clampToAtlas({x:hit.x, z:hit.z}, bigView.at);
+  }
+  return {ok:true, d:hit.d};
 }
 
 /* The chosen start point, drawn as a flag on a stick so it reads as "you will start
@@ -21781,6 +21818,61 @@ document.querySelectorAll('#mapEditToggle .toggle').forEach(b=>{
 });
 $('#saveMapBtn')?.addEventListener('click', saveMapFile);
 updateEditUI();
+
+/* ============================ START WHERE I AM (GPS) ============================
+
+   The map sheet's 📍 button. A real position is projected into the map, snapped to the
+   nearest path and handed to minimap.js exactly as a tap would be, so it LOADS the start
+   card and "Start here" commits it.
+
+   watchPosition for a few seconds rather than getCurrentPosition: the first fix a phone
+   returns is often a coarse cell/Wi-Fi guess, and the good GPS fix arrives a few seconds
+   later. Keep the most accurate one seen and stop early once it is good enough. */
+const LOCATE_GOOD_M = 15, LOCATE_WAIT_MS = 8000, LOCATE_SNAP_MIN_M = 30, LOCATE_SNAP_MAX_M = 150;
+let locating = false;
+function locateMe(){
+  const btn = $('#mapLocate');
+  if(locating) return;
+  if(!navigator.geolocation || !window.isSecureContext){
+    flashSpotNote('Location needs https and a device that can share it'); return;
+  }
+  locating = true;
+  if(btn){ btn.disabled = true; btn.classList.add('busy'); }
+  let best = null, watchId = null, timer = null, done = false;
+  const stop = ()=>{
+    if(done) return false;
+    done = true; locating = false;
+    navigator.geolocation.clearWatch(watchId); clearTimeout(timer);
+    if(btn){ btn.disabled = false; btn.classList.remove('busy'); }
+    return true;
+  };
+  const finish = ()=>{
+    if(!stop()) return;
+    if(best) useLocationFix(best); else flashSpotNote('No location fix, try again outdoors');
+  };
+  timer = setTimeout(finish, LOCATE_WAIT_MS);       // armed first: a callback may fire at once
+  watchId = navigator.geolocation.watchPosition(pos=>{
+    if(!best || pos.coords.accuracy < best.coords.accuracy) best = pos;
+    if(best.coords.accuracy <= LOCATE_GOOD_M) finish();
+  }, err=>{
+    if(best) return finish();
+    if(!stop()) return;
+    flashSpotNote(err.code === 1 ? 'Location is blocked for this page, allow it in site settings'
+                : err.code === 3 ? 'Location timed out' : 'No location fix, try again outdoors');
+  }, {enableHighAccuracy:true, timeout:15000, maximumAge:0});
+}
+function useLocationFix(pos){
+  const c = pos.coords;
+  const p = projectLonLat(c.longitude, c.latitude);
+  if(!p || !inMapArea(p.x, p.z)){ flashSpotNote('You\u2019re outside this map'); return null; }
+  const k = Math.max(1e-6, getMapScale());          // world units per real metre
+  const snapM = Math.min(LOCATE_SNAP_MAX_M, Math.max(LOCATE_SNAP_MIN_M, 2*(c.accuracy || 0)));
+  const r = pickTrailPointNear(p.x, p.z, snapM*k);
+  if(!r.ok) flashSpotNote('Nearest trail is ' + Math.round(r.d/k) + ' m away');
+  else if(c.accuracy > 100) flashSpotNote('Rough fix (\u00b1' + Math.round(c.accuracy) + ' m), check the flag');
+  return r;
+}
+$('#mapLocate')?.addEventListener('click', locateMe);
 
 async function boot(bundleUrl){
   loadKennel();

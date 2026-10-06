@@ -239,6 +239,22 @@ function pickOnSheet(px, py){
   return pickSpotAt(px, py) || pickTrailheadAt(px, py) || pickTrailPointAt(px, py);
 }
 
+/* Start from a real-world position rather than a tapped pixel. Same contract as a tap on
+   the sheet: it LOADS the start card through onTrailPointPick and moves nobody. `maxD` is
+   in world units. Returns {ok, d}; d is the world-unit distance to the nearest path, so the
+   caller can say how far away it was when nothing was close enough. */
+function pickTrailPointNear(x, z, maxD){
+  const hit = nearestPathPoint(x, z, null);          // no cap here, so d is always reportable
+  if(!hit) return {ok:false, d:Infinity};
+  if(hit.d > maxD || !onTrailPointPick) return {ok:false, d:hit.d};
+  onTrailPointPick(hit);
+  if(bigView){                                       // show the flag: zoom in and centre on it
+    setBigZoom(Math.max(bigZoom, 3));
+    bigFocus = clampToAtlas({x:hit.x, z:hit.z}, bigView.at);
+  }
+  return {ok:true, d:hit.d};
+}
+
 /* The chosen start point, drawn as a flag on a stick so it reads as "you will start
    here" and cannot be confused with a numbered pin or a lettered trailhead badge. */
 function setPickedPoint(p){ pickedPoint = (p && isFinite(p.x) && isFinite(p.z)) ? {x:p.x, z:p.z} : null; }
@@ -837,4 +853,4 @@ function updateMinimap(px, pz, yaw, selectedHead){
 export { initMinimap, updateMinimap, setBigMapOpen, getBigView, getSelectedHead,
          setPickedPoint, getPickedPoint, nearestPathPoint, setBoardMarker,
          setHighlightRoute, getHighlightRoute, highlightEdges, pickSpotAt, pickOnSheet,
-         setCourseShown, getCourseShown, setRaceFrac, getRaceFrac };
+         setCourseShown, getCourseShown, setRaceFrac, getRaceFrac, pickTrailPointNear };

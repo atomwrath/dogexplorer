@@ -369,6 +369,7 @@ body[data-pane="map"] #bigmapWrap{display:block;}
   cursor:pointer;opacity:.5;font-size:13px;line-height:1;padding:0 2px;}
 .spot-row .sp-x:hover{opacity:1;}
 #bigmapZoom{position:absolute;bottom:24px;right:24px;display:flex;flex-direction:row;gap:8px;}
+#bigmapZoom .btn.busy{opacity:.5;}
 #bigmapZoom .btn{width:44px;height:44px;padding:0;font-size:20px;line-height:1;
   display:flex;align-items:center;justify-content:center;}
 .bigmap-hint{position:absolute;left:24px;bottom:24px;max-width:230px;margin:0;

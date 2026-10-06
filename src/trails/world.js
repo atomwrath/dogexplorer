@@ -382,6 +382,24 @@ function getMapId(){ return MAP_ID; }
 let MAP_LATLON=null;
 function getMapLatLon(){ return MAP_LATLON; }
 
+/* Real-world lon/lat -> current WORLD units, through whichever projector built the map
+   (the bundle's own, or the fallback one). Already scaled by MAP_SCALE and already in
+   the +z-south convention, so callers must not multiply by the scale again. */
+let PROJECTOR=null;
+function projectLonLat(lon, lat){
+  if(!PROJECTOR || !Number.isFinite(lon) || !Number.isFinite(lat)) return null;
+  const p = PROJECTOR.project(lon, lat);
+  return (p && Number.isFinite(p.x) && Number.isFinite(p.z)) ? {x:p.x, z:p.z} : null;
+}
+/* Is a world point inside the map: the DEM rectangle when a bundle is loaded (that is where
+   real terrain exists), the network's bounding box otherwise. */
+function inMapArea(x, z){
+  const r = BUNDLE ? demRect(BUNDLE)
+                   : {x0:bboxW.minx, z0:bboxW.minz, x1:bboxW.maxx, z1:bboxW.maxz};
+  return x >= r.x0 && x <= r.x1 && z >= r.z0 && z <= r.z1;
+}
+
+
 /* Two independent knobs, one derived value.
 
    EXAG is the hill-exaggeration slider the file header describes: pure taste, safe to
@@ -2810,11 +2828,12 @@ function rebuildWorld(){
 
   const layers=[...(BUNDLE ? (BUNDLE.layers||[]) : []), ...EXTRA];
   MAP_ID = BUNDLE ? bundleMapId() : (layers.length ? 'geojson:'+layers.length : 'none');
-  if(!layers.length){ MAP_LATLON=null; setSkyPlace(null, null, true); applyThemeLighting(); return; }
+  if(!layers.length){ PROJECTOR=null; MAP_LATLON=null; setSkyPlace(null, null, true); applyThemeLighting(); return; }
   // A bundle's own projection is authoritative whenever one is loaded; the fallback only
   // covers the no-DEM case, where there's no heightfield to stay aligned with anyway.
   const PROJ = BUNDLE || fallbackProjector(layers);
-  if(!PROJ) return;
+  if(!PROJ){ PROJECTOR=null; return; }
+  PROJECTOR = PROJ;
 
   // merge the bundle's own layers with anything dropped in-session, classify each
   // feature, then project every coordinate through the bundle's own projection so
@@ -3796,4 +3815,4 @@ export { loadWorld, rebuildWorld, addLayers, clearLayers, hasBundle, setContourS
          setThemeById, getTheme, setMapScale, getMapScale, getExaggeration, getBackdrop,
          setFogMultiplier, getFogMultiplier, setTerrainQuadBudget, getDemStride, applyThemeLighting,
          getGraph, getTrailheads, getPOIs, getFixtures, treeSpotOK, getRailCrossings, getPowerSpans, getRailStats, getAreas, getBBox, getCropStats,
-         getWorldGroup, setStartHead, getStartHead, setVertScale, getVertScale, compass, THEMES, THEME };
+         getWorldGroup, setStartHead, getStartHead, setVertScale, getVertScale, compass, THEMES, THEME, projectLonLat, inMapArea };
