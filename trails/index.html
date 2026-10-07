@@ -17,13 +17,6 @@
 </head>
 <body>
 <div id="app">
-  <header>
-    <div class="logo">
-      <div class="pawbadge">🥾</div>
-      <h1>PUP <span>TRAILS</span><small>real trails · real terrain</small></h1>
-    </div>
-    <div class="spacer"></div>
-  </header>
   <main>
     <div id="stage">
       <canvas id="c"></canvas>
@@ -209,6 +202,23 @@
               <button class="btn small" id="bigZoomIn" title="Zoom in">➕</button>
               <button class="btn small" id="bigZoomOut" title="Zoom out">➖</button>
               <button class="btn small" id="mapLocate" title="Start where I am (uses this device's location)">📍</button>
+            </div>
+            <!-- START WHERE I AM. Everything the 📍 button has to say is said here, over the sheet:
+                 the old notes were drawn in the 3D world, behind it. See src/trails/locate.js. -->
+            <div class="bm-card" id="locCard" role="dialog" aria-live="polite" aria-labelledby="locTitle" hidden>
+              <h3 id="locTitle">📍 Your location</h3>
+              <div id="locBody" class="loc-body"></div>
+              <div id="locEdit" class="loc-edit" hidden>
+                <input id="locInput" type="text" inputmode="text" enterkeyhint="go" autocomplete="off"
+                       autocapitalize="characters" autocorrect="off" spellcheck="false"
+                       aria-label="Latitude and longitude" placeholder="38°51′17″ N  104°52′8″ W">
+                <p class="hint" id="locParsed"></p>
+              </div>
+              <div class="loc-actions">
+                <button class="btn small primary" id="locGo" type="button">▶ Go to</button>
+                <button class="btn small" id="locEditBtn" type="button">✏️ Edit</button>
+                <button class="btn small" id="locCancel" type="button">✕ Cancel</button>
+              </div>
             </div>
             <div id="bigmapSide">
               <div class="bm-card" id="hereCard">

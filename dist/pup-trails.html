@@ -56,13 +56,6 @@ html, body{-webkit-user-select:none; user-select:none; -webkit-touch-callout:non
            -webkit-tap-highlight-color:transparent;}
 input, textarea, [contenteditable]{-webkit-user-select:text; user-select:text; -webkit-touch-callout:default;}
 #app{display:flex;flex-direction:column;height:100dvh;}
-header{display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--card);border-bottom:4px solid var(--ink);}
-.logo{display:flex;align-items:center;gap:10px;}
-.pawbadge{width:38px;height:38px;border-radius:12px;background:var(--green);border:3px solid var(--ink);
-  display:flex;align-items:center;justify-content:center;font-size:20px;}
-h1{font-size:20px;margin:0;}
-h1 span{color:var(--green);}
-h1 small{display:block;font-size:11px;opacity:.6;font-weight:normal;}
 .spacer{flex:1;}
 .btn{font-family:inherit;font-weight:bold;font-size:14px;background:#fff;border:3px solid var(--ink);
   border-radius:12px;padding:8px 14px;cursor:pointer;display:inline-block;}
@@ -399,7 +392,27 @@ body[data-pane="map"] #bigmapWrap{display:block;}
   cursor:pointer;opacity:.5;font-size:13px;line-height:1;padding:0 2px;}
 .spot-row .sp-x:hover{opacity:1;}
 #bigmapZoom{position:absolute;bottom:24px;right:24px;display:flex;flex-direction:row;gap:8px;}
-#bigmapZoom .btn.busy{opacity:.5;}
+/* The locate card (src/trails/locate.js): over the TOP of the sheet, so a phone's keyboard, which
+   rises from the bottom, never covers the box being typed in. fixed, not absolute: on a phone the
+   sheet scrolls, and the card must not scroll away with it. [hidden] is declared outright because
+   a display rule on the id would otherwise win over the attribute. */
+#locCard{position:fixed;z-index:40;top:calc(env(safe-area-inset-top,0px) + 10px);left:50%;
+  transform:translateX(-50%);width:min(440px,calc(100vw - 24px));max-height:calc(100dvh - 24px);
+  overflow-y:auto;box-shadow:0 6px 0 rgba(61,42,32,.28);}
+#locCard[hidden]{display:none;}
+#locCard .loc-line{margin:0 0 4px;font-size:13px;line-height:1.35;}
+#locCard .loc-main{font-weight:bold;font-size:15px;}
+#locCard .loc-dim{opacity:.65;font-size:12px;}
+#locCard .loc-warn{font-weight:bold;color:#b3401a;}
+#locCard .loc-edit{margin:6px 0 2px;}
+#locCard .loc-edit[hidden]{display:none;}
+#locInput{width:100%;box-sizing:border-box;font:inherit;font-size:16px;padding:9px 10px;
+  border:3px solid var(--ink);border-radius:10px;background:#fff;color:var(--ink);
+  -webkit-user-select:text;user-select:text;}
+#locCard .hint{margin:5px 0 0;font-size:12px;}
+.loc-actions{display:flex;gap:8px;margin-top:10px;}
+.loc-actions .btn{flex:1;padding:10px 6px;font-size:14px;text-align:center;}
+.loc-actions .btn:disabled{opacity:.4;cursor:default;}
 #bigmapZoom .btn{width:44px;height:44px;padding:0;font-size:20px;line-height:1;
   display:flex;align-items:center;justify-content:center;}
 .bigmap-hint{position:absolute;left:24px;bottom:24px;max-width:230px;margin:0;
@@ -699,13 +712,6 @@ body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
 </head>
 <body>
 <div id="app">
-  <header>
-    <div class="logo">
-      <div class="pawbadge">🥾</div>
-      <h1>PUP <span>TRAILS</span><small>real trails · real terrain</small></h1>
-    </div>
-    <div class="spacer"></div>
-  </header>
   <main>
     <div id="stage">
       <canvas id="c"></canvas>
@@ -891,6 +897,23 @@ body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
               <button class="btn small" id="bigZoomIn" title="Zoom in">➕</button>
               <button class="btn small" id="bigZoomOut" title="Zoom out">➖</button>
               <button class="btn small" id="mapLocate" title="Start where I am (uses this device's location)">📍</button>
+            </div>
+            <!-- START WHERE I AM. Everything the 📍 button has to say is said here, over the sheet:
+                 the old notes were drawn in the 3D world, behind it. See src/trails/locate.js. -->
+            <div class="bm-card" id="locCard" role="dialog" aria-live="polite" aria-labelledby="locTitle" hidden>
+              <h3 id="locTitle">📍 Your location</h3>
+              <div id="locBody" class="loc-body"></div>
+              <div id="locEdit" class="loc-edit" hidden>
+                <input id="locInput" type="text" inputmode="text" enterkeyhint="go" autocomplete="off"
+                       autocapitalize="characters" autocorrect="off" spellcheck="false"
+                       aria-label="Latitude and longitude" placeholder="38°51′17″ N  104°52′8″ W">
+                <p class="hint" id="locParsed"></p>
+              </div>
+              <div class="loc-actions">
+                <button class="btn small primary" id="locGo" type="button">▶ Go to</button>
+                <button class="btn small" id="locEditBtn" type="button">✏️ Edit</button>
+                <button class="btn small" id="locCancel" type="button">✕ Cancel</button>
+              </div>
             </div>
             <div id="bigmapSide">
               <div class="bm-card" id="hereCard">
@@ -10145,9 +10168,12 @@ function projectLonLat(lon, lat){
 }
 /* Is a world point inside the map: the DEM rectangle when a bundle is loaded (that is where
    real terrain exists), the network's bounding box otherwise. */
+function getMapRect(){
+  return BUNDLE ? demRect(BUNDLE)
+                : {x0:bboxW.minx, z0:bboxW.minz, x1:bboxW.maxx, z1:bboxW.maxz};
+}
 function inMapArea(x, z){
-  const r = BUNDLE ? demRect(BUNDLE)
-                   : {x0:bboxW.minx, z0:bboxW.minz, x1:bboxW.maxx, z1:bboxW.maxz};
+  const r = getMapRect();
   return x >= r.x0 && x <= r.x1 && z >= r.z0 && z <= r.z1;
 }
 
@@ -14507,6 +14533,119 @@ function spotNear(x, z, radius){
   return null;
 }
 
+/* ==== src/trails/geo-input.js ==== */
+/* Reading and writing coordinates a person can type: the pure half of "start where I am".
+
+   No DOM, no world, no geolocation in here, so every function can be asked a question with
+   nothing running. locate.js is the half that touches the page.
+
+   WHAT parseLatLon ACCEPTS. A latitude and a longitude, in either order of ceremony:
+       38°51′17″ N  104°52′8″ W        degrees, minutes, seconds, hemisphere after
+       N 38°51′17″  W 104°52′8″        hemisphere before
+       38°51.283′ N, 104°52.133′ W     decimal minutes
+       38.85472, -104.86889            decimal degrees, comma, space or semicolon between
+       38.85472 N 104.86889 W          decimal degrees with hemispheres
+       38 51 17 N 104 52 8 W           plain spaces -- an iPhone keyboard has no ° ′ ″ on it
+   Straight quotes stand in for the primes, and the usual lookalikes (º ˚ ’ ” ‘ “ ′ ″) are
+   folded first. With hemisphere letters the two halves can come in either order; without
+   them the first is the latitude. Anything it is not sure of is null, never a guess: a
+   coordinate that quietly lands somewhere else is worse than one that is refused.
+
+   Every name here is unique across the project: build.py flattens the modules into one scope. */
+
+const GI_DEG = /[º˚°]/g;                 // º ˚ °
+const GI_MIN = /[′’‘´`ʹ]/g;    // ′ ’ ‘ ´ ` ʹ
+const GI_SEC = /[″”“ʺ]/g;           // ″ ” “ ʺ
+const GI_NUM = /[-+]?\d+(?:\.\d+)?/g;
+
+/* One coordinate's worth of text -> {value, axis}. `axis` is 'lat' or 'lon' when a hemisphere
+   letter says so, null when it does not. */
+function giChunk(c){
+  const letters = c.match(/[NSEW]/g) || [];
+  if(letters.length > 1) return null;
+  const hemi = letters[0] || '';
+  const nums = c.match(GI_NUM);
+  if(!nums || nums.length > 3) return null;
+  /* a decimal belongs on the LAST part only: 38.5°51′ is not a coordinate */
+  for(let i = 0; i < nums.length - 1; i++) if(nums[i].indexOf('.') >= 0) return null;
+  const neg = nums[0].charAt(0) === '-';
+  if(neg && hemi) return null;                            // "-104 W" says it twice
+  for(let i = 1; i < nums.length; i++) if(/^[-+]/.test(nums[i])) return null;
+  const deg = Math.abs(parseFloat(nums[0]));
+  const min = nums.length > 1 ? parseFloat(nums[1]) : 0;
+  const sec = nums.length > 2 ? parseFloat(nums[2]) : 0;
+  if(!(min >= 0 && min < 60 && sec >= 0 && sec < 60)) return null;
+  let v = deg + min/60 + sec/3600;
+  if(neg || hemi === 'S' || hemi === 'W') v = -v;
+  return { value:v, axis: hemi ? ((hemi === 'N' || hemi === 'S') ? 'lat' : 'lon') : null };
+}
+
+function parseLatLon(text){
+  if(typeof text !== 'string') return null;
+  let s = text.toUpperCase().replace(/−/g, '-')
+    .replace(GI_DEG, '°').replace(GI_MIN, "'").replace(GI_SEC, '"').replace(/''/g, '"')
+    .replace(/\bDEG(?:REES?)?\b/g, '°').replace(/\bMIN(?:UTES?)?\b/g, "'").replace(/\bSEC(?:ONDS?)?\b/g, '"')
+    .replace(/\b(?:LATITUDE|LONGITUDE|LAT|LONG|LON|LNG)\b\s*[:=]?/g, ' ')
+    .replace(/\bNORTH\b/g, 'N').replace(/\bSOUTH\b/g, 'S').replace(/\bEAST\b/g, 'E').replace(/\bWEST\b/g, 'W');
+  if(/[^0-9NSEW\s.,;+\-°'"]/.test(s)) return null;   // anything else is not a coordinate
+  const at = [];
+  s.replace(/[NSEW]/g, (m, i) => { at.push(i); return m; });
+  let chunks = null;
+  if(at.length === 2){
+    if(s.slice(0, at[0]).trim() === '') chunks = [s.slice(at[0], at[1]), s.slice(at[1])];   // N 38 51 17 W 104 52 8
+    else chunks = [s.slice(0, at[0] + 1), s.slice(at[0] + 1)];                               // 38 51 17 N 104 52 8 W
+  }else if(at.length === 0){
+    const halves = s.split(/[,;]/);
+    if(halves.length === 2) chunks = halves;
+    else if(halves.length === 1){
+      const n = s.match(GI_NUM) || [];
+      const k = n.length / 2;
+      if(n.length === 2 || n.length === 4 || n.length === 6) chunks = [n.slice(0, k).join(' '), n.slice(k).join(' ')];
+    }
+  }
+  if(!chunks) return null;
+  const a = giChunk(chunks[0]), b = giChunk(chunks[1]);
+  if(!a || !b) return null;
+  let lat, lon;
+  if(a.axis && b.axis){
+    if(a.axis === b.axis) return null;
+    lat = a.axis === 'lat' ? a : b; lon = a.axis === 'lat' ? b : a;
+  }else if(!a.axis && !b.axis){ lat = a; lon = b; }
+  else return null;                                        // one hemisphere letter between two numbers
+  if(!(Math.abs(lat.value) <= 90 && Math.abs(lon.value) <= 180)) return null;
+  return { lat: lat.value, lon: lon.value };
+}
+
+/* 38.854722 -> 38°51′17″ N. Seconds are whole, rounded, and the carry is handled so 59.6″ does
+   not print as 60″. */
+function fmtDMS(v, isLat){
+  const hemi = isLat ? (v >= 0 ? 'N' : 'S') : (v >= 0 ? 'E' : 'W');
+  const a = Math.abs(v);
+  let d = Math.floor(a), mf = (a - d)*60, m = Math.floor(mf), s = Math.round((mf - m)*60);
+  if(s === 60){ s = 0; m++; }
+  if(m === 60){ m = 0; d++; }
+  return d + '°' + m + '′' + s + '″ ' + hemi;
+}
+function fmtLatLonDMS(lat, lon){ return fmtDMS(lat, true) + '  ' + fmtDMS(lon, false); }
+function fmtLatLonDec(lat, lon){ return lat.toFixed(5) + ', ' + lon.toFixed(5); }
+
+/* Which way a world-space offset points, as the eight winds. World x is east and z is SOUTH,
+   so north is -z. */
+const GI_WINDS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+function geoCompass8(dx, dz){
+  const deg = (Math.atan2(dx, -dz)*180/Math.PI + 360) % 360;
+  return GI_WINDS[Math.round(deg/45) % 8];
+}
+
+/* A real-world distance in metres, for a person: 850 m, 12.4 km, 1,234 km. */
+function fmtFarDist(m){
+  if(!(m >= 0)) return '';
+  if(m < 995) return Math.max(10, Math.round(m/10)*10) + ' m';     // 995 and up rounds to a whole kilometre
+  const km = m/1000;
+  if(km < 100) return km.toFixed(1) + ' km';
+  return Math.round(km).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' km';
+}
+
 /* ==== src/trails/courses.js ==== */
 /* Recorded courses: a path the walker traced on the trail network, and the times set on
    it.
@@ -15083,6 +15222,7 @@ function fmtCourseLen(m){
 
 
 
+
 const INK_MAP = '#3a2517';
 const TRAIL_INK = {trail:'#9c6a35', track:'#8a6a45', dirtroad:'#a08a68', road:'#6f6b62',
                    paved_trail:'#9d978b', paved_track:'#8d887e', rail:'#3b3530'};
@@ -15300,6 +15440,106 @@ function pickTrailPointNear(x, z, maxD){
 
 /* The chosen start point, drawn as a flag on a stick so it reads as "you will start
    here" and cannot be confused with a numbered pin or a lettered trailhead badge. */
+/* ---------- where the walker really is (GPS), on the sheet ----------
+
+   Stored as lon/lat, NOT as a world point: the world-scale slider moves every world position,
+   and a real-world position projected once would sit in the wrong place the next time it was
+   touched. It is projected afresh each frame through world.js's projectLonLat, which already
+   knows the scale. {lat, lon, acc} with acc the fix's accuracy in metres (0 for typed ones).
+
+   ON THE VISIBLE SHEET it is a blue dot with the accuracy as a ring. NOT ON IT -- off the map
+   altogether, or on the map but panned out of view -- it becomes an ARROW on the sheet's edge,
+   pointing the way to go, with how far in real metres. The arrow stays out from under the
+   locate card when that is open (locCard sits over the top of the sheet). */
+let userFix = null;
+let userMarker = null;         // what the last frame drew, for the harness: {kind, x, y, ang, distM, off}
+function setUserFix(f){
+  userFix = (f && isFinite(f.lat) && isFinite(f.lon)) ? {lat:f.lat, lon:f.lon, acc: (f.acc > 0 ? f.acc : 0)} : null;
+  if(!userFix) userMarker = null;
+}
+function getUserFix(){ return userFix; }
+function getUserMarker(){ return userMarker; }
+
+/* Where, on a W x H sheet, the marker for a point at (sx,sy) goes, given the rectangle L,T,R,B it
+   must stay inside. Inside: the point itself. Outside: where the ray from the rectangle's centre to
+   the point leaves it. `ang` is that ray's direction, canvas convention (0 = right, +y down). Pure,
+   so a check can ask it without a canvas. */
+function edgeMarker(sx, sy, L, T, R, B){
+  if(sx >= L && sx <= R && sy >= T && sy <= B) return {inside:true, x:sx, y:sy, ang:0};
+  const cx = (L + R)/2, cy = (T + B)/2, dx = sx - cx, dy = sy - cy;
+  const tx = dx ? ((dx > 0 ? R : L) - cx)/dx : Infinity, ty = dy ? ((dy > 0 ? B : T) - cy)/dy : Infinity;
+  const t = Math.min(tx, ty);
+  return {inside:false, x:cx + dx*t, y:cy + dy*t, ang:Math.atan2(dy, dx)};
+}
+
+/* CSS px of the canvas's top edge that the locate card covers, in canvas px. */
+function locCardCover(k){
+  const card = document.getElementById('locCard');
+  if(!card || card.hidden || !bigCv) return 0;
+  const over = card.getBoundingClientRect().bottom - bigCv.getBoundingClientRect().top;
+  return over > 0 ? over*k : 0;
+}
+
+function drawUserFix(g, X, Z, W, H, scale, canvasPxPerCss){
+  if(!userFix){ userMarker = null; return; }
+  const p = projectLonLat(userFix.lon, userFix.lat);
+  if(!p){ userMarker = null; return; }
+  const sx = X(p.x), sy = Z(p.z), m = 26*scale;
+  const top = Math.max(m, locCardCover(canvasPxPerCss) + m*0.7);
+  const e = edgeMarker(sx, sy, m, top, W - m, H - m);
+  const ms = getMapScale();
+  if(e.inside){
+    const accPx = (userFix.acc*ms)*(X(p.x + 1) - X(p.x));
+    g.save();
+    if(accPx > 9*scale){
+      g.beginPath(); g.arc(sx, sy, Math.min(accPx, Math.min(W, H)/2), 0, 7);
+      g.fillStyle = 'rgba(43,127,255,0.14)'; g.fill();
+      g.lineWidth = Math.max(1, 1.3*scale); g.strokeStyle = 'rgba(43,127,255,0.55)'; g.stroke();
+    }
+    g.beginPath(); g.arc(sx, sy, 7*scale, 0, 7);
+    g.fillStyle = '#2b7fff'; g.fill();
+    g.lineWidth = Math.max(2, 2.6*scale); g.strokeStyle = '#fff'; g.stroke();
+    g.restore();
+    userMarker = {kind:'dot', x:sx, y:sy, ang:0, distM:0, off:!inMapArea(p.x, p.z)};
+    return;
+  }
+  /* the way there, in real metres: from the map's own edge when the walker is off the map (that
+     is "how far to go"), from the middle of what is on screen when they are on it but panned away */
+  const off = !inMapArea(p.x, p.z);
+  let dWorld;
+  if(off){
+    const r = getMapRect();
+    dWorld = Math.hypot(Math.max(r.x0 - p.x, 0, p.x - r.x1), Math.max(r.z0 - p.z, 0, p.z - r.z1));
+  }else if(bigView){
+    const k = bigView.at.ppm*bigView.s, cx = bigView.at.x0 + (W/2 - bigView.ox)/k, cz = bigView.at.z0 + (H/2 - bigView.oy)/k;
+    dWorld = Math.hypot(p.x - cx, p.z - cz);
+  }else dWorld = 0;
+  const distM = dWorld/Math.max(1e-6, ms);
+  const ca = Math.cos(e.ang), sa = Math.sin(e.ang), a = 15*scale;
+  g.save();
+  g.translate(e.x, e.y);
+  g.beginPath(); g.arc(0, 0, a*1.25, 0, 7);
+  g.fillStyle = '#fff8e6'; g.fill();
+  g.lineWidth = Math.max(2, 2.4*scale); g.strokeStyle = INK_MAP; g.stroke();
+  g.rotate(e.ang);
+  g.beginPath(); g.moveTo(a*0.78, 0); g.lineTo(-a*0.5, -a*0.62); g.lineTo(-a*0.2, 0); g.lineTo(-a*0.5, a*0.62); g.closePath();
+  g.fillStyle = '#2b7fff'; g.fill();
+  g.lineJoin = 'round'; g.lineWidth = Math.max(1.4, 1.8*scale); g.strokeStyle = INK_MAP; g.stroke();
+  g.restore();
+  // the distance, pulled inward from the arrow so it stays on the sheet
+  const label = fmtFarDist(distM);
+  if(label){
+    g.save();
+    g.font = 'bold ' + Math.round(13*scale) + 'px "Comic Sans MS","Chalkboard SE",sans-serif';
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    const lx = e.x - ca*(a*2.3), ly = e.y - sa*(a*1.9);
+    g.lineWidth = Math.max(3, 4*scale); g.strokeStyle = '#fff8e6'; g.lineJoin = 'round';
+    g.strokeText(label, lx, ly); g.fillStyle = INK_MAP; g.fillText(label, lx, ly);
+    g.restore();
+  }
+  userMarker = {kind:'arrow', x:e.x, y:e.y, ang:e.ang, distM, off};
+}
+
 function setPickedPoint(p){ pickedPoint = (p && isFinite(p.x) && isFinite(p.z)) ? {x:p.x, z:p.z} : null; }
 function getPickedPoint(){ return pickedPoint; }
 function drawPickedPoint(g, X, Z, scale){
@@ -15876,6 +16116,7 @@ function updateMinimap(px, pz, yaw, selectedHead){
       drawPickedPoint(g, X, Z, dpr*1.3);
       drawSighted(g, X, Z, dpr*1.6);
       drawSpots(g, X, Z, dpr*1.9, true);
+      drawUserFix(g, X, Z, W, H, dpr*1.4, dpr);
       drawBoardMarker(g, X, Z, dpr*1.6);
       drawPup(g, X(px), Z(pz), yaw, dpr*2.2);
     } else {
@@ -15892,6 +16133,255 @@ function updateMinimap(px, pz, yaw, selectedHead){
     g.restore();
   }
 }
+
+/* ==== src/trails/locate.js ==== */
+/* START WHERE I AM: the map sheet's 📍 button, and the card it opens.
+
+   WHY A CARD AND NOT A NOTE. The first version told the walker what happened -- "outside this
+   map", "location is blocked", "no fix" -- through flashSpotNote, which is a comic burst drawn in
+   the 3D world. The map sheet covers the 3D world, so on a phone every one of those messages was
+   drawn behind the very sheet the button is on: the button faded for a few seconds and nothing
+   appeared to happen. Anything this feature has to say is said HERE, in a card over the sheet.
+
+   THE FLOW.  Press 📍  ->  the card opens and asks the device ("finding")  ->  the best fix it
+   gets is shown, with its accuracy and whether it is on this map  ("fix")  ->  Go to loads the
+   nearest trail point into the start card exactly as a tap on the sheet would, Edit lets the
+   numbers be typed instead, Cancel puts it all away. If the device cannot say where it is
+   (blocked, no signal, no GPS) the card says why and goes straight to typing ("none").
+
+   Go to LOADS, it does not start: the walk begins when "Start here" is pressed, like every other
+   pick on the sheet. The blue dot (or, off the map, the arrow on the sheet's edge) is minimap.js's;
+   this module only tells it where the walker is, in lon/lat.
+
+   watchPosition for a few seconds rather than getCurrentPosition: the first fix a phone returns
+   is often a coarse cell/Wi-Fi guess and the good one arrives a little later. The best seen is
+   kept, and it stops early once it is good enough. The wait for the FIRST fix is long, because
+   the walker may be reading iOS's permission prompt; once one arrives the rest of the wait is short.
+
+   Every name here starts loc or Loc: build.py flattens the modules into one scope, and `$` is
+   main.js's, so the DOM is reached with document.getElementById. */
+
+
+
+
+const LOC_GOOD_M = 15;          // accurate enough to stop waiting
+const LOC_FIRST_MS = 30000;     // for a first fix, prompt-reading time included
+const LOC_MORE_MS = 6000;       // for a better one, once there is a first
+const LOC_SNAP_MAX_M = 500;     // Go to will not reach further than this for a trail
+
+let locMode = 'idle';           // 'idle' | 'finding' | 'fix' | 'none' | 'manual'
+let locSession = 0;             // bumped by every start and every cancel; stale callbacks compare against it
+let locWatchId = null, locTimer = null, locBest = null;
+let locFix = null;              // {lat, lon, acc} the card is currently about
+let locNote = '';               // why there is no fix, or what Go to could not do
+let locWired = false;
+
+const locEl = id => document.getElementById(id);
+function locStopWatch(){
+  if(locWatchId !== null){ try{ navigator.geolocation.clearWatch(locWatchId); }catch(e){} locWatchId = null; }
+  if(locTimer){ clearTimeout(locTimer); locTimer = null; }
+}
+
+/* Where a lon/lat is, as far as the sheet is concerned: its world point, whether that is on the
+   map, and either how far the nearest trail is (on it) or how far and which way the map is (off). */
+function locAnalyse(fix){
+  const p = projectLonLat(fix.lon, fix.lat);
+  if(!p) return null;
+  const k = Math.max(1e-6, getMapScale());
+  if(inMapArea(p.x, p.z)){
+    const h = nearestPathPoint(p.x, p.z, null);
+    return { p, inside:true, nearM: h ? h.d/k : Infinity };
+  }
+  const r = getMapRect();
+  const dx = Math.max(r.x0 - p.x, 0, p.x - r.x1), dz = Math.max(r.z0 - p.z, 0, p.z - r.z1);
+  return { p, inside:false, offM: Math.hypot(dx, dz)/k, wind: geoCompass8(p.x - (r.x0 + r.x1)/2, p.z - (r.z0 + r.z1)/2) };
+}
+function locWhere(a){
+  if(!a) return 'That place cannot be put on this map.';
+  if(a.inside) return a.nearM < 1e6 ? 'On this map. Nearest trail is ' + fmtFarDist(a.nearM) + ' away.' : 'On this map.';
+  return 'Off this map: ' + fmtFarDist(a.offM) + ' ' + a.wind + ' of it. The arrow on the edge of the sheet points the way.';
+}
+
+function locOpen(){ const c = locEl('locCard'); if(c) c.hidden = false; }
+function locClose(clearMarker){
+  locSession++; locStopWatch();
+  locMode = 'idle'; locNote = '';
+  if(clearMarker){ locFix = null; setUserFix(null); }
+  const c = locEl('locCard'); if(c) c.hidden = true;
+  const i = locEl('locInput'); if(i) i.blur();
+}
+
+function locRender(){
+  const card = locEl('locCard'); if(!card) return;
+  const title = locEl('locTitle'), body = locEl('locBody'), edit = locEl('locEdit'), parsed = locEl('locParsed');
+  const go = locEl('locGo'), input = locEl('locInput');
+  const lines = [];     // [text, className]
+  let t = '📍 Your location', canGo = false, typing = false;
+  if(locMode === 'finding'){
+    t = '📍 Finding you…';
+    lines.push(['Asking this device where it is. If it asks permission, tap Allow.', '']);
+    if(locBest) lines.push(['Best so far: within ' + Math.round(locBest.coords.accuracy) + ' m', 'loc-dim']);
+  }else if(locMode === 'fix' && locFix){
+    t = '📍 Here you are';
+    lines.push([fmtLatLonDMS(locFix.lat, locFix.lon), 'loc-main']);
+    lines.push([fmtLatLonDec(locFix.lat, locFix.lon), 'loc-main']);
+    if(locFix.acc > 0) lines.push(['Accurate to about ' + Math.round(locFix.acc) + ' m' + (locFix.acc > 100 ? ' (rough: check the flag)' : ''), 'loc-dim']);
+    const a = locAnalyse(locFix);
+    lines.push([locWhere(a), '']);
+    canGo = !!(a && a.inside);
+  }else if(locMode === 'none'){
+    t = '📍 No location received';
+    lines.push([locNote, '']);
+    lines.push(['You can type where you are instead.', '']);
+    typing = true;
+  }else if(locMode === 'manual'){
+    t = '✏️ Enter a location';
+    typing = true;
+  }
+  if(typing){
+    const r = parseLatLon(input ? input.value : '');
+    if(r){
+      const a = locAnalyse({lat:r.lat, lon:r.lon});
+      if(parsed) parsed.textContent = fmtLatLonDec(r.lat, r.lon) + '. ' + locWhere(a);
+      canGo = !!(a && a.inside);
+    }else if(parsed){
+      parsed.textContent = input && input.value.trim()
+        ? 'That is not a latitude and longitude yet. Try 38°51′17″ N  104°52′8″ W, or 38.8547, -104.8689.'
+        : 'Latitude and longitude, like 38°51′17″ N  104°52′8″ W, or 38.8547, -104.8689.';
+    }
+  }
+  if(locMode === 'fix' || locMode === 'manual' || locMode === 'none'){
+    if(locNote && locMode !== 'none') lines.push([locNote, 'loc-warn']);
+  }
+  if(title) title.textContent = t;
+  if(body){
+    body.textContent = '';
+    for(const [txt, cls] of lines){
+      const p = document.createElement('p'); p.className = 'loc-line' + (cls ? ' ' + cls : ''); p.textContent = txt; body.appendChild(p);
+    }
+  }
+  if(edit) edit.hidden = !typing;
+  if(go) go.disabled = !canGo;
+}
+function locNone(why, err){
+  locStopWatch();
+  locMode = 'none'; locBest = null; locFix = null; setUserFix(null);
+  locNote = why + (err ? ' (' + [err.code != null ? 'code ' + err.code : '', err.message || ''].filter(Boolean).join(': ') + ')' : '');
+  locOpen(); locRender();
+}
+function locErrText(err){
+  if(err && err.code === 1) return 'Location is blocked for this page. On iPhone: Settings, Privacy & Security, Location Services, Safari Websites, While Using. Then reload.';
+  if(err && err.code === 3) return 'Your device took too long to find its location. Try again outdoors.';
+  return 'Your device could not work out where it is. Try again outdoors.';
+}
+
+function locGotFix(pos){
+  locStopWatch();
+  const c = pos.coords;
+  locFix = { lat:c.latitude, lon:c.longitude, acc:c.accuracy || 0 };
+  locMode = 'fix'; locNote = '';
+  setUserFix(locFix);
+  locOpen(); locRender();
+}
+function locFinish(){
+  if(locMode !== 'finding') return;
+  if(locBest) locGotFix(locBest);
+  else locNone('No location came back.');
+}
+
+function locateMe(){
+  const s = ++locSession;
+  locStopWatch();
+  locBest = null; locFix = null; locNote = ''; setUserFix(null);
+  locOpen();
+  const inp = locEl('locInput'); if(inp) inp.value = '';
+  if(!navigator.geolocation){ locNone('This browser cannot share a location.'); return; }
+  if(!window.isSecureContext){ locNone('Location only works on a secure (https) page.'); return; }
+  locMode = 'finding'; locRender();
+  locTimer = setTimeout(()=>{ if(s === locSession) locFinish(); }, LOC_FIRST_MS);
+  let id = null;
+  try{
+    id = navigator.geolocation.watchPosition(pos=>{
+      if(s !== locSession || locMode !== 'finding') return;
+      const first = !locBest;
+      if(first || pos.coords.accuracy < locBest.coords.accuracy) locBest = pos;
+      if(locBest.coords.accuracy <= LOC_GOOD_M){ locFinish(); return; }
+      if(first){ clearTimeout(locTimer); locTimer = setTimeout(()=>{ if(s === locSession) locFinish(); }, LOC_MORE_MS); }
+      locRender();
+    }, err=>{
+      if(s !== locSession || locMode !== 'finding') return;
+      if(locBest) locFinish(); else locNone(locErrText(err), err);
+    }, {enableHighAccuracy:true, timeout:20000, maximumAge:0});
+  }catch(e){ locNone('This browser refused the location request.', e); return; }
+  /* A browser may call back before watchPosition has returned its id (the harness does): by
+     then this attempt is already over, so the id has to be cleared here. */
+  if(s === locSession && locMode === 'finding') locWatchId = id;
+  else { try{ navigator.geolocation.clearWatch(id); }catch(e){} }
+}
+
+/* Edit: stop asking the device and let the numbers be typed, starting from what it said. */
+function locEnterManual(){
+  locSession++; locStopWatch();
+  locMode = 'manual'; locNote = '';
+  const inp = locEl('locInput');
+  if(inp && locFix && !inp.value) inp.value = fmtLatLonDMS(locFix.lat, locFix.lon);
+  locOpen(); locRender();
+  if(inp){ try{ inp.focus(); inp.select(); }catch(e){} }
+}
+function locOnInput(){
+  const inp = locEl('locInput');
+  const r = parseLatLon(inp ? inp.value : '');
+  locNote = '';
+  if(r){ locFix = { lat:r.lat, lon:r.lon, acc:0 }; setUserFix(locFix); }
+  else { locFix = null; setUserFix(null); }
+  locRender();
+}
+
+/* Go to: the nearest trail point to the place on the card goes into the start card, the way a
+   tap on the sheet puts it there. Refusals are said ON THE CARD, which stays up. */
+function locGo(){
+  let fix = locFix;
+  if(locMode === 'manual' || locMode === 'none'){
+    const inp = locEl('locInput'), r = parseLatLon(inp ? inp.value : '');
+    if(!r){ locNote = 'That is not a latitude and longitude yet.'; locRender(); return; }
+    fix = locFix = { lat:r.lat, lon:r.lon, acc:0 };
+    setUserFix(fix);
+  }
+  if(!fix) return;
+  const a = locAnalyse(fix);
+  if(!a){ locNote = 'That place cannot be put on this map.'; locRender(); return; }
+  if(!a.inside){ locNote = 'That spot is off this map, so there is nowhere to go to.'; locRender(); return; }
+  const k = Math.max(1e-6, getMapScale());
+  const r = pickTrailPointNear(a.p.x, a.p.z, LOC_SNAP_MAX_M*k);
+  if(!r.ok){
+    locNote = 'No trail within ' + LOC_SNAP_MAX_M + ' m of that spot (the nearest is ' + fmtFarDist(r.d/k) + ' away).';
+    locRender(); return;
+  }
+  locClose(false);      // the dot stays on the sheet, beside the flag
+}
+function locCancel(){ locClose(true); }
+
+function initLocate(){
+  if(locWired) return;
+  locWired = true;
+  const on = (id, fn) => { const el = locEl(id); if(el) el.addEventListener('click', fn); };
+  on('mapLocate', locateMe); on('locGo', locGo); on('locEditBtn', locEnterManual); on('locCancel', locCancel);
+  const inp = locEl('locInput');
+  if(inp){
+    inp.addEventListener('input', locOnInput);
+    // the walk's key table is fed by every keydown on the window: a W or an S typed here would
+    // otherwise be the pup walking, an E would start auto-walk, and Esc would quit the walk
+    inp.addEventListener('keydown', e=>{
+      e.stopPropagation();
+      if(e.key === 'Enter'){ e.preventDefault(); locGo(); }
+      else if(e.key === 'Escape'){ e.preventDefault(); locCancel(); }
+    });
+    inp.addEventListener('keyup', e=> e.stopPropagation());
+  }
+}
+
+/* test seam: a top-level let is invisible to the harness once the modules are flattened */
+function getLocateState(){ return { mode:locMode, fix:locFix, note:locNote, open: !!(locEl('locCard') && !locEl('locCard').hidden) }; }
 
 /* ==== src/trails/panes.js ==== */
 /* ============================ THE ONE OPEN-STATE ============================
@@ -17668,6 +18158,7 @@ function wildIconSpec(key){
    driver is live (syncAvatar below), or the rig renders at the world origin while the
    camera follows the player, which on a 2.6 km map means it is simply never on screen.
    That was the "map loads, no dog" bug. */
+
 
 
 
@@ -21819,60 +22310,8 @@ document.querySelectorAll('#mapEditToggle .toggle').forEach(b=>{
 $('#saveMapBtn')?.addEventListener('click', saveMapFile);
 updateEditUI();
 
-/* ============================ START WHERE I AM (GPS) ============================
-
-   The map sheet's 📍 button. A real position is projected into the map, snapped to the
-   nearest path and handed to minimap.js exactly as a tap would be, so it LOADS the start
-   card and "Start here" commits it.
-
-   watchPosition for a few seconds rather than getCurrentPosition: the first fix a phone
-   returns is often a coarse cell/Wi-Fi guess, and the good GPS fix arrives a few seconds
-   later. Keep the most accurate one seen and stop early once it is good enough. */
-const LOCATE_GOOD_M = 15, LOCATE_WAIT_MS = 8000, LOCATE_SNAP_MIN_M = 30, LOCATE_SNAP_MAX_M = 150;
-let locating = false;
-function locateMe(){
-  const btn = $('#mapLocate');
-  if(locating) return;
-  if(!navigator.geolocation || !window.isSecureContext){
-    flashSpotNote('Location needs https and a device that can share it'); return;
-  }
-  locating = true;
-  if(btn){ btn.disabled = true; btn.classList.add('busy'); }
-  let best = null, watchId = null, timer = null, done = false;
-  const stop = ()=>{
-    if(done) return false;
-    done = true; locating = false;
-    navigator.geolocation.clearWatch(watchId); clearTimeout(timer);
-    if(btn){ btn.disabled = false; btn.classList.remove('busy'); }
-    return true;
-  };
-  const finish = ()=>{
-    if(!stop()) return;
-    if(best) useLocationFix(best); else flashSpotNote('No location fix, try again outdoors');
-  };
-  timer = setTimeout(finish, LOCATE_WAIT_MS);       // armed first: a callback may fire at once
-  watchId = navigator.geolocation.watchPosition(pos=>{
-    if(!best || pos.coords.accuracy < best.coords.accuracy) best = pos;
-    if(best.coords.accuracy <= LOCATE_GOOD_M) finish();
-  }, err=>{
-    if(best) return finish();
-    if(!stop()) return;
-    flashSpotNote(err.code === 1 ? 'Location is blocked for this page, allow it in site settings'
-                : err.code === 3 ? 'Location timed out' : 'No location fix, try again outdoors');
-  }, {enableHighAccuracy:true, timeout:15000, maximumAge:0});
-}
-function useLocationFix(pos){
-  const c = pos.coords;
-  const p = projectLonLat(c.longitude, c.latitude);
-  if(!p || !inMapArea(p.x, p.z)){ flashSpotNote('You\u2019re outside this map'); return null; }
-  const k = Math.max(1e-6, getMapScale());          // world units per real metre
-  const snapM = Math.min(LOCATE_SNAP_MAX_M, Math.max(LOCATE_SNAP_MIN_M, 2*(c.accuracy || 0)));
-  const r = pickTrailPointNear(p.x, p.z, snapM*k);
-  if(!r.ok) flashSpotNote('Nearest trail is ' + Math.round(r.d/k) + ' m away');
-  else if(c.accuracy > 100) flashSpotNote('Rough fix (\u00b1' + Math.round(c.accuracy) + ' m), check the flag');
-  return r;
-}
-$('#mapLocate')?.addEventListener('click', locateMe);
+/* START WHERE I AM: the sheet's 📍 button and the card it opens. See locate.js. */
+initLocate();
 
 async function boot(bundleUrl){
   loadKennel();

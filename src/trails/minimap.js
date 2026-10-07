@@ -33,8 +33,9 @@
    still built once per world revision, so zooming in doesn't re-render anything, it
    just draws a bigger crop of the same offscreen image. */
 import { clamp } from '../core/math.js';
-import { getAreas, getBBox, getGraph, getMapScale, getPOIs, getTrailheads, getWaterways, getWorldRevision, styleKey } from './world.js';
+import { getAreas, getBBox, getGraph, getMapRect, getMapScale, getPOIs, getTrailheads, getWaterways, getWorldRevision, inMapArea, projectLonLat, styleKey } from './world.js';
 import { getSpots, spotWorld } from './spots.js';
+import { fmtFarDist } from './geo-input.js';
 import { coursePoints } from './courses.js';
 import { reliefCanvas } from './terrain.js';
 import { getCritters } from './critters.js';
@@ -257,6 +258,106 @@ function pickTrailPointNear(x, z, maxD){
 
 /* The chosen start point, drawn as a flag on a stick so it reads as "you will start
    here" and cannot be confused with a numbered pin or a lettered trailhead badge. */
+/* ---------- where the walker really is (GPS), on the sheet ----------
+
+   Stored as lon/lat, NOT as a world point: the world-scale slider moves every world position,
+   and a real-world position projected once would sit in the wrong place the next time it was
+   touched. It is projected afresh each frame through world.js's projectLonLat, which already
+   knows the scale. {lat, lon, acc} with acc the fix's accuracy in metres (0 for typed ones).
+
+   ON THE VISIBLE SHEET it is a blue dot with the accuracy as a ring. NOT ON IT -- off the map
+   altogether, or on the map but panned out of view -- it becomes an ARROW on the sheet's edge,
+   pointing the way to go, with how far in real metres. The arrow stays out from under the
+   locate card when that is open (locCard sits over the top of the sheet). */
+let userFix = null;
+let userMarker = null;         // what the last frame drew, for the harness: {kind, x, y, ang, distM, off}
+function setUserFix(f){
+  userFix = (f && isFinite(f.lat) && isFinite(f.lon)) ? {lat:f.lat, lon:f.lon, acc: (f.acc > 0 ? f.acc : 0)} : null;
+  if(!userFix) userMarker = null;
+}
+function getUserFix(){ return userFix; }
+function getUserMarker(){ return userMarker; }
+
+/* Where, on a W x H sheet, the marker for a point at (sx,sy) goes, given the rectangle L,T,R,B it
+   must stay inside. Inside: the point itself. Outside: where the ray from the rectangle's centre to
+   the point leaves it. `ang` is that ray's direction, canvas convention (0 = right, +y down). Pure,
+   so a check can ask it without a canvas. */
+function edgeMarker(sx, sy, L, T, R, B){
+  if(sx >= L && sx <= R && sy >= T && sy <= B) return {inside:true, x:sx, y:sy, ang:0};
+  const cx = (L + R)/2, cy = (T + B)/2, dx = sx - cx, dy = sy - cy;
+  const tx = dx ? ((dx > 0 ? R : L) - cx)/dx : Infinity, ty = dy ? ((dy > 0 ? B : T) - cy)/dy : Infinity;
+  const t = Math.min(tx, ty);
+  return {inside:false, x:cx + dx*t, y:cy + dy*t, ang:Math.atan2(dy, dx)};
+}
+
+/* CSS px of the canvas's top edge that the locate card covers, in canvas px. */
+function locCardCover(k){
+  const card = document.getElementById('locCard');
+  if(!card || card.hidden || !bigCv) return 0;
+  const over = card.getBoundingClientRect().bottom - bigCv.getBoundingClientRect().top;
+  return over > 0 ? over*k : 0;
+}
+
+function drawUserFix(g, X, Z, W, H, scale, canvasPxPerCss){
+  if(!userFix){ userMarker = null; return; }
+  const p = projectLonLat(userFix.lon, userFix.lat);
+  if(!p){ userMarker = null; return; }
+  const sx = X(p.x), sy = Z(p.z), m = 26*scale;
+  const top = Math.max(m, locCardCover(canvasPxPerCss) + m*0.7);
+  const e = edgeMarker(sx, sy, m, top, W - m, H - m);
+  const ms = getMapScale();
+  if(e.inside){
+    const accPx = (userFix.acc*ms)*(X(p.x + 1) - X(p.x));
+    g.save();
+    if(accPx > 9*scale){
+      g.beginPath(); g.arc(sx, sy, Math.min(accPx, Math.min(W, H)/2), 0, 7);
+      g.fillStyle = 'rgba(43,127,255,0.14)'; g.fill();
+      g.lineWidth = Math.max(1, 1.3*scale); g.strokeStyle = 'rgba(43,127,255,0.55)'; g.stroke();
+    }
+    g.beginPath(); g.arc(sx, sy, 7*scale, 0, 7);
+    g.fillStyle = '#2b7fff'; g.fill();
+    g.lineWidth = Math.max(2, 2.6*scale); g.strokeStyle = '#fff'; g.stroke();
+    g.restore();
+    userMarker = {kind:'dot', x:sx, y:sy, ang:0, distM:0, off:!inMapArea(p.x, p.z)};
+    return;
+  }
+  /* the way there, in real metres: from the map's own edge when the walker is off the map (that
+     is "how far to go"), from the middle of what is on screen when they are on it but panned away */
+  const off = !inMapArea(p.x, p.z);
+  let dWorld;
+  if(off){
+    const r = getMapRect();
+    dWorld = Math.hypot(Math.max(r.x0 - p.x, 0, p.x - r.x1), Math.max(r.z0 - p.z, 0, p.z - r.z1));
+  }else if(bigView){
+    const k = bigView.at.ppm*bigView.s, cx = bigView.at.x0 + (W/2 - bigView.ox)/k, cz = bigView.at.z0 + (H/2 - bigView.oy)/k;
+    dWorld = Math.hypot(p.x - cx, p.z - cz);
+  }else dWorld = 0;
+  const distM = dWorld/Math.max(1e-6, ms);
+  const ca = Math.cos(e.ang), sa = Math.sin(e.ang), a = 15*scale;
+  g.save();
+  g.translate(e.x, e.y);
+  g.beginPath(); g.arc(0, 0, a*1.25, 0, 7);
+  g.fillStyle = '#fff8e6'; g.fill();
+  g.lineWidth = Math.max(2, 2.4*scale); g.strokeStyle = INK_MAP; g.stroke();
+  g.rotate(e.ang);
+  g.beginPath(); g.moveTo(a*0.78, 0); g.lineTo(-a*0.5, -a*0.62); g.lineTo(-a*0.2, 0); g.lineTo(-a*0.5, a*0.62); g.closePath();
+  g.fillStyle = '#2b7fff'; g.fill();
+  g.lineJoin = 'round'; g.lineWidth = Math.max(1.4, 1.8*scale); g.strokeStyle = INK_MAP; g.stroke();
+  g.restore();
+  // the distance, pulled inward from the arrow so it stays on the sheet
+  const label = fmtFarDist(distM);
+  if(label){
+    g.save();
+    g.font = 'bold ' + Math.round(13*scale) + 'px "Comic Sans MS","Chalkboard SE",sans-serif';
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    const lx = e.x - ca*(a*2.3), ly = e.y - sa*(a*1.9);
+    g.lineWidth = Math.max(3, 4*scale); g.strokeStyle = '#fff8e6'; g.lineJoin = 'round';
+    g.strokeText(label, lx, ly); g.fillStyle = INK_MAP; g.fillText(label, lx, ly);
+    g.restore();
+  }
+  userMarker = {kind:'arrow', x:e.x, y:e.y, ang:e.ang, distM, off};
+}
+
 function setPickedPoint(p){ pickedPoint = (p && isFinite(p.x) && isFinite(p.z)) ? {x:p.x, z:p.z} : null; }
 function getPickedPoint(){ return pickedPoint; }
 function drawPickedPoint(g, X, Z, scale){
@@ -833,6 +934,7 @@ function updateMinimap(px, pz, yaw, selectedHead){
       drawPickedPoint(g, X, Z, dpr*1.3);
       drawSighted(g, X, Z, dpr*1.6);
       drawSpots(g, X, Z, dpr*1.9, true);
+      drawUserFix(g, X, Z, W, H, dpr*1.4, dpr);
       drawBoardMarker(g, X, Z, dpr*1.6);
       drawPup(g, X(px), Z(pz), yaw, dpr*2.2);
     } else {
@@ -853,4 +955,5 @@ function updateMinimap(px, pz, yaw, selectedHead){
 export { initMinimap, updateMinimap, setBigMapOpen, getBigView, getSelectedHead,
          setPickedPoint, getPickedPoint, nearestPathPoint, setBoardMarker,
          setHighlightRoute, getHighlightRoute, highlightEdges, pickSpotAt, pickOnSheet,
-         setCourseShown, getCourseShown, setRaceFrac, getRaceFrac, pickTrailPointNear };
+         setCourseShown, getCourseShown, setRaceFrac, getRaceFrac, pickTrailPointNear,
+         setUserFix, getUserFix, getUserMarker, edgeMarker };

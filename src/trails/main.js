@@ -21,7 +21,8 @@ import { addCamPitch, addCamYaw, addCamZoom, getCamPitch, getCamYaw, getCamZoom,
 import { getCritterStats, spawnCritters, resetCritters, setWildlife, wildlifeEnabled, updateCritters, WATCH_SECONDS, playerNoise, typicalSpookRadius, takeImpacts,
          catchNear, releaseCarried, getCarried, carrySlow, setCarryAnchor, nearestCatchable, catchRadius } from './critters.js';
 import { initMinimap, updateMinimap, setHighlightRoute, setPickedPoint,
-         setCourseShown, getCourseShown, setRaceFrac, setBoardMarker, pickTrailPointNear } from './minimap.js';
+         setCourseShown, getCourseShown, setRaceFrac, setBoardMarker } from './minimap.js';
+import { initLocate } from './locate.js';
 import { initPanes, getPane, showPane, togglePane } from './panes.js';
 import { setCourseLine, refreshCourseLine, clearCourseLine } from './course-line.js';
 import { addSpot, getSpots, removeSpot, setSpotMap, spotNear, spotWorld } from './spots.js';
@@ -38,7 +39,7 @@ import { barkSound, cheerBlip, initAudio, thudSound, splashSound,
          stepSound, landSound, jumpSound, scrabbleSound, catchSound,
          countPip, goTone, offCourseSound, rejoinSound } from '../core/audio.js';
 
-import { waterSurfaceAt, applyThemeLighting, getMapLatLon, setTerrainQuadBudget, getDemStride, addLayers, clearLayers, compass, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapId, getMapScale, getPathMix, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, inWaterway, loadWorld, renameTrail, getEditCount, getMapBundleJSON, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY, setWadeLegLength, getWorldRevision, areaBlocked, areaSolidTop, nearestSolidFace, solidEmbed, distToSolid, projectLonLat, inMapArea } from './world.js';
+import { waterSurfaceAt, applyThemeLighting, getMapLatLon, setTerrainQuadBudget, getDemStride, addLayers, clearLayers, compass, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapId, getMapScale, getPathMix, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, inWaterway, loadWorld, renameTrail, getEditCount, getMapBundleJSON, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY, setWadeLegLength, getWorldRevision, areaBlocked, areaSolidTop, nearestSolidFace, solidEmbed, distToSolid } from './world.js';
 
 import { THEME, THEMES } from './themes.js';
 import { setSkyMode, getSkyMode, setSkyClock, getSkyClock, skyFrame, skyReadout, skyState, nowClock } from './sky.js';
@@ -4170,60 +4171,8 @@ document.querySelectorAll('#mapEditToggle .toggle').forEach(b=>{
 $('#saveMapBtn')?.addEventListener('click', saveMapFile);
 updateEditUI();
 
-/* ============================ START WHERE I AM (GPS) ============================
-
-   The map sheet's 📍 button. A real position is projected into the map, snapped to the
-   nearest path and handed to minimap.js exactly as a tap would be, so it LOADS the start
-   card and "Start here" commits it.
-
-   watchPosition for a few seconds rather than getCurrentPosition: the first fix a phone
-   returns is often a coarse cell/Wi-Fi guess, and the good GPS fix arrives a few seconds
-   later. Keep the most accurate one seen and stop early once it is good enough. */
-const LOCATE_GOOD_M = 15, LOCATE_WAIT_MS = 8000, LOCATE_SNAP_MIN_M = 30, LOCATE_SNAP_MAX_M = 150;
-let locating = false;
-function locateMe(){
-  const btn = $('#mapLocate');
-  if(locating) return;
-  if(!navigator.geolocation || !window.isSecureContext){
-    flashSpotNote('Location needs https and a device that can share it'); return;
-  }
-  locating = true;
-  if(btn){ btn.disabled = true; btn.classList.add('busy'); }
-  let best = null, watchId = null, timer = null, done = false;
-  const stop = ()=>{
-    if(done) return false;
-    done = true; locating = false;
-    navigator.geolocation.clearWatch(watchId); clearTimeout(timer);
-    if(btn){ btn.disabled = false; btn.classList.remove('busy'); }
-    return true;
-  };
-  const finish = ()=>{
-    if(!stop()) return;
-    if(best) useLocationFix(best); else flashSpotNote('No location fix, try again outdoors');
-  };
-  timer = setTimeout(finish, LOCATE_WAIT_MS);       // armed first: a callback may fire at once
-  watchId = navigator.geolocation.watchPosition(pos=>{
-    if(!best || pos.coords.accuracy < best.coords.accuracy) best = pos;
-    if(best.coords.accuracy <= LOCATE_GOOD_M) finish();
-  }, err=>{
-    if(best) return finish();
-    if(!stop()) return;
-    flashSpotNote(err.code === 1 ? 'Location is blocked for this page, allow it in site settings'
-                : err.code === 3 ? 'Location timed out' : 'No location fix, try again outdoors');
-  }, {enableHighAccuracy:true, timeout:15000, maximumAge:0});
-}
-function useLocationFix(pos){
-  const c = pos.coords;
-  const p = projectLonLat(c.longitude, c.latitude);
-  if(!p || !inMapArea(p.x, p.z)){ flashSpotNote('You\u2019re outside this map'); return null; }
-  const k = Math.max(1e-6, getMapScale());          // world units per real metre
-  const snapM = Math.min(LOCATE_SNAP_MAX_M, Math.max(LOCATE_SNAP_MIN_M, 2*(c.accuracy || 0)));
-  const r = pickTrailPointNear(p.x, p.z, snapM*k);
-  if(!r.ok) flashSpotNote('Nearest trail is ' + Math.round(r.d/k) + ' m away');
-  else if(c.accuracy > 100) flashSpotNote('Rough fix (\u00b1' + Math.round(c.accuracy) + ' m), check the flag');
-  return r;
-}
-$('#mapLocate')?.addEventListener('click', locateMe);
+/* START WHERE I AM: the sheet's 📍 button and the card it opens. See locate.js. */
+initLocate();
 
 async function boot(bundleUrl){
   loadKennel();

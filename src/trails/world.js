@@ -393,9 +393,12 @@ function projectLonLat(lon, lat){
 }
 /* Is a world point inside the map: the DEM rectangle when a bundle is loaded (that is where
    real terrain exists), the network's bounding box otherwise. */
+function getMapRect(){
+  return BUNDLE ? demRect(BUNDLE)
+                : {x0:bboxW.minx, z0:bboxW.minz, x1:bboxW.maxx, z1:bboxW.maxz};
+}
 function inMapArea(x, z){
-  const r = BUNDLE ? demRect(BUNDLE)
-                   : {x0:bboxW.minx, z0:bboxW.minz, x1:bboxW.maxx, z1:bboxW.maxz};
+  const r = getMapRect();
   return x >= r.x0 && x <= r.x1 && z >= r.z0 && z <= r.z1;
 }
 
@@ -3815,4 +3818,4 @@ export { loadWorld, rebuildWorld, addLayers, clearLayers, hasBundle, setContourS
          setThemeById, getTheme, setMapScale, getMapScale, getExaggeration, getBackdrop,
          setFogMultiplier, getFogMultiplier, setTerrainQuadBudget, getDemStride, applyThemeLighting,
          getGraph, getTrailheads, getPOIs, getFixtures, treeSpotOK, getRailCrossings, getPowerSpans, getRailStats, getAreas, getBBox, getCropStats,
-         getWorldGroup, setStartHead, getStartHead, setVertScale, getVertScale, compass, THEMES, THEME, projectLonLat, inMapArea };
+         getWorldGroup, setStartHead, getStartHead, setVertScale, getVertScale, compass, THEMES, THEME, projectLonLat, inMapArea, getMapRect };

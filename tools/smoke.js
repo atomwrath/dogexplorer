@@ -1431,8 +1431,10 @@ async function assertAll(window, errors, stats) {
     return getSelectedHead() === subj.i && getSelectedHead() !== getStartHead();
   })());
 
-  /* START WHERE I AM (GPS). The projection is the part that can silently put a walker in the
-     wrong place, so it is tested at two world scales; the geolocation API itself is stubbed. */
+  /* START WHERE I AM (GPS). The Geolocation API is stubbed; everything else is the shipped code.
+     What these guard: the projection (the part that can silently put a walker in the wrong
+     place), and that every outcome is said ON THE CARD -- the first version spoke through the 3D
+     world, behind the map sheet, so on a phone nothing appeared to happen. */
   const priorSubject = getHereSubject();   // these checks load other cards; put the sheet back after
   const withGeo = (impl, fn) => {
     const nav = navigator;   // whichever object the bundle reads (Node 22 ships its own global navigator)
@@ -1453,46 +1455,119 @@ async function assertAll(window, errors, stats) {
     const mLat = (o.z - projectLonLat(c.lon, c.lat + dl).z) / dl;
     return { lon: c.lon + (x - o.x) / mLon, lat: c.lat - (z - o.z) / mLat };
   };
+  const instantFix = (lat, lon, acc = 5) => ({ watchPosition(ok) { ok({ coords:{ latitude:lat, longitude:lon, accuracy:acc } }); return 3; }, clearWatch() {} });
+  const locCard = () => d.querySelector('#locCard');
+  const press = id => d.querySelector('#' + id).click();
+  const cardText = () => (locCard() ? locCard().textContent : '');
+  const typeInto = txt => { const i = d.querySelector('#locInput'); i.value = txt; i.dispatchEvent(new window.Event('input', { bubbles:true })); };
+  const frame = t => { if (global.__raf) { const fn = global.__raf; global.__raf = null; fn(t); } };
+  const heads0 = getTrailheads();
+  const H0 = heads0.length && getMapLatLon() ? heads0[0] : null, LL0 = H0 ? lonLatOf(H0.x, H0.z) : null;
 
-  check('the location button exists on the map sheet', !!d.querySelector('#bigmapZoom #mapLocate'));
+  check('the location button and its (hidden) card are on the map sheet, and the header logo is gone',
+    !!d.querySelector('#bigmapZoom #mapLocate') && !!locCard() && locCard().hidden === true && !d.querySelector('header'));
 
-  check('pressing the location button with a fix on a trail loads the start card there and moves nobody', (() => {
-    const heads = getTrailheads(); if (!heads.length || !getMapLatLon()) return false;
-    const h = heads[0], ll = lonLatOf(h.x, h.z), back = projectLonLat(ll.lon, ll.lat);
-    if (!back || Math.hypot(back.x - h.x, back.z - h.z) > 0.01) return false;   // the test's own maths
+  check('typed coordinates are understood: the DMS form, decimals, and the iPhone-keyboard form with no symbols', (() => {
+    const near = (r, la, lo) => !!r && Math.abs(r.lat - la) < 2e-5 && Math.abs(r.lon - lo) < 2e-5;
+    const la = 38 + 51/60 + 17/3600, lo = -(104 + 52/60 + 8/3600);
+    return near(parseLatLon('38°51′17″ N  104°52′8″ W'), la, lo) &&
+      near(parseLatLon('38 51 17 N 104 52 8 W'), la, lo) && near(parseLatLon('38.85472, -104.86889'), 38.85472, -104.86889) &&
+      near(parseLatLon('W 104°52′8″ N 38°51′17″'), la, lo) &&
+      parseLatLon('hello') === null && parseLatLon('91 N 10 E') === null && parseLatLon('38 N 38 N') === null &&
+      fmtLatLonDMS(la, lo) === '38°51′17″ N  104°52′8″ W';
+  })());
+
+  check('pressing the location button with a fix on the map shows it on the card and loads nothing until Go to', (() => {
+    if (!H0) return false;
+    const before = getHereSubject(), was = probe().dogWorld;
+    withGeo(instantFix(LL0.lat, LL0.lon), () => press('mapLocate'));
+    const st = getLocateState();
+    const shown = !locCard().hidden && st.mode === 'fix' && cardText().includes(fmtLatLonDMS(LL0.lat, LL0.lon)) &&
+      !d.querySelector('#locGo').disabled;
+    return shown && getHereSubject() === before && dist(probe().dogWorld, was) < 0.01;
+  })());
+
+  check('Go to loads the nearest trail point into the start card, moves nobody, closes the card and keeps the blue dot', (() => {
+    if (!H0) return false;
     const was = probe().dogWorld;
-    withGeo({ watchPosition(ok) { ok({ coords:{ latitude:ll.lat, longitude:ll.lon, accuracy:5 } }); return 3; },
-              clearWatch() {} }, () => locateMe());
+    press('locGo');
     const subj = getHereSubject();
-    return !!subj && subj.kind === 'point' && Math.hypot(subj.pt.x - h.x, subj.pt.z - h.z) < 0.5 &&
-      dist(probe().dogWorld, was) < 0.01;
+    frame(1034);                          // draw a sheet frame so the dot is placed
+    const m = getUserMarker();
+    return !!subj && subj.kind === 'point' && Math.hypot(subj.pt.x - H0.x, subj.pt.z - H0.z) < 0.5 &&
+      locCard().hidden === true && dist(probe().dogWorld, was) < 0.01 && !!getUserFix() && !!m && m.kind === 'dot';
   })());
 
-  check('a fix outside the map is refused and loads nothing', (() => {
-    const c = getMapLatLon(), before = getHereSubject();
-    const r = useLocationFix({ coords:{ latitude:c.lat + 5, longitude:c.lon, accuracy:5 } });
-    return r === null && getHereSubject() === before;
+  check('a fix off the map says so on the card, Go to is disabled, and the edge arrow points toward it with the distance', (() => {
+    const c = getMapLatLon(); if (!c) return false;
+    const before = getHereSubject();
+    withGeo(instantFix(c.lat + 0.5, c.lon), () => press('mapLocate'));     // about 55 km north
+    const card = cardText(), off = /Off this map/.test(card) && d.querySelector('#locGo').disabled === true;
+    press('locGo');                                                         // disabled: must be inert
+    frame(1036);
+    const m = getUserMarker();
+    return off && getHereSubject() === before && !!m && m.kind === 'arrow' && m.off === true &&
+      Math.abs(m.ang + Math.PI/2) < 0.5 && m.distM > 30000 && m.distM < 57000 && /N of it/.test(card);
   })());
 
-  check('a point far from every path is not snapped onto one', (() => {
-    const heads = getTrailheads(); if (!heads.length) return false;
-    const h = heads[0], k = getMapScale(), before = getHereSubject();
-    const r = pickTrailPointNear(h.x + 5000*k, h.z + 5000*k, 25*k);
-    return !r.ok && r.d > 25*k && getHereSubject() === before;
+  check('the arrow geometry: inside is the point itself; outside is where the ray from the centre leaves the sheet', (() => {
+    const eq = (a, b) => Math.abs(a - b) < 1e-6;
+    const a = edgeMarker(50, 30, 10, 10, 110, 60), b = edgeMarker(60, -1000, 10, 10, 110, 60),
+          c = edgeMarker(1000, 35, 10, 10, 110, 60), e = edgeMarker(-40, -15, 10, 10, 110, 60);
+    return a.inside && eq(a.x, 50) && !b.inside && eq(b.x, 60) && eq(b.y, 10) && eq(b.ang, -Math.PI/2) &&
+      eq(c.x, 110) && eq(c.y, 35) && eq(c.ang, 0) && eq(e.x, 10) && eq(e.y, 10);
   })());
 
-  check('a denied location permission puts the button back and loads nothing', (() => {
-    const btn = d.querySelector('#mapLocate'); if (!btn) return false;
-    const before = getHereSubject(); let cleared = 0;
-    withGeo({ watchPosition(ok, fail) { fail({ code:1 }); return 7; }, clearWatch() { cleared++; } }, () => locateMe());
-    return !btn.disabled && !btn.classList.contains('busy') && cleared === 1 && getHereSubject() === before;
+  check('a refused permission is explained on the card, offers typing instead, and leaves no marker', (() => {
+    withGeo({ watchPosition(ok, fail) { fail({ code:1, message:'User denied Geolocation' }); return 7; }, clearWatch() {} }, () => press('mapLocate'));
+    const st = getLocateState();
+    return st.mode === 'none' && !locCard().hidden && /blocked/i.test(cardText()) && d.querySelector('#locEdit').hidden === false &&
+      d.querySelector('#locGo').disabled === true && getUserFix() === null;
   })());
 
-  /* Measured in REAL metres, against the equirectangular constants, and deliberately NOT
-     through lonLatOf above: that helper is built from projectLonLat itself, so a scale error
-     cancels out of it. Nor at the map centre alone -- the projection origin is the centre of
-     the network, where x = z = 0 and a stray multiply by the scale changes nothing. So walk
-     1 km east and 1 km south of the centre and ask how many world units that came to. */
+  check('typing a latitude and longitude lights Go to, shows the dot, and Go to loads the trail point nearest it', (() => {
+    if (!H0) return false;
+    const before = getHereSubject();
+    typeInto('not a place');
+    const refused = d.querySelector('#locGo').disabled === true && getUserFix() === null;
+    typeInto(fmtLatLonDMS(LL0.lat, LL0.lon));
+    const armed = d.querySelector('#locGo').disabled === false && !!getUserFix();
+    press('locGo');
+    const subj = getHereSubject();
+    // whole seconds are about 30 m on the ground, and the pick is the nearest trail point to that
+    return refused && armed && subj !== before && !!subj && subj.kind === 'point' &&
+      Math.hypot(subj.pt.x - H0.x, subj.pt.z - H0.z) < 60 * getMapScale() && locCard().hidden === true;
+  })());
+
+  check('Edit starts from the fix in degrees, minutes and seconds; Cancel puts the card and the marker away', (() => {
+    if (!H0) return false;
+    withGeo(instantFix(LL0.lat, LL0.lon), () => press('mapLocate'));
+    d.querySelector('#locInput').value = '';
+    press('locEditBtn');
+    const filled = d.querySelector('#locInput').value === fmtLatLonDMS(LL0.lat, LL0.lon) && getLocateState().mode === 'manual';
+    press('locCancel');
+    return filled && locCard().hidden === true && getUserFix() === null && getLocateState().mode === 'idle';
+  })());
+
+  check('an answer that arrives after Cancel is ignored', (() => {
+    if (!H0) return false;
+    let late = null;
+    withGeo({ watchPosition(ok) { late = ok; return 9; }, clearWatch() {} }, () => press('mapLocate'));
+    const searching = getLocateState().mode === 'finding';
+    press('locCancel');
+    late({ coords:{ latitude:LL0.lat, longitude:LL0.lon, accuracy:5 } });
+    return searching && getLocateState().mode === 'idle' && locCard().hidden === true && getUserFix() === null;
+  })());
+
+  check('letters typed into the coordinates box do not reach the walk (W, S and E would otherwise move and auto-walk the pup)', (() => {
+    let leaked = 0; const spy = () => { leaked++; };
+    window.addEventListener('keydown', spy);
+    const i = d.querySelector('#locInput');
+    for (const code of ['KeyW', 'KeyS', 'KeyE']) i.dispatchEvent(new window.KeyboardEvent('keydown', { bubbles:true, code, key:code.slice(3).toLowerCase() }));
+    window.removeEventListener('keydown', spy);
+    return leaked === 0;
+  })());
+
   check('1 km on the ground projects to 1 km x world scale, at every world scale', (() => {
     const keep = getMapScale(); let ok = true;
     for (const s of [1, 0.2]) {
@@ -1506,6 +1581,13 @@ async function assertAll(window, errors, stats) {
     }
     setMapScale(keep);
     return ok;
+  })());
+
+  check('a point far from every path is not snapped onto one', (() => {
+    const heads = getTrailheads(); if (!heads.length) return false;
+    const h = heads[0], k = getMapScale(), before = getHereSubject();
+    const r = pickTrailPointNear(h.x + 5000*k, h.z + 5000*k, 25*k);
+    return !r.ok && r.d > 25*k && getHereSubject() === before;
   })());
   if (priorSubject && priorSubject.kind === 'head') showHereHead(priorSubject.i);
 
