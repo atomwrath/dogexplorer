@@ -7,14 +7,16 @@
    appeared to happen. Anything this feature has to say is said HERE, in a card over the sheet.
 
    THE FLOW.  Press 📍  ->  the card opens and asks the device ("finding")  ->  the best fix it
-   gets is shown, with its accuracy and whether it is on this map  ("fix")  ->  Go to loads the
-   nearest trail point into the start card exactly as a tap on the sheet would, Edit lets the
-   numbers be typed instead, Cancel puts it all away. If the device cannot say where it is
+   gets is shown, with its accuracy and whether it is on this map  ("fix")  ->  Start here starts
+   the walk at the nearest trail point, Edit lets the numbers be typed instead, Cancel puts it
+   all away. If the device cannot say where it is
    (blocked, no signal, no GPS) the card says why and goes straight to typing ("none").
 
-   Go to LOADS, it does not start: the walk begins when "Start here" is pressed, like every other
-   pick on the sheet. The blue dot (or, off the map, the arrow on the sheet's edge) is minimap.js's;
-   this module only tells it where the walker is, in lon/lat.
+   Start here STARTS: it loads the nearest trail point exactly as a tap on the sheet would, then
+   calls the function main.js handed to initLocate -- the same one the sheet's own Start here
+   button calls -- so the pup is put on that point and the sheet closes, with no second press.
+   The blue dot (or, off the map, the arrow on the sheet's edge) is minimap.js's; this module
+   only tells it where the walker is, in lon/lat.
 
    watchPosition for a few seconds rather than getCurrentPosition: the first fix a phone returns
    is often a coarse cell/Wi-Fi guess and the good one arrives a little later. The best seen is
@@ -30,14 +32,15 @@ import { fmtFarDist, fmtLatLonDec, fmtLatLonDMS, geoCompass8, parseLatLon } from
 const LOC_GOOD_M = 15;          // accurate enough to stop waiting
 const LOC_FIRST_MS = 30000;     // for a first fix, prompt-reading time included
 const LOC_MORE_MS = 6000;       // for a better one, once there is a first
-const LOC_SNAP_MAX_M = 500;     // Go to will not reach further than this for a trail
+const LOC_SNAP_MAX_M = 500;     // Start here will not reach further than this for a trail
 
 let locMode = 'idle';           // 'idle' | 'finding' | 'fix' | 'none' | 'manual'
 let locSession = 0;             // bumped by every start and every cancel; stale callbacks compare against it
 let locWatchId = null, locTimer = null, locBest = null;
 let locFix = null;              // {lat, lon, acc} the card is currently about
-let locNote = '';               // why there is no fix, or what Go to could not do
+let locNote = '';               // why there is no fix, or what Start here could not do
 let locWired = false;
+let locStart = null;            // main.js's startFromHere: puts the pup on what the sheet has loaded
 
 const locEl = id => document.getElementById(id);
 function locStopWatch(){
@@ -200,8 +203,9 @@ function locOnInput(){
   locRender();
 }
 
-/* Go to: the nearest trail point to the place on the card goes into the start card, the way a
-   tap on the sheet puts it there. Refusals are said ON THE CARD, which stays up. */
+/* Start here: the nearest trail point to the place on the card is loaded the way a tap on the
+   sheet loads it, and then the walk is started on it. Refusals are said ON THE CARD, which
+   stays up. (Named locGo for the button's id, which the harness presses.) */
 function locGo(){
   let fix = locFix;
   if(locMode === 'manual' || locMode === 'none'){
@@ -213,7 +217,7 @@ function locGo(){
   if(!fix) return;
   const a = locAnalyse(fix);
   if(!a){ locNote = 'That place cannot be put on this map.'; locRender(); return; }
-  if(!a.inside){ locNote = 'That spot is off this map, so there is nowhere to go to.'; locRender(); return; }
+  if(!a.inside){ locNote = 'That spot is off this map, so there is nowhere to start.'; locRender(); return; }
   const k = Math.max(1e-6, getMapScale());
   const r = pickTrailPointNear(a.p.x, a.p.z, LOC_SNAP_MAX_M*k);
   if(!r.ok){
@@ -221,10 +225,12 @@ function locGo(){
     locRender(); return;
   }
   locClose(false);      // the dot stays on the sheet, beside the flag
+  if(locStart) locStart();
 }
 function locCancel(){ locClose(true); }
 
-function initLocate(){
+function initLocate(startFn){
+  if(typeof startFn === 'function') locStart = startFn;
   if(locWired) return;
   locWired = true;
   const on = (id, fn) => { const el = locEl(id); if(el) el.addEventListener('click', fn); };

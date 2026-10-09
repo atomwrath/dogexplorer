@@ -197,11 +197,22 @@
             </section>
           </aside>
           <div id="bigmapWrap">
-            <canvas id="bigmap"></canvas>
-            <div id="bigmapZoom">
-              <button class="btn small" id="bigZoomIn" title="Zoom in">➕</button>
-              <button class="btn small" id="bigZoomOut" title="Zoom out">➖</button>
-              <button class="btn small" id="mapLocate" title="Start where I am (uses this device's location)">📍</button>
+            <!-- The stage is the canvas and everything pinned to it: the start label (top left),
+                 Start here (bottom left) and the zoom/locate buttons (bottom right). Pinned to the
+                 stage rather than to the sheet, so on a phone, where the sheet scrolls and the
+                 Recordings card sits under the map, none of them ends up on top of that card. -->
+            <div id="bigmapStage">
+              <canvas id="bigmap"></canvas>
+              <!-- Where a walk would start: the name and the elevation, nothing else. Hidden when
+                   there is no start yet. -->
+              <div id="startNow" hidden></div>
+              <!-- Shown only while a trailhead or a tapped trail point is loaded. -->
+              <button class="btn primary" id="mapStartBtn" type="button" hidden>🚩 Start here</button>
+              <div id="bigmapZoom">
+                <button class="btn small" id="bigZoomIn" title="Zoom in">➕</button>
+                <button class="btn small" id="bigZoomOut" title="Zoom out">➖</button>
+                <button class="btn small" id="mapLocate" title="Start where I am (uses this device's location)">📍</button>
+              </div>
             </div>
             <!-- START WHERE I AM. Everything the 📍 button has to say is said here, over the sheet:
                  the old notes were drawn in the 3D world, behind it. See src/trails/locate.js. -->
@@ -215,54 +226,57 @@
                 <p class="hint" id="locParsed"></p>
               </div>
               <div class="loc-actions">
-                <button class="btn small primary" id="locGo" type="button">▶ Go to</button>
+                <button class="btn small primary" id="locGo" type="button">🚩 Start here</button>
                 <button class="btn small" id="locEditBtn" type="button">✏️ Edit</button>
                 <button class="btn small" id="locCancel" type="button">✕ Cancel</button>
               </div>
             </div>
             <div id="bigmapSide">
-              <div class="bm-card" id="hereCard">
-                <h3 id="hereTitle">🚩 Start here</h3>
-                <div id="hereIdle">
-                  <p class="hint" id="startNow">—</p>
-                  <p class="hint">Tap any trail on the map to start from that spot, a
-                    lettered badge for a trailhead, or a course below.</p>
+              <!-- Saved courses and saved spots are one thing to a walker -- what they recorded --
+                   so they are one card, and it folds (the same fold wiring as the settings
+                   sections: data-fold, .sect-head, .sect-toggle, .sect-body). -->
+              <section class="bm-card" id="recCard" data-fold="rec" data-fold-narrow-closed>
+                <div class="sect-head">
+                  <h3>⏺ Recordings</h3>
+                  <button class="sect-toggle" type="button" aria-expanded="true" aria-controls="recBody"></button>
                 </div>
-                <div id="hereStats" class="here-stats"></div>
-                <div id="hereActions" class="here-actions"></div>
-              </div>
-              <div class="bm-card">
-                <h3>🏁 Courses</h3>
-                <div id="courseList" class="course-list"></div>
-                <button class="btn small wide" id="recStartBtn">⏺ Record a path</button>
-                <div id="recSaveRow" class="rec-save">
-                  <input type="text" id="recName" maxlength="40" placeholder="Name this course"
-                         autocomplete="off" spellcheck="false">
-                  <div class="io-row">
-                    <button class="btn small" id="recSaveBtn">✓ Save</button>
-                    <button class="btn small" id="recDropBtn">✕ Discard</button>
+                <div class="sect-body" id="recBody">
+                  <div class="sub">🏁 Courses</div>
+                  <div id="courseList" class="course-list"></div>
+                  <!-- The course that is loaded: its facts, and Race / Forget. Empty (and hidden)
+                       until a course row is tapped. -->
+                  <div id="courseHere" class="course-here" hidden>
+                    <div class="sub" id="hereTitle"></div>
+                    <div id="hereStats" class="here-stats"></div>
+                    <div id="hereActions" class="here-actions"></div>
                   </div>
-                </div>
-                <p class="hint" id="recNote">Recording snaps to whatever trail you are on.
-                  Off-trail stretches are skipped.</p>
-                <div class="ghost-pick">
-                  <span>👻 Ghost</span>
-                  <div id="ghostMode" class="seg">
-                    <button data-ghost="best" class="on">🏆 Record</button>
-                    <button data-ghost="mine">⭐ Yours</button>
-                    <button data-ghost="off">Off</button>
+                  <button class="btn small wide" id="recStartBtn">⏺ Record a path</button>
+                  <div id="recSaveRow" class="rec-save">
+                    <input type="text" id="recName" maxlength="40" placeholder="Name this course"
+                           autocomplete="off" spellcheck="false">
+                    <div class="io-row">
+                      <button class="btn small" id="recSaveBtn">✓ Save</button>
+                      <button class="btn small" id="recDropBtn">✕ Discard</button>
+                    </div>
                   </div>
+                  <p class="hint" id="recNote">Recording snaps to whatever trail you are on.
+                    Off-trail stretches are skipped.</p>
+                  <div class="ghost-pick">
+                    <span>👻 Ghost</span>
+                    <div id="ghostMode" class="seg">
+                      <button data-ghost="best" class="on">🏆 Record</button>
+                      <button data-ghost="mine">⭐ Yours</button>
+                      <button data-ghost="off">Off</button>
+                    </div>
+                  </div>
+                  <p class="hint">Tap a course to see it on the map, then race or forget it above.</p>
+                  <div class="sub">📍 Saved spots</div>
+                  <div id="spotList" class="spot-list"></div>
+                  <button class="btn small wide" id="mapSaveSpotBtn">📍 Save where I am</button>
+                  <p class="hint">Tap a pin on the map or a row here to go back to it.</p>
                 </div>
-                <p class="hint">Tap a course to see it on the map, then race or forget it above.</p>
-              </div>
-              <div class="bm-card">
-                <h3>📍 Saved spots</h3>
-                <div id="spotList" class="spot-list"></div>
-                <button class="btn small wide" id="mapSaveSpotBtn">📍 Save where I am</button>
-                <p class="hint">Tap a pin on the map or a row here to go back to it.</p>
-              </div>
+              </section>
             </div>
-            <p class="hint bigmap-hint">Drag to pan, scroll or ➕/➖ to zoom.</p>
           </div>
         </div>
       </div>

@@ -1477,7 +1477,12 @@ async function assertAll(window, errors, stats) {
       fmtLatLonDMS(la, lo) === '38°51′17″ N  104°52′8″ W';
   })());
 
-  check('pressing the location button with a fix on the map shows it on the card and loads nothing until Go to', (() => {
+  check('the card\'s button says Start here, not Go to', (() => {
+    const b = d.querySelector('#locGo');
+    return !!b && /Start here/.test(b.textContent) && !/Go to/i.test(b.textContent);
+  })());
+
+  check('pressing the location button with a fix on the map shows it on the card and moves nobody until Start here', (() => {
     if (!H0) return false;
     const before = getHereSubject(), was = probe().dogWorld;
     withGeo(instantFix(LL0.lat, LL0.lon), () => press('mapLocate'));
@@ -1487,26 +1492,34 @@ async function assertAll(window, errors, stats) {
     return shown && getHereSubject() === before && dist(probe().dogWorld, was) < 0.01;
   })());
 
-  check('Go to loads the nearest trail point into the start card, moves nobody, closes the card and keeps the blue dot', (() => {
+  let __gpsNote = '';
+  check('Start here on the card puts the pup on the nearest trail point at once, closes the card and the sheet, and keeps the fix on the sheet', (() => {
     if (!H0) return false;
-    const was = probe().dogWorld;
+    showPane('map');
     press('locGo');
-    const subj = getHereSubject();
-    frame(1034);                          // draw a sheet frame so the dot is placed
-    const m = getUserMarker();
-    return !!subj && subj.kind === 'point' && Math.hypot(subj.pt.x - H0.x, subj.pt.z - H0.z) < 0.5 &&
-      locCard().hidden === true && dist(probe().dogWorld, was) < 0.01 && !!getUserFix() && !!m && m.kind === 'dot';
-  })());
+    const subj = getHereSubject(), tp = getTrailPlayer();
+    const started = !!subj && subj.kind === 'point' && Math.hypot(tp.x - subj.pt.x, tp.z - subj.pt.z) < 0.05 &&
+      Math.hypot(tp.x - H0.x, tp.z - H0.z) < 0.5 && tp.dist === 0;
+    __gpsNote = `${subj ? subj.kind : 'nothing loaded'}, pup ${Math.hypot(tp.x - H0.x, tp.z - H0.z).toFixed(2)}u from the fix, pane ${getPane()}`;
+    const closed = locCard().hidden === true && getPane() === null;
+    const f = getUserFix(), kept = !!f && Math.abs(f.lat - LL0.lat) < 1e-9 && Math.abs(f.lon - LL0.lon) < 1e-9;
+    showPane('map');                      // the marker is the sheet's: reopen it and draw a frame so it is placed
+    frame(1034);
+    const m = getUserMarker();            // a dot where the view shows it, the edge arrow where it has been panned off
+    __gpsNote += `; started ${started}, closed ${closed}, fix kept ${kept}, marker ${m ? m.kind : 'none'}`;
+    return started && closed && kept && !!m;
+  })(), () => __gpsNote);
 
-  check('a fix off the map says so on the card, Go to is disabled, and the edge arrow points toward it with the distance', (() => {
+  check('a fix off the map says so on the card, Start here is disabled and starts nobody, and the edge arrow points toward it with the distance', (() => {
     const c = getMapLatLon(); if (!c) return false;
-    const before = getHereSubject();
+    const before = getHereSubject(), was = probe().dogWorld;
     withGeo(instantFix(c.lat + 0.5, c.lon), () => press('mapLocate'));     // about 55 km north
     const card = cardText(), off = /Off this map/.test(card) && d.querySelector('#locGo').disabled === true;
     press('locGo');                                                         // disabled: must be inert
     frame(1036);
     const m = getUserMarker();
-    return off && getHereSubject() === before && !!m && m.kind === 'arrow' && m.off === true &&
+    return off && getHereSubject() === before && dist(probe().dogWorld, was) < 0.01 && getPane() === 'map' &&
+      !!m && m.kind === 'arrow' && m.off === true &&
       Math.abs(m.ang + Math.PI/2) < 0.5 && m.distM > 30000 && m.distM < 57000 && /N of it/.test(card);
   })());
 
@@ -1525,7 +1538,7 @@ async function assertAll(window, errors, stats) {
       d.querySelector('#locGo').disabled === true && getUserFix() === null;
   })());
 
-  check('typing a latitude and longitude lights Go to, shows the dot, and Go to loads the trail point nearest it', (() => {
+  check('typing a latitude and longitude lights Start here, shows the dot, and Start here puts the pup on the trail point nearest it', (() => {
     if (!H0) return false;
     const before = getHereSubject();
     typeInto('not a place');
@@ -1533,10 +1546,13 @@ async function assertAll(window, errors, stats) {
     typeInto(fmtLatLonDMS(LL0.lat, LL0.lon));
     const armed = d.querySelector('#locGo').disabled === false && !!getUserFix();
     press('locGo');
-    const subj = getHereSubject();
+    const subj = getHereSubject(), tp = getTrailPlayer();
     // whole seconds are about 30 m on the ground, and the pick is the nearest trail point to that
-    return refused && armed && subj !== before && !!subj && subj.kind === 'point' &&
-      Math.hypot(subj.pt.x - H0.x, subj.pt.z - H0.z) < 60 * getMapScale() && locCard().hidden === true;
+    const ok = refused && armed && subj !== before && !!subj && subj.kind === 'point' &&
+      Math.hypot(subj.pt.x - H0.x, subj.pt.z - H0.z) < 60 * getMapScale() && locCard().hidden === true &&
+      Math.hypot(tp.x - subj.pt.x, tp.z - subj.pt.z) < 0.05 && getPane() === null;
+    showPane('map');                      // later checks work on the open sheet
+    return ok;
   })());
 
   check('Edit starts from the fix in degrees, minutes and seconds; Cancel puts the card and the marker away', (() => {
@@ -1592,16 +1608,35 @@ async function assertAll(window, errors, stats) {
   if (priorSubject && priorSubject.kind === 'head') showHereHead(priorSubject.i);
 
 
-  check('the loaded trailhead card carries the button that does move you', (() => {
+  check('the map sheet has no drag hint and no start box; Start here lives on the map itself', (() =>
+    !d.querySelector('.bigmap-hint') && !d.querySelector('#hereCard') &&
+    !!d.querySelector('#bigmapStage #mapStartBtn') && !!d.querySelector('#bigmapStage #startNow') &&
+    !/Drag to pan/.test(d.querySelector('#bigmapWrap').textContent))());
+
+  check('the loaded trailhead shows Start here on the map, and pressing it is what moves you', (() => {
     const heads = getTrailheads();
     const subj = getHereSubject();
     if (!subj || subj.kind !== 'head') return false;
     const to = subj.i;
-    const btn = d.querySelector('#hereActions .btn');
-    if (!btn) return false;
+    const btn = d.querySelector('#mapStartBtn');
+    if (!btn || btn.hidden || heads.length < 2) return false;
+    placeAtHead((to + 1) % heads.length);          // somewhere else, so only the button can put the pup on `to`
+    showPane('map');
+    const away = dist(probe().dogWorld, heads[to]) > 0.5;
     btn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
     const s3 = probe();
-    return s3.startHead === to && getPane() === null && dist(s3.dogWorld, heads[to]) < 0.5;
+    return away && s3.startHead === to && getPane() === null && dist(s3.dogWorld, heads[to]) < 0.5;
+  })());
+
+  check('Start here is only offered while a trailhead or a trail point is loaded', (() => {
+    const btn = d.querySelector('#mapStartBtn');
+    if (!btn) return false;
+    showHereIdle();
+    const idle = btn.hidden === true;
+    showHereHead(0);
+    const head = btn.hidden === false;
+    showHereIdle();
+    return idle && head && btn.hidden === true;
   })());
 
   /* START ANYWHERE ON A TRAIL. A tap on the sheet that is not a pin and not a badge snaps
@@ -1648,7 +1683,8 @@ async function assertAll(window, errors, stats) {
     __ptNote = subj ? `${subj.kind} on ${subj.pt ? subj.pt.name : '?'}` : 'nothing loaded';
     return hit && subj && subj.kind === 'point' && subj.pt.name === target.e.name &&
       pp && Math.hypot(pp.x - target.x, pp.z - target.z) < 1.5 &&
-      /On /.test(txt('#hereTitle')) &&
+      /^\u{1F4CD} On /u.test(txt('#startNow')) && d.querySelector('#startNow').hidden === false &&
+      d.querySelector('#mapStartBtn').hidden === false &&
       dist(probe().dogWorld, was) < 0.01 && getPane() === 'map';
   })(), () => __ptNote);
 
@@ -1668,8 +1704,8 @@ async function assertAll(window, errors, stats) {
     const a = e.pts[0], b = e.pts[1];
     const pt = { x: (a[0] + b[0]) / 2, z: (a[1] + b[1]) / 2, yaw: Math.atan2(-(b[1] - a[1]), b[0] - a[0]), edge: e };
     showHerePoint(pt);
-    const btn = d.querySelector('#hereActions .btn.primary');
-    if (!btn) return false;
+    const btn = d.querySelector('#mapStartBtn');
+    if (!btn || btn.hidden) return false;
     btn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
     const tp = getTrailPlayer();
     const sp = probe();
@@ -1682,15 +1718,23 @@ async function assertAll(window, errors, stats) {
     return ok && getPickedPoint() === null && mapSelectedHead() === getStartHead();
   })());
 
-  check('the trailhead card reports where it is and what meets it', (() => {
+  check('a loaded trailhead is named at the top left of the map by its letter, its name and its elevation, and nothing else', (() => {
     showPane('map');
     showHereHead(0);
-    const rows = [...d.querySelectorAll('#hereStats .hs-row')]
-      .map(r => r.children[0].textContent + '=' + r.children[1].textContent);
-    __hereNote = rows.join(' | ');
-    return rows.length >= 2 && /Trail=/.test(__hereNote) && /From you=/.test(__hereNote) &&
-      d.querySelector('#hereStats').classList.contains('on');
+    const lab = d.querySelector('#startNow');
+    __hereNote = lab.textContent;
+    return lab.hidden === false && /^[A-Z0-9]+ \u00b7 .+ \u00b7 [\d,]+ ft$/.test(lab.textContent) &&
+      lab.textContent.includes(getTrailheads()[0].name) &&
+      !d.querySelector('#hereStats').classList.contains('on') && d.querySelector('#courseHere').hidden === true;
   })(), () => __hereNote);
+
+  check('with nothing loaded the label is the start the walk is already using', (() => {
+    showHereIdle();
+    const lab = d.querySelector('#startNow');
+    const i = getStartHead();
+    return lab.hidden === false && lab.textContent.startsWith(headLetter(i) + ' \u00b7 ') &&
+      lab.textContent.includes(getTrailheads()[i].name);
+  })());
 
   check('Escape closes the map before it quits the walk', (() => {
     showPane('map');
@@ -3129,9 +3173,38 @@ async function assertAll(window, errors, stats) {
       return gotM > walkedM * 0.85 && gotM < walkedM * 1.15;
     })(), () => __zigNote);
 
+    /* ---- the Recordings card: courses and saved spots as ONE card that folds ---- */
+    const recCard = d.querySelector('#recCard'), recBody = d.querySelector('#recBody');
+    const recToggle = recCard && recCard.querySelector('.sect-toggle');
+    const tap = el => el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    check('courses and saved spots are one Recordings card, and the map sheet has no other side card', !!recCard &&
+      n('#bigmapSide .bm-card') === 1 && recCard.contains(d.querySelector('#courseList')) &&
+      recCard.contains(d.querySelector('#spotList')) && recCard.contains(d.querySelector('#recStartBtn')) &&
+      recCard.contains(d.querySelector('#mapSaveSpotBtn')) && /Recordings/.test(recCard.querySelector('h3').textContent));
+    check('the Recordings caret folds the card and unfolds it again', (() => {
+      if (!recToggle || !recBody) return false;
+      const open0 = !recBody.hidden && recToggle.getAttribute('aria-expanded') === 'true';
+      tap(recToggle);
+      const folded = recBody.hidden === true && recToggle.getAttribute('aria-expanded') === 'false';
+      tap(recCard.querySelector('.sect-head'));            // the whole heading row is the target
+      return open0 && folded && recBody.hidden === false && recToggle.getAttribute('aria-expanded') === 'true';
+    })());
+
+    check('on a phone-sized sheet the Recordings card starts folded unless the walker has chosen otherwise; settings sections never do', (() => {
+      const set = d.querySelector('.sect[data-fold="pup"]');
+      return !!recCard && !!set &&
+        foldStartsOpen(recCard, null, true) === false && foldStartsOpen(recCard, null, false) === true &&
+        foldStartsOpen(recCard, '1', true) === true && foldStartsOpen(recCard, '0', false) === false &&
+        foldStartsOpen(set, null, true) === true;
+    })());
+
+    tap(recToggle);                                       // fold it, then stop: the trace must open it
+    const foldedBeforeStop = recBody.hidden === true;
     const pending = stopRecording();
     check('stopping hands the trace over to be named, on the map sheet',
       !!pending && !getRecState().on && !!getPendingRecording() && getPane() === 'map');
+    check('a trace waiting for a name opens a folded Recordings card, so the name field is never hidden',
+      foldedBeforeStop && recBody.hidden === false && d.querySelector('#recSaveRow').classList.contains('on'));
 
     const course = saveRecording('Test Course');
     check('saving files the course', !!course && getCourses().length === 1,
@@ -3139,6 +3212,16 @@ async function assertAll(window, errors, stats) {
     check('the map sheet lists it, already loaded into the details card with a race control',
       n('#courseList .course-row') === 1 &&
       [...d.querySelectorAll('#hereActions .btn')].some(b => /Race/.test(b.textContent)));
+    check('a loaded course shows its details inside the Recordings card, opening it, and takes the Start here button away', (() => {
+      showHereHead(0);                                     // a trailhead loaded: Start here is up
+      const up = d.querySelector('#mapStartBtn').hidden === false;
+      tap(recToggle);                                      // fold the card, then tap the course's row
+      const folded = recBody.hidden === true;
+      tap(d.querySelector('#courseList .cs-name'));        // also puts the course back on the map, as it was
+      return up && folded && recBody.hidden === false && d.querySelector('#courseHere').hidden === false &&
+        recBody.contains(d.querySelector('#courseHere')) && txt('#hereTitle').includes('Test Course') &&
+        d.querySelector('#mapStartBtn').hidden === true;
+    })());
 
     /* The reason courses.js stores real metres, same argument spots.js makes: world scale
        moves every coordinate, and a course that did not move with it would be raced

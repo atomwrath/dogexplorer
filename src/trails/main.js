@@ -1086,6 +1086,7 @@ function renderCourseUI(){
   }
   const saveRow = $('#recSaveRow');
   if(saveRow) saveRow.classList.toggle('on', !!recPending);
+  if(recPending) openRecordings();   // the name field is in the card, which may be folded
   const nameInput = $('#recName');
   if(nameInput && recPending && nameInput.value !== recPending.name && !nameInput.dataset.touched)
     nameInput.value = recPending.name;
@@ -3652,18 +3653,27 @@ function mapSelectedHead(){
 }
 
 function hereEl(){
-  return {title:$('#hereTitle'), idle:$('#hereIdle'),
+  return {box:$('#courseHere'), title:$('#hereTitle'),
           stats:$('#hereStats'), actions:$('#hereActions')};
 }
 
-/* Back to the idle state: the current start point and the hint about tapping things. */
-function showHereIdle(){
-  hereSubject = null;
+/* What the loaded subject shows, and where. A trailhead or a tapped trail point shows as the
+   label at the top left of the map and the Start here button at its bottom left (both
+   drawn by renderStartPicker); only a COURSE has a details block of its own, under the
+   course list in the Recordings card. So loading a trailhead or a point empties that block,
+   and loading nothing does too. */
+function clearHereCourse(){
   const el = hereEl();
-  if(el.title) el.title.textContent = '\u{1F6A9} Start here';
-  if(el.idle) el.idle.classList.remove('off');
+  if(el.box) el.box.hidden = true;
+  if(el.title) el.title.textContent = '';
   if(el.stats){ el.stats.classList.remove('on'); el.stats.innerHTML = ''; }
   if(el.actions){ el.actions.classList.remove('on'); el.actions.innerHTML = ''; }
+}
+
+/* Back to the idle state: nothing loaded, so the label is the current start point. */
+function showHereIdle(){
+  hereSubject = null;
+  clearHereCourse();
   setPickedPoint(liveStartPoint());
   renderStartPicker();
 }
@@ -3694,7 +3704,9 @@ function hereBtn(actions, label, primary, fn){
   return b;
 }
 
-/* --- a trailhead --------------------------------------------------------------------- */
+/* --- a trailhead ---------------------------------------------------------------------- */
+/* Picking a trailhead on the sheet LOADS it: the ring moves, the label at the top left names
+   it, and the Start here button appears. Nobody moves until that button is pressed. */
 function showHereHead(i){
   const heads = getTrailheads();
   if(!heads.length || i == null || i < 0 || i >= heads.length){ showHereIdle(); return; }
@@ -3705,53 +3717,14 @@ function showHereHead(i){
      with it. */
   if(previewCourse){ previewCourse = null; renderCourseList(); syncCourseOverlay(); }
   setPickedPoint(null);
-  const h = heads[i];
-  const el = hereEl();
-  if(el.idle) el.idle.classList.add('off');
-  if(el.title) el.title.textContent = '\u{1F6A9} ' + headLetter(i) + ' \u00b7 ' + h.name;
-  const stats = el.stats, actions = el.actions;
-  if(!stats || !actions) return;
-  stats.innerHTML = ''; actions.innerHTML = '';
-
-  hereRow(stats, 'Trail', h.name + ' (' + h.where + ' end)');
-  const ft = elevationFt(h.x, h.z);
-  if(ft != null) hereRow(stats, 'Elevation', Math.round(ft).toLocaleString() + ' ft');
-  /* How far away it is, and in a straight line -- said so explicitly, because on a trail
-     network the walk is always longer and a number that looked like walking distance would
-     be wrong by a factor that varies with the terrain. */
-  const k = Math.max(1e-6, getMapScale());
-  const away = Math.hypot(h.x - player.x, h.z - player.z)/k;
-  hereRow(stats, 'From you', fmtCourseLen(away) + ' as the crow flies');
-
-  /* Which trails actually meet here. A trailhead is a dead end by definition, so this is
-     usually one -- but junction trailheads exist, and "three trails start here" is the
-     single most useful thing to know before committing a walk to it. */
-  const g = getGraph();
-  if(g){
-    const names = new Set();
-    g.edges.forEach(e=>{
-      if(!e.named) return;
-      const pts = e.pts || [];
-      for(const q of [pts[0], pts[pts.length-1]]){
-        if(q && Math.hypot(q[0]-h.x, q[1]-h.z) < 2.0) names.add(e.name);
-      }
-    });
-    if(names.size) hereNote(stats, [...names].join(' \u00b7 '));
-  }
-  stats.classList.add('on');
-
-  hereBtn(actions, '\u{1F6A9} Start here', true, ()=>{
-    placeAtHead(i);
-    if(!playing) enterPlay();
-    showPane(null);
-  });
-  actions.classList.add('on');
+  clearHereCourse();
+  renderStartPicker();
 }
 
 /* --- any point on a trail -------------------------------------------------------------- */
-/* Same three slots as a trailhead, so the card reads the same whichever you tapped. `pt`
-   comes from minimap.js: {x, z, yaw, edge}. The edge is read for its name and route here
-   and then dropped -- the graph is rebuilt on every rescale and a held edge would go stale. */
+/* Same contract as a trailhead. `pt` comes from minimap.js: {x, z, yaw, edge}. The edge is
+   read for its name and route here and then dropped -- the graph is rebuilt on every
+   rescale and a held edge would go stale. */
 function showHerePoint(pt){
   if(!pt || !isFinite(pt.x) || !isFinite(pt.z)){ showHereIdle(); return; }
   const e = pt.edge || null;
@@ -3761,28 +3734,23 @@ function showHerePoint(pt){
   hereSubject = {kind:'point', pt:p};
   if(previewCourse){ previewCourse = null; renderCourseList(); syncCourseOverlay(); }
   setPickedPoint(p);
-  const el = hereEl();
-  if(el.idle) el.idle.classList.add('off');
-  if(el.title) el.title.textContent = '\u{1F4CD} On ' + p.name;
-  const stats = el.stats, actions = el.actions;
-  if(!stats || !actions) return;
-  stats.innerHTML = ''; actions.innerHTML = '';
+  clearHereCourse();
+  renderStartPicker();
+}
 
-  const kindWord = {road:'Road', dirtroad:'Dirt road', track:'Track', rail:'Railway'}[p.kind] || 'Trail';
-  hereRow(stats, kindWord, p.name + ' (' + compass(p.x, p.z) + ')');
-  const ft = elevationFt(p.x, p.z);
-  if(ft != null) hereRow(stats, 'Elevation', Math.round(ft).toLocaleString() + ' ft');
-  const k = Math.max(1e-6, getMapScale());
-  hereRow(stats, 'From you', fmtCourseLen(Math.hypot(p.x - player.x, p.z - player.z)/k) + ' as the crow flies');
-  if(!p.named) hereNote(stats, 'The map file gives this one no name.');
-  stats.classList.add('on');
-
-  hereBtn(actions, '\u{1F6A9} Start here', true, ()=>{
-    placeAtPoint(p);
-    if(!playing) enterPlay();
-    showPane(null);
-  });
-  actions.classList.add('on');
+/* START A WALK FROM WHAT IS LOADED. The one door from the map sheet into a walk: the Start here
+   button on the sheet, and the Start here button on the 📍 card (locate.js, which is handed
+   this function by initLocate). Answers whether it started anything -- a course, or nothing,
+   being loaded is not a place to start. */
+function startFromHere(){
+  const subj = hereSubject;
+  if(!subj) return false;
+  if(subj.kind === 'head') placeAtHead(subj.i);
+  else if(subj.kind === 'point') placeAtPoint(subj.pt);
+  else return false;
+  if(!playing) enterPlay();
+  showPane(null);
+  return true;
 }
 
 /* --- a course ------------------------------------------------------------------------- */
@@ -3791,7 +3759,8 @@ function showHereCourse(c){
   hereSubject = {kind:'course', c};
   setPickedPoint(null);
   const el = hereEl();
-  if(el.idle) el.idle.classList.add('off');
+  if(el.box) el.box.hidden = false;
+  openRecordings();                  // the details are in the card; a folded card would hide them
   if(el.title) el.title.textContent = '\u{1F3C1} ' + c.name;
   const stats = el.stats, actions = el.actions;
   if(!stats || !actions) return;
@@ -3844,6 +3813,7 @@ function showHereCourse(c){
     syncCourseOverlay();
   });
   actions.classList.add('on');
+  renderStartPicker();               // a course is not a place to start: the button goes
 }
 
 /* Re-render whatever is loaded, after something it displays has changed underneath it --
@@ -3862,17 +3832,42 @@ function refreshHere(){
   }
 }
 
-function renderStartPicker(){
-  const now=$('#startNow');
-  const heads=getTrailheads();
-  if(!heads.length){
-    if(now) now.textContent='— load a map first —';
-    return;
+/* The label at the top left of the map, and the Start here button at the bottom left.
+
+   THE LABEL says where a walk would start, in a name and an elevation: the trailhead or trail
+   point that is loaded, and when nothing is loaded the start the walk is already using. It is
+   hidden when there is none. THE BUTTON is there only while a trailhead or a trail point is
+   loaded -- idle has nothing to commit, and a loaded course has Race this instead. */
+function startLabelText(){
+  const heads = getTrailheads();
+  let x = null, z = null, name = '', lead = '';
+  if(hereSubject && hereSubject.kind === 'head' && heads[hereSubject.i]){
+    const h = heads[hereSubject.i];
+    x = h.x; z = h.z; name = h.name; lead = headLetter(hereSubject.i) + ' \u00b7 ';
+  }else if(hereSubject && hereSubject.kind === 'point'){
+    const p = hereSubject.pt;
+    x = p.x; z = p.z; name = p.name; lead = '\u{1F4CD} On ';
+  }else{
+    const sp = liveStartPoint();
+    if(sp){ x = sp.x; z = sp.z; name = sp.name; lead = '\u{1F4CD} On '; }
+    else if(heads.length){
+      const i = getStartHead(), h = heads[i];
+      if(h){ x = h.x; z = h.z; name = h.name; lead = headLetter(i) + ' \u00b7 '; }
+    }
   }
-  const sp=liveStartPoint();
-  if(sp){ if(now) now.textContent = '\u{1F4CD} On '+sp.name+' ('+compass(sp.x, sp.z)+')'; return; }
-  const i=getStartHead(), h=heads[i];
-  if(now && h) now.textContent = headLetter(i)+' · '+h.name+' ('+h.where+' end)';
+  if(x === null) return '';
+  const ft = elevationFt(x, z);
+  return lead + name + (ft == null ? '' : ' \u00b7 ' + Math.round(ft).toLocaleString() + ' ft');
+}
+function renderStartPicker(){
+  const now = $('#startNow');
+  if(now){
+    const t = startLabelText();
+    now.textContent = t;
+    now.hidden = !t;
+  }
+  const btn = $('#mapStartBtn');
+  if(btn) btn.hidden = !(hereSubject && (hereSubject.kind === 'head' || hereSubject.kind === 'point'));
 }
 
 /* Saved pins, as rows that mirror the badges on the sheet: same order, same numbers. The
@@ -4172,7 +4167,7 @@ $('#saveMapBtn')?.addEventListener('click', saveMapFile);
 updateEditUI();
 
 /* START WHERE I AM: the sheet's 📍 button and the card it opens. See locate.js. */
-initLocate();
+initLocate(startFromHere);
 
 async function boot(bundleUrl){
   loadKennel();
@@ -4190,8 +4185,9 @@ async function boot(bundleUrl){
      That held while a trailhead was just a letter. It stopped holding once there was
      anything worth reading about one: you cannot read the elevation of a place you have
      already been moved to, and a walk you did not mean to start costs you the one you were
-     already in. So a trailhead pick now fills the details card and the card carries the
-     button.
+     already in. So a trailhead pick now loads the label at the top left of the map and the
+     Start here button beside the bottom-left corner carries the start. The 📍 card's own
+     Start here (locate.js) is the other door, and it goes through the same startFromHere.
 
      Saved pins still go straight there, and that asymmetry is deliberate rather than an
      oversight: a pin is a place YOU chose and named, so there is nothing to tell you about
@@ -4311,6 +4307,12 @@ $('#mapList')?.addEventListener('change', async e=>{
    regardless, or collapsing becomes a trap. State is remembered per browser the same way
    sound/detail/sky are; the map keeps the key it has always used. */
 const foldKey = name => name === 'map' ? 'pupMapSectOpen' : 'pupFold_' + name;
+/* Open the Recordings card without remembering it as the walker's choice: something in it needs
+   to be seen (a trace to name, a course's details), which is not a preference. */
+function openRecordings(){
+  const sect = $('#recCard');
+  if(sect) setFoldOpen(sect, true, false);
+}
 function setFoldOpen(sect, open, remember){
   const body = sect.querySelector('.sect-body'), btn = sect.querySelector('.sect-toggle');
   if(!body || !btn) return;
@@ -4319,14 +4321,22 @@ function setFoldOpen(sect, open, remember){
   btn.textContent = open ? '▾' : '▸';
   btn.title = open ? 'Collapse' : 'Expand';
   btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-  const what = ((sect.querySelector('h2') || {}).textContent || 'section').replace(/^\W+/, '').trim();
+  const what = ((sect.querySelector('h2, h3') || {}).textContent || 'section').replace(/^\W+/, '').trim();
   btn.setAttribute('aria-label', (open ? 'Collapse ' : 'Expand ') + what);
   if(remember){ try{ localStorage.setItem(foldKey(sect.dataset.fold), open ? '1' : '0'); }catch(err){} }
 }
-document.querySelectorAll('.sect[data-fold]').forEach(sect=>{
-  let open = true;
-  try{ open = localStorage.getItem(foldKey(sect.dataset.fold)) !== '0'; }catch(err){}
-  setFoldOpen(sect, open, false);
+/* The Recordings card on the map sheet folds the same way (it is a [data-fold] too). On a
+   phone-sized screen it starts folded, because the map is what the sheet is for and the card
+   sits under it; a walker's own choice, once made, wins. */
+function foldStartsOpen(sect, kept, narrow){
+  if(kept !== null && kept !== undefined) return kept !== '0';
+  return !(sect.hasAttribute('data-fold-narrow-closed') && narrow);
+}
+document.querySelectorAll('[data-fold]').forEach(sect=>{
+  let kept = null;
+  try{ kept = localStorage.getItem(foldKey(sect.dataset.fold)); }catch(err){}
+  const narrow = !!(window.matchMedia && window.matchMedia('(max-width:900px)').matches);
+  setFoldOpen(sect, foldStartsOpen(sect, kept, narrow), false);
   const head = sect.querySelector('.sect-head');
   if(head) head.addEventListener('click', ()=>{
     const body = sect.querySelector('.sect-body');
@@ -4344,6 +4354,7 @@ tapBtn($('#autoBtn'), toggleAutoWalk);
 $('#barkBtn')?.addEventListener('click', doBark);
 $('#saveSpotBtn')?.addEventListener('click', saveHere);
 $('#mapSaveSpotBtn')?.addEventListener('click', ()=>{ saveHere(); });
+$('#mapStartBtn')?.addEventListener('click', ()=>{ startFromHere(); });
 
 /* The record control is ONE button with two jobs, because "record" and "stop" are the same
    decision seen from either side of it and two buttons would leave one of them dead at any
@@ -4498,7 +4509,8 @@ export { boot, enterPlay, exitPlay, placeAtHead, placeAt, placeAtSpot, saveHere,
          avatarName, raceFrozen, isRaceCardOpen, closeRaceCard, syncCourseOverlay,
          getRecState, getRaceState, getPendingRecording, getPreviewCourse,
          getGhostMode, setGhostMode, armGhost, fmtRelief, courseElevAt, worldElevAt,
-         showHereHead, showHereCourse, showHereIdle, showHerePoint, placeAtPoint, refreshHere, getHereSubject };
+         showHereHead, showHereCourse, showHereIdle, showHerePoint, placeAtPoint, refreshHere, getHereSubject,
+         startFromHere };
 
 // auto-boot from a `?world=` query param, or wait for the panel's own load button
 {

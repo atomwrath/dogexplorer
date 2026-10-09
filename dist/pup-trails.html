@@ -365,8 +365,12 @@ body.touch.play:not([data-pane]):not(.arrived):not(.racedone) #autoBtn{display:f
 #bigmapWrap{position:absolute;inset:0;display:none;background:var(--cream);
   padding:12px;box-sizing:border-box;}
 body[data-pane="map"] #bigmapWrap{display:block;}
-#bigmap{width:100%;height:100%;display:block;border:4px solid var(--ink);border-radius:16px;
-  background:#e9dcbe;box-sizing:border-box;cursor:grab;touch-action:none;}
+/* The stage is what the canvas and the things pinned to it (start label, Start here, zoom and
+   locate) are laid out in; see the note in trails/index.html. The canvas fills it from the
+   inside, so it needs no height from its parent. */
+#bigmapStage{position:relative;width:100%;height:100%;}
+#bigmap{position:absolute;inset:0;width:100%;height:100%;display:block;border:4px solid var(--ink);
+  border-radius:16px;background:#e9dcbe;box-sizing:border-box;cursor:grab;touch-action:none;}
 #bigmap:active{cursor:grabbing;}
 /* The sheet is now a picker for two kinds of place -- trailheads and saved pins -- so it
    carries its own side card rather than borrowing space in the left panel, which is
@@ -377,7 +381,22 @@ body[data-pane="map"] #bigmapWrap{display:block;}
 .bm-card{background:var(--card);border:3px solid var(--ink);border-radius:14px;padding:10px 12px;}
 .bm-card h3{margin:0 0 6px;font-size:14px;}
 .bm-card .hint{margin:0 0 8px;}
-#startNow{font-weight:bold;opacity:.85;}
+/* Where a walk would start, top left of the map: a name and an elevation. It never takes a tap
+   (the map under it does), and it ends before the side card on a wide sheet. */
+#startNow{position:absolute;top:10px;left:10px;z-index:2;max-width:calc(100% - 270px);box-sizing:border-box;
+  background:#fff8e6;border:3px solid var(--ink);border-radius:12px;padding:6px 11px;
+  font-size:12.5px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  pointer-events:none;}
+#startNow[hidden]{display:none;}
+/* Start here, bottom left of the map. [hidden] is declared outright because .btn's display
+   would otherwise win over the attribute. */
+#mapStartBtn{position:absolute;left:12px;bottom:12px;z-index:2;min-height:44px;padding:10px 18px;
+  font-size:16px;box-shadow:0 4px 0 rgba(61,42,32,.28);}
+#mapStartBtn[hidden]{display:none;}
+/* The recordings card: one fold holding courses and saved spots. */
+#recCard .sect-head h3{margin:0;}
+#recCard .sub{margin:10px 0 4px;}
+#recCard .sub:first-child{margin-top:0;}
 .spot-list{display:flex;flex-direction:column;gap:5px;margin-bottom:8px;}
 .spot-list .none{font-size:11.5px;opacity:.6;}
 .spot-row{display:flex;align-items:center;gap:7px;border:3px solid var(--ink);border-radius:10px;
@@ -391,7 +410,7 @@ body[data-pane="map"] #bigmapWrap{display:block;}
 .spot-row .sp-x{flex:none;border:none;background:none;font-family:inherit;font-weight:bold;
   cursor:pointer;opacity:.5;font-size:13px;line-height:1;padding:0 2px;}
 .spot-row .sp-x:hover{opacity:1;}
-#bigmapZoom{position:absolute;bottom:24px;right:24px;display:flex;flex-direction:row;gap:8px;}
+#bigmapZoom{position:absolute;bottom:12px;right:12px;display:flex;flex-direction:row;gap:8px;}
 /* The locate card (src/trails/locate.js): over the TOP of the sheet, so a phone's keyboard, which
    rises from the bottom, never covers the box being typed in. fixed, not absolute: on a phone the
    sheet scrolls, and the card must not scroll away with it. [hidden] is declared outright because
@@ -415,22 +434,21 @@ body[data-pane="map"] #bigmapWrap{display:block;}
 .loc-actions .btn:disabled{opacity:.4;cursor:default;}
 #bigmapZoom .btn{width:44px;height:44px;padding:0;font-size:20px;line-height:1;
   display:flex;align-items:center;justify-content:center;}
-.bigmap-hint{position:absolute;left:24px;bottom:24px;max-width:230px;margin:0;
-  background:#fff8e6;border:3px solid var(--ink);border-radius:12px;padding:7px 11px;
-  font-size:11.5px;font-weight:bold;opacity:.9;}
 @media (max-width:900px){
-  /* the side card would eat half a phone's sheet -- lay it under the map instead */
-  #bigmapSide{position:static;width:auto;max-height:none;margin-bottom:10px;
-    flex-direction:row;overflow-x:auto;}
-  .bm-card{flex:1 0 200px;}
+  /* the side card would eat half a phone's sheet -- lay it under the map instead, as one
+     full-width card (it folds, and starts folded: see data-fold-narrow-closed) */
+  #bigmapSide{position:static;width:auto;max-height:none;margin-top:10px;flex:none;
+    overflow:visible;}
   #bigmapWrap{display:none;overflow-y:auto;}
   body[data-pane="map"] #bigmapWrap{display:flex;flex-direction:column;}
-  #bigmap{flex:1;min-height:60vh;}
+  #bigmapStage{flex:1 0 auto;height:auto;min-height:60vh;}
+  #startNow{max-width:calc(100% - 20px);}
 }
 @media (max-width:760px){
-  #bigmapZoom{bottom:14px;right:14px;gap:6px;}
+  #bigmapZoom{gap:6px;}
   #bigmapZoom .btn{width:40px;height:40px;font-size:17px;}
-  .bigmap-hint{left:14px;bottom:14px;max-width:170px;font-size:10.5px;padding:6px 9px;}
+  /* 320 px phones: Start here (left) and the zoom/locate row (right) must not meet */
+  #mapStartBtn{font-size:15px;padding:10px 12px;}
 }
 
 @media (max-width:760px){
@@ -522,8 +540,12 @@ body.arrived #arrivalWrap{display:flex;align-items:flex-start;justify-content:ce
 .here-actions{display:none;gap:6px;margin-top:8px;flex-wrap:wrap;}
 .here-actions.on{display:flex;}
 .here-actions .btn{flex:1 1 auto;}
-#hereIdle{display:block;}
-#hereIdle.off{display:none;}
+/* The loaded course sits under the course list, tinted like its rows so it reads as that row's
+   detail rather than a card of its own. */
+.course-here{margin:0 0 8px;padding:8px 10px;border:3px solid #d94fa0;border-radius:10px;
+  background:#fdeaf5;}
+.course-here[hidden]{display:none;}
+#recCard .course-here .sub{margin:0 0 2px;opacity:1;font-size:12px;}
 
 /* Trail stats sit to the RIGHT of the name and shrink first, so a long trail name pushes
    its own figures off rather than wrapping the row and turning a scannable list into a
@@ -892,11 +914,22 @@ body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
             </section>
           </aside>
           <div id="bigmapWrap">
-            <canvas id="bigmap"></canvas>
-            <div id="bigmapZoom">
-              <button class="btn small" id="bigZoomIn" title="Zoom in">➕</button>
-              <button class="btn small" id="bigZoomOut" title="Zoom out">➖</button>
-              <button class="btn small" id="mapLocate" title="Start where I am (uses this device's location)">📍</button>
+            <!-- The stage is the canvas and everything pinned to it: the start label (top left),
+                 Start here (bottom left) and the zoom/locate buttons (bottom right). Pinned to the
+                 stage rather than to the sheet, so on a phone, where the sheet scrolls and the
+                 Recordings card sits under the map, none of them ends up on top of that card. -->
+            <div id="bigmapStage">
+              <canvas id="bigmap"></canvas>
+              <!-- Where a walk would start: the name and the elevation, nothing else. Hidden when
+                   there is no start yet. -->
+              <div id="startNow" hidden></div>
+              <!-- Shown only while a trailhead or a tapped trail point is loaded. -->
+              <button class="btn primary" id="mapStartBtn" type="button" hidden>🚩 Start here</button>
+              <div id="bigmapZoom">
+                <button class="btn small" id="bigZoomIn" title="Zoom in">➕</button>
+                <button class="btn small" id="bigZoomOut" title="Zoom out">➖</button>
+                <button class="btn small" id="mapLocate" title="Start where I am (uses this device's location)">📍</button>
+              </div>
             </div>
             <!-- START WHERE I AM. Everything the 📍 button has to say is said here, over the sheet:
                  the old notes were drawn in the 3D world, behind it. See src/trails/locate.js. -->
@@ -910,54 +943,57 @@ body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
                 <p class="hint" id="locParsed"></p>
               </div>
               <div class="loc-actions">
-                <button class="btn small primary" id="locGo" type="button">▶ Go to</button>
+                <button class="btn small primary" id="locGo" type="button">🚩 Start here</button>
                 <button class="btn small" id="locEditBtn" type="button">✏️ Edit</button>
                 <button class="btn small" id="locCancel" type="button">✕ Cancel</button>
               </div>
             </div>
             <div id="bigmapSide">
-              <div class="bm-card" id="hereCard">
-                <h3 id="hereTitle">🚩 Start here</h3>
-                <div id="hereIdle">
-                  <p class="hint" id="startNow">—</p>
-                  <p class="hint">Tap any trail on the map to start from that spot, a
-                    lettered badge for a trailhead, or a course below.</p>
+              <!-- Saved courses and saved spots are one thing to a walker -- what they recorded --
+                   so they are one card, and it folds (the same fold wiring as the settings
+                   sections: data-fold, .sect-head, .sect-toggle, .sect-body). -->
+              <section class="bm-card" id="recCard" data-fold="rec" data-fold-narrow-closed>
+                <div class="sect-head">
+                  <h3>⏺ Recordings</h3>
+                  <button class="sect-toggle" type="button" aria-expanded="true" aria-controls="recBody"></button>
                 </div>
-                <div id="hereStats" class="here-stats"></div>
-                <div id="hereActions" class="here-actions"></div>
-              </div>
-              <div class="bm-card">
-                <h3>🏁 Courses</h3>
-                <div id="courseList" class="course-list"></div>
-                <button class="btn small wide" id="recStartBtn">⏺ Record a path</button>
-                <div id="recSaveRow" class="rec-save">
-                  <input type="text" id="recName" maxlength="40" placeholder="Name this course"
-                         autocomplete="off" spellcheck="false">
-                  <div class="io-row">
-                    <button class="btn small" id="recSaveBtn">✓ Save</button>
-                    <button class="btn small" id="recDropBtn">✕ Discard</button>
+                <div class="sect-body" id="recBody">
+                  <div class="sub">🏁 Courses</div>
+                  <div id="courseList" class="course-list"></div>
+                  <!-- The course that is loaded: its facts, and Race / Forget. Empty (and hidden)
+                       until a course row is tapped. -->
+                  <div id="courseHere" class="course-here" hidden>
+                    <div class="sub" id="hereTitle"></div>
+                    <div id="hereStats" class="here-stats"></div>
+                    <div id="hereActions" class="here-actions"></div>
                   </div>
-                </div>
-                <p class="hint" id="recNote">Recording snaps to whatever trail you are on.
-                  Off-trail stretches are skipped.</p>
-                <div class="ghost-pick">
-                  <span>👻 Ghost</span>
-                  <div id="ghostMode" class="seg">
-                    <button data-ghost="best" class="on">🏆 Record</button>
-                    <button data-ghost="mine">⭐ Yours</button>
-                    <button data-ghost="off">Off</button>
+                  <button class="btn small wide" id="recStartBtn">⏺ Record a path</button>
+                  <div id="recSaveRow" class="rec-save">
+                    <input type="text" id="recName" maxlength="40" placeholder="Name this course"
+                           autocomplete="off" spellcheck="false">
+                    <div class="io-row">
+                      <button class="btn small" id="recSaveBtn">✓ Save</button>
+                      <button class="btn small" id="recDropBtn">✕ Discard</button>
+                    </div>
                   </div>
+                  <p class="hint" id="recNote">Recording snaps to whatever trail you are on.
+                    Off-trail stretches are skipped.</p>
+                  <div class="ghost-pick">
+                    <span>👻 Ghost</span>
+                    <div id="ghostMode" class="seg">
+                      <button data-ghost="best" class="on">🏆 Record</button>
+                      <button data-ghost="mine">⭐ Yours</button>
+                      <button data-ghost="off">Off</button>
+                    </div>
+                  </div>
+                  <p class="hint">Tap a course to see it on the map, then race or forget it above.</p>
+                  <div class="sub">📍 Saved spots</div>
+                  <div id="spotList" class="spot-list"></div>
+                  <button class="btn small wide" id="mapSaveSpotBtn">📍 Save where I am</button>
+                  <p class="hint">Tap a pin on the map or a row here to go back to it.</p>
                 </div>
-                <p class="hint">Tap a course to see it on the map, then race or forget it above.</p>
-              </div>
-              <div class="bm-card">
-                <h3>📍 Saved spots</h3>
-                <div id="spotList" class="spot-list"></div>
-                <button class="btn small wide" id="mapSaveSpotBtn">📍 Save where I am</button>
-                <p class="hint">Tap a pin on the map or a row here to go back to it.</p>
-              </div>
+              </section>
             </div>
-            <p class="hint bigmap-hint">Drag to pan, scroll or ➕/➖ to zoom.</p>
           </div>
         </div>
       </div>
@@ -16144,14 +16180,16 @@ function updateMinimap(px, pz, yaw, selectedHead){
    appeared to happen. Anything this feature has to say is said HERE, in a card over the sheet.
 
    THE FLOW.  Press 📍  ->  the card opens and asks the device ("finding")  ->  the best fix it
-   gets is shown, with its accuracy and whether it is on this map  ("fix")  ->  Go to loads the
-   nearest trail point into the start card exactly as a tap on the sheet would, Edit lets the
-   numbers be typed instead, Cancel puts it all away. If the device cannot say where it is
+   gets is shown, with its accuracy and whether it is on this map  ("fix")  ->  Start here starts
+   the walk at the nearest trail point, Edit lets the numbers be typed instead, Cancel puts it
+   all away. If the device cannot say where it is
    (blocked, no signal, no GPS) the card says why and goes straight to typing ("none").
 
-   Go to LOADS, it does not start: the walk begins when "Start here" is pressed, like every other
-   pick on the sheet. The blue dot (or, off the map, the arrow on the sheet's edge) is minimap.js's;
-   this module only tells it where the walker is, in lon/lat.
+   Start here STARTS: it loads the nearest trail point exactly as a tap on the sheet would, then
+   calls the function main.js handed to initLocate -- the same one the sheet's own Start here
+   button calls -- so the pup is put on that point and the sheet closes, with no second press.
+   The blue dot (or, off the map, the arrow on the sheet's edge) is minimap.js's; this module
+   only tells it where the walker is, in lon/lat.
 
    watchPosition for a few seconds rather than getCurrentPosition: the first fix a phone returns
    is often a coarse cell/Wi-Fi guess and the good one arrives a little later. The best seen is
@@ -16167,14 +16205,15 @@ function updateMinimap(px, pz, yaw, selectedHead){
 const LOC_GOOD_M = 15;          // accurate enough to stop waiting
 const LOC_FIRST_MS = 30000;     // for a first fix, prompt-reading time included
 const LOC_MORE_MS = 6000;       // for a better one, once there is a first
-const LOC_SNAP_MAX_M = 500;     // Go to will not reach further than this for a trail
+const LOC_SNAP_MAX_M = 500;     // Start here will not reach further than this for a trail
 
 let locMode = 'idle';           // 'idle' | 'finding' | 'fix' | 'none' | 'manual'
 let locSession = 0;             // bumped by every start and every cancel; stale callbacks compare against it
 let locWatchId = null, locTimer = null, locBest = null;
 let locFix = null;              // {lat, lon, acc} the card is currently about
-let locNote = '';               // why there is no fix, or what Go to could not do
+let locNote = '';               // why there is no fix, or what Start here could not do
 let locWired = false;
+let locStart = null;            // main.js's startFromHere: puts the pup on what the sheet has loaded
 
 const locEl = id => document.getElementById(id);
 function locStopWatch(){
@@ -16337,8 +16376,9 @@ function locOnInput(){
   locRender();
 }
 
-/* Go to: the nearest trail point to the place on the card goes into the start card, the way a
-   tap on the sheet puts it there. Refusals are said ON THE CARD, which stays up. */
+/* Start here: the nearest trail point to the place on the card is loaded the way a tap on the
+   sheet loads it, and then the walk is started on it. Refusals are said ON THE CARD, which
+   stays up. (Named locGo for the button's id, which the harness presses.) */
 function locGo(){
   let fix = locFix;
   if(locMode === 'manual' || locMode === 'none'){
@@ -16350,7 +16390,7 @@ function locGo(){
   if(!fix) return;
   const a = locAnalyse(fix);
   if(!a){ locNote = 'That place cannot be put on this map.'; locRender(); return; }
-  if(!a.inside){ locNote = 'That spot is off this map, so there is nowhere to go to.'; locRender(); return; }
+  if(!a.inside){ locNote = 'That spot is off this map, so there is nowhere to start.'; locRender(); return; }
   const k = Math.max(1e-6, getMapScale());
   const r = pickTrailPointNear(a.p.x, a.p.z, LOC_SNAP_MAX_M*k);
   if(!r.ok){
@@ -16358,10 +16398,12 @@ function locGo(){
     locRender(); return;
   }
   locClose(false);      // the dot stays on the sheet, beside the flag
+  if(locStart) locStart();
 }
 function locCancel(){ locClose(true); }
 
-function initLocate(){
+function initLocate(startFn){
+  if(typeof startFn === 'function') locStart = startFn;
   if(locWired) return;
   locWired = true;
   const on = (id, fn) => { const el = locEl(id); if(el) el.addEventListener('click', fn); };
@@ -19225,6 +19267,7 @@ function renderCourseUI(){
   }
   const saveRow = $('#recSaveRow');
   if(saveRow) saveRow.classList.toggle('on', !!recPending);
+  if(recPending) openRecordings();   // the name field is in the card, which may be folded
   const nameInput = $('#recName');
   if(nameInput && recPending && nameInput.value !== recPending.name && !nameInput.dataset.touched)
     nameInput.value = recPending.name;
@@ -21791,18 +21834,27 @@ function mapSelectedHead(){
 }
 
 function hereEl(){
-  return {title:$('#hereTitle'), idle:$('#hereIdle'),
+  return {box:$('#courseHere'), title:$('#hereTitle'),
           stats:$('#hereStats'), actions:$('#hereActions')};
 }
 
-/* Back to the idle state: the current start point and the hint about tapping things. */
-function showHereIdle(){
-  hereSubject = null;
+/* What the loaded subject shows, and where. A trailhead or a tapped trail point shows as the
+   label at the top left of the map and the Start here button at its bottom left (both
+   drawn by renderStartPicker); only a COURSE has a details block of its own, under the
+   course list in the Recordings card. So loading a trailhead or a point empties that block,
+   and loading nothing does too. */
+function clearHereCourse(){
   const el = hereEl();
-  if(el.title) el.title.textContent = '\u{1F6A9} Start here';
-  if(el.idle) el.idle.classList.remove('off');
+  if(el.box) el.box.hidden = true;
+  if(el.title) el.title.textContent = '';
   if(el.stats){ el.stats.classList.remove('on'); el.stats.innerHTML = ''; }
   if(el.actions){ el.actions.classList.remove('on'); el.actions.innerHTML = ''; }
+}
+
+/* Back to the idle state: nothing loaded, so the label is the current start point. */
+function showHereIdle(){
+  hereSubject = null;
+  clearHereCourse();
   setPickedPoint(liveStartPoint());
   renderStartPicker();
 }
@@ -21833,7 +21885,9 @@ function hereBtn(actions, label, primary, fn){
   return b;
 }
 
-/* --- a trailhead --------------------------------------------------------------------- */
+/* --- a trailhead ---------------------------------------------------------------------- */
+/* Picking a trailhead on the sheet LOADS it: the ring moves, the label at the top left names
+   it, and the Start here button appears. Nobody moves until that button is pressed. */
 function showHereHead(i){
   const heads = getTrailheads();
   if(!heads.length || i == null || i < 0 || i >= heads.length){ showHereIdle(); return; }
@@ -21844,53 +21898,14 @@ function showHereHead(i){
      with it. */
   if(previewCourse){ previewCourse = null; renderCourseList(); syncCourseOverlay(); }
   setPickedPoint(null);
-  const h = heads[i];
-  const el = hereEl();
-  if(el.idle) el.idle.classList.add('off');
-  if(el.title) el.title.textContent = '\u{1F6A9} ' + headLetter(i) + ' \u00b7 ' + h.name;
-  const stats = el.stats, actions = el.actions;
-  if(!stats || !actions) return;
-  stats.innerHTML = ''; actions.innerHTML = '';
-
-  hereRow(stats, 'Trail', h.name + ' (' + h.where + ' end)');
-  const ft = elevationFt(h.x, h.z);
-  if(ft != null) hereRow(stats, 'Elevation', Math.round(ft).toLocaleString() + ' ft');
-  /* How far away it is, and in a straight line -- said so explicitly, because on a trail
-     network the walk is always longer and a number that looked like walking distance would
-     be wrong by a factor that varies with the terrain. */
-  const k = Math.max(1e-6, getMapScale());
-  const away = Math.hypot(h.x - player.x, h.z - player.z)/k;
-  hereRow(stats, 'From you', fmtCourseLen(away) + ' as the crow flies');
-
-  /* Which trails actually meet here. A trailhead is a dead end by definition, so this is
-     usually one -- but junction trailheads exist, and "three trails start here" is the
-     single most useful thing to know before committing a walk to it. */
-  const g = getGraph();
-  if(g){
-    const names = new Set();
-    g.edges.forEach(e=>{
-      if(!e.named) return;
-      const pts = e.pts || [];
-      for(const q of [pts[0], pts[pts.length-1]]){
-        if(q && Math.hypot(q[0]-h.x, q[1]-h.z) < 2.0) names.add(e.name);
-      }
-    });
-    if(names.size) hereNote(stats, [...names].join(' \u00b7 '));
-  }
-  stats.classList.add('on');
-
-  hereBtn(actions, '\u{1F6A9} Start here', true, ()=>{
-    placeAtHead(i);
-    if(!playing) enterPlay();
-    showPane(null);
-  });
-  actions.classList.add('on');
+  clearHereCourse();
+  renderStartPicker();
 }
 
 /* --- any point on a trail -------------------------------------------------------------- */
-/* Same three slots as a trailhead, so the card reads the same whichever you tapped. `pt`
-   comes from minimap.js: {x, z, yaw, edge}. The edge is read for its name and route here
-   and then dropped -- the graph is rebuilt on every rescale and a held edge would go stale. */
+/* Same contract as a trailhead. `pt` comes from minimap.js: {x, z, yaw, edge}. The edge is
+   read for its name and route here and then dropped -- the graph is rebuilt on every
+   rescale and a held edge would go stale. */
 function showHerePoint(pt){
   if(!pt || !isFinite(pt.x) || !isFinite(pt.z)){ showHereIdle(); return; }
   const e = pt.edge || null;
@@ -21900,28 +21915,23 @@ function showHerePoint(pt){
   hereSubject = {kind:'point', pt:p};
   if(previewCourse){ previewCourse = null; renderCourseList(); syncCourseOverlay(); }
   setPickedPoint(p);
-  const el = hereEl();
-  if(el.idle) el.idle.classList.add('off');
-  if(el.title) el.title.textContent = '\u{1F4CD} On ' + p.name;
-  const stats = el.stats, actions = el.actions;
-  if(!stats || !actions) return;
-  stats.innerHTML = ''; actions.innerHTML = '';
+  clearHereCourse();
+  renderStartPicker();
+}
 
-  const kindWord = {road:'Road', dirtroad:'Dirt road', track:'Track', rail:'Railway'}[p.kind] || 'Trail';
-  hereRow(stats, kindWord, p.name + ' (' + compass(p.x, p.z) + ')');
-  const ft = elevationFt(p.x, p.z);
-  if(ft != null) hereRow(stats, 'Elevation', Math.round(ft).toLocaleString() + ' ft');
-  const k = Math.max(1e-6, getMapScale());
-  hereRow(stats, 'From you', fmtCourseLen(Math.hypot(p.x - player.x, p.z - player.z)/k) + ' as the crow flies');
-  if(!p.named) hereNote(stats, 'The map file gives this one no name.');
-  stats.classList.add('on');
-
-  hereBtn(actions, '\u{1F6A9} Start here', true, ()=>{
-    placeAtPoint(p);
-    if(!playing) enterPlay();
-    showPane(null);
-  });
-  actions.classList.add('on');
+/* START A WALK FROM WHAT IS LOADED. The one door from the map sheet into a walk: the Start here
+   button on the sheet, and the Start here button on the 📍 card (locate.js, which is handed
+   this function by initLocate). Answers whether it started anything -- a course, or nothing,
+   being loaded is not a place to start. */
+function startFromHere(){
+  const subj = hereSubject;
+  if(!subj) return false;
+  if(subj.kind === 'head') placeAtHead(subj.i);
+  else if(subj.kind === 'point') placeAtPoint(subj.pt);
+  else return false;
+  if(!playing) enterPlay();
+  showPane(null);
+  return true;
 }
 
 /* --- a course ------------------------------------------------------------------------- */
@@ -21930,7 +21940,8 @@ function showHereCourse(c){
   hereSubject = {kind:'course', c};
   setPickedPoint(null);
   const el = hereEl();
-  if(el.idle) el.idle.classList.add('off');
+  if(el.box) el.box.hidden = false;
+  openRecordings();                  // the details are in the card; a folded card would hide them
   if(el.title) el.title.textContent = '\u{1F3C1} ' + c.name;
   const stats = el.stats, actions = el.actions;
   if(!stats || !actions) return;
@@ -21983,6 +21994,7 @@ function showHereCourse(c){
     syncCourseOverlay();
   });
   actions.classList.add('on');
+  renderStartPicker();               // a course is not a place to start: the button goes
 }
 
 /* Re-render whatever is loaded, after something it displays has changed underneath it --
@@ -22001,17 +22013,42 @@ function refreshHere(){
   }
 }
 
-function renderStartPicker(){
-  const now=$('#startNow');
-  const heads=getTrailheads();
-  if(!heads.length){
-    if(now) now.textContent='— load a map first —';
-    return;
+/* The label at the top left of the map, and the Start here button at the bottom left.
+
+   THE LABEL says where a walk would start, in a name and an elevation: the trailhead or trail
+   point that is loaded, and when nothing is loaded the start the walk is already using. It is
+   hidden when there is none. THE BUTTON is there only while a trailhead or a trail point is
+   loaded -- idle has nothing to commit, and a loaded course has Race this instead. */
+function startLabelText(){
+  const heads = getTrailheads();
+  let x = null, z = null, name = '', lead = '';
+  if(hereSubject && hereSubject.kind === 'head' && heads[hereSubject.i]){
+    const h = heads[hereSubject.i];
+    x = h.x; z = h.z; name = h.name; lead = headLetter(hereSubject.i) + ' \u00b7 ';
+  }else if(hereSubject && hereSubject.kind === 'point'){
+    const p = hereSubject.pt;
+    x = p.x; z = p.z; name = p.name; lead = '\u{1F4CD} On ';
+  }else{
+    const sp = liveStartPoint();
+    if(sp){ x = sp.x; z = sp.z; name = sp.name; lead = '\u{1F4CD} On '; }
+    else if(heads.length){
+      const i = getStartHead(), h = heads[i];
+      if(h){ x = h.x; z = h.z; name = h.name; lead = headLetter(i) + ' \u00b7 '; }
+    }
   }
-  const sp=liveStartPoint();
-  if(sp){ if(now) now.textContent = '\u{1F4CD} On '+sp.name+' ('+compass(sp.x, sp.z)+')'; return; }
-  const i=getStartHead(), h=heads[i];
-  if(now && h) now.textContent = headLetter(i)+' · '+h.name+' ('+h.where+' end)';
+  if(x === null) return '';
+  const ft = elevationFt(x, z);
+  return lead + name + (ft == null ? '' : ' \u00b7 ' + Math.round(ft).toLocaleString() + ' ft');
+}
+function renderStartPicker(){
+  const now = $('#startNow');
+  if(now){
+    const t = startLabelText();
+    now.textContent = t;
+    now.hidden = !t;
+  }
+  const btn = $('#mapStartBtn');
+  if(btn) btn.hidden = !(hereSubject && (hereSubject.kind === 'head' || hereSubject.kind === 'point'));
 }
 
 /* Saved pins, as rows that mirror the badges on the sheet: same order, same numbers. The
@@ -22311,7 +22348,7 @@ $('#saveMapBtn')?.addEventListener('click', saveMapFile);
 updateEditUI();
 
 /* START WHERE I AM: the sheet's 📍 button and the card it opens. See locate.js. */
-initLocate();
+initLocate(startFromHere);
 
 async function boot(bundleUrl){
   loadKennel();
@@ -22329,8 +22366,9 @@ async function boot(bundleUrl){
      That held while a trailhead was just a letter. It stopped holding once there was
      anything worth reading about one: you cannot read the elevation of a place you have
      already been moved to, and a walk you did not mean to start costs you the one you were
-     already in. So a trailhead pick now fills the details card and the card carries the
-     button.
+     already in. So a trailhead pick now loads the label at the top left of the map and the
+     Start here button beside the bottom-left corner carries the start. The 📍 card's own
+     Start here (locate.js) is the other door, and it goes through the same startFromHere.
 
      Saved pins still go straight there, and that asymmetry is deliberate rather than an
      oversight: a pin is a place YOU chose and named, so there is nothing to tell you about
@@ -22450,6 +22488,12 @@ $('#mapList')?.addEventListener('change', async e=>{
    regardless, or collapsing becomes a trap. State is remembered per browser the same way
    sound/detail/sky are; the map keeps the key it has always used. */
 const foldKey = name => name === 'map' ? 'pupMapSectOpen' : 'pupFold_' + name;
+/* Open the Recordings card without remembering it as the walker's choice: something in it needs
+   to be seen (a trace to name, a course's details), which is not a preference. */
+function openRecordings(){
+  const sect = $('#recCard');
+  if(sect) setFoldOpen(sect, true, false);
+}
 function setFoldOpen(sect, open, remember){
   const body = sect.querySelector('.sect-body'), btn = sect.querySelector('.sect-toggle');
   if(!body || !btn) return;
@@ -22458,14 +22502,22 @@ function setFoldOpen(sect, open, remember){
   btn.textContent = open ? '▾' : '▸';
   btn.title = open ? 'Collapse' : 'Expand';
   btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-  const what = ((sect.querySelector('h2') || {}).textContent || 'section').replace(/^\W+/, '').trim();
+  const what = ((sect.querySelector('h2, h3') || {}).textContent || 'section').replace(/^\W+/, '').trim();
   btn.setAttribute('aria-label', (open ? 'Collapse ' : 'Expand ') + what);
   if(remember){ try{ localStorage.setItem(foldKey(sect.dataset.fold), open ? '1' : '0'); }catch(err){} }
 }
-document.querySelectorAll('.sect[data-fold]').forEach(sect=>{
-  let open = true;
-  try{ open = localStorage.getItem(foldKey(sect.dataset.fold)) !== '0'; }catch(err){}
-  setFoldOpen(sect, open, false);
+/* The Recordings card on the map sheet folds the same way (it is a [data-fold] too). On a
+   phone-sized screen it starts folded, because the map is what the sheet is for and the card
+   sits under it; a walker's own choice, once made, wins. */
+function foldStartsOpen(sect, kept, narrow){
+  if(kept !== null && kept !== undefined) return kept !== '0';
+  return !(sect.hasAttribute('data-fold-narrow-closed') && narrow);
+}
+document.querySelectorAll('[data-fold]').forEach(sect=>{
+  let kept = null;
+  try{ kept = localStorage.getItem(foldKey(sect.dataset.fold)); }catch(err){}
+  const narrow = !!(window.matchMedia && window.matchMedia('(max-width:900px)').matches);
+  setFoldOpen(sect, foldStartsOpen(sect, kept, narrow), false);
   const head = sect.querySelector('.sect-head');
   if(head) head.addEventListener('click', ()=>{
     const body = sect.querySelector('.sect-body');
@@ -22483,6 +22535,7 @@ tapBtn($('#autoBtn'), toggleAutoWalk);
 $('#barkBtn')?.addEventListener('click', doBark);
 $('#saveSpotBtn')?.addEventListener('click', saveHere);
 $('#mapSaveSpotBtn')?.addEventListener('click', ()=>{ saveHere(); });
+$('#mapStartBtn')?.addEventListener('click', ()=>{ startFromHere(); });
 
 /* The record control is ONE button with two jobs, because "record" and "stop" are the same
    decision seen from either side of it and two buttons would leave one of them dead at any
