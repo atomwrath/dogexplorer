@@ -1,5 +1,5 @@
 /* Drives the SHARED dog (src/dog/runtime.js) for trail movement, sneaking and gait —
-   the dog itself is Pup City / Backyard Pups' rig, unmodified. This file owns none of
+   the dog itself is Pup City / Pup Creator' rig, unmodified. This file owns none of
    the dog's geometry or presets; it only reads the live refs runtime.js already exports
    and turns trail movement into the same leg-swing / tail-wag / bark it always had.
 
@@ -20,7 +20,7 @@ let dogLegLen = 0.4;     // hip pivot height above ground, WORLD units -- see me
 
 /* The shared rig sizes itself directly in world units via g.scale.setScalar(p.size)
    inside dog/build.js -- tuned to look right in Pup City's own stylised world (city
-   blocks 22 units square) and reused as-is in Backyard Pups. Trails' world is real
+   blocks 22 units square) and reused as-is in Pup Creator. Trails' world is real
    metric distance (DEM + GeoJSON, "1 unit = 1 metre" per the scale slider's own copy),
    and the rig was never re-tuned for that: worked out from build.js's own geometry, a
    DEFAULTS pup (size:1) measures roughly 3.9 m nose to tail-tip before any correction --
@@ -33,7 +33,7 @@ let dogLegLen = 0.4;     // hip pivot height above ground, WORLD units -- see me
    walk/run/turn speed from that same size field over a narrow expected range (0.55-1.6),
    so scaling it down here would flatten every pup's stats to the same low-size floor
    instead of shrinking the model. This way a saved pup's chosen size still varies its
-   speed exactly as it does in Backyard Pups; only what you SEE changes. */
+   speed exactly as it does in Pup Creator; only what you SEE changes. */
 const TRAIL_DOG_SCALE = 0.3;
 
 /* The gait is foot-locked against this length (see gait.js), so it has to be the pivot's

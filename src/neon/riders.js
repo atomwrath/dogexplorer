@@ -1,6 +1,6 @@
 /* A board, and somebody standing on it.
 
-   Riders are the shared art: buildDog() for pups (so anything saved in Backyard Pups can
+   Riders are the shared art: buildDog() for pups (so anything saved in Pup Creator can
    race) and makeAnimalModel() for the wildlife. Both rigs face local +X and stand with
    their feet at y = 0, which is all this file relies on. Neither rig is metric (see the
    README's note on TRAIL_DOG_SCALE); the scales below are chosen for how a rider reads

@@ -1,4 +1,4 @@
-/* Backyard Pups — the character creator.
+/* Pup Creator — the character creator.
    buildDog and DEFAULTS come from ../dog/, shared byte-for-byte with Pup City. */
 import { canvas, renderer, scene, camera, resize, disposeGroup } from '../core/render.js';
 import { toon, M } from '../core/materials.js';
@@ -276,10 +276,10 @@ function saveCurrent(){
 }
 function exportSaves(){
   const data = savedPups.length? savedPups : [{params:Object.assign({},P)}];
-  const blob = new Blob([JSON.stringify({backyardPups:1, pups:data}, null, 2)], {type:'application/json'});
+  const blob = new Blob([JSON.stringify({pupCreator:1, pups:data}, null, 2)], {type:'application/json'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'backyard-pups.json';
+  a.download = 'pup-creator.json';
   a.click();
   setTimeout(()=> URL.revokeObjectURL(a.href), 2000);
   toast('Pup file downloaded!');
@@ -377,6 +377,7 @@ let mode = 'edit';
 function setMode(m){
   mode = m;
   document.body.classList.toggle('play', m==='play');
+  padReleaseAll();   // switching modes hides the pad; nothing may stay held across it
   if(m==='play'){
     document.getElementById('playName').textContent = `🐶 ${P.name}`;
     syncBowl();
@@ -431,16 +432,50 @@ window.addEventListener('keydown', e=>{
 });
 window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()] = false; });
 
-/* on-screen pad */
+/* on-screen pad.
+   Every held direction is tracked by pointer id, so a pointerup that never arrives (an iPad
+   system gesture, the button being hidden mid-press, the tab going to the background) can
+   never leave a direction latched on: each of those paths ends in padRelease/padReleaseAll. */
+const PAD_KEYS = {up:'arrowup', down:'arrowdown', left:'arrowleft', right:'arrowright'};
+const padHeld = new Map();   // pointerId -> {k, b}
+function padRelease(id){
+  const h = padHeld.get(id);
+  if(!h) return;
+  padHeld.delete(id);
+  // another finger may still be holding the same direction
+  for(const o of padHeld.values()) if(o.k === h.k) return;
+  keys[h.k] = false;
+  h.b.classList.remove('held');
+}
+function padReleaseAll(){
+  for(const id of Array.from(padHeld.keys())) padRelease(id);
+}
 document.querySelectorAll('#dpad .pbtn').forEach(b=>{
-  const k = {up:'arrowup', down:'arrowdown', left:'arrowleft', right:'arrowright'}[b.dataset.k];
-  const on = e=>{ e.preventDefault(); keys[k] = true; b.classList.add('held'); };
-  const off = e=>{ keys[k] = false; b.classList.remove('held'); };
-  b.addEventListener('pointerdown', on);
-  b.addEventListener('pointerup', off);
-  b.addEventListener('pointerleave', off);
-  b.addEventListener('pointercancel', off);
+  const k = PAD_KEYS[b.dataset.k];
+  b.addEventListener('pointerdown', e=>{
+    e.preventDefault();
+    try{ b.setPointerCapture(e.pointerId); }catch(err){}
+    padHeld.set(e.pointerId, {k, b});
+    keys[k] = true; b.classList.add('held');
+  });
+  b.addEventListener('pointerup', e=> padRelease(e.pointerId));
+  b.addEventListener('pointercancel', e=> padRelease(e.pointerId));
+  b.addEventListener('lostpointercapture', e=> padRelease(e.pointerId));
+  b.addEventListener('pointerleave', e=>{
+    if(b.hasPointerCapture && b.hasPointerCapture(e.pointerId)) return;   // captured: the finger is still down
+    padRelease(e.pointerId);
+  });
 });
+// safety nets: the release can land anywhere, or nowhere
+window.addEventListener('pointerup', e=> padRelease(e.pointerId));
+window.addEventListener('pointercancel', e=> padRelease(e.pointerId));
+window.addEventListener('blur', ()=>{ padReleaseAll(); for(const k in keys) keys[k] = false; });
+document.addEventListener('visibilitychange', ()=>{
+  if(document.hidden){ padReleaseAll(); for(const k in keys) keys[k] = false; }
+});
+// holding a button must never start a text selection or the iOS callout / context menu
+['selectstart','contextmenu'].forEach(t=>
+  document.addEventListener(t, e=>{ if(mode==='play') e.preventDefault(); }));
 document.getElementById('jumpBtn').addEventListener('pointerdown', e=>{ e.preventDefault(); tryJump(); });
 document.getElementById('barkBtn').addEventListener('pointerdown', e=>{ e.preventDefault(); bark(); });
 document.getElementById('fillBtn').addEventListener('pointerdown', e=>{ e.preventDefault(); fillBowl(); });

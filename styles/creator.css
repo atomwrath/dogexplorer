@@ -236,13 +236,24 @@
     white-space:nowrap;}
 
   /* on-screen pad */
-  #pad{position:absolute; bottom:16px; right:16px; z-index:5; display:flex; gap:14px; align-items:flex-end;}
+  /* While playing, nothing on the stage may be selectable or pop the iOS callout: on iPad a
+     held direction otherwise turns into a text selection. (-webkit- forms are the ones iPad
+     Safari honours; the panel is left alone because inputs need to stay editable.) */
+  body.play #stage{
+    -webkit-user-select:none; user-select:none;
+    -webkit-touch-callout:none;
+    touch-action:none;
+  }
+  #pad{position:absolute; bottom:16px; right:16px; z-index:5; display:flex; gap:14px; align-items:flex-end;
+    touch-action:none;}
   #dpad{display:grid; grid-template-columns:repeat(3,44px); grid-template-rows:repeat(3,44px); gap:4px;}
   .pbtn{
     font-family:inherit; font-size:17px; font-weight:bold;
     border:3px solid var(--ink); border-radius:12px; background:rgba(255,255,255,.92);
     color:var(--ink); cursor:pointer; box-shadow:2.5px 2.5px 0 rgba(61,42,32,.25);
-    display:flex; align-items:center; justify-content:center; user-select:none;
+    display:flex; align-items:center; justify-content:center;
+    -webkit-user-select:none; user-select:none; -webkit-touch-callout:none;
+    touch-action:none;
   }
   .pbtn:active,.pbtn.held{background:var(--blue); color:#fff;}
   #dpad .blank{visibility:hidden;}

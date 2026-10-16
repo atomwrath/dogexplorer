@@ -89,7 +89,7 @@ function setKennelPups(list){
 }
 
 /* Accepts every shape the suite has ever written or read: the creator's
-   {backyardPups:1, pups:[{params}]} export, a bare array, or a single pup object.
+   {pupCreator:1, pups:[{params}]} export (older files say backyardPups:1; both are read), a bare array, or a single pup object.
    Returns plain param objects; callers merge DEFAULTS themselves. */
 function parsePupFile(data){
   let obj = data;

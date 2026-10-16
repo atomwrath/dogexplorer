@@ -4652,7 +4652,7 @@ if(dropzone){
 }
 
 /* One picker for everything. A pup-world/1 bundle, a plain .geojson and a
-   backyard-pups.json are all just JSON, so detect by content rather than by extension --
+   pup-creator.json are all just JSON, so detect by content rather than by extension --
    QGIS writes .geojson, fetch_dem.py writes .json, and users rename both. Layers are
    batched so dropping trails + areas together rebuilds once, not twice. */
 async function loadFiles(files){
@@ -4672,7 +4672,7 @@ async function loadFiles(files){
       // chip tracking is separate from EXTRA (world.js has no per-file memory of what it
       // merged) -- record name+count here purely for the panel's own display
       loadedFiles.push({name:f.name, count:(layer.features||[]).length, layer});
-    }else if(obj && (obj.backyardPups || obj.pups || obj.furColor)){
+    }else if(obj && (obj.pupCreator || obj.backyardPups || obj.pups || obj.furColor)){
       gotPups += addPups(parsePupFile(obj));
     }else{
       console.error('unrecognised file (expected a pup-world/1 bundle, GeoJSON or a pup file):', f.name);

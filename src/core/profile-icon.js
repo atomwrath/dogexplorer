@@ -2,7 +2,7 @@
 
    ONE RENDERER FOR TWO JOBS. The icons that ship with the game are drawn ahead of time by
    tools/make-profile-icons.mjs, and anything the game meets that has no shipped icon (a pup
-   made in Backyard Pups, one imported from a file, a preset whose look has since changed) is
+   made in Pup Creator, one imported from a file, a preset whose look has since changed) is
    drawn on the spot by the player's own browser. Both go through renderProfile() below, with
    the same lights, framing and downsample, so a drawn-ahead icon and an on-the-spot one are
    the same picture and a card never looks out of place beside its neighbours.

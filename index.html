@@ -6,15 +6,19 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#ffefcd">
-<meta name="description" content="Backyard Pups, Pup City, and Pup Trails — cartoon 3D dog games that run in any browser.">
+<meta name="description" content="Pup Trails, Neon Pups, Pup Creator, and Pup City — cartoon 3D dog games that run in any browser.">
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="apple-touch-icon" href="./icons/icon-192.png">
 <title>Pup Games</title>
 <link rel="stylesheet" href="./styles/base.css">
 <style>
   *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
-  html,body{height:100%; margin:0;}
+  /* min-height, not height: with a fixed-height body and justify-content:center, content taller
+     than the screen (the single-column phone layout) overflows equally off the top and bottom,
+     and the top part can't be scrolled to -- that is what clipped the Pup Trails card. */
+  html,body{margin:0;}
   body{
+    min-height:100vh; min-height:100dvh;
     font-family:"Comic Sans MS","Chalkboard SE","Segoe UI",system-ui,sans-serif;
     background:var(--cream);
     background-image:radial-gradient(circle at 12% 18%, #fff6e0 0 32%, transparent 33%),
@@ -61,9 +65,9 @@
       <p>Hoverboard racing on the same real trail maps, in neon. Auto-built circuits and sprints, bouncy bumpers, animal rivals, gravity on or off.</p>
       <div class="go">Drop in →</div>
     </a>
-    <a class="game" href="./dist/backyard-pups.html">
+    <a class="game" href="./dist/pup-creator.html">
       <div class="em">🐶</div>
-      <h2>Backyard Pups</h2>
+      <h2>Pup Creator</h2>
       <p>Design a pup from the paws up — size, ears, tail, spots, collar. Save your favorites and export them to take into the city.</p>
       <div class="go">Open the creator →</div>
     </a>

@@ -3,7 +3,7 @@ https://atomwrath.github.io/dogexplorer/
 
 Two cartoon 3D dog games that run in any browser — no install, no build step required to play.?
 
-- **Backyard Pups** — design a pup from the paws up, save favorites, export them as JSON.
+- **Pup Creator** — design a pup from the paws up, save favorites, export them as JSON.
 - **Pup City** — downtown dash. Sneak the block, scare the strays, dodge traffic, chomp the golden bone, and don't startle the neighbors.
 
 - **Neon Pups** — hoverboard racing on the Pup Trails maps. `src/neon/`: `routes.js` builds the
@@ -134,7 +134,7 @@ Edit anything under `src/` and reload. No bundler, no node_modules, no watch pro
 ## Building single-file versions
 
 ```bash
-python3 build.py             # -> dist/pup-city.html, dist/backyard-pups.html
+python3 build.py             # -> dist/pup-city.html, dist/pup-creator.html
 ```
 
 Each is fully self-contained (three.js, CSS and all modules inlined) and opens from a double-click. Handy for sharing, archiving, or playing with no server at all.

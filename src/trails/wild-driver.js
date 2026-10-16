@@ -1,5 +1,5 @@
 /* Playing AS a wild animal, not just watching one, is new — neither Pup City (wildlife
-   is AI-only) nor Backyard Pups (dogs only) has a player-controlled non-dog creature,
+   is AI-only) nor Pup Creator (dogs only) has a player-controlled non-dog creature,
    so there's no existing "runtime" module to plug into the way dog-driver.js plugs into
    dog/runtime.js. What IS shared is the art and the balance data: makeAnimalModel()
    and SPECIES. This file is the trail-only equivalent of dog/runtime.js — same

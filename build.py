@@ -2,7 +2,7 @@
 """
 Bundle the ES modules into standalone single-file HTML builds.
 
-    python3 build.py            # -> dist/pup-city.html, dist/backyard-pups.html,
+    python3 build.py            # -> dist/pup-city.html, dist/pup-creator.html,
                                 #    dist/pup-trails.html, dist/neon-pups.html
     python3 build.py --serve    # build, then serve the repo at :8000
 
@@ -102,7 +102,7 @@ def inline(html_path, out_name):
 def main():
     print('building single-file bundles...')
     inline(ROOT / 'city' / 'index.html', 'pup-city.html')
-    inline(ROOT / 'creator' / 'index.html', 'backyard-pups.html')
+    inline(ROOT / 'creator' / 'index.html', 'pup-creator.html')
     inline(ROOT / 'trails' / 'index.html', 'pup-trails.html')
     inline(ROOT / 'neon' / 'index.html', 'neon-pups.html')
     print('done -> dist/')

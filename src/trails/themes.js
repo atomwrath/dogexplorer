@@ -1,5 +1,5 @@
 /* Landscape presets for Pup Trails -- meadow / forest / red rock. There's no equivalent
-   concept in Pup City or Backyard Pups (each has exactly one environment), so this is
+   concept in Pup City or Pup Creator (each has exactly one environment), so this is
    entirely trail-owned; nothing to reconcile with the shared modules here. */
 
 const THEMES={

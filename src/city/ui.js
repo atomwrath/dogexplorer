@@ -177,7 +177,7 @@ pupSec.innerHTML = `
     <input type="file" id="importFile" accept=".json,application/json" style="display:none">
   </div>
   <div id="pupList"></div>
-  <div class="hint-note">Import <b>backyard-pups.json</b> from the Dog Character Creator, then pick who runs today.</div>`;
+  <div class="hint-note">Import <b>pup-creator.json</b> from the Pup Creator, then pick who runs today.</div>`;
 let importedPups = [];
 let selectedIdx = -1;
 function renderPupList(){

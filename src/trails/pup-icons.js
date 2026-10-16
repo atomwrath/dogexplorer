@@ -4,7 +4,7 @@
      1. Shipped. src/data/profile-icons.js holds an icon for every dog preset and wild species,
         drawn ahead of time by tools/make-profile-icons.mjs. Found by hash, so they appear on the
         first frame, cost nothing to show, and work on a device with no WebGL to spare.
-     2. Drawn on this device. A pup with no shipped icon -- one made in Backyard Pups, one
+     2. Drawn on this device. A pup with no shipped icon -- one made in Pup Creator, one
         imported from a file, a preset retuned since the icons were last generated -- is drawn
         by the very same renderer (core/profile-icon.js), one per timer tick so the picker never
         stalls, and kept for the rest of the session.

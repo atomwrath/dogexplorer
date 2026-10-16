@@ -1,4 +1,4 @@
-/* buildDog — SHARED between Pup City and Backyard Pups.
+/* buildDog — SHARED between Pup City and Pup Creator.
    Change it here and both games get it. */
 import { M, toon } from '../core/materials.js';
 import { DEFAULTS } from './params.js';

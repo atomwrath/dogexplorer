@@ -1,6 +1,6 @@
 /* Trail-specific rendering: signs, blazes, gates, POI/area models, ground shadows,
-   trail ribbons. None of this exists elsewhere in the repo -- Pup City and Backyard
-   Pups have no notion of a trail network, a POI, or a graded area -- so it's entirely
+   trail ribbons. None of this exists elsewhere in the repo -- Pup City and Pup
+   Creator have no notion of a trail network, a POI, or a graded area -- so it's entirely
    trail-owned. What IS shared (toon materials, math, terrain height) comes in via
    import rather than being redefined here, unlike the standalone build this was split
    from, which had its own copies of everything.

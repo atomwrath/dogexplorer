@@ -780,7 +780,7 @@ body[data-pane] #touchCtl, body.arrived #touchCtl{display:none;}
                 <div id="animalGrid" class="pup-grid" title="Blue bar: speed. Pink bar: how far off you spook the locals." hidden></div>
                 <div class="io-row">
                   <button class="btn small" id="randomPupBtn" title="Pick a random pup">🎲 Random pup</button>
-                  <label class="btn small" for="pupFile" title="Import a backyard-pups.json. Pups saved in Backyard Pups show up here on their own.">📥 Import</label>
+                  <label class="btn small" for="pupFile" title="Import a pup-creator.json. Pups saved in Pup Creator show up here on their own.">📥 Import</label>
                 </div>
                 <input type="file" id="pupFile" accept=".json,application/json" multiple hidden>
               </div>
@@ -2069,7 +2069,7 @@ function pushPose(legLen, deckY, legCount){
 
 /* ==== src/trails/wild-driver.js ==== */
 /* Playing AS a wild animal, not just watching one, is new — neither Pup City (wildlife
-   is AI-only) nor Backyard Pups (dogs only) has a player-controlled non-dog creature,
+   is AI-only) nor Pup Creator (dogs only) has a player-controlled non-dog creature,
    so there's no existing "runtime" module to plug into the way dog-driver.js plugs into
    dog/runtime.js. What IS shared is the art and the balance data: makeAnimalModel()
    and SPECIES. This file is the trail-only equivalent of dog/runtime.js — same
@@ -2301,7 +2301,7 @@ function randomPupParams(){
 }
 
 /* ==== src/dog/build.js ==== */
-/* buildDog — SHARED between Pup City and Backyard Pups.
+/* buildDog — SHARED between Pup City and Pup Creator.
    Change it here and both games get it. */
 
 
@@ -2720,7 +2720,7 @@ function setDog(params){
 
 /* ==== src/trails/dog-driver.js ==== */
 /* Drives the SHARED dog (src/dog/runtime.js) for trail movement, sneaking and gait —
-   the dog itself is Pup City / Backyard Pups' rig, unmodified. This file owns none of
+   the dog itself is Pup City / Pup Creator' rig, unmodified. This file owns none of
    the dog's geometry or presets; it only reads the live refs runtime.js already exports
    and turns trail movement into the same leg-swing / tail-wag / bark it always had.
 
@@ -2741,7 +2741,7 @@ let dogLegLen = 0.4;     // hip pivot height above ground, WORLD units -- see me
 
 /* The shared rig sizes itself directly in world units via g.scale.setScalar(p.size)
    inside dog/build.js -- tuned to look right in Pup City's own stylised world (city
-   blocks 22 units square) and reused as-is in Backyard Pups. Trails' world is real
+   blocks 22 units square) and reused as-is in Pup Creator. Trails' world is real
    metric distance (DEM + GeoJSON, "1 unit = 1 metre" per the scale slider's own copy),
    and the rig was never re-tuned for that: worked out from build.js's own geometry, a
    DEFAULTS pup (size:1) measures roughly 3.9 m nose to tail-tip before any correction --
@@ -2754,7 +2754,7 @@ let dogLegLen = 0.4;     // hip pivot height above ground, WORLD units -- see me
    walk/run/turn speed from that same size field over a narrow expected range (0.55-1.6),
    so scaling it down here would flatten every pup's stats to the same low-size floor
    instead of shrinking the model. This way a saved pup's chosen size still varies its
-   speed exactly as it does in Backyard Pups; only what you SEE changes. */
+   speed exactly as it does in Pup Creator; only what you SEE changes. */
 const TRAIL_DOG_SCALE = 0.3;
 
 /* The gait is foot-locked against this length (see gait.js), so it has to be the pivot's
@@ -5181,7 +5181,7 @@ function areaShape(a){
 
 /* ==== src/trails/themes.js ==== */
 /* Landscape presets for Pup Trails -- meadow / forest / red rock. There's no equivalent
-   concept in Pup City or Backyard Pups (each has exactly one environment), so this is
+   concept in Pup City or Pup Creator (each has exactly one environment), so this is
    entirely trail-owned; nothing to reconcile with the shared modules here. */
 
 const THEMES={
@@ -5226,8 +5226,8 @@ function setTheme(t){ THEME = t; }
 
 /* ==== src/trails/pieces.js ==== */
 /* Trail-specific rendering: signs, blazes, gates, POI/area models, ground shadows,
-   trail ribbons. None of this exists elsewhere in the repo -- Pup City and Backyard
-   Pups have no notion of a trail network, a POI, or a graded area -- so it's entirely
+   trail ribbons. None of this exists elsewhere in the repo -- Pup City and Pup
+   Creator have no notion of a trail network, a POI, or a graded area -- so it's entirely
    trail-owned. What IS shared (toon materials, math, terrain height) comes in via
    import rather than being redefined here, unlike the standalone build this was split
    from, which had its own copies of everything.
@@ -16926,7 +16926,7 @@ function setKennelPups(list){
 }
 
 /* Accepts every shape the suite has ever written or read: the creator's
-   {backyardPups:1, pups:[{params}]} export, a bare array, or a single pup object.
+   {pupCreator:1, pups:[{params}]} export (older files say backyardPups:1; both are read), a bare array, or a single pup object.
    Returns plain param objects; callers merge DEFAULTS themselves. */
 function parsePupFile(data){
   let obj = data;
@@ -18280,7 +18280,7 @@ const PROFILE_ICONS = {
 
    ONE RENDERER FOR TWO JOBS. The icons that ship with the game are drawn ahead of time by
    tools/make-profile-icons.mjs, and anything the game meets that has no shipped icon (a pup
-   made in Backyard Pups, one imported from a file, a preset whose look has since changed) is
+   made in Pup Creator, one imported from a file, a preset whose look has since changed) is
    drawn on the spot by the player's own browser. Both go through renderProfile() below, with
    the same lights, framing and downsample, so a drawn-ahead icon and an on-the-spot one are
    the same picture and a card never looks out of place beside its neighbours.
@@ -18506,7 +18506,7 @@ function pixelsToDataURL(img){
      1. Shipped. src/data/profile-icons.js holds an icon for every dog preset and wild species,
         drawn ahead of time by tools/make-profile-icons.mjs. Found by hash, so they appear on the
         first frame, cost nothing to show, and work on a device with no WebGL to spare.
-     2. Drawn on this device. A pup with no shipped icon -- one made in Backyard Pups, one
+     2. Drawn on this device. A pup with no shipped icon -- one made in Pup Creator, one
         imported from a file, a preset retuned since the icons were last generated -- is drawn
         by the very same renderer (core/profile-icon.js), one per timer tick so the picker never
         stalls, and kept for the rest of the session.
@@ -23264,7 +23264,7 @@ if(dropzone){
 }
 
 /* One picker for everything. A pup-world/1 bundle, a plain .geojson and a
-   backyard-pups.json are all just JSON, so detect by content rather than by extension --
+   pup-creator.json are all just JSON, so detect by content rather than by extension --
    QGIS writes .geojson, fetch_dem.py writes .json, and users rename both. Layers are
    batched so dropping trails + areas together rebuilds once, not twice. */
 async function loadFiles(files){
@@ -23284,7 +23284,7 @@ async function loadFiles(files){
       // chip tracking is separate from EXTRA (world.js has no per-file memory of what it
       // merged) -- record name+count here purely for the panel's own display
       loadedFiles.push({name:f.name, count:(layer.features||[]).length, layer});
-    }else if(obj && (obj.backyardPups || obj.pups || obj.furColor)){
+    }else if(obj && (obj.pupCreator || obj.backyardPups || obj.pups || obj.furColor)){
       gotPups += addPups(parsePupFile(obj));
     }else{
       console.error('unrecognised file (expected a pup-world/1 bundle, GeoJSON or a pup file):', f.name);

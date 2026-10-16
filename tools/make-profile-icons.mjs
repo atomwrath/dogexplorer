@@ -3,7 +3,7 @@
    models, and writes them to src/data/profile-icons.js as data URIs.
 
    Pup Trails ships these so the picker has real pictures from the first frame. Anything with
-   no shipped icon -- a pup made in Backyard Pups, one imported from a file, a preset retuned
+   no shipped icon -- a pup made in Pup Creator, one imported from a file, a preset retuned
    since this was last run -- is drawn at run time by the same renderer (src/core/profile-icon.js).
    The game compares each icon's hash with what it would draw now, so a stale icon is replaced
    rather than shown; but re-run this after changing a preset, a species, or the lighting in
