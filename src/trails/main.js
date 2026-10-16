@@ -39,7 +39,7 @@ import { barkSound, cheerBlip, initAudio, thudSound, splashSound,
          stepSound, landSound, jumpSound, scrabbleSound, catchSound,
          countPip, goTone, offCourseSound, rejoinSound } from '../core/audio.js';
 
-import { waterSurfaceAt, applyThemeLighting, getMapLatLon, setTerrainQuadBudget, getDemStride, addLayers, clearLayers, compass, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapId, getMapScale, getPathMix, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, inWaterway, loadWorld, renameTrail, getEditCount, getMapBundleJSON, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY, setWadeLegLength, getWorldRevision, areaBlocked, areaSolidTop, nearestSolidFace, solidEmbed, distToSolid } from './world.js';
+import { waterSurfaceAt, applyThemeLighting, getMapLatLon, setTerrainQuadBudget, getDemStride, addLayers, clearLayers, compass, getBBox, getBackdrop, getContourStep, getExaggeration, getFogMultiplier, getGraph, getMapId, getMapScale, getPathMix, getPOIs, hasBundle, getStartHead, getTrailheads, getVertScale, inWaterway, loadWorld, renameTrail, getEditCount, getMapBundleJSON, projectLonLat, inMapArea, setContourStep, setFogMultiplier, setMapScale, setStartHead, setThemeById, setVertScale, standingY, setWadeLegLength, getWorldRevision, areaBlocked, areaSolidTop, nearestSolidFace, solidEmbed, distToSolid } from './world.js';
 
 import { THEME, THEMES } from './themes.js';
 import { setSkyMode, getSkyMode, setSkyClock, getSkyClock, skyFrame, skyReadout, skyState, nowClock } from './sky.js';
@@ -60,6 +60,8 @@ import { HB, hbs, hbKickTop, hbStepSpeed, hbTurnRate, hbOverBoard, hbExitPlan, h
          hbMount, hbDismount, hbFreeStep, hbUpdateVisual, hbSetLook, hbStepBlend, hbPushBack } from './hoverboard.js';
 import { autoWalkBegin, autoWalkSteer } from './auto-walk.js';
 import { edgeLabel } from './map-edits.js';
+import { demPlan, demBuild, demLoadTile, demLayerBounds, demLayerKey, demFormatBytes, demClampCell,
+         DEM_CELL_DEFAULT } from './dem-fetch.js';
 import { requestIcon } from './pup-icons.js';
 import { dogIconSpec, wildIconSpec } from './pup-icon-specs.js';
 import { wildSeed } from '../core/profile-icon.js';
@@ -3273,6 +3275,11 @@ function applyDetail(mode, reload){
   setTerrainQuadBudget(DETAIL_BUDGET[mode]);
   try{ localStorage.setItem(DETAIL_KEY, mode); }catch(err){}
   renderDetailToggle();
+  /* A map built from dropped files has no URL to come back to: reloading lastMapUrl here
+     would swap the player's own map for whichever one was loaded before it. */
+  if(reload && demActive()) return loadWorld(demBuilt.bundle, [], 3).then(()=>{
+    refreshMapUI(); placeAtHead(pickDefaultHead());
+  });
   if(reload && lastMapUrl) return loadMap(lastMapUrl, lastMapWasDefault).then(ok=>{
     if(ok){ refreshMapUI(); placeAtHead(pickDefaultHead()); }
   });
@@ -4023,6 +4030,7 @@ function refreshMapUI(){
   syncCourseOverlay();
   // a new map is a new latitude, longitude and time zone: same clock, different sunrise
   renderSkyUI();
+  renderDemUI();
 }
 
 /* --- loaded GeoJSON file chips ---
@@ -4052,6 +4060,7 @@ function renderFileChips(){
     });
     wrap.appendChild(chip);
   });
+  renderDemUI();
 }
 
 function downloadText(filename, text, type){
@@ -4063,6 +4072,8 @@ function downloadText(filename, text, type){
   URL.revokeObjectURL(url);
 }
 function saveCombinedLayers(){
+  // a map built here is the dropped files AND their elevation: that one file is "combined"
+  if(demActive()){ downloadText(demBuilt.name, demSaveText(), 'application/json'); return; }
   if(!loadedFiles.length){ console.warn('no loaded GeoJSON layers to save'); return; }
   const combined = loadedFiles.length===1 ? loadedFiles[0].layer : {
     type:'FeatureCollection',
@@ -4071,6 +4082,204 @@ function saveCombinedLayers(){
   downloadText('combined.geojson', JSON.stringify(combined), 'application/geo+json');
 }
 $('#saveCombinedBtn')?.addEventListener('click', saveCombinedLayers);
+
+/* ---------- elevation for dropped files ----------
+   Dropped GeoJSON has no heightfield, so it is flat -- or, because the default map is a DEM
+   bundle that stays loaded underneath, it is CROPPED to that bundle's rectangle (world.js
+   clips everything to the loaded DEM), which for a map somewhere else means nothing shows.
+   This is the in-page fetch_dem.py (dem-fetch.js): it downloads the elevation under the
+   dropped files and turns them into a map of their own.
+
+   THE OFFER is made only when it would help: files are dropped AND either no DEM is loaded
+   or the files reach outside the one that is. Files that sit inside the loaded map's DEM are
+   an overlay on it and need nothing.
+
+   WHAT IT REPLACES. The new bundle holds the dropped files alone, so it replaces whatever map
+   was on screen (the map picker brings that back), and the file chips go: the files are the
+   bundle's layers now, and a chip's remove button re-adds layers on top of a bundle, which
+   would draw them twice. When the map on screen is one built here and more files are dropped
+   that reach outside it, the offer is a REBUILD of everything: the files already in that map
+   plus the new ones, over one larger grid (demSources) -- the earlier map is not thrown away
+   for the sake of the later file.
+
+   SAVING. "Save combined" (and Save map, in edit mode) downloads the bundle -- the files and
+   the elevation in one pup-world/1 file, the same thing fetch_dem.py writes, ready for
+   data/. Files dropped on top of it afterwards are folded into that file (demSaveText). */
+let demBuilt = null;            // {bundle, mapId, name, cell, tiles} of the map built here
+let demBusy = null;             // AbortController while a download is running
+let demArmed = false;           // a large download waiting for its second tap
+let demMsg = '';                // the last failure or cancel, shown until the next change
+let demProgress = '';           // progress text while demBusy
+let demLoader = demLoadTile;    // the smoke suite swaps this for a fake network
+let demMeasured = {key:'', bytes:0};
+function demSetLoader(fn){ demLoader = fn || demLoadTile; }
+function getDemBuilt(){ return demBuilt; }
+
+function demActive(){ return !!demBuilt && hasBundle() && getMapId() === demBuilt.mapId; }
+
+function demNeeded(){
+  if(!loadedFiles.length) return false;
+  if(!hasBundle()) return true;
+  const b = demLayerBounds(loadedFiles.map(f=>f.layer));
+  if(!b) return false;
+  return [[b.minLon,b.minLat],[b.maxLon,b.minLat],[b.minLon,b.maxLat],[b.maxLon,b.maxLat]].some(c=>{
+    const p = projectLonLat(c[0], c[1]);
+    return !p || !inMapArea(p.x, p.z);
+  });
+}
+
+function demCellValue(){
+  const s = $('#demCell');
+  return demClampCell(s ? s.value : DEM_CELL_DEFAULT);
+}
+
+/* Everything a build would be made from right now: the files already in the map built here (if
+   that is what is on screen) and then the ones dropped since. */
+function demSources(){
+  const out = [];
+  if(demActive()) for(const k of Object.keys(demBuilt.bundle.layers)) out.push({name:k, layer:demBuilt.bundle.layers[k]});
+  loadedFiles.forEach(f=>out.push({name:f.name, layer:f.layer}));
+  return out;
+}
+
+/* The plan for what would be built now, at the slider's resolution. Cheap enough for every move
+   of the slider except the one number that is not: the layers' size as text, so that is
+   measured once per set of files. */
+function demCurrentPlan(){
+  const src = demSources();
+  if(!src.length) return null;
+  const key = src.map(s=>s.name+':'+((s.layer && s.layer.features) || []).length).join('|');
+  if(demMeasured.key !== key){
+    let n = 0;
+    try{ n = JSON.stringify(src.map(s=>s.layer)).length; }catch(err){}
+    demMeasured = {key, bytes:n};
+  }
+  return demPlan(src.map(s=>s.layer), demCellValue(), demMeasured.bytes);
+}
+
+function demSaveName(src){
+  const stem = src.length === 1 ? demLayerKey(src[0].name, new Set()) : 'combined';
+  return stem + 'World.json';
+}
+
+/* The bundle as a file: its own layers (with any trail renames, which patch the very features
+   inside it) plus anything dropped on top since. */
+function demSaveText(){
+  const b = demBuilt.bundle;
+  if(!loadedFiles.length) return JSON.stringify(b);
+  const layers = Object.assign({}, b.layers);
+  const used = new Set(Object.keys(layers));
+  loadedFiles.forEach(f=>{ layers[demLayerKey(f.name, used)] = f.layer; });
+  return JSON.stringify(Object.assign({}, b, {layers}));
+}
+
+function renderDemUI(){
+  const box = $('#demBox'); if(!box) return;
+  const active = demActive();
+  const offer = !demBusy && demNeeded();       // also while `active`: more files outside it means a rebuild
+  box.hidden = !(demBusy || offer || active);
+  const add = $('#demAdd'), note = $('#demNote'), btn = $('#demGoBtn'), val = $('#demCellVal'), slider = $('#demCell');
+  const save = $('#saveCombinedBtn');
+  if(save) save.title = active ? 'Download the map and its elevation as one file' : 'Download the dropped layers as one file';
+  if(add) add.hidden = !(demBusy || offer);
+  if(!note) return;
+  note.classList.remove('warn');
+  if(demBusy){
+    note.textContent = demProgress;
+    if(btn){ btn.textContent = 'Cancel'; btn.disabled = false; }
+    if(slider) slider.disabled = true;
+    return;
+  }
+  if(slider) slider.disabled = false;
+  if(btn && !offer) btn.textContent = '⛰️ Add elevation';     // not left reading Cancel
+  if(!offer){
+    if(active) note.textContent = `Elevation added: ${demBuilt.cell} m grid from ${demBuilt.tiles} tile${demBuilt.tiles===1?'':'s'}. Save combined downloads the map and its elevation as one file.`;
+    return;
+  }
+  const plan = demCurrentPlan();
+  if(val) val.textContent = demCellValue() + ' m';
+  let text;
+  if(!plan || plan.error || plan.tooBig){
+    text = (plan && (plan.error || plan.tooBig)) || '';
+    // the files already in the map are part of the plan, so "fewer files" means starting again
+    if(plan && plan.tooBig && active) text += ' Pick a map from the list to start again with just these.';
+    note.classList.add('warn');
+    if(btn){ btn.textContent = '⛰️ Add elevation'; btn.disabled = true; }
+  }else{
+    text = `${plan.tileCount} tile${plan.tileCount===1?'':'s'} · about ${demFormatBytes(plan.estDownloadBytes)} to download · `
+      + `map file about ${demFormatBytes(plan.estFileBytes)}. `
+      + (active ? 'Rebuilds the map with the files already in it and these.'
+                : 'Builds a map from your files alone and replaces the one on screen.');
+    if(plan.large){
+      note.classList.add('warn');
+      text = '⚠ Large download. ' + text;
+    }
+    if(btn){
+      btn.disabled = false;
+      btn.textContent = demArmed ? `Download about ${demFormatBytes(plan.estDownloadBytes)}? Tap again` : '⛰️ Add elevation';
+    }
+  }
+  if(demMsg){ note.classList.add('warn'); text = demMsg + '\n' + text; }
+  note.textContent = text;
+}
+
+function demOnProgress(p){
+  demProgress = p.phase === 'tiles' ? `Downloading elevation… ${p.done} of ${p.total} tiles` : 'Building the terrain…';
+  const note = $('#demNote');
+  if(note && demBusy) note.textContent = demProgress;
+}
+
+async function demGo(){
+  if(demBusy){ demBusy.abort(); return; }       // the button reads Cancel while a download runs
+  const plan = demCurrentPlan();
+  if(!plan || plan.error || plan.tooBig) return;
+  // a large download asks once: the first tap arms the button, the second goes
+  if(plan.large && !demArmed){ demArmed = true; renderDemUI(); return; }
+  demArmed = false; demMsg = '';
+  const snap = loadedFiles.slice();            // to notice the files changing under the download
+  const src = demSources();
+  const ctl = new AbortController();
+  demBusy = ctl; demProgress = 'Starting…';
+  renderDemUI();
+  let out = null;
+  try{
+    out = await demBuild(src.map(s=>s.layer), src.map(s=>s.name), plan,
+                         {signal: ctl.signal, loadTile: demLoader, onProgress: demOnProgress});
+  }catch(err){
+    if(err && err.name === 'AbortError') demMsg = 'Cancelled.';
+    else{
+      console.error('elevation download failed:', err);
+      demMsg = (err && err.demCode) ? err.message : 'Elevation could not be added — see the console.';
+    }
+  }
+  demBusy = null;
+  // the files may have been changed while the tiles came down; the result is for the old set
+  if(out && (loadedFiles.length !== snap.length || snap.some((f,i)=>loadedFiles[i] !== f))){
+    out = null;
+    demMsg = 'The imported files changed while elevation was downloading. Try again.';
+  }
+  if(out){
+    try{
+      await loadWorld(out.bundle, [], 3);
+      loadedFiles = [];
+      demBuilt = {bundle: out.bundle, mapId: getMapId(), name: demSaveName(src), cell: plan.cell, tiles: plan.tileCount};
+      renderFileChips();
+      refreshMapUI();
+      if(getGraph()) placeAtHead(pickDefaultHead());
+      const st = getDemStride();
+      const mapNote = $('#mapNote');
+      if(mapNote) mapNote.textContent = 'Loaded: your files with elevation'
+        + ` · ${getTrailheads().length} trailhead${getTrailheads().length===1?'':'s'}`
+        + (st > 1 ? ` · terrain coarsened ${st}× to fit` : '');
+    }catch(err){
+      console.error('could not build the map from the downloaded elevation:', err);
+      demMsg = 'The elevation downloaded but the map could not be built from it — see the console.';
+    }
+  }
+  renderDemUI();
+}
+$('#demGoBtn')?.addEventListener('click', demGo);
+$('#demCell')?.addEventListener('input', ()=>{ demArmed = false; demMsg = ''; renderDemUI(); });
 
 /* ---------- map editing ----------
    The map is a static file the game cannot write to, so "save" is a download: the loaded
@@ -4102,6 +4311,7 @@ function setMapEditing(on){
   updateEditUI();
 }
 function saveMapFile(){
+  if(demActive()){ downloadText(demBuilt.name, demSaveText(), 'application/json'); return; }
   const json=getMapBundleJSON();
   if(json) downloadText((lastMapUrl || 'map.json').split('?')[0].split('/').pop() || 'map.json', json, 'application/json');
   else saveCombinedLayers();

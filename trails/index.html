@@ -122,6 +122,22 @@
                      the whole fix. -->
                 <input type="file" id="worldFile" accept=".geojson,.json,.txt,application/geo+json,application/json,text/plain" multiple hidden>
                 <div id="fileChips" class="file-chips"></div>
+                <!-- Elevation for dropped files (see "elevation for dropped files" in main.js).
+                     Shown only while there are files that need it or the map was just built
+                     from them; the slider and button hide once it is built, and Save combined
+                     below then downloads the map with its elevation. -->
+                <div id="demBox" hidden>
+                  <div id="demAdd" hidden>
+                    <div class="ctl" title="Cell size of the elevation grid. Smaller is sharper and makes a bigger file; 8 m matches the maps in the game.">
+                      <label>Elevation detail <span class="val" id="demCellVal">8 m</span></label>
+                      <input type="range" id="demCell" min="6" max="20" step="1" value="8">
+                    </div>
+                    <div class="io-row">
+                      <button class="btn small" id="demGoBtn" type="button" title="Download elevation under the dropped files and build a map from them">⛰️ Add elevation</button>
+                    </div>
+                  </div>
+                  <p class="hint" id="demNote"></p>
+                </div>
                 <div class="io-row">
                   <button class="btn small" id="saveCombinedBtn" title="Download the dropped layers as one file">↓ Save combined</button>
                   <button class="btn small" id="clearLayersBtn" title="Remove the dropped layers">Clear map</button>

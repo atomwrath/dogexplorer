@@ -121,6 +121,8 @@ body[data-pane="map"] #paneDrawer{width:100%;border-right-color:transparent;box-
 .sect-toggle:hover{background:var(--cream);}
 #mapListRow{margin-top:8px;}
 .hint{font-size:11.5px;opacity:.65;}
+#demNote{white-space:pre-line;margin:6px 0;}
+#demNote.warn{opacity:1;color:var(--orange);}
 /* left:58px, not 10px -- #paneTabs owns the left edge from the top down.
    touch-action:none for the same reason as #paneTabs and #miniWrap -- this readout sits
    over the canvas the whole walk and is one more place a stray finger can leak a native

@@ -465,6 +465,19 @@ async function assertAll(window, errors, stats) {
   const dist = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
   const results = [];
   const check = (name, ok, detail) => results.push({ name, ok: !!ok, detail });
+  // SMOKE_ONLY=dem: just the elevation-download checks (demChecks, at the end of this function)
+  /* A step that breaks must go red, not take the run down with it: a later step that reads what
+     an earlier one should have produced would throw, and a throw prints no results at all --
+     which tools/revert-dem.py cannot tell from a clean run. So an exception is a failed check. */
+  async function demChecksSafe() {
+    try { await demChecks(); }
+    catch (e) { check('the elevation checks ran to the end without throwing', false, String(e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e)); }
+  }
+  if (process.env.SMOKE_ONLY === 'dem') {
+    await demChecksSafe();
+    for (const r of results) console.log(` ${r.ok ? 'ok  ' : 'FAIL'}  ${r.name}${r.detail ? '   (' + r.detail + ')' : ''}`);
+    process.exit(results.some(r => !r.ok) || errors.length ? 1 : 0);
+  }
   let __paneNote = '';
   const clickText = (sel, re) => {
     const b = [...d.querySelectorAll(sel)].find(x => re.test(x.textContent));
@@ -8373,6 +8386,247 @@ return {atFork, atDeg2, pairs, worst:+worst.toFixed(2), sites:Object.keys(where)
   check('on a steep trail the slope the pup is tipped by is the tread grade',
     steep.on === 'tread' && Math.abs(steep.grade) > 0.15 && Math.abs(steep.measured - steep.grade) < Math.abs(steep.grade)*0.35,
     `steepest trail grade ${steep.grade}, measured ${steep.measured} on ${steep.on}`);
+
+  /* ---------- elevation for dropped files (src/trails/dem-fetch.js, panel in main.js) ----------
+     RUNS LAST, because it replaces the loaded map. The network is faked: demSetLoader swaps
+     the tile loader for one that returns a known surface, so what is checked is everything
+     that is OURS -- the plan, the resampling, the alignment to the game's own loader, the panel
+     and the save -- not whether AWS is up. The footprint below is the one fetch_dem.py was run
+     on to get the grid/zoom/tile numbers in ORACLE, and the same tiles were used to confirm the
+     heightfield it writes is byte-identical to this module's (done by hand, not in this suite:
+     the PNGs are 94 KB apiece).
+
+     A function so that `SMOKE_ONLY=dem node tools/smoke.js` can run just these, in seconds
+     rather than the full suite's two minutes -- tools/revert-dem.py runs it that way. */
+  async function demChecks(){
+    const G = code => (0, eval)(code);
+    const demGJ = {type:'FeatureCollection', features:[
+      {type:'Feature', properties:{name:'T'}, geometry:{type:'LineString', coordinates:[[-104.991943359375, 38.9730750257973], [-104.9853515625, 38.98703072662053], [-104.978759765625, 38.99698642744376]]}},
+      {type:'Feature', properties:{name:'P'}, geometry:{type:'Point', coordinates:[-104.990943359375, 38.99598642744376]}}]};
+    const demPt = (lon, lat) => ({type:'Feature', properties:{}, geometry:{type:'Point', coordinates:[lon, lat]}});
+    const demBox = (d) => ({type:'FeatureCollection', features:[demPt(-104.9854 - d, 38.985 - d), demPt(-104.9854 + d, 38.985 + d)]});
+    const fakeFile = (obj, name) => ({name, text: async () => (typeof obj === 'string' ? obj : JSON.stringify(obj))});
+    const clickEl = id => d.getElementById(id).click();
+    const setSlider = v => { const s = d.getElementById('demCell'); s.value = String(v); s.dispatchEvent(new window.Event('input')); };
+    const noteText = () => d.getElementById('demNote').textContent;
+    const until = async (fn, ms = 20000) => { const t0 = Date.now(); while(!fn()){ if(Date.now() - t0 > ms) return false; await new Promise(r => setTimeout(r, 5)); } return true; };
+    // fetch_dem.py's own output for demGJ: cell -> [width, height, zoom, tiles]
+    const ORACLE = {6: [224, 476, 15, 8], 8: [168, 358, 15, 8], 13: [104, 220, 15, 8], 15: [90, 192, 14, 6], 20: [68, 144, 14, 6]};
+    // a tilted surface laid over the tile pixels of the z15 block demGJ sits in: continuous
+    // across tile edges, so a tile put in the wrong place or a flipped axis shows as a jump
+    const X0 = 6827*256, Y0 = 12523*256;
+    const surf = (X, Y) => 1800 + 0.15*(X - X0) - 0.10*(Y - Y0);
+    const calls = [];
+    const planeLoader = async (z, x, y, signal) => {
+      calls.push([z, x, y]);
+      const t = new Float32Array(256*256);
+      const sc = Math.pow(2, 15 - z);                       // a z14 tile covers 2x2 z15 tiles
+      for(let py = 0; py < 256; py++) for(let px = 0; px < 256; px++) t[py*256 + px] = surf((x*256 + px)*sc, (y*256 + py)*sc);
+      return t;
+    };
+
+    // ---- the plan ----
+    const bad = [];
+    for(const c of Object.keys(ORACLE)){
+      const p = G(`demPlan`)([demGJ], +c, 0), o = ORACLE[c];
+      if(p.nx !== o[0] || p.nz !== o[1] || p.zoom !== o[2] || p.tileCount !== o[3]) bad.push(`${c} m: ${p.nx}x${p.nz} z${p.zoom} ${p.tileCount} tiles vs ${o}`);
+    }
+    check('the elevation plan agrees with fetch_dem.py: grid, zoom and tile count at 6, 8, 13, 15 and 20 m',
+      bad.length === 0, bad.length ? bad.join('; ') : 'all five match');
+    const pSmall = G('demPlan')([demGJ], 8, 0), pBig = G('demPlan')([demBox(0.1)], 20, 0), pHuge = G('demPlan')([demBox(0.1)], 8, 0);
+    check('a download is only called large from about 5 MB, and the estimate is tile count x the measured ~95 KB tile',
+      !pSmall.large && pBig.large && pSmall.estDownloadBytes === 8*95000 && pBig.estDownloadBytes === pBig.tileCount*95000,
+      `8 tiles -> ${pSmall.estDownloadBytes} B large=${pSmall.large}; ${pBig.tileCount} tiles -> ${pBig.estDownloadBytes} B large=${pBig.large}`);
+    check('an area past the tile limit is refused rather than attempted',
+      pHuge.tileCount > 400 && !!pHuge.tooBig && !pBig.tooBig,
+      `${pHuge.tileCount} tiles at 8 m: ${pHuge.tooBig ? 'refused' : 'allowed'}; ${pBig.tileCount} at 20 m: ${pBig.tooBig ? 'refused' : 'allowed'}`);
+    check('a layer that is not WGS84 is refused, and so is an empty one',
+      !!G('demPlan')([Object.assign({crs:{type:'name', properties:{name:'urn:ogc:def:crs:EPSG::3857'}}}, demGJ)], 8, 0).error
+        && !!G('demPlan')([{type:'FeatureCollection', features:[]}], 8, 0).error
+        && !G('demPlan')([Object.assign({crs:{type:'name', properties:{name:'urn:ogc:def:crs:OGC:1.3:CRS84'}}}, demGJ)], 8, 0).error,
+      'EPSG:3857 and an empty file refused; CRS84 accepted');
+    const keyUsed = new Set();
+    const keys = [G('demLayerKey')('a.geojson', keyUsed), G('demLayerKey')('a.json', keyUsed), G('demLayerKey')('', keyUsed)];
+    check('layers from files with the same name get different keys, with the extension stripped',
+      keys.join() === 'a,a-2,layer', keys.join());
+    const rgba = new Uint8Array(4*256*256);
+    const probeVals = [0, 1.5, 2744.25, -10.5, 4301.99609375];
+    probeVals.forEach((v, i) => { const s = v + 32768, R = Math.floor(s/256), Gc = Math.floor(s) % 256, B = Math.round((s - Math.floor(s))*256); rgba.set([R, Gc, B, 255], i*4); });
+    const dec = G('demDecodeTerrarium')(rgba);
+    check('a Terrarium pixel decodes to R*256 + G + B/256 - 32768 exactly',
+      probeVals.every((v, i) => dec[i] === Math.fround(v)), probeVals.map((v, i) => `${v} -> ${dec[i]}`).join(', '));
+
+    // ---- the heightfield, read back through the game's own loader ----
+    const built = await G('demBuild')([demGJ], ['trails.geojson'], pSmall, {loadTile: planeLoader});
+    const W = G('loadWorldBundle')(built.bundle, {});
+    let worst = 0, n = 0;
+    for(const [i, j] of [[0, 0], [W.width - 1, 0], [0, W.height - 1], [W.width - 1, W.height - 1], [30, 40], [120, 200], [85, 300], [167, 100], [10, 357], [64, 128], [100, 255], [150, 5]]){
+      const c = W.cellCentre(i, j), ll = W.unproject(c.x, c.z), t = G('demTileXY')(ll.lon, ll.lat, 15);
+      const want = surf(t.x*256, t.y*256), got = W.heights[j*W.width + i];
+      worst = Math.max(worst, Math.abs(got - want)); n++;
+    }
+    check('the built heightfield lines up with the projection: every probed cell reads the surface at its own lon/lat',
+      n === 12 && worst < 0.08, `${n} cells across all four corners and the interior, worst error ${worst.toFixed(3)} m (decimetre storage allows 0.05)`);
+    check('the bundle is the shape fetch_dem.py writes: format, layers keyed by file, int16 base64 heightfield',
+      built.bundle.format === 'pup-world/1' && Object.keys(built.bundle.layers).join() === 'trails'
+        && built.bundle.heightfield.encoding === 'int16le-base64' && built.bundle.projection.zAxis === 'south'
+        && built.bundle.heightfield.width*built.bundle.heightfield.height === 168*358,
+      `layers ${Object.keys(built.bundle.layers)}, ${built.bundle.heightfield.width}x${built.bundle.heightfield.height}`);
+
+    // ---- the panel ----
+    await G('loadMap')('../data/world.json', true);
+    G('refreshMapUI')();
+    const gog = JSON.parse(fs.readFileSync(path.join(ROOT, 'data/geojson/gogalltrails.geojson'), 'utf8'));
+    check('with no dropped files the elevation controls are not on the panel', d.getElementById('demBox').hidden === true, '#demBox hidden');
+    await G('loadFiles')([fakeFile(gog, 'gogalltrails.geojson')]);
+    check('files that sit inside the loaded map\'s DEM are an overlay and are not offered elevation',
+      d.getElementById('demBox').hidden === true, `#demBox hidden: ${d.getElementById('demBox').hidden}`);
+    d.getElementById('clearLayersBtn').click();
+    await G('loadFiles')([fakeFile(demGJ, 'trails.geojson')]);
+    const boxShown = !d.getElementById('demBox').hidden && !d.getElementById('demAdd').hidden;
+    check('files that reach outside the loaded DEM are offered elevation, with the cost up front',
+      boxShown && /8 tiles/.test(noteText()) && /about 760 KB/.test(noteText()) && !d.getElementById('demGoBtn').disabled,
+      noteText());
+    setSlider(20);
+    const at20 = noteText(), lab20 = d.getElementById('demCellVal').textContent;
+    setSlider(8);
+    check('the resolution slider (6-20 m) re-prices the download as it moves',
+      /6 tiles/.test(at20) && lab20 === '20 m' && /8 tiles/.test(noteText()) && d.getElementById('demCell').min === '6' && d.getElementById('demCell').max === '20',
+      `20 m: "${at20.slice(0, 40)}"; 8 m: "${noteText().slice(0, 40)}"`);
+
+    // ---- a small download, end to end ----
+    G('demSetLoader')(planeLoader);
+    calls.length = 0;
+    clickEl('demGoBtn');                                   // 8 tiles is not large: one tap goes
+    const done = await until(() => G('getDemBuilt')() !== null);
+    const st = G('getDemBuilt')();
+    check('one tap downloads a small area: 8 tiles fetched, a map built from the files and their elevation',
+      done && calls.length === 8 && G('demActive')() && st.bundle.heightfield.width === 168 && st.bundle.heightfield.height === 358,
+      `${calls.length} tile calls, active ${G('demActive')()}`);
+    check('the built map replaces the one on screen, shows the files\' trail and stands on real terrain',
+      G('getGraph')() && G('getGraph')().edges.length > 0 && d.getElementById('fileChips').children.length === 0
+        && /with elevation/.test(d.getElementById('mapNote').textContent),
+      `${G('getGraph')() ? G('getGraph')().edges.length : 0} edges, ${d.getElementById('fileChips').children.length} chips, note "${d.getElementById('mapNote').textContent}"`);
+    const hfB = st.bundle.heightfield;
+    check('the panel says elevation was added and puts the download/slider away',
+      d.getElementById('demAdd').hidden && /^Elevation added: 8 m grid from 8 tiles/.test(noteText()) && Math.abs(hfB.maxM - hfB.minM) > 100,
+      `"${noteText().slice(0, 60)}", relief ${(hfB.maxM - hfB.minM).toFixed(0)} m`);
+
+    // ---- saving the combined map + DEM ----
+    let saved = null;
+    const realDownload = global.downloadText || window.downloadText;
+    G('globalThis').downloadText = (name, text, type) => { saved = {name, text, type}; };
+    clickEl('saveCombinedBtn');
+    const sv = saved && JSON.parse(saved.text);
+    check('Save combined downloads the map and its elevation as ONE pup-world/1 file named after the files',
+      !!sv && saved.name === 'trailsWorld.json' && sv.format === 'pup-world/1' && !!sv.layers.trails
+        && sv.heightfield.data === hfB.data && /map and its elevation/.test(d.getElementById('saveCombinedBtn').title),
+      saved ? `${saved.name}, ${(saved.text.length/1024)|0} KB, layers [${sv && Object.keys(sv.layers)}]` : 'nothing downloaded');
+    // the file reads back as the same map: drop it on the page again
+    const probePts = [[0.5, 0.5], [0.2, 0.8], [0.8, 0.3], [0.1, 0.1], [0.9, 0.9]].map(([a, b]) => [hfB.originX + a*hfB.width*hfB.cell, hfB.originZ + b*hfB.height*hfB.cell]);
+    const before = probePts.map(([x, z]) => G('standingY')(x, z));
+    const idBefore = G('getMapId')();
+    await G('loadFiles')([fakeFile(saved.text, saved.name)]);
+    const after = probePts.map(([x, z]) => G('standingY')(x, z));
+    check('the saved file loads back as the same map: same id, same ground at five probe points',
+      G('getMapId')() === idBefore && before.every((y, i) => Math.abs(y - after[i]) < 1e-6),
+      `id ${G('getMapId')() === idBefore ? 'same' : 'changed'}; ground ${before.map(y => y.toFixed(2))} -> ${after.map(y => y.toFixed(2))}`);
+    // changing terrain detail reloads the map; for a map with no URL that must be THIS map, not the one before it
+    await G('applyDetail')('low', true);
+    const keptLow = G('demActive')() && G('getMapId')() === idBefore;
+    await G('applyDetail')('auto', true);
+    check('changing terrain detail reloads the map built here, not whichever map was loaded before it',
+      keptLow && G('demActive')() && G('getMapId')() === idBefore, `after low: ${keptLow}, after auto: ${G('demActive')()}`);
+    // files dropped on top afterwards travel with the save
+    await G('loadFiles')([fakeFile({type:'FeatureCollection', features:[demPt(-104.9854, 38.985)]}, 'extra.geojson')]);
+    saved = null; clickEl('saveCombinedBtn');
+    const sv2 = saved && JSON.parse(saved.text);
+    check('files dropped on top of a built map are folded into its saved file',
+      !!sv2 && !!sv2.layers.trails && !!sv2.layers.extra && sv2.heightfield.data === hfB.data,
+      sv2 ? `layers [${Object.keys(sv2.layers)}]` : 'nothing downloaded');
+    d.getElementById('clearLayersBtn').click();
+
+    // ---- more files outside a built map: a rebuild of everything, not a replacement ----
+    await G('loadFiles')([fakeFile(demBox(0.015), 'grow.geojson')]);
+    setSlider(8);
+    const growPlan = G('demPlan')([demBox(0.015)], 8, 0);
+    const growOffer = !d.getElementById('demAdd').hidden && /Rebuilds the map with the files already in it/.test(noteText());
+    const prevBuilt = G('getDemBuilt')();
+    calls.length = 0;
+    clickEl('demGoBtn');
+    await until(() => G('getDemBuilt')() !== prevBuilt);
+    const gb = G('getDemBuilt')();
+    check('more files outside a built map offer a rebuild that keeps the files already in it',
+      growOffer && gb !== prevBuilt && calls.length === growPlan.tileCount && Object.keys(gb.bundle.layers).join() === 'trails,grow'
+        && gb.bundle.heightfield.width > 168 && gb.name === 'combinedWorld.json',
+      `offer ${growOffer}, ${calls.length} of ${growPlan.tileCount} tiles, layers [${Object.keys(gb.bundle.layers)}], ${gb.bundle.heightfield.width} wide, saves as ${gb.name}`);
+
+    // ---- a large download asks first ----
+    await G('loadFiles')([fakeFile(demBox(0.1), 'wide.geojson')]);
+    setSlider(8);
+    check('a map too big to attempt cannot be started, and says why',
+      d.getElementById('demGoBtn').disabled && /Too large/.test(noteText()), noteText().slice(0, 90));
+    setSlider(20);
+    const warnShown = /^⚠ Large download/.test(noteText()) && d.getElementById('demNote').classList.contains('warn');
+    calls.length = 0;
+    clickEl('demGoBtn');
+    check('a large download warns, and the first tap only arms the button -- nothing is fetched yet',
+      warnShown && calls.length === 0 && /Tap again/.test(d.getElementById('demGoBtn').textContent) && /about 12\.\d MB/.test(d.getElementById('demGoBtn').textContent),
+      `warn ${warnShown}, ${calls.length} fetches, button "${d.getElementById('demGoBtn').textContent}"`);
+    setSlider(19);
+    check('moving the slider disarms it: the confirmation was for a different download',
+      !/Tap again/.test(d.getElementById('demGoBtn').textContent), `button "${d.getElementById('demGoBtn').textContent}"`);
+    setSlider(20); clickEl('demGoBtn');
+    clickEl('demGoBtn');
+    const big = await until(() => G('getDemBuilt')() && G('getDemBuilt')().tiles === pBig.tileCount, 60000);
+    check('the second tap downloads every tile and builds the map',
+      big && calls.length === pBig.tileCount && G('getDemBuilt')().bundle.heightfield.width === pBig.nx,
+      `${calls.length} of ${pBig.tileCount} tiles; ${big ? G('getDemBuilt')().bundle.heightfield.width : '-'} cells wide`);
+
+    // ---- cancel and failure leave the files alone ----
+    // start from the stock map again, so this is a first build and not a rebuild of the huge one above
+    await G('loadMap')('../data/world.json', true);
+    G('refreshMapUI')();
+    // somewhere the loaded map does not cover, or it would be an overlay and not be offered
+    await G('loadFiles')([fakeFile({type:'FeatureCollection', features:[demPt(-104.5, 38.5), demPt(-104.49, 38.51)]}, 'again.geojson')]);
+    setSlider(8);
+    let sawAbort = false;
+    G('demSetLoader')((z, x, y, signal) => new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => { sawAbort = true; const e = new Error('Cancelled'); e.name = 'AbortError'; reject(e); });
+    }));
+    clickEl('demGoBtn');
+    await new Promise(r => setTimeout(r, 20));
+    const busyLabel = d.getElementById('demGoBtn').textContent;
+    clickEl('demGoBtn');                                   // the button reads Cancel while it runs
+    await new Promise(r => setTimeout(r, 20));
+    check('Cancel stops the download, and the files are still there to try again',
+      busyLabel === 'Cancel' && sawAbort && /^Cancelled\./.test(noteText()) && !d.getElementById('demAdd').hidden && d.getElementById('fileChips').children.length === 1,
+      `button "${busyLabel}", abort seen ${sawAbort}, note "${noteText().slice(0, 30)}", ${d.getElementById('fileChips').children.length} chip(s)`);
+    const realErr = console.error; console.error = () => {};
+    G('demSetLoader')(async () => { const e = new Error('Could not reach the elevation server. Check the connection and try again.'); e.demCode = 'network'; throw e; });
+    clickEl('demGoBtn');
+    await new Promise(r => setTimeout(r, 30));
+    console.error = realErr;
+    check('a dead connection says so in the panel and leaves the files in place',
+      /Could not reach the elevation server/.test(noteText()) && !d.getElementById('demAdd').hidden && d.getElementById('fileChips').children.length === 1,
+      noteText().slice(0, 70));
+    // ---- the files change while the tiles come down: the result is for a set that no longer exists ----
+    {
+      let release; const gate = new Promise(r => { release = r; });
+      const keep = G('getDemBuilt')();
+      G('demSetLoader')(async () => { await gate; return new Float32Array(256*256); });
+      clickEl('demGoBtn');
+      await new Promise(r => setTimeout(r, 20));
+      await G('loadFiles')([fakeFile({type:'FeatureCollection', features:[demPt(-104.45, 38.45)]}, 'second.geojson')]);
+      release();
+      const told = await until(() => /changed while elevation was downloading/.test(noteText()));
+      check('files dropped while tiles are downloading throw the stale result away instead of loading it',
+        told && G('getDemBuilt')() === keep && !G('demActive')(), `told ${told}, map built here unchanged: ${G('getDemBuilt')() === keep}`);
+    }
+    G('globalThis').downloadText = realDownload;
+    G('demSetLoader')(null);
+  }
+  await demChecksSafe();
 
   const failed = results.filter(r => !r.ok);
   console.log('\n---------------- smoke test ----------------');
